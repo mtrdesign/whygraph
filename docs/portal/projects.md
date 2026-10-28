@@ -122,7 +122,9 @@ the page at that section. The section ids are `general`, `models`, `github`, `sc
 
 The **Chat** row under **Models and keys** also has an **Effort** field: the default effort for chats
 that have no level of their own (see [Effort](../guide/chat.md#effort)). Set it in the defaults or for
-the project; **Reset** goes back to the inherited value.
+the project; **Reset** goes back to the inherited value. A project's Chat row also has a **Mode** field:
+the [mode](../guide/chat.md#modes) a new chat starts in when you have no earlier chat in the project.
+It exists per project only, not in the defaults.
 
 **Each section saves on its own.** Edits wait for that section's **Save** (or **Discard**), which
 stay disabled until you change something; a saved section says *Saved* in place. Leaving the page

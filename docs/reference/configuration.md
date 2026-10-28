@@ -115,6 +115,8 @@ max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
                               # limit (0-3)
 # effort = "medium"          # default effort for chats with no level of their own:
                               # low | medium | high | xhigh | max (unset = the provider's default)
+# mode = "engineer"          # project only: the mode a new chat starts in when you have no
+                              # earlier chat here. engineer | lead | onboarding
 
 # Named parts of the codebase, used by the chat assistant (see "Areas" below).
 # Up to 50 tables; each name is a lowercase slug.
@@ -155,7 +157,7 @@ timeout_sec = 120
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
 | `[analyze]` | The per-commit LLM diff descriptions written during a scan - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
-| `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets, the output limit, continuations, and the default [effort](../guide/chat.md#effort). |
+| `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets, the output limit, continuations, the default [effort](../guide/chat.md#effort), and (per project) the default [mode](../guide/chat.md#modes). |
 | `[areas.<name>]` | Named [product areas](#areas): a set of paths and issue / PR labels the chat assistant can filter history by. Empty by default. |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
 

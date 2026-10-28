@@ -116,6 +116,47 @@ Effort to **Default** for that chat.
 On Anthropic, changing the effort starts a fresh prompt cache for that reply, so the first reply after
 a change costs a little more.
 
+## Modes
+
+The **Mode** select beside the model pickers sets how the assistant approaches a question. A mode is a
+preset, not a restriction: every mode can use all nineteen tools, and a mode only changes which ones the
+assistant reaches for first and how it words the answer. Each mode also has its own starter questions
+for an empty chat.
+
+| Mode | For |
+|---|---|
+| **Engineer** | Code-first answers: symbols, files and lines, and why the code is the way it is. |
+| **Lead** | The state of the work: what shipped, what is in flight or stuck, and who knows each area. |
+| **Onboarding** | A top-down tour for someone new: the map, the pieces that matter, and where to start reading. |
+
+You can switch a chat's mode at any time; it applies from the next reply, and each reply records the
+mode it was written in. Changing it starts a fresh prompt cache for that reply, as changing the effort
+does.
+
+**Which mode a new chat starts in.** Your last-used mode in this project; if you have no chat yet, the
+project's `[chat].mode` (Settings > Models and keys > **Chat** > **Mode**; see
+[the configuration reference](../reference/configuration.md#section-by-section)); otherwise Engineer. There is no organization-wide
+default. Modes are built into WhyGraph: a repository cannot add one or change one.
+
+### References in your question
+
+When you name something WhyGraph can look up - a `symbol`, a file path, `#412`, a commit SHA - it
+resolves the name against the index and the project database before the model sees the question, and
+passes the result along with it: which names are real, where they live, whether a pull request or issue
+is open, and whether a rationale card for a symbol is already cached. A name that does not resolve is
+marked as such. The block carries identifiers and states only, never a pull request title or a commit
+message. It is not shown in the chat, it is kept with your message so later replies in the chat see the
+same text, and **Continue** and **Regenerate** reuse it rather than looking again. The lookup has a
+1.5 second budget, reads from the index only (no git, no scan, no model call), and never fails a turn:
+when it cannot finish, the question goes through as you wrote it.
+
+!!! note "WhyGraph never forces a tool call"
+    The assistant is encouraged to look things up (by the mode, and by the references above), but a
+    turn is never forced to call a tool. Some providers reject a forced tool choice when the model is
+    thinking, and where one accepts it, it turns the thinking off for that reply. Forcing would trade
+    answer quality for a guarantee, so WhyGraph measures instead: tool calls are counted by name in
+    the project's [agent activity](../portal/agents.md#agent-activity).
+
 ## Sessions
 
 Your conversations are listed in the sidebar's **Chats** section, below **All projects**, newest

@@ -2819,3 +2819,66 @@ def test_the_claude_oauth_token_secret_is_refused(
         "/api/portal/defaults", json={"secrets": {"llm": {"claude-cli": "sk-x"}}}
     )
     assert claude_key.status_code == 422
+
+
+def test_import_keeps_only_valid_areas_and_the_add_succeeds(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    (root / "whygraph.toml").write_text(
+        '[areas.good]\npaths = ["src/good/"]\n'
+        '[areas.bad]\npaths = ["../etc"]\n'
+        '[areas.leaky]\npaths = ["src/"]\ntoken = "ghp_not_stored"\n'
+        '[chat]\neffort = "turbo"\n'
+    )
+    response = ready.post("/api/projects", json={"source": "local", "path": str(root)})
+    assert response.status_code == 201, response.text
+    assert "ghp_not_stored" not in response.text
+    hints = {d["key"]: d["hint"] for d in response.json()["import"]["dropped"]}
+    assert set(hints) == {"areas.bad", "areas.leaky", "chat.effort"}
+    assert hints["areas.bad"].startswith("not a valid value: ")
+    config = ready.get("/api/projects/demo/config")
+    assert config.status_code == 200
+    assert config.json()["config"]["areas"] == {"good": {"paths": ["src/good/"]}}
+
+
+def test_put_config_rejects_invalid_areas_with_keys(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    add_local(ready, make_repo(env.shared, "demo"))
+    url = "/api/projects/demo/config"
+    bad = ready.put(url, json={"config": {"areas": {"bad": {"paths": ["../x"]}}}})
+    assert bad.status_code == 422
+    assert bad.json()["keys"] == ["areas.bad"]
+    extra = ready.put(
+        url, json={"config": {"areas": {"x": {"paths": ["a/"], "color": "red"}}}}
+    )
+    assert extra.status_code == 422
+    assert extra.json()["keys"] == ["areas.x"]
+    reserved = ready.put(url, json={"config": {"areas": {"token": {"paths": ["a/"]}}}})
+    assert reserved.status_code == 422
+    ok = ready.put(
+        url, json={"config": {"areas": {"api": {"paths": ["src/api/"], "labels": []}}}}
+    )
+    assert ok.status_code == 200, ok.text
+    assert ready.get(url).json()["config"]["areas"]["api"]["paths"] == ["src/api/"]
+    # Unchanged stored values are not re-checked: an unrelated save still works.
+    same = ready.put(
+        url,
+        json={
+            "config": {
+                "areas": {"api": {"paths": ["src/api/"], "labels": []}},
+                "chat": {"max_tool_rounds": 4},
+            }
+        },
+    )
+    assert same.status_code == 200, same.text
+
+
+def test_defaults_refuse_areas(ready: TestClient) -> None:
+    bad = ready.put(
+        "/api/portal/defaults",
+        json={"config": {"areas": {"x": {"paths": ["a/"]}}}},
+    )
+    assert bad.status_code == 422
+    assert bad.json()["keys"] == ["areas"]

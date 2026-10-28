@@ -184,6 +184,7 @@ from .policy import (
     ImportPreview,
     allowed_sources,
     filter_layer,
+    invalid_values,
     preview_import,
     put_allowlist,
 )
@@ -766,8 +767,21 @@ def _put_or_delete(
         raise ApiError(422, str(exc)) from exc
 
 
-def _checked_layer(raw: dict, spec, base: Path) -> dict:
-    """Apply rule 4 (no secrets) and an allowlist to a user-supplied layer."""
+def _checked_layer(
+    raw: dict, spec, base: Path, stored: Mapping[str, Any] | None = None
+) -> dict:
+    """Apply rule 4 (no secrets), an allowlist and the value checks to a layer.
+
+    The value checks are :func:`~whygraph.portal.policy.invalid_values`, the
+    rule set import applies too. Only values that differ from ``stored``
+    are checked, so a stale stored value never blocks an unrelated save.
+
+    Raises
+    ------
+    ApiError
+        ``422`` with ``keys`` for a secret, a key the allowlist refuses or
+        an invalid value.
+    """
     secrets_found = find_secret_paths(raw)
     if secrets_found:
         raise ApiError(
@@ -779,6 +793,14 @@ def _checked_layer(raw: dict, spec, base: Path) -> dict:
     kept, dropped = filter_layer(normalized, spec)
     if dropped:
         raise ApiError(422, "these keys cannot be set here", keys=dropped)
+    invalid = invalid_values(kept, stored)
+    if invalid:
+        raise ApiError(
+            422,
+            "these values are not valid: "
+            + "; ".join(f"{k}: {v}" for k, v in sorted(invalid.items())),
+            keys=sorted(invalid),
+        )
     return kept
 
 
@@ -1431,7 +1453,12 @@ def put_defaults(
     cleared: list[dict] = []
     with get_session() as session:
         if body.config is not None:
-            kept = _checked_layer(body.config, DEFAULTS_ALLOWLIST, state.data_dir)
+            kept = _checked_layer(
+                body.config,
+                DEFAULTS_ALLOWLIST,
+                state.data_dir,
+                load_layer(session, None, org_id=org_id),
+            )
             try:
                 Config.from_dict(kept, state.data_dir)
                 cleared_ids = save_layer(session, None, kept, org_id=org_id)
@@ -2683,7 +2710,10 @@ def put_project_config(
                 _linked_layer(body.config, project, project.root)
                 if linked
                 else _checked_layer(
-                    body.config, put_allowlist(state.mode), project.root
+                    body.config,
+                    put_allowlist(state.mode),
+                    project.root,
+                    load_layer(session, project.id, org_id=project.org_id),
                 )
             )
             try:

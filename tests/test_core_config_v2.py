@@ -700,3 +700,64 @@ def test_bad_config_json_raises_config_error_without_echoing_it(
         core.get_config()
 
     assert payload not in str(exc.value)
+
+
+def _area(**over: object) -> dict:
+    return {"paths": ["src/a/"], **over}
+
+
+@pytest.mark.parametrize(
+    "name,raw",
+    [
+        ("Bad", _area()),
+        ("-x", _area()),
+        ("x" * 41, _area()),
+        ("token", _area()),
+        ("api_key", _area()),
+        ("x", "not a table"),
+        ("x", {}),
+        ("x", _area(paths=[])),
+        ("x", _area(paths="src/")),
+        ("x", _area(paths=["/abs"])),
+        ("x", _area(paths=["a/../b"])),
+        ("x", _area(paths=["a\\b"])),
+        ("x", _area(paths=["a" * 257])),
+        ("x", _area(paths=["p"] * 21)),
+        ("x", _area(labels=["l"] * 21)),
+        ("x", _area(labels=["l" * 51])),
+        ("x", _area(description="a" * 201)),
+        ("x", _area(description="two\nlines")),
+        ("x", _area(token="secret")),
+        ("x", _area(extra={"token": "s"})),
+    ],
+)
+def test_area_errors_rejects(name: str, raw: object) -> None:
+    assert config_mod.area_errors(name, raw)
+
+
+def test_area_errors_accepts_and_never_echoes_values() -> None:
+    assert config_mod.area_errors("checkout-2", _area(labels=["Area:X"])) == []
+    errors = config_mod.area_errors("x", _area(token="ghp_leak_value"))
+    assert "ghp_leak_value" not in " ".join(errors)
+
+
+def test_areas_table_errors() -> None:
+    assert config_mod.areas_table_errors(None) == []
+    assert config_mod.areas_table_errors({}) == []
+    assert config_mod.areas_table_errors([1])
+    assert config_mod.areas_table_errors({f"a{i}": {} for i in range(51)})
+
+
+def test_invalid_area_is_dropped_on_load(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="whygraph.core.config"):
+        cfg = Config.from_dict(
+            {"areas": {"b": _area(), "bad": _area(paths=["../x"]), "a": _area()}},
+            tmp_path,
+        )
+    assert [a.name for a in cfg.areas] == ["a", "b"]
+    assert cfg.areas[0].paths == ("src/a/",)
+    assert "ignoring [areas.bad]" in caplog.text
+    assert "unknown key" not in caplog.text
+    assert Config.from_dict({"areas": "junk"}, tmp_path).areas == ()

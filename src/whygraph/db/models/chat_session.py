@@ -57,6 +57,8 @@ class ChatSession(WhygraphTable, table=True):
     effort : str or None
         The session's effort level for its next turn. ``None`` means the
         ``[chat].effort`` default.
+    mode : str or None
+        The session's chat mode. ``None`` means the default engineer mode.
     """
 
     id: int | None = Field(default=None, primary_key=True)
@@ -68,3 +70,4 @@ class ChatSession(WhygraphTable, table=True):
     owner_uid: str | None = Field(default=None, sa_type=Text)
     active_leaf_id: int | None = Field(default=None)
     effort: str | None = Field(default=None, sa_type=Text)
+    mode: str | None = Field(default=None, sa_type=Text)

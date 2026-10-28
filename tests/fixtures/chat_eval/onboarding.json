@@ -85,6 +85,7 @@
       "expect": {
         "tools_any": [
           "get_area_history",
+          "get_area_owners",
           "run_project_stats"
         ]
       }

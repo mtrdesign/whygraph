@@ -104,7 +104,7 @@ descriptions you skip backfill on demand. See [Scanning](../guide/scanning.md).
 A project's **Settings** set how it uses LLMs and GitHub (the wizard's Configure step links there as
 **More settings**). A list of sections sits beside the page (a strip you can scroll sideways on a
 phone) and follows your scroll position; a link such as `/p/<project>/settings?section=models` opens
-the page at that section. The section ids are `general`, `models`, `github`, `scanning`, `budgets`,
+the page at that section. The section ids are `general`, `models`, `github`, `scanning`, `areas`, `budgets`,
 `agents`, `access`, `connections` and `danger`.
 
 | Section | What you set |
@@ -114,6 +114,7 @@ the page at that section. The section ids are `general`, `models`, `github`, `sc
 | **GitHub** | Whether to crawl pull requests and issues at all, and (locally) the GitHub token card |
 | **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project (local folders only) |
 | **Scanning** | One switch, **Serve CodeGraph tools to agents** (`[scan].serve_codegraph`, on by default; local folders and linked projects). Off, the project's `/mcp/<slug>/code` endpoint answers every call with a "turned off" error and the Overview says so. It stops nothing that is running: the CodeGraph server is shared by every project |
+| **Areas** | Named parts of the codebase (path and label lists) the Chat assistant can filter by, with **Suggest areas** to propose some from recent commits; per project only (not in the portal defaults) and not shown for linked projects. See [Areas](../reference/configuration.md#areas) |
 | **Usage** | This month's spend on the project and, for owners and admins, its monthly budget |
 | **Agents** | The coding agents connected to the project, and **Update agent files** (unedited files update silently, edited ones wait for your say, and **Overwrite my edits too** replaces those as well; a line shows the installed version of the agent files against the current one; see [Keeping the agent files up to date](agents.md#agent-files-upgrade)) |
 | **Access** and **Connected machines** | Production only: who may open the project, and the members' machines linked to it |

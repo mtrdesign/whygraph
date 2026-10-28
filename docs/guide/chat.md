@@ -165,7 +165,7 @@ message as soon as the stopped reply has ended. A chat runs one reply at a time.
 
 ## What it can look at
 
-Seventeen tools across five sources. You never call these directly; they are listed so you know what
+Nineteen tools across five sources. You never call these directly; they are listed so you know what
 the assistant can and cannot reach.
 
 <div class="grid cards" markdown>
@@ -181,7 +181,7 @@ the assistant can and cannot reach.
     ---
 
     `get_rationale`, `get_evidence`, `get_area_history`, `find_changes`, `get_commit`, `get_pr`,
-    `get_issue`, `get_repo_overview`, `list_recent_activity`
+    `get_issue`, `get_repo_overview`, `list_recent_activity`, `get_work_in_flight`, `get_area_owners`
 
 -   __Statistics__ (aggregate SQL)
 
@@ -202,6 +202,30 @@ the assistant can and cannot reach.
     `read_file`, `list_dir`
 
 </div>
+
+### Areas, open work and owners
+
+If the project configures [areas](../reference/configuration.md#areas), the assistant sees them and
+can narrow `find_changes` with `area` (or a path, not both) and `since_days`;
+`list_recent_activity` also takes `since_days`.
+
+- **`get_work_in_flight`** lists what is open right now: pull requests (drafts included) and issues,
+  each with its idle time and a stale flag (a PR idle 7 days, an issue 30, by default; drafts are never
+  stale), plus counts. With `area` it keeps items whose labels map to that area; a PR without such
+  labels is placed by its commits only when they are already scanned. It states `forge_data_as_of`
+  (when GitHub was last crawled) and lists anything it cannot know under `not_tracked`, such as a PR's
+  files, so the assistant says "not tracked" instead of guessing. Items past the limit are counted
+  in `omitted`.
+- **`get_area_owners`** answers "who knows this code": for an area or a path (exactly one), each
+  person's share of the commits, files touched, last touch and last activity anywhere, plus the
+  CHAOSS Contributor Absence Factor (the fewest people whose shares reach half the commits) overall
+  and among people active in the last 90 days. It counts default-branch commits in the window
+  (365 days by default) and leaves out merges, bots and formatting or refactor sweeps;
+  `Co-authored-by` trailers and CODEOWNERS are not read. This is **ownership of the code, not anyone's
+  performance**.
+
+Area matching follows the paths you configured; directory renames are not followed (see
+[Areas](../reference/configuration.md#areas)).
 
 ### Statistics are aggregate-only
 

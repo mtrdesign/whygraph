@@ -59,6 +59,8 @@ from whygraph.chat.harness import (
     TurnCancelled,
     run_turn,
 )
+from whygraph.chat.areas import configured_areas
+from whygraph.chat.modes import DEFAULT_MODE, MODE_IDS, MODES, render_starters
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import Config, ConfigError, get_config
 from whygraph.core.context import current_project
@@ -116,6 +118,7 @@ class CreateSessionBody(BaseModel):
     model: str | None = None
     title: str | None = None
     effort: str | None = None
+    mode: str | None = None
 
 
 class UpdateSessionBody(BaseModel):
@@ -124,13 +127,15 @@ class UpdateSessionBody(BaseModel):
     Provider, model and effort are mutable so the header dropdowns can
     switch mid-conversation; the change applies from the next turn. An
     explicit ``"effort": null`` resets the session to the ``[chat].effort``
-    default.
+    default. ``mode`` is mutable the same way; an explicit ``"mode": null``
+    resets the session to the project's ``[chat].mode``, else the default.
     """
 
     title: str | None = None
     provider: str | None = None
     model: str | None = None
     effort: str | None = None
+    mode: str | None = None
 
 
 class SendMessageBody(BaseModel):
@@ -161,6 +166,16 @@ def _check_effort(effort: str | None) -> None:
         )
 
 
+def _check_mode(mode: str | None) -> None:
+    """400 ``bad_mode`` unless ``mode`` is unset or one of the chat modes."""
+    if mode is not None and mode not in MODE_IDS:
+        raise ServeError(
+            400,
+            f"{mode!r} is not a chat mode; available: {MODE_IDS}",
+            code="bad_mode",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
@@ -177,6 +192,7 @@ def _session_dict(row: ChatSessionRow, *, message_count: int | None = None) -> d
         "provider": row.provider,
         "model": row.model,
         "effort": row.effort,
+        "mode": row.mode,
         "streaming": _is_streaming(_lease_key(row.id)),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
@@ -209,6 +225,7 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "error": row.error,
         "finish_reason": row.finish_reason,
         "effort": row.effort,
+        "mode": row.mode,
         "reasoning": row.reasoning,
         "parent_id": row.parent_id,
         "created_at": row.created_at,
@@ -301,6 +318,30 @@ def providers() -> list[dict]:
         }
         for provider in CHAT_PROVIDERS
     ]
+
+
+@router.get("/modes")
+def modes(request: Request) -> dict:
+    """The chat modes, with starters rendered for the project, and the new-chat default.
+
+    ``default`` is the mode a new session starts in: the caller's last-used
+    mode in this project, else the project's ``[chat].mode``, else engineer.
+    ``<area>`` in a starter becomes the first configured area's name.
+    """
+    areas = configured_areas()
+    area = areas[0].name if areas else None
+    return {
+        "default": _new_session_mode(request),
+        "modes": [
+            {
+                "id": mode.id,
+                "label": mode.label,
+                "description": mode.description,
+                "starters": list(render_starters(mode, area)),
+            }
+            for mode in MODES.values()
+        ],
+    }
 
 
 @router.get("/models")
@@ -400,6 +441,7 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
     """
     body = body or CreateSessionBody()
     _check_effort(body.effort)
+    _check_mode(body.mode)
     if body.provider and body.provider not in CHAT_PROVIDERS:
         raise ServeError(
             400,
@@ -429,6 +471,7 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
         provider=provider,
         model=model,
         effort=body.effort,
+        mode=body.mode or _new_session_mode(request),
         created_at=now,
         updated_at=now,
         owner_uid=_caller_uid(request),
@@ -438,6 +481,34 @@ def create_session(request: Request, body: CreateSessionBody | None = None) -> d
         session.commit()
         session.refresh(row)
         return _session_dict(row, message_count=0)
+
+
+def _project_mode() -> str:
+    """The project's ``[chat].mode`` if it names a mode, else the default."""
+    mode = get_config().chat.mode
+    return mode if mode in MODE_IDS else DEFAULT_MODE
+
+
+def _new_session_mode(request: Request) -> str:
+    """The mode a new session starts in.
+
+    The caller's most recently active session in this project that carries
+    a known mode, else the project's ``[chat].mode``, else the default.
+    Other users' sessions never count.
+    """
+    uid = _caller_uid(request)
+    query = select(ChatSessionRow.mode).where(col(ChatSessionRow.mode).in_(MODE_IDS))
+    if uid is not None:
+        query = query.where(ChatSessionRow.owner_uid == uid)
+    else:
+        query = query.where(col(ChatSessionRow.owner_uid).is_(None))
+    with get_session() as session:
+        last = session.exec(
+            query.order_by(
+                col(ChatSessionRow.updated_at).desc(), col(ChatSessionRow.id).desc()
+            )
+        ).first()
+    return last or _project_mode()
 
 
 def _require_session(
@@ -516,7 +587,13 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
             _check_effort(body.effort)
             row.effort = body.effort
 
-        row.updated_at = _now_iso()
+        if "mode" in body.model_fields_set:
+            _check_mode(body.mode)
+            row.mode = body.mode or _project_mode()
+
+        # A mode-only change must not reorder the session list.
+        if body.model_fields_set != {"mode"}:
+            row.updated_at = _now_iso()
         session.add(row)
         session.commit()
         session.refresh(row)
@@ -863,6 +940,7 @@ def _persist_assistant_turn(
     provider: str,
     model: str,
     effort: str | None = None,
+    mode: str | None = None,
     reasoning: str | None = None,
     error: str | None = None,
 ) -> int:
@@ -884,6 +962,8 @@ def _persist_assistant_turn(
         error or an abort), whose row then carries no tokens.
     effort : str or None, optional
         The effort level the turn ran at.
+    mode : str or None, optional
+        The chat mode the turn ran in.
     reasoning : str or None, optional
         The round's reasoning text, for display only (never sent back).
     error : str or None, optional
@@ -910,6 +990,7 @@ def _persist_assistant_turn(
             replay=_persisted_replay(usage.replay) if usage else None,
             finish_reason=usage.finish_reason if usage else None,
             effort=effort,
+            mode=mode,
             reasoning=reasoning,
             created_at=now,
         ),
@@ -1013,6 +1094,8 @@ class TurnJob:
         The row the turn answers (see :func:`_load_history`).
     effort : str or None
         The resolved effort level.
+    mode : str or None
+        The resolved chat mode.
     continue_from_assistant : bool
         The turn carries on from a truncated reply (``start_id``) instead of
         answering a user row; the harness appends its continue prompt.
@@ -1034,6 +1117,7 @@ class TurnJob:
         *,
         start_id: int = 0,
         effort: str | None = None,
+        mode: str | None = None,
         continue_from_assistant: bool = False,
     ) -> None:
         self.key = key
@@ -1043,6 +1127,7 @@ class TurnJob:
         self.start_id = start_id
         self.parent_id: int | None = start_id
         self.effort = effort
+        self.mode = mode
         self.continue_from_assistant = continue_from_assistant
         self.cancel_event = threading.Event()
         self.client = None
@@ -1225,6 +1310,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             provider=provider,
             model=model,
             effort=job.effort,
+            mode=job.mode,
             **fields,
         )
         return job.parent_id
@@ -1294,6 +1380,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
             history=history,
             registry=registry,
             effort=job.effort,
+            mode=job.mode,
             cancel=job.cancel_event,
             continue_from_assistant=job.continue_from_assistant,
         ):
@@ -1419,6 +1506,11 @@ def _resolve_effort(session_effort: str | None) -> str | None:
     return session_effort or get_config().chat.effort
 
 
+def _resolve_mode(session_mode: str | None) -> str:
+    """The mode a turn runs in: the stored one if known, else the project's, else the default."""
+    return session_mode if session_mode in MODE_IDS else _project_mode()
+
+
 def _preflight(
     request: Request,
     session_id: int,
@@ -1486,6 +1578,13 @@ def _require_truncated_leaf(session_id: int, message_id: int) -> None:
             raise ServeError(404, f"message {message_id} not found", code="not_found")
 
 
+def _message_mode(message_id: int) -> str | None:
+    """The mode stored on one message row (``None`` when unset or missing)."""
+    with get_session() as session:
+        message = session.get(ChatMessageRow, message_id)
+        return None if message is None else message.mode
+
+
 def _start_turn(
     request: Request,
     session_id: int,
@@ -1535,6 +1634,9 @@ def _start_turn(
             user_id = _persist_user_message(session_id, content or "", edit_of=edit_of)
             job.start_id = job.parent_id = user_id
         job.effort = _resolve_effort(row.effort)
+        job.mode = _resolve_mode(
+            _message_mode(continue_of) if continue_of is not None else row.mode
+        )
         job.start()
     except BaseException:
         _release(key, job)
@@ -1654,6 +1756,8 @@ _COPIED_COLUMNS = (
     "replay",
     "finish_reason",
     "effort",
+    "mode",
+    "grounding",
     "reasoning",
     "created_at",
 )
@@ -1696,6 +1800,7 @@ def fork_session(session_id: int, body: ForkBody, request: Request) -> dict:
                 provider=source.provider,
                 model=source.model,
                 effort=source.effort,
+                mode=source.mode,
                 created_at=now,
                 updated_at=now,
                 owner_uid=_caller_uid(request),

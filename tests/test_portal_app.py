@@ -1468,6 +1468,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     # The Chat router: include_router(..., project_db_access(PROJECT_CHAT))
     (f"{_P}/areas/suggest", "GET"): _CONFIGURE,
     (f"{_P}/chat/providers", "GET"): _CHAT,
+    (f"{_P}/chat/modes", "GET"): _CHAT,
     (f"{_P}/chat/models", "GET"): _CHAT,
     (f"{_P}/chat/sessions", "GET"): _CHAT,
     (f"{_P}/chat/sessions", "POST"): _CHAT,

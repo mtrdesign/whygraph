@@ -292,6 +292,12 @@ def test_linked_put_config_names_the_refused_keys(
     )
     assert sibling.status_code == 403, sibling.text
     assert sibling.json()["keys"] == ["scan.forge"]
+    areas = portal.put(
+        f"/api/projects/{SLUG}/config",
+        json={"config": {"areas": {"x": {"paths": ["a/"]}}}},
+    )
+    assert areas.status_code == 403, areas.text
+    assert areas.json()["keys"] == ["areas"]
     # A secret inside `config` is still the ordinary 422, value never echoed.
     secret = portal.put(
         f"/api/projects/{SLUG}/config",

@@ -46,11 +46,14 @@ from typing import Any, Mapping
 
 from whygraph.core.config import (
     CONFIG_FILENAME,
+    EFFORT_LEVELS,
     AnalyzeConfig,
     ChatConfig,
     ConfigError,
     LlmConfig,
     RationaleConfig,
+    area_errors,
+    areas_table_errors,
     check_default_branch,
     check_scan_remote,
     normalize_v2,
@@ -102,6 +105,7 @@ IMPORT_ALLOWLIST: Spec = {
     "analyze": _all_fields(AnalyzeConfig, "analyze"),
     "rationale": _all_fields(RationaleConfig, "rationale"),
     "chat": _all_fields(ChatConfig),
+    "areas": True,
     "scan": {
         "forge": True,
         "remote": True,
@@ -132,7 +136,7 @@ PUT_ALLOWLIST: Spec = {
 """Rule 1b: what ``PUT /api/projects/{slug}/config`` may store."""
 
 DEFAULTS_ALLOWLIST: Spec = {
-    **{k: v for k, v in PUT_ALLOWLIST.items() if k != "scan"},
+    **{k: v for k, v in PUT_ALLOWLIST.items() if k not in ("scan", "areas")},
     **{
         section: {**PUT_ALLOWLIST[section], **{key: True for key in keys}}
         for section, keys in ORG_ONLY_KEYS.items()
@@ -246,6 +250,7 @@ _HISTORY_DB_HINT = (
     "the portal keeps project history in its data directory; this setting is not used"
 )
 _DEFAULT_HINT = "not imported"
+_VALUE_HINT = "not a valid value: "
 
 
 @dataclass
@@ -372,9 +377,13 @@ def preview_import(root: Path) -> ImportPreview:
 
     kept, dropped = filter_layer(layer, IMPORT_ALLOWLIST)
     dropped += _drop_unsafe_git_names(kept)
+    reasons = invalid_values(kept)
+    dropped += _drop_invalid_values(kept)
     preview.layer = kept
     for key in sorted(dropped):
-        if key.startswith("llm.") and key.rsplit(".", 1)[-1] in ("base_url", "host"):
+        if key in reasons:
+            hint = f"{_VALUE_HINT}{reasons[key]}"
+        elif key.startswith("llm.") and key.rsplit(".", 1)[-1] in ("base_url", "host"):
             hint = _ENDPOINT_HINT
         elif key == "whygraph_db":
             hint = _HISTORY_DB_HINT
@@ -433,3 +442,85 @@ __all__ = [
     "preview_import",
     "put_allowlist",
 ]
+
+
+def invalid_values(
+    layer: Mapping[str, Any], stored: Mapping[str, Any] | None = None
+) -> dict[str, str]:
+    """Return the values of ``layer`` that fail validation, keyed by dotted path.
+
+    The one value check shared by import (:func:`preview_import`), the
+    project ``PUT`` and the defaults ``PUT``: they all apply the same
+    rules from :mod:`whygraph.core.config` (``[areas]``) and
+    ``chat.effort``. The layer is expected to be already allowlisted.
+
+    Parameters
+    ----------
+    layer : Mapping
+        A normalized, allowlisted config layer.
+    stored : Mapping, optional
+        The layer currently stored. When given, a value equal to the
+        stored one is not checked: a form that PUTs the whole layer must
+        not be blocked by a stale value in an unrelated section.
+
+    Returns
+    -------
+    dict of str to str
+        ``{"areas.bad": "paths must not contain '..'"}``; empty when valid.
+        An invalid ``[areas]`` table as a whole is reported under
+        ``"areas"``.
+    """
+    found: dict[str, str] = {}
+    old = stored if isinstance(stored, Mapping) else {}
+
+    areas = layer.get("areas")
+    if "areas" in layer and areas != old.get("areas"):
+        table = areas_table_errors(areas)
+        if table:
+            found["areas"] = "; ".join(table)
+        elif isinstance(areas, Mapping):
+            old_areas = old.get("areas")
+            old_areas = old_areas if isinstance(old_areas, Mapping) else {}
+            for name, value in areas.items():
+                if name in old_areas and old_areas[name] == value:
+                    continue
+                errors = area_errors(name, value)
+                if errors:
+                    found[f"areas.{name}"] = "; ".join(errors)
+
+    chat = layer.get("chat")
+    if isinstance(chat, Mapping) and "effort" in chat:
+        effort = chat["effort"]
+        old_chat = old.get("chat")
+        same = isinstance(old_chat, Mapping) and old_chat.get("effort") == effort
+        if effort is not None and not same and effort not in EFFORT_LEVELS:
+            found["chat.effort"] = f"must be one of {', '.join(EFFORT_LEVELS)}"
+    return found
+
+
+def _drop_invalid_values(kept: dict) -> list[str]:
+    """Pop the values :func:`invalid_values` rejects from an imported layer.
+
+    Parameters
+    ----------
+    kept : dict
+        The allowlisted layer; modified in place (empty tables removed).
+
+    Returns
+    -------
+    list of str
+        The dotted path of every dropped value.
+    """
+    bad = invalid_values(kept)
+    for key in bad:
+        if key == "areas":
+            kept.pop("areas", None)
+        elif key.startswith("areas."):
+            kept["areas"].pop(key[len("areas.") :], None)
+        elif key == "chat.effort":
+            kept["chat"].pop("effort", None)
+    if isinstance(kept.get("areas"), dict) and not kept["areas"]:
+        del kept["areas"]
+    if isinstance(kept.get("chat"), dict) and not kept["chat"]:
+        del kept["chat"]
+    return sorted(bad)

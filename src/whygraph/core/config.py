@@ -466,6 +466,192 @@ class RationaleConfig:
     agent_generations_per_member_per_hour: int = 30
 
 
+AREA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+"""A valid ``[areas.<name>]`` key: a lowercase slug of at most 40 characters."""
+
+RESERVED_AREA_NAMES: frozenset[str] = frozenset({"token", "api_key"})
+"""Names that would trip the secret-key guard (``SECRET_KEYS``) if used as a key."""
+
+MAX_AREAS = 50
+MAX_AREA_DESCRIPTION = 200
+MAX_AREA_PATHS = 20
+MAX_AREA_PATH_CHARS = 256
+MAX_AREA_LABELS = 20
+MAX_AREA_LABEL_CHARS = 50
+_AREA_KEYS = ("description", "paths", "labels")
+
+
+@dataclass(frozen=True, slots=True)
+class AreaConfig:
+    """One configured product area: a name for a set of paths and labels.
+
+    Loaded from ``[areas.<name>]``. Paths are posix, relative to the repo
+    root; a trailing ``/`` marks a prefix, otherwise an entry matches that
+    exact path or anything under ``<path>/``. Nothing opens these paths:
+    they are only matched against recorded file-change paths.
+
+    Attributes
+    ----------
+    name : str
+        The area's slug (see :data:`AREA_NAME_RE`).
+    description : str
+        One line, at most :data:`MAX_AREA_DESCRIPTION` characters.
+    paths : tuple of str
+        One to :data:`MAX_AREA_PATHS` path entries.
+    labels : tuple of str
+        Issue / PR labels (matched case-insensitively); may be empty.
+    """
+
+    name: str
+    description: str
+    paths: tuple[str, ...]
+    labels: tuple[str, ...] = ()
+
+
+def _string_list_errors(
+    value: object, what: str, *, low: int, high: int, max_chars: int
+) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return [f"{what} must be a list of strings"]
+    errors: list[str] = []
+    if not low <= len(value) <= high:
+        errors.append(f"{what} must have {low} to {high} entries, got {len(value)}")
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            errors.append(f"{what} entries must be non-empty strings")
+            break
+        if len(item) > max_chars:
+            errors.append(f"{what} entries must be at most {max_chars} characters")
+            break
+        if any(ord(c) < 32 or ord(c) == 127 for c in item):
+            errors.append(f"{what} entries must not contain control characters")
+            break
+    return errors
+
+
+def area_errors(name: str, raw: object) -> list[str]:
+    """Return why one ``[areas.<name>]`` entry is invalid; empty when valid.
+
+    The single rule set behind lenient load, import and ``PUT``: nothing
+    else decides what an area may hold. It is deliberately strict about
+    unknown keys, since an extra key (``token = "..."``) would otherwise
+    reach the secret guard of ``save_layer``.
+
+    Parameters
+    ----------
+    name : str
+        The area's key.
+    raw : object
+        The area's value as parsed from TOML / JSON.
+
+    Returns
+    -------
+    list of str
+        One short reason per problem; never contains a value from ``raw``.
+    """
+    errors: list[str] = []
+    if not isinstance(name, str) or not AREA_NAME_RE.match(name):
+        errors.append(
+            "name must be a lowercase slug (a-z, 0-9, -) of at most 40 characters"
+        )
+    elif name in RESERVED_AREA_NAMES:
+        errors.append(f"name {name!r} is reserved")
+    if not isinstance(raw, Mapping):
+        return [*errors, "an area must be a table"]
+    extra = sorted(str(k) for k in set(raw) - set(_AREA_KEYS))
+    if extra:
+        errors.append(f"unknown keys: {', '.join(extra)}")
+    description = raw.get("description", "")
+    if not isinstance(description, str):
+        errors.append("description must be a string")
+    else:
+        if len(description) > MAX_AREA_DESCRIPTION:
+            errors.append(
+                f"description must be at most {MAX_AREA_DESCRIPTION} characters"
+            )
+        if "\n" in description or "\r" in description:
+            errors.append("description must be one line")
+    if "paths" not in raw:
+        errors.append("paths is required")
+    else:
+        paths = raw["paths"]
+        errors += _string_list_errors(
+            paths,
+            "paths",
+            low=1,
+            high=MAX_AREA_PATHS,
+            max_chars=MAX_AREA_PATH_CHARS,
+        )
+        if isinstance(paths, list | tuple):
+            for item in paths:
+                if not isinstance(item, str):
+                    continue
+                if item.startswith("/") or "\\" in item:
+                    errors.append("paths must be relative posix paths")
+                    break
+                if ".." in item.split("/"):
+                    errors.append("paths must not contain '..'")
+                    break
+    if "labels" in raw:
+        errors += _string_list_errors(
+            raw["labels"],
+            "labels",
+            low=0,
+            high=MAX_AREA_LABELS,
+            max_chars=MAX_AREA_LABEL_CHARS,
+        )
+    return errors
+
+
+def areas_table_errors(raw: object) -> list[str]:
+    """Return why a whole ``[areas]`` table is invalid; empty when valid.
+
+    Checks the table's shape and size only; each entry is checked by
+    :func:`area_errors`. ``None`` (a reset) is valid.
+
+    Parameters
+    ----------
+    raw : object
+        The ``areas`` value as parsed.
+
+    Returns
+    -------
+    list of str
+        Empty, or one reason.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, Mapping):
+        return ["areas must be a table of tables"]
+    if len(raw) > MAX_AREAS:
+        return [f"at most {MAX_AREAS} areas, got {len(raw)}"]
+    return []
+
+
+def _build_areas_config(raw: object) -> tuple[AreaConfig, ...]:
+    """Parse ``[areas]`` leniently: an invalid table or entry is dropped with a warning."""
+    problems = areas_table_errors(raw)
+    if problems or not isinstance(raw, Mapping):
+        for problem in problems:
+            _log.warning("ignoring [areas]: %s", problem)
+        return ()
+    built: list[AreaConfig] = []
+    for name, value in raw.items():
+        errors = area_errors(name, value)
+        if errors:
+            _log.warning("ignoring [areas.%s]: %s", name, "; ".join(errors))
+            continue
+        built.append(
+            AreaConfig(
+                name=name,
+                description=value.get("description", ""),
+                paths=tuple(value["paths"]),
+                labels=tuple(value.get("labels", ())),
+            )
+        )
+    return tuple(sorted(built, key=lambda a: a.name))
+
+
 @dataclass(frozen=True, slots=True)
 class ChatConfig:
     """Configuration for the portal's Chat assistant.
@@ -1114,6 +1300,9 @@ class Config:
         Settings for the portal's Chat assistant. Loaded from the
         ``[chat]`` table; consumed by :mod:`whygraph.chat` and
         :mod:`whygraph.serve.chat`.
+    areas : tuple of AreaConfig
+        Configured product areas, sorted by name. Loaded leniently from
+        the ``[areas]`` table: an invalid entry is dropped with a warning.
     """
 
     log_level: str = "INFO"
@@ -1130,6 +1319,7 @@ class Config:
     analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
     rationale: RationaleConfig = field(default_factory=RationaleConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
+    areas: tuple[AreaConfig, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate field values immediately after construction.
@@ -1342,6 +1532,10 @@ class Config:
         chat_raw = data.pop("chat", {}) or {}
         if chat_raw:
             data["chat"] = _build_chat_config(chat_raw)
+
+        areas_raw = data.pop("areas", None)
+        if areas_raw:
+            data["areas"] = _build_areas_config(areas_raw)
 
         logging_raw = data.pop("logging", {}) or {}
         if logging_raw:

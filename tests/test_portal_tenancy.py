@@ -326,6 +326,16 @@ def _seed_history(root: Path, org: str) -> None:
                         lines_added=1,
                     )
                 )
+        # A nested path for the areas/suggest canary (the mark is the repo's
+        # parent directory, see _marked_repo).
+        session.add(
+            CommitFileChange(
+                commit_sha=sha,
+                path=f"crates/{root.parent.name}_canary/x.rs",
+                change_type="A",
+                lines_added=1,
+            )
+        )
         session.commit()
 
 
@@ -694,6 +704,10 @@ def _repos_check(body: dict, w: World, o: OrgWorld) -> None:
     registered = {r["path"]: r["registered"] for r in body["repos"]}
     assert registered[str(o.root)] is True
     assert registered[str(w.other(o).root)] is False  # item 4
+
+
+def _suggest_check(body: dict, o: OrgWorld) -> None:
+    assert [s["paths"] for s in body["suggestions"]] == [[f"crates/{o.mark}_canary/"]]
 
 
 def _projects_check(body: dict, w: World, o: OrgWorld) -> None:
@@ -1136,6 +1150,13 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     # The Chat router
     ("GET", "/api/projects/{slug}/chat/providers"): Call(
         200, shows=lambda o: [f"{o.mark}-model"]
+    ),
+    # Each org's seed has one nested canary path; the sweep fails if the
+    # other org's mark shows in the answer.
+    ("GET", "/api/projects/{slug}/areas/suggest"): Call(
+        200,
+        shows=lambda o: [f"{o.mark}_canary"],
+        check=lambda body, w, o: _suggest_check(body, o),
     ),
     ("GET", "/api/projects/{slug}/chat/models"): Call(
         200,
@@ -1604,6 +1625,8 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("POST", "/api/projects/{slug}/github-token/test"),
         # Listing models with the project's key (plan 36 section 4.1.2)
         ("GET", "/api/projects/{slug}/models/{provider}"),
+        # Suggesting areas for Settings (plan 38 section 5.7)
+        ("GET", "/api/projects/{slug}/areas/suggest"),
     }
     # Everyone reads the price table (it prices their own estimates).
     assert ("GET", "/api/prices") in MEMBER_ROUTES

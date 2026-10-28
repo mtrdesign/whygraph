@@ -17,10 +17,16 @@ file-change paths.
 from __future__ import annotations
 
 import json
+import re
+from collections import defaultdict
 from collections.abc import Iterable
+from datetime import datetime, timedelta, timezone
+
+from sqlmodel import Session, col, select
 
 from whygraph.core import get_config
-from whygraph.core.config import AreaConfig
+from whygraph.core.config import AreaConfig, area_errors
+from whygraph.db.models import Commit, CommitFileChange
 from whygraph.core.utils import like_escape
 from whygraph.mcp.errors import WhyGraphError
 
@@ -29,6 +35,26 @@ OVERVIEW_BUDGET_CHARS = 4_000
 
 OVERVIEW_PATHS_PER_AREA = 5
 """Paths shown per area in the overview before they are cut."""
+
+SUGGEST_DAYS = 365
+"""How far back :func:`suggest_areas` looks at commits."""
+
+SUGGEST_MAX = 12
+"""Most areas :func:`suggest_areas` proposes."""
+
+SUGGEST_MAX_DEPTH = 4
+"""Deepest directory level the suggestion descends to."""
+
+SUGGEST_DESCEND_SHARE = 0.7
+"""A child holding more than this share of the commits is descended into."""
+
+SUGGEST_MIN_SHARE = 0.05
+"""Smallest share of commits a proposed directory must hold."""
+
+SUGGEST_DENYLIST: frozenset[str] = frozenset(
+    {"node_modules", "dist", "build", "vendor", ".venv", "target", "coverage"}
+)
+"""Directory names never proposed (generated or vendored trees)."""
 
 PathPredicate = tuple[str, str | None]
 """``(escaped LIKE pattern, exact path or None)`` for one area path entry."""
@@ -210,3 +236,91 @@ def overview_block() -> dict:
     if len(json.dumps(block)) <= OVERVIEW_BUDGET_CHARS:
         return block
     return {"items": [{"name": a.name} for a in areas], "truncated": True}
+
+
+def _slug(segment: str) -> str:
+    """Lowercase ``segment`` into the area-name alphabet (may return ``""``)."""
+    return re.sub(r"[^a-z0-9-]+", "-", segment.lower()).strip("-")[:40].strip("-")
+
+
+def suggest_areas(session: Session) -> list[dict]:
+    """Propose areas from where recent commits land in the tree.
+
+    Looks at distinct commits of the last :data:`SUGGEST_DAYS` days (by
+    ``authored_at``) and the directories their file changes touch, ignoring
+    :data:`SUGGEST_DENYLIST` trees and top-level files. From the repo root it
+    descends while a single child directory holds more than 70 % of the
+    commits under the current directory (up to :data:`SUGGEST_MAX_DEPTH`
+    levels), so ``src/<pkg>/`` and ``packages/*`` layouts surface their real
+    components. It then proposes each child holding at least 5 % of those
+    commits, busiest first, at most :data:`SUGGEST_MAX`. Nothing is saved.
+
+    Parameters
+    ----------
+    session : sqlmodel.Session
+        An open session on the project's WhyGraph database.
+
+    Returns
+    -------
+    list of dict
+        ``{"name", "paths", "labels": [], "description": ""}`` entries, each
+        valid under :func:`~whygraph.core.config.area_errors`; at most
+        :data:`SUGGEST_MAX`, so within ``MAX_AREAS``.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SUGGEST_DAYS)).isoformat()
+    rows = session.exec(
+        select(CommitFileChange.commit_sha, CommitFileChange.path)
+        .join(Commit, col(Commit.sha) == col(CommitFileChange.commit_sha))
+        .where(col(Commit.authored_at) >= cutoff)
+    ).all()
+    # Commits per directory prefix, for every directory above a file.
+    commits: dict[tuple[str, ...], set[str]] = defaultdict(set)
+    for sha, path in rows:
+        parts = tuple(p for p in path.split("/") if p)
+        if len(parts) < 2 or SUGGEST_DENYLIST.intersection(parts[:-1]):
+            continue
+        for depth in range(1, len(parts)):
+            commits[parts[:depth]].add(sha)
+
+    def children(prefix: tuple[str, ...]) -> list[tuple[tuple[str, ...], int]]:
+        found = [
+            (key, len(shas))
+            for key, shas in commits.items()
+            if len(key) == len(prefix) + 1 and key[: len(prefix)] == prefix
+        ]
+        return sorted(found, key=lambda item: (-item[1], item[0]))
+
+    prefix: tuple[str, ...] = ()
+    kids = children(prefix)
+    total = len({sha for shas in commits.values() for sha in shas})
+    while kids and len(prefix) < SUGGEST_MAX_DEPTH:
+        top, top_count = kids[0]
+        if top_count <= SUGGEST_DESCEND_SHARE * total:
+            break
+        sub = children(top)
+        if not sub:
+            break
+        prefix, total, kids = top, top_count, sub
+
+    suggestions: list[dict] = []
+    taken: set[str] = set()
+    for key, count in kids:
+        if len(suggestions) >= SUGGEST_MAX:
+            break
+        if count < SUGGEST_MIN_SHARE * total:
+            continue
+        name = _slug(key[-1])
+        if name in taken and len(key) > 1:
+            name = _slug(f"{key[-2]}-{key[-1]}")
+        entry = {
+            "name": name,
+            "paths": ["/".join(key) + "/"],
+            "labels": [],
+            "description": "",
+        }
+        body = {k: v for k, v in entry.items() if k != "name"}
+        if name in taken or area_errors(name, body):
+            continue
+        taken.add(name)
+        suggestions.append(entry)
+    return suggestions

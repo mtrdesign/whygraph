@@ -3605,6 +3605,25 @@ def get_scan_estimate(
     return body
 
 
+@projects_router.get("/{slug}/areas/suggest")
+def suggest_project_areas(
+    project: BoundProject = Depends(
+        project_db_access(Action.PROJECT_CONFIGURE, guard=linked_guard("Areas"))
+    ),
+) -> dict:
+    """Propose areas from the project's recent commit history (nothing is saved).
+
+    Returns ``{"suggestions": [{name, paths, labels, description}]}``; each
+    entry is valid for ``[areas.<name>]``. Refused for a linked project
+    (``403 managed_on_platform``): it has no local history to read.
+    """
+    from whygraph.chat.areas import suggest_areas
+    from whygraph.db import get_session as project_session
+
+    with project_session() as session:
+        return {"suggestions": suggest_areas(session)}
+
+
 __all__ = [
     "linked_guard",
     "portal_router",

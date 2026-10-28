@@ -539,7 +539,8 @@ def _check_case(expect: dict, turn: dict) -> list[str]:
     ``tools_any``: at least one of these was called. ``tools_never``: none was.
     ``args``: ``{tool: {key: regex}}``, every named tool call must have the key
     matching (``re.search``) in at least one of its calls. ``cites``: regexes the
-    final answer must match. ``max_rounds``: tool rounds at most this many.
+    final answer must match. ``forbid``: regexes the final answer must not
+    match (the never-rank cases). ``max_rounds``: tool rounds at most this many.
     """
     failures: list[str] = []
     if turn["error"]:
@@ -559,6 +560,9 @@ def _check_case(expect: dict, turn: dict) -> list[str]:
     for pattern in expect.get("cites") or []:
         if not re.search(pattern, turn["answer"]):
             failures.append(f"answer does not cite {pattern}")
+    for pattern in expect.get("forbid") or []:
+        if re.search(pattern, turn["answer"]):
+            failures.append(f"answer matches forbidden {pattern[:30]}")
     limit = expect.get("max_rounds")
     if limit is not None and turn["rounds"] > limit:
         failures.append(f"{turn['rounds']} rounds > {limit}")
@@ -741,7 +745,15 @@ def _suite_main(args, targets: list[tuple[str | None, str | None]]) -> int:
             k = suite_k.get(suite["suite"], args.k)
             print(f"suite {suite['suite']} k={k} on {label}")
             trials = _run_suite_pass(args, provider, model, suite, k)
-            runs.append({"suite": suite["suite"], "k": k, "trials": trials})
+            runs.append(
+                {
+                    "suite": suite["suite"],
+                    "k": k,
+                    "mode": args.mode,
+                    "slug": args.slug,
+                    "trials": trials,
+                }
+            )
         report = _suite_markdown(label, args, runs, (before, _spent(args)))
         out = Path(args.report)
         out.write_text(report)
@@ -769,6 +781,218 @@ def _suite_main(args, targets: list[tuple[str | None, str | None]]) -> int:
         )
         print(f"wrote {out} and {sidecar}")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Blind judge: packets and tally (plan 38 section 12 Q8)
+# ---------------------------------------------------------------------------
+
+RUBRIC_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "tests"
+    / "fixtures"
+    / "chat_eval"
+    / "judge_rubric.md"
+)
+
+
+def _answers_by_mode(report: dict) -> dict[tuple[str, str], dict[str, dict]]:
+    """``{(suite, case): {mode: {question, answer, tool_calls}}}`` from a report.
+
+    A run's mode is its own ``mode`` (falling back to the report's). The first
+    trial without an error and with a non-empty answer is the one judged.
+    """
+    found: dict[tuple[str, str], dict[str, dict]] = {}
+    for run in report["runs"]:
+        mode = run.get("mode") or report.get("mode")
+        for trial in run["trials"]:
+            if trial.get("error") or not (trial.get("answer") or "").strip():
+                continue
+            slot = found.setdefault((run["suite"], trial["case"]), {})
+            slot.setdefault(
+                mode,
+                {
+                    "question": trial["question"],
+                    "answer": trial["answer"],
+                    "tool_calls": [
+                        {"name": c["name"], "arguments": c.get("arguments", {})}
+                        for c in trial.get("tool_calls", [])
+                    ],
+                },
+            )
+    return found
+
+
+def _write_packets(report_path: str, out_dir: str) -> int:
+    """Write one packet per (question, own-mode vs other mode, order) and a key.
+
+    A question's own mode is its suite's name. Packet ids are neutral and
+    shuffled with a fixed seed; ``key.json`` is the only file that names modes.
+    """
+    import random
+
+    report = json.loads(Path(report_path).read_text())
+    rubric = RUBRIC_PATH.read_text()
+    work: list[tuple[str, str, str, str, str]] = []
+    for (suite, case), by_mode in sorted(_answers_by_mode(report).items()):
+        if suite not in by_mode:
+            print(
+                f"! {case}: no usable answer in its own mode, skipped", file=sys.stderr
+            )
+            continue
+        for other in sorted(m for m in by_mode if m != suite):
+            work.append((case, suite, suite, other, "own-first"))
+            work.append((case, suite, other, suite, "own-second"))
+    random.Random(38).shuffle(work)
+    out = Path(out_dir)
+    (out / "votes").mkdir(parents=True, exist_ok=True)
+    answers = _answers_by_mode(report)
+    key: dict[str, dict] = {}
+    for number, (case, suite, mode_a, mode_b, _) in enumerate(work, 1):
+        packet_id = f"p{number:03d}"
+        side = answers[(suite, case)]
+        packet = {
+            "packet": packet_id,
+            "question": side[suite]["question"],
+            "A": {
+                "answer": side[mode_a]["answer"],
+                "tool_calls": side[mode_a]["tool_calls"],
+            },
+            "B": {
+                "answer": side[mode_b]["answer"],
+                "tool_calls": side[mode_b]["tool_calls"],
+            },
+            "rubric": rubric,
+        }
+        (out / f"{packet_id}.json").write_text(json.dumps(packet, indent=2))
+        key[packet_id] = {"A": mode_a, "B": mode_b, "question_id": case, "suite": suite}
+    (out / "key.json").write_text(json.dumps(key, indent=2))
+    print(f"wrote {len(key)} packets to {out} (key.json kept beside them)")
+    return len(key)
+
+
+def _tally_votes(out_dir: str) -> str:
+    """Count ``votes/*.json`` against ``key.json``; return the Markdown table.
+
+    Per (question, other mode) the votes of both orders are pooled and the
+    majority decides (a split is a tie). A mode wins a question when it beats or
+    ties both other modes and beats at least one.
+    """
+    out = Path(out_dir)
+    key = json.loads((out / "key.json").read_text())
+    pooled: dict[tuple[str, str, str], Counter] = {}
+    for path in sorted((out / "votes").glob("*.json")):
+        data = json.loads(path.read_text())
+        for vote in data if isinstance(data, list) else [data]:
+            info = key.get(vote.get("packet"))
+            if info is None or vote.get("winner") not in ("A", "B", "tie"):
+                continue
+            own, other = info["suite"], None
+            other = info["B"] if info["A"] == own else info["A"]
+            tally = pooled.setdefault((info["question_id"], own, other), Counter())
+            if vote["winner"] == "tie":
+                tally["tie"] += 1
+            else:
+                tally[info[vote["winner"]]] += 1
+    verdicts: dict[tuple[str, str], dict[str, str]] = {}
+    for (case, own, other), tally in pooled.items():
+        a, b = tally[own], tally[other]
+        verdicts.setdefault((own, case), {})[other] = (
+            "win" if a > b else "loss" if b > a else "tie"
+        )
+    modes = sorted({v["suite"] for v in key.values()})
+    lines = [
+        "| mode | questions won | questions | votes (own / other / tie per pair) |",
+        "|---|---|---|---|",
+    ]
+    for mode in modes:
+        cases = sorted(c for (m, c) in verdicts if m == mode)
+        won = sum(
+            1
+            for c in cases
+            if all(r in ("win", "tie") for r in verdicts[(mode, c)].values())
+            and any(r == "win" for r in verdicts[(mode, c)].values())
+        )
+        pairs = "; ".join(
+            f"{c}/{o}: {pooled[(c, mode, o)][mode]}/{pooled[(c, mode, o)][o]}"
+            f"/{pooled[(c, mode, o)]['tie']}"
+            for c in cases
+            for o in sorted(verdicts[(mode, c)])
+        )
+        lines.append(f"| {mode} | {won} | {len(cases)} | {pairs} |")
+    return "\n".join(lines)
+
+
+def _self_test() -> int:
+    """Run both judge halves on an inline fake report; exit 0 on the expected table."""
+    import tempfile
+
+    def trial(case, mode_tag):
+        return {
+            "case": case,
+            "question": f"question {case}",
+            "trial": 1,
+            "answer": f"answer {case} number {len(mode_tag)}",
+            "tool_calls": [{"name": "t", "arguments": {"q": case}}],
+            "error": "",
+        }
+
+    cases = ["X1", "X2", "X3", "X4"]
+    report = {
+        "runs": [
+            {"suite": "lead", "mode": m, "trials": [trial(c, m) for c in cases]}
+            for m in ("lead", "engineer", "onboarding")
+        ]
+    }
+    # Outcome of lead vs engineer and vs onboarding for each question.
+    outcome = {
+        ("X1", "engineer"): "own",
+        ("X1", "onboarding"): "own",
+        ("X2", "engineer"): "split",
+        ("X2", "onboarding"): "own",
+        ("X3", "engineer"): "other",
+        ("X3", "onboarding"): "own",
+        ("X4", "engineer"): "split",
+        ("X4", "onboarding"): "split",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        report_path = Path(tmp) / "report.json"
+        report_path.write_text(json.dumps(report))
+        out = Path(tmp) / "packets"
+        count = _write_packets(str(report_path), str(out))
+        key = json.loads((out / "key.json").read_text())
+        ok = count == 16 and len(key) == 16
+        ok &= all(
+            "lead" not in json.dumps(json.loads(p.read_text()))
+            for p in out.glob("p*.json")
+        )
+        votes = out / "votes"
+        for packet_id, info in key.items():
+            want = outcome[
+                (info["question_id"], info["B"] if info["A"] == "lead" else info["A"])
+            ]
+            own_side = "A" if info["A"] == "lead" else "B"
+            other_side = "B" if own_side == "A" else "A"
+            if want == "own":
+                picks = [own_side] * 3
+            elif want == "other":
+                picks = [other_side] * 3
+            else:  # 3-3 across the two orders
+                picks = [own_side, own_side, other_side]
+                if own_side == "B":
+                    picks = [other_side, other_side, own_side]
+            (votes / f"{packet_id}.json").write_text(
+                json.dumps(
+                    [{"packet": packet_id, "winner": w, "reason": "t"} for w in picks]
+                )
+            )
+        table = _tally_votes(str(out))
+    row = next(line for line in table.splitlines() if line.startswith("| lead "))
+    # X1 and X2 win; X3 loses to engineer; X4 ties both without a win.
+    ok &= row.split("|")[2].strip() == "2" and row.split("|")[3].strip() == "4"
+    print(table)
+    print("self-test:", "OK" if ok else "FAILED")
+    return 0 if ok else 1
 
 
 def main() -> int:
@@ -829,7 +1053,34 @@ def main() -> int:
         default="eval-report.md",
         help="Markdown report path; the JSON transcript sidecar sits beside it.",
     )
+    parser.add_argument(
+        "--judge-packets",
+        nargs=2,
+        metavar=("REPORT_JSON", "DIR"),
+        help="Write blind judge packets and key.json from a transcript JSON.",
+    )
+    parser.add_argument(
+        "--judge-tally",
+        metavar="DIR",
+        help="Tally DIR/votes/*.json against DIR/key.json into a Markdown table.",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Exercise --judge-packets and --judge-tally on a fake report.",
+    )
     args = parser.parse_args()
+
+    if args.self_test:
+        return _self_test()
+    if args.judge_packets:
+        _write_packets(*args.judge_packets)
+        return 0
+    if args.judge_tally:
+        table = _tally_votes(args.judge_tally)
+        Path(args.judge_tally, "tally.md").write_text(table + "\n")
+        print(table)
+        return 0
 
     try:
         targets = _parse_targets(args)

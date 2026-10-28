@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Text
+from sqlalchemy import Text, text
 from sqlmodel import Field
 
 from whygraph.db.base import WhygraphTable
@@ -29,9 +29,15 @@ class ForgeCrawlState(WhygraphTable, table=True):
         ``list_recent_activity`` report the older of the two kinds' stamps
         as ``forge_data_as_of``, so a reader can tell how old the PR and
         issue data is.
+    fields_version : int
+        The crawler's ``FORGE_FIELDS_VERSION`` when this crawl ran; ``0``
+        for a crawl that predates the phase 2 fields.
     """
 
     kind: str = Field(primary_key=True, sa_type=Text)
     repo: str = Field(sa_type=Text)
     watermark: str | None = Field(default=None, sa_type=Text)
     crawled_at: str = Field(sa_type=Text)
+    fields_version: int = Field(
+        default=0, sa_column_kwargs={"server_default": text("0")}
+    )

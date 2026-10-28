@@ -19,6 +19,26 @@ class PullRequest(WhygraphTable, table=True):
     -----
     * ``draft`` is ``int`` (0/1), not ``bool``, to keep the declared
       SQLite affinity as INTEGER.
+
+    Attributes
+    ----------
+    milestone : int or None
+        The milestone number, or ``None`` when the PR has none.
+    assignees : str
+        JSON list of assignee logins.
+    review_decision : str or None
+        GitHub's ``reviewDecision`` (``APPROVED``, ``CHANGES_REQUESTED``,
+        ``REVIEW_REQUIRED``), ``None`` when unset.
+    latest_reviews : str
+        JSON list of the latest opinionated review per reviewer.
+    review_requests : str
+        JSON list of requested reviewers (users and bots only).
+    first_review_at : str or None
+        Earliest submitted review by someone other than the author.
+    files : str
+        JSON list of changed file paths (first 100).
+    additions, deletions, changed_files : int or None
+        Diff totals as GitHub reports them.
     """
 
     number: int = Field(primary_key=True, nullable=True)
@@ -44,3 +64,21 @@ class PullRequest(WhygraphTable, table=True):
     comments: str = Field(
         default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
     )
+    milestone: int | None = Field(default=None)
+    assignees: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    review_decision: str | None = Field(default=None, sa_type=Text)
+    latest_reviews: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    review_requests: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    first_review_at: str | None = Field(default=None, sa_type=Text)
+    files: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    additions: int | None = Field(default=None)
+    deletions: int | None = Field(default=None)
+    changed_files: int | None = Field(default=None)

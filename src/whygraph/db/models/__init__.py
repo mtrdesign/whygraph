@@ -40,10 +40,12 @@ from whygraph.db.models.commit import Commit
 from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.db.models.forge_crawl_state import ForgeCrawlState
 from whygraph.db.models.issue import Issue
+from whygraph.db.models.milestone import Milestone
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pr_origin_skip import PROriginSkip
 from whygraph.db.models.pull_request import PullRequest
 from whygraph.db.models.rationale_cache import RationaleCache
+from whygraph.db.models.tag import Tag
 
 __all__ = [
     "Author",
@@ -53,8 +55,10 @@ __all__ = [
     "CommitFileChange",
     "ForgeCrawlState",
     "Issue",
+    "Milestone",
     "PRIssueLink",
     "PROriginSkip",
     "PullRequest",
     "RationaleCache",
+    "Tag",
 ]

@@ -127,7 +127,6 @@ for an empty chat.
 |---|---|
 | **Engineer** | Code-first answers: symbols, files and lines, and why the code is the way it is. |
 | **Lead** | The state of the work: what shipped, what is in flight or stuck, and who knows each area. |
-| **Onboarding** | A top-down tour for someone new: the map, the pieces that matter, and where to start reading. |
 
 You can switch a chat's mode at any time; it applies from the next reply, and each reply records the
 mode it was written in. Changing it starts a fresh prompt cache for that reply, as changing the effort
@@ -136,7 +135,9 @@ does.
 **Which mode a new chat starts in.** Your last-used mode in this project; if you have no chat yet, the
 project's `[chat].mode` (Settings > Models and keys > **Chat** > **Mode**; see
 [the configuration reference](../reference/configuration.md#section-by-section)); otherwise Engineer. There is no organization-wide
-default. Modes are built into WhyGraph: a repository cannot add one or change one.
+default. Modes are built into WhyGraph: a repository cannot add one or change one. A chat or a
+`[chat].mode` that names a mode WhyGraph no longer has (an early Onboarding mode was removed) runs as
+the project's default, else Engineer.
 
 ### References in your question
 

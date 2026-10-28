@@ -125,21 +125,6 @@ MODES: Mapping[str, Mode] = MappingProxyType(
             ),
             avoid=("get_symbol", "read_file"),
         ),
-        "onboarding": Mode(
-            id="onboarding",
-            label="Onboarding",
-            description=(
-                "A top-down tour for someone new: the map, the pieces that "
-                "matter, and where to start reading."
-            ),
-            starters=(
-                "Give me a map of this codebase",
-                f"Explain how {AREA_PLACEHOLDER} works end to end",
-                f"What should I know before changing {AREA_PLACEHOLDER}?",
-            ),
-            prefer=("get_area_outline", "get_rationale", "read_file"),
-            avoid=("run_project_stats", "find_changes"),
-        ),
     }
 )
 """Every mode, keyed by id, in :data:`MODE_IDS` order (pinned by a test)."""

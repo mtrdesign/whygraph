@@ -59,6 +59,7 @@ from whygraph.portal import db as portal_db
 from whygraph.portal import repos as portal_repos
 from whygraph.portal.app import PortalStartupError, create_portal_app
 from whygraph.portal.authz import OrgAccess, Role
+from whygraph.portal.config_layers import save_layer
 from whygraph.portal.deps import (
     IdentityResolver,
     PortalState,
@@ -2074,13 +2075,33 @@ def test_invalid_chat_mode_is_dropped_on_import() -> None:
     from whygraph.portal.policy import _drop_invalid_values, invalid_values
 
     layer = {"chat": {"mode": "gone", "effort": "low"}}
-    assert invalid_values(layer) == {
-        "chat.mode": "must be one of engineer, lead, onboarding"
-    }
+    assert invalid_values(layer) == {"chat.mode": "must be one of engineer, lead"}
     assert _drop_invalid_values(layer) == ["chat.mode"]
     assert layer == {"chat": {"effort": "low"}}
     assert invalid_values({"chat": {"mode": "gone"}}, {"chat": {"mode": "gone"}}) == {}
     assert invalid_values({"chat": {"mode": "lead"}}) == {}
+
+
+def test_a_stored_onboarding_chat_mode_loads_as_unset_and_cannot_be_written(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    """Onboarding lost the phase 1 gate: a layer that kept it loads as the default."""
+    add_local(ready, make_repo(env.shared, "demo"))
+    refused = ready.put(
+        "/api/projects/demo/config", json={"config": {"chat": {"mode": "onboarding"}}}
+    )
+    assert refused.status_code == 422
+    assert refused.json()["keys"] == ["chat.mode"]
+
+    # A layer saved while onboarding was a mode still holds it.
+    pid = _project_id("demo")
+    with portal_db.get_session() as session:
+        org_id = session.get(Project, pid).org_id
+        save_layer(session, pid, {"chat": {"mode": "onboarding"}}, org_id=org_id)
+        session.commit()
+    contexts = ready.app.state.portal.contexts
+    contexts.invalidate(pid)
+    assert contexts.get(pid).config.chat.mode is None
 
 
 def test_hooks_change_resyncs_hooks_on_an_initialized_project(

@@ -385,13 +385,16 @@ def test_core_effort_levels_mirror_services() -> None:
 def test_mode_ids_pin_and_lenient_load(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    assert MODE_IDS == ("engineer", "lead", "onboarding")
+    assert MODE_IDS == ("engineer", "lead")
     assert Config.from_dict({"chat": {"mode": "lead"}}, tmp_path).chat.mode == "lead"
     assert Config.from_dict({}, tmp_path).chat.mode is None
     with caplog.at_level("WARNING"):
         cfg = Config.from_dict({"chat": {"mode": "gone"}}, tmp_path)
     assert cfg.chat.mode is None
     assert "gone" in caplog.text
+    # Onboarding was removed at the phase 1 gate; a stored value loads as unset.
+    retired = Config.from_dict({"chat": {"mode": "onboarding"}}, tmp_path)
+    assert retired.chat.mode is None
 
 
 # ---- rationale-cache identity ---------------------------------------------

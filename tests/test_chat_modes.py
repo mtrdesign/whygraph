@@ -110,12 +110,6 @@ def test_the_lead_block_carries_its_rules() -> None:
     assert "contributor_absence_factor" in block
 
 
-def test_the_onboarding_block_ends_with_where_to_start() -> None:
-    block = mode_block(MODES["onboarding"])
-    assert "Where to start reading" in block
-    assert "Define each project term on first use" in block
-
-
 def test_starters_take_the_first_area_or_a_generic_phrase() -> None:
     lead = MODES["lead"]
     assert any(AREA_PLACEHOLDER in text for text in lead.starters)

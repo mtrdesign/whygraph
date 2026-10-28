@@ -47,6 +47,7 @@ from typing import Any, Mapping
 from whygraph.core.config import (
     CONFIG_FILENAME,
     EFFORT_LEVELS,
+    MODE_IDS,
     AnalyzeConfig,
     ChatConfig,
     ConfigError,
@@ -136,7 +137,8 @@ PUT_ALLOWLIST: Spec = {
 """Rule 1b: what ``PUT /api/projects/{slug}/config`` may store."""
 
 DEFAULTS_ALLOWLIST: Spec = {
-    **{k: v for k, v in PUT_ALLOWLIST.items() if k not in ("scan", "areas")},
+    **{k: v for k, v in PUT_ALLOWLIST.items() if k not in ("scan", "areas", "chat")},
+    "chat": {k: v for k, v in PUT_ALLOWLIST["chat"].items() if k != "mode"},
     **{
         section: {**PUT_ALLOWLIST[section], **{key: True for key in keys}}
         for section, keys in ORG_ONLY_KEYS.items()
@@ -495,6 +497,12 @@ def invalid_values(
         same = isinstance(old_chat, Mapping) and old_chat.get("effort") == effort
         if effort is not None and not same and effort not in EFFORT_LEVELS:
             found["chat.effort"] = f"must be one of {', '.join(EFFORT_LEVELS)}"
+    if isinstance(chat, Mapping) and "mode" in chat:
+        mode = chat["mode"]
+        old_chat = old.get("chat")
+        same = isinstance(old_chat, Mapping) and old_chat.get("mode") == mode
+        if mode is not None and not same and mode not in MODE_IDS:
+            found["chat.mode"] = f"must be one of {', '.join(MODE_IDS)}"
     return found
 
 
@@ -517,8 +525,8 @@ def _drop_invalid_values(kept: dict) -> list[str]:
             kept.pop("areas", None)
         elif key.startswith("areas."):
             kept["areas"].pop(key[len("areas.") :], None)
-        elif key == "chat.effort":
-            kept["chat"].pop("effort", None)
+        elif key in ("chat.effort", "chat.mode"):
+            kept["chat"].pop(key.split(".")[1], None)
     if isinstance(kept.get("areas"), dict) and not kept["areas"]:
         del kept["areas"]
     if isinstance(kept.get("chat"), dict) and not kept["chat"]:

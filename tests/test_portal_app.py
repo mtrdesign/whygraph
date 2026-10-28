@@ -2061,6 +2061,27 @@ def test_defaults_hold_only_llm_and_task_tables(ready: TestClient) -> None:
     assert "sk-ant-4321" not in ok.text
 
 
+def test_defaults_refuse_chat_mode_but_keep_effort(ready: TestClient) -> None:
+    bad = ready.put("/api/portal/defaults", json={"config": {"chat": {"mode": "lead"}}})
+    assert bad.status_code == 422
+    assert bad.json()["keys"] == ["chat.mode"]
+    ok = ready.put("/api/portal/defaults", json={"config": {"chat": {"effort": "low"}}})
+    assert ok.status_code == 200
+
+
+def test_invalid_chat_mode_is_dropped_on_import() -> None:
+    from whygraph.portal.policy import _drop_invalid_values, invalid_values
+
+    layer = {"chat": {"mode": "gone", "effort": "low"}}
+    assert invalid_values(layer) == {
+        "chat.mode": "must be one of engineer, lead, onboarding"
+    }
+    assert _drop_invalid_values(layer) == ["chat.mode"]
+    assert layer == {"chat": {"effort": "low"}}
+    assert invalid_values({"chat": {"mode": "gone"}}, {"chat": {"mode": "gone"}}) == {}
+    assert invalid_values({"chat": {"mode": "lead"}}) == {}
+
+
 def test_hooks_change_resyncs_hooks_on_an_initialized_project(
     ready: TestClient, env: SimpleNamespace
 ) -> None:

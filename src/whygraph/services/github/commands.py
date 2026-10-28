@@ -10,7 +10,7 @@ hand-rolling argv strings.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from subprocess import CompletedProcess
 from typing import Any
@@ -117,12 +117,36 @@ def floor_for(watermark: str) -> datetime:
     return parse_github_ts(watermark) - LOOKBACK
 
 
+GATEWAY_TIMEOUTS = ("HTTP 502", "HTTP 504")
+"""``gh`` stderr markers of a query GitHub gave up on (too heavy for its limit)."""
+
+PAGE_SIZES = (100, 50, 25)
+"""Page sizes tried in turn when a page times out upstream."""
+
+
+def is_gateway_timeout(exc: ShellError) -> bool:
+    """Return whether ``exc`` is a GitHub 502 / 504 (an over-heavy query).
+
+    Parameters
+    ----------
+    exc : ShellError
+        The failed ``gh`` invocation.
+
+    Returns
+    -------
+    bool
+        ``True`` when stderr names ``HTTP 502`` or ``HTTP 504``.
+    """
+    return any(marker in exc.stderr for marker in GATEWAY_TIMEOUTS)
+
+
 def paginate_graphql(
     shell: Shell,
     *,
     query: str,
     path: tuple[str, ...],
     variables: Mapping[str, str],
+    query_for_size: Callable[[int], str] | None = None,
 ) -> Iterator[dict]:
     """Yield ``nodes`` from a paginated GraphQL connection.
 
@@ -146,6 +170,12 @@ def paginate_graphql(
         Static variables passed to every invocation (typically
         ``{"owner": owner, "name": name}``). The ``cursor`` variable is
         injected by this function and overrides any caller value.
+    query_for_size : Callable[[int], str], optional
+        Builds the query for a page size. When given, ``query`` is
+        ignored; a ``HTTP 502`` / ``504`` retries the same cursor at the
+        next size of :data:`PAGE_SIZES` (100, 50, 25) and the reduced
+        size stays for the rest of the crawl. Without it a failure
+        raises at once.
 
     Notes
     -----
@@ -165,15 +195,24 @@ def paginate_graphql(
     """
     static = dict(variables)
     cursor: str | None = None
+    size_index = 0
     while True:
         request_vars = {**static}
         if cursor is not None:
             request_vars["cursor"] = cursor
+        text = query_for_size(PAGE_SIZES[size_index]) if query_for_size else query
         try:
             data = shell.run(
-                GhApiGraphqlCmd(query, request_vars), env=token_env(GH_TOKEN_ENV)
+                GhApiGraphqlCmd(text, request_vars), env=token_env(GH_TOKEN_ENV)
             )
         except ShellError as exc:
+            if (
+                query_for_size is not None
+                and is_gateway_timeout(exc)
+                and size_index + 1 < len(PAGE_SIZES)
+            ):
+                size_index += 1
+                continue
             detail = exc.stderr.strip() or exc.stdout.strip()
             raise GitHubError(f"gh api graphql failed: {detail}") from exc
         conn: Any = data

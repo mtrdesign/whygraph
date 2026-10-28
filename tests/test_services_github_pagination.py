@@ -129,7 +129,7 @@ def test_by_numbers_skips_a_null_alias_and_wraps_shell_errors() -> None:
 
 def test_list_queries_share_pr_fields_and_walk_newest_first() -> None:
     fields = prs_mod._PR_FIELDS
-    assert fields in prs_mod._LIST_QUERY
+    assert fields in prs_mod._list_query(100)
     shell = CmdShell([{"repository": {"pr7": _node(7)}}])
     list(PullRequests("o", "r", shell=shell).by_numbers([7]))
     assert fields in shell.query(0)
@@ -140,8 +140,8 @@ def test_list_queries_share_pr_fields_and_walk_newest_first() -> None:
         "labels(first: 20)",
         "mergeCommit { oid }",
     ):
-        assert needle in prs_mod._LIST_QUERY
-    for q in (prs_mod._LIST_QUERY, issues_mod._LIST_QUERY):
+        assert needle in prs_mod._list_query(100)
+    for q in (prs_mod._list_query(100), issues_mod._LIST_QUERY):
         assert "UPDATED_AT, direction: DESC" in q
         assert "CREATED_AT" not in q
 
@@ -168,3 +168,66 @@ def test_timestamp_helpers_round_trip() -> None:
     assert parsed.utcoffset() is not None
     assert format_github_ts(parsed) == MARK
     assert parsed - floor_for(MARK) == LOOKBACK
+
+
+class _Flaky(CmdShell):
+    """``CmdShell`` where an ``Exception`` response is raised, not returned."""
+
+    def run(self, cmd, *, env=None, **kwargs):  # noqa: ANN001, ANN201
+        self.cmds.append(cmd)
+        response = self.responses[0]
+        if isinstance(response, Exception):
+            self.responses.pop(0)
+            raise response
+        return super(CmdShell, self).run(cmd, env=env, **kwargs)
+
+
+def _gateway(code: int = 502) -> ShellError:
+    return ShellError(["gh"], 1, "", f"gh: Something went wrong (HTTP {code})")
+
+
+def test_pull_request_list_retries_a_502_at_half_the_page_size() -> None:
+    page = _page("pullRequests", [_node(1), _node(2)])
+    shell = _Flaky([_gateway(), page])
+    got = [pr.number for pr in PullRequests("o", "r", shell=shell)]
+    assert got == [1, 2]
+    assert "first: 100" in shell.query(0)
+    assert "first: 50" in shell.query(1)
+
+
+def test_pull_request_list_keeps_the_reduced_size_for_the_next_page() -> None:
+    first = _page("pullRequests", [_node(1)], more=True)
+    second = _page("pullRequests", [_node(2)])
+    shell = _Flaky([_gateway(504), first, second])
+    assert [pr.number for pr in PullRequests("o", "r", shell=shell)] == [1, 2]
+    assert "first: 50" in shell.query(2)
+    assert shell.args(2)["cursor"] == "c1"
+
+
+def test_pull_request_list_fails_after_three_gateway_errors() -> None:
+    shell = _Flaky([_gateway(), _gateway(), _gateway()])
+    with pytest.raises(GitHubError, match="HTTP 502"):
+        [*iter(PullRequests("o", "r", shell=shell))]
+    assert "first: 25" in shell.query(2)
+
+
+def test_pull_request_list_does_not_retry_other_failures() -> None:
+    shell = _Flaky([ShellError(["gh"], 1, "", "HTTP 403 forbidden")])
+    with pytest.raises(GitHubError, match="403"):
+        [*iter(PullRequests("o", "r", shell=shell))]
+    assert len(shell.cmds) == 1
+
+
+def test_by_numbers_splits_a_batch_on_a_gateway_error() -> None:
+    nums = list(range(1, DETAILS_BATCH + 1))
+    shell = _Flaky(
+        [
+            _gateway(),
+            {"repository": {f"pr{n}": _node(n) for n in nums[:10]}},
+            {"repository": {f"pr{n}": _node(n) for n in nums[10:]}},
+        ]
+    )
+    got = [pr.number for pr in PullRequests("o", "r", shell=shell).by_numbers(nums)]
+    assert got == nums
+    assert "pr10:" in shell.query(1) and "pr11:" not in shell.query(1)
+    assert "pr11:" in shell.query(2)

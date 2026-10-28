@@ -31,6 +31,9 @@ query($owner: String!, $name: String!, $cursor: String) {
         createdAt updatedAt closedAt
         author { login }
         labels(first: 20) { nodes { name } }
+        milestone { number }
+        assignees(first: 10) { nodes { login } }
+        stateReason
       }
     }
   }
@@ -53,6 +56,9 @@ query($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
         createdAt updatedAt closedAt
         author { login }
         labels(first: 20) { nodes { name } }
+        milestone { number }
+        assignees(first: 10) { nodes { login } }
+        stateReason
       }
     }
   }

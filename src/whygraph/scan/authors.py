@@ -147,16 +147,29 @@ def _login_from_noreply(email: str) -> str | None:
     return login
 
 
-def _is_bot(email: str, login: str | None) -> bool:
+def is_bot(email: str, login: str | None) -> bool:
     """Whether a contact is a bot rather than a human.
 
     Recognizes the ``[bot]`` marker GitHub appends to app logins, in
     either the login itself or the local part of its noreply address
     (``41898282+github-actions[bot]@users.noreply.github.com``).
 
-    Bots are not dropped — their commits are real and should stay
+    Bots are not dropped here — their commits are real and should stay
     countable — they just never merge across the bot/human boundary, so a
-    bot forms its own cluster (:func:`_resolve`).
+    bot forms its own cluster (:func:`_resolve`). Public because the chat's
+    ownership and work-in-flight reads exclude bots with the same rule.
+
+    Parameters
+    ----------
+    email : str
+        A commit author address; ``""`` when only a login is known.
+    login : str or None
+        A GitHub login, when known.
+
+    Returns
+    -------
+    bool
+        ``True`` when either carries the ``[bot]`` marker.
     """
     if login and "[bot]" in login.lower():
         return True
@@ -413,7 +426,7 @@ def _resolve(session, repository: Repository) -> list[_Cluster]:
             mergeable = (
                 raw_email not in _SHARED_EMAILS
                 and canon_email not in _SHARED_EMAILS
-                and _is_bot(raw_email, None) == _is_bot(canon_email, None)
+                and is_bot(raw_email, None) == is_bot(canon_email, None)
             )
             if mergeable:
                 union.union(("email", raw_email), ("email", canon_email))

@@ -125,10 +125,10 @@ def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_seventeen_tools_with_unique_names_and_object_schemas() -> None:
+def test_nineteen_tools_with_unique_names_and_object_schemas() -> None:
     names = [spec.name for spec in TOOL_SPECS]
-    assert len(names) == 17
-    assert len(set(names)) == 17
+    assert len(names) == 19
+    assert len(set(names)) == 19
     assert set(names) == {
         "search_symbols",
         "get_symbol",
@@ -142,6 +142,8 @@ def test_seventeen_tools_with_unique_names_and_object_schemas() -> None:
         "get_issue",
         "get_repo_overview",
         "list_recent_activity",
+        "get_work_in_flight",
+        "get_area_owners",
         "run_project_stats",
         "run_graph_stats",
         "render_chart",
@@ -1631,3 +1633,523 @@ def test_a_charted_result_stays_parseable_at_the_row_cap() -> None:
     assert len(raw) < MAX_RESULT_CHARS
     result = json.loads(raw)  # the assertion that actually matters
     assert result["row_count"] == 200
+
+
+# ---------------------------------------------------------------------------
+# get_work_in_flight and get_area_owners (the Lead tools, plan 38 §5.9)
+# ---------------------------------------------------------------------------
+
+_NOW = "2026-10-28T10:00:00+00:00"
+
+
+def _areas(monkeypatch: pytest.MonkeyPatch, *items) -> None:
+    """Configure areas on the bound config (sorted by name, as load does)."""
+    import dataclasses
+
+    monkeypatch.setattr(
+        core,
+        "_config",
+        dataclasses.replace(
+            core._config, areas=tuple(sorted(items, key=lambda a: a.name))
+        ),
+    )
+
+
+def _freeze(monkeypatch: pytest.MonkeyPatch, now: str = _NOW) -> None:
+    from datetime import datetime
+
+    from whygraph.mcp import resources
+
+    monkeypatch.setattr(resources, "_utcnow", lambda: datetime.fromisoformat(now))
+
+
+def _pr(number: int, **overrides):
+    from whygraph.db.models import PullRequest
+
+    fields = {
+        "number": number,
+        "title": f"PR {number}",
+        "state": "open",
+        "created_at": "2026-10-01T00:00:00Z",
+        "updated_at": "2026-10-01T00:00:00Z",
+        "head_sha": f"head{number}",
+        "head_ref": f"feat/{number}",
+        "base_ref": "main",
+        "author": "dev",
+        "html_url": f"https://example.invalid/pr/{number}",
+        "labels": "[]",
+        "fetched_at": "2026-10-25T00:00:00Z",
+    }
+    fields.update(overrides)
+    return PullRequest(**fields)
+
+
+def _issue(number: int, **overrides):
+    from whygraph.db.models import Issue
+
+    fields = {
+        "number": number,
+        "title": f"Issue {number}",
+        "state": "open",
+        "created_at": "2026-09-01T00:00:00Z",
+        "updated_at": "2026-09-01T00:00:00Z",
+        "author": "dev",
+        "html_url": f"https://example.invalid/issue/{number}",
+        "labels": "[]",
+        "fetched_at": "2026-10-25T00:00:00Z",
+    }
+    fields.update(overrides)
+    return Issue(**fields)
+
+
+def _row_commit(sha: str, when: str, *, name="dev", email="dev@example.com", **kw):
+    from whygraph.db.models import Commit
+
+    fields = {
+        "sha": sha,
+        "parent_shas": "p0",
+        "author_name": name,
+        "author_email": email,
+        "authored_at": when,
+        "committed_at": when,
+        "subject": f"subject {sha}",
+        "body": "",
+        "files_changed": 1,
+        "insertions": 1,
+        "deletions": 0,
+        "scanned_at": _NOW,
+        "on_default_branch": 1,
+    }
+    fields.update(kw)
+    return Commit(**fields)
+
+
+@pytest.fixture
+def in_flight(chat_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """Open work at a frozen clock, with two areas configured.
+
+    * #412 is labelled into ``checkout``; its newest *human* comment is
+      2026-10-20 (a bot commented later, which moved ``updated_at``).
+    * #413 is an unlabelled draft whose head commit is scanned locally and
+      touches ``src/billing/`` - placed by commits.
+    * #414 is unlabelled with no scanned commits - no area.
+    * #400 is closed and must not appear.
+    """
+    from alembic import command
+
+    from whygraph.core.config import AreaConfig
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+    from whygraph.db.models import CommitFileChange, ForgeCrawlState, PRIssueLink
+
+    command.upgrade(alembic_config(), "head")
+    _areas(
+        monkeypatch,
+        AreaConfig("checkout", "Checkout", ("src/checkout/",), ("area:checkout",)),
+        AreaConfig("billing", "Billing", ("src/billing",)),
+    )
+    _freeze(monkeypatch)
+    comments = [
+        {"author": "alice", "body": "looks good", "created_at": "2026-10-20T10:00:00Z"},
+        {
+            "author": "dependabot[bot]",
+            "body": "rebased",
+            "created_at": "2026-10-27T10:00:00Z",
+        },
+    ]
+    with get_session() as session:
+        session.add(
+            _pr(
+                412,
+                labels='["area:checkout"]',
+                created_at="2026-10-19T10:00:00Z",
+                updated_at="2026-10-27T10:00:00Z",
+                comments=json.dumps(comments),
+            )
+        )
+        session.add(
+            _pr(
+                413,
+                draft=1,
+                head_sha="c_open",
+                created_at="2026-10-01T10:00:00Z",
+                updated_at="2026-10-10T10:00:00Z",
+            )
+        )
+        session.add(_pr(414, updated_at="2026-10-28T08:00:00Z"))
+        session.add(_pr(400, state="closed"))
+        session.add(_issue(300, updated_at="2026-09-18T10:00:00Z"))
+        session.add(
+            _issue(301, labels='["Area:Checkout"]', updated_at="2026-10-20T10:00:00Z")
+        )
+        session.add(_issue(302, state="closed"))
+        session.add(PRIssueLink(pr_number=412, issue_number=300, link_kind="closes"))
+        session.add(PRIssueLink(pr_number=400, issue_number=301, link_kind="closes"))
+        session.add(_row_commit("c_open", "2026-10-01T09:00:00Z", on_default_branch=0))
+        session.add(
+            CommitFileChange(
+                commit_sha="c_open", path="src/billing/pay.py", change_type="M"
+            )
+        )
+        session.add(
+            ForgeCrawlState(
+                kind="pull_request",
+                repo="o/r",
+                crawled_at="2026-10-25T08:12:00+00:00",
+            )
+        )
+        session.add(
+            ForgeCrawlState(
+                kind="issue", repo="o/r", crawled_at="2026-10-27T08:12:00+00:00"
+            )
+        )
+        session.commit()
+    return chat_repo
+
+
+def _wip(**kwargs) -> dict:
+    return _result(
+        ToolRegistry(max_rationale_generations=0), "get_work_in_flight", **kwargs
+    )
+
+
+def test_work_in_flight_lists_open_items_with_idle_time(in_flight: Path) -> None:
+    result = _wip()
+
+    assert result["as_of"] == "2026-10-28T10:00:00Z"
+    # The older of the two crawl stamps dates both lists.
+    assert result["forge_data_as_of"] == "2026-10-25T08:12:00+00:00"
+    assert "3 days old" in result["freshness_warning"]
+    assert result["not_tracked"] == [
+        "review_decision",
+        "assignees",
+        "milestone",
+        "pr_files",
+        "deployments",
+        "incidents",
+    ]
+    assert result["summary"] == {
+        "open_prs": 3,
+        "drafts": 1,
+        "stale_prs": 1,
+        "stale_drafts": 1,
+        "open_issues": 2,
+        "stale_issues": 1,
+    }
+    assert result["omitted"] == 0
+    prs = {p["number"]: p for p in result["pull_requests"]}
+    # Longest idle first; the closed PR is absent.
+    assert [p["number"] for p in result["pull_requests"]] == [413, 412, 414]
+
+    # Bot comment ignored: last activity is the human one, not updated_at.
+    assert prs[412]["last_activity_at"] == "2026-10-20T10:00:00Z"
+    assert prs[412]["idle_days"] == 8
+    assert prs[412]["age_days"] == 9
+    assert prs[412]["stale"] is True
+    assert prs[412]["closes_issues"] == [300]
+    assert (prs[412]["areas"], prs[412]["area_source"]) == (["checkout"], "labels")
+    # A draft is never stale, however idle.
+    assert prs[413]["draft"] is True and prs[413]["stale"] is False
+    assert (prs[413]["areas"], prs[413]["area_source"]) == (["billing"], "commits")
+    assert (prs[414]["areas"], prs[414]["area_source"]) == ([], None)
+    assert prs[414]["last_activity_at"] == "2026-10-28T08:00:00Z"
+    assert prs[414]["stale"] is False
+
+    assert [i["number"] for i in result["issues"]] == [300, 301]
+    issues = {i["number"]: i for i in result["issues"]}
+    assert issues[300]["idle_days"] == 40 and issues[300]["stale"] is True
+    assert issues[300]["linked_open_prs"] == [412]
+    # Only an OPEN PR counts as linked; #400 is closed.
+    assert issues[301]["linked_open_prs"] == []
+    assert issues[301]["areas"] == ["checkout"]  # labels compare case-insensitively
+
+
+def test_work_in_flight_filters_by_area(in_flight: Path) -> None:
+    checkout = _wip(area="checkout")
+    assert checkout["area"] == "checkout"
+    assert [p["number"] for p in checkout["pull_requests"]] == [412]
+    assert [i["number"] for i in checkout["issues"]] == [301]
+    assert checkout["summary"]["open_prs"] == 1
+
+    billing = _wip(area="Billing")
+    assert [p["number"] for p in billing["pull_requests"]] == [413]
+    assert billing["issues"] == []
+
+
+def test_work_in_flight_unknown_area_names_the_configured_ones(in_flight: Path) -> None:
+    error = _wip(area="nope")["error"]
+    assert "billing" in error and "checkout" in error
+
+
+def test_work_in_flight_clamps_and_counts_what_it_omits(in_flight: Path) -> None:
+    result = _wip(limit=1)
+    assert len(result["pull_requests"]) == 1
+    assert len(result["issues"]) == 1
+    assert result["omitted"] == 3
+    assert "area" in result["note"] and "limit" in result["note"]
+    # Summary still covers everything, not just the listed rows.
+    assert result["summary"]["open_prs"] == 3
+
+    assert len(_wip(limit=0)["pull_requests"]) == 1
+    assert _wip(limit=999)["omitted"] == 0
+    clamped = _wip(stale_days=0, issue_stale_days=10_000)
+    assert (clamped["stale_days"], clamped["issue_stale_days"]) == (1, 365)
+    # With a one-day threshold #414 (idle 0) is still fresh, #412 stale.
+    assert clamped["summary"]["stale_prs"] == 1
+
+
+def test_work_in_flight_long_threads_fall_back_to_updated_at(
+    in_flight: Path,
+) -> None:
+    """A PR at the crawl's 100-comment page may have newer comments unseen."""
+    from whygraph.db import get_session
+
+    many = [
+        {"author": "alice", "body": "x", "created_at": "2026-10-02T00:00:00Z"}
+    ] * 100
+    with get_session() as session:
+        session.add(
+            _pr(
+                415,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(many),
+            )
+        )
+        session.commit()
+    pr = next(p for p in _wip()["pull_requests"] if p["number"] == 415)
+    assert pr["last_activity_at"] == "2026-10-26T10:00:00Z"
+
+
+def test_work_in_flight_freshness(
+    in_flight: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _freeze(monkeypatch, "2026-10-25T20:00:00+00:00")
+    assert "freshness_warning" not in _wip()
+
+    from sqlmodel import delete
+
+    from whygraph.db import get_session
+    from whygraph.db.models import ForgeCrawlState
+
+    with get_session() as session:
+        session.exec(delete(ForgeCrawlState))
+        session.commit()
+    result = _wip()
+    assert result["forge_data_as_of"] is None
+    assert "No GitHub crawl" in result["freshness_warning"]
+
+
+def test_work_in_flight_without_areas_attributes_nothing(
+    in_flight: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _areas(monkeypatch)
+    result = _wip()
+    assert {p["area_source"] for p in result["pull_requests"]} == {None}
+    assert all(p["areas"] == [] for p in result["pull_requests"])
+
+
+def test_recent_activity_dates_the_forge_lists(in_flight: Path) -> None:
+    result = _result(ToolRegistry(max_rationale_generations=0), "list_recent_activity")
+    assert result["forge_data_as_of"] == "2026-10-25T08:12:00+00:00"
+
+
+def test_recent_activity_forge_date_is_null_without_a_crawl(
+    seeded_history: Path,
+) -> None:
+    result = _result(ToolRegistry(max_rationale_generations=0), "list_recent_activity")
+    assert result["forge_data_as_of"] is None
+
+
+@pytest.fixture
+def owned(chat_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """Commit history under ``src/checkout/`` with every exclusion represented.
+
+    Counted: alice 3 (two addresses, one cluster), bob 2 (inactive since
+    March), carol 1, and "Dave Web" 1 through the shared ``noreply`` address
+    (in two clusters, so it falls back to the commit's name).
+    Excluded: one merge, two bots (by address, and by resolved login), one
+    refactor sweep. Ignored: out of window, off the default branch, outside
+    the area.
+    """
+    from alembic import command
+
+    from whygraph.core.config import AreaConfig
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+    from whygraph.db.models import Author, CommitFileChange
+
+    command.upgrade(alembic_config(), "head")
+    _areas(
+        monkeypatch,
+        AreaConfig("checkout", "Checkout", ("src/checkout/",), ("area:checkout",)),
+    )
+    _freeze(monkeypatch)
+
+    ids = iter(range(1, 100))
+
+    def author(login, name, emails, last_seen):
+        return Author(
+            id=next(ids),
+            primary_login=login,
+            primary_name=name,
+            primary_email=emails[0],
+            emails=json.dumps(emails),
+            logins=json.dumps([login] if login else []),
+            names=json.dumps([name]),
+            last_seen=last_seen,
+        )
+
+    commits = [
+        # sha, when, name, email, path, extra
+        ("a1", "2026-10-01T00:00:00Z", "Alice", "alice@x", "src/checkout/a.py", {}),
+        ("a2", "2026-09-20T00:00:00Z", "Alice", "alice@home", "src/checkout/b.py", {}),
+        ("a3", "2026-09-10T00:00:00Z", "Alice", "alice@x", "src/checkout/a.py", {}),
+        ("b1", "2026-03-01T00:00:00Z", "Bob", "bob@x", "src/checkout/a.py", {}),
+        ("b2", "2026-02-01T00:00:00Z", "Bob", "bob@x", "src/checkout/a.py", {}),
+        ("c1", "2026-09-01T00:00:00Z", "Carol", "carol@x", "src/checkout/c.py", {}),
+        (
+            "d1",
+            "2026-10-05T00:00:00Z",
+            "Dave Web",
+            "noreply@github.com",
+            "src/checkout/d.py",
+            {},
+        ),
+        (
+            "m1",
+            "2026-10-02T00:00:00Z",
+            "Alice",
+            "alice@x",
+            "src/checkout/a.py",
+            {"parent_shas": "p1 p2"},
+        ),
+        (
+            "bot1",
+            "2026-10-03T00:00:00Z",
+            "github-actions[bot]",
+            "41898282+github-actions[bot]@users.noreply.github.com",
+            "src/checkout/a.py",
+            {},
+        ),
+        (
+            "bot2",
+            "2026-10-04T00:00:00Z",
+            "Renovate",
+            "renovate@x",
+            "src/checkout/a.py",
+            {},
+        ),
+        (
+            "r1",
+            "2026-02-15T00:00:00Z",
+            "Bob",
+            "bob@x",
+            "src/checkout/a.py",
+            {"refactor_score": 60},
+        ),
+        ("old", "2024-01-01T00:00:00Z", "Bob", "bob@x", "src/checkout/a.py", {}),
+        (
+            "off",
+            "2026-10-06T00:00:00Z",
+            "Carol",
+            "carol@x",
+            "src/checkout/a.py",
+            {"on_default_branch": 0},
+        ),
+        ("out", "2026-10-07T00:00:00Z", "Carol", "carol@x", "src/checkoutx/a.py", {}),
+    ]
+    with get_session() as session:
+        session.add(
+            author(
+                "alice",
+                "Alice",
+                ["alice@home", "alice@x", "noreply@github.com"],
+                "2026-10-02T00:00:00Z",
+            )
+        )
+        session.add(author("bob", "Bob", ["bob@x"], "2026-03-01T00:00:00Z"))
+        session.add(author("carol", "Carol", ["carol@x"], "2026-10-07T00:00:00Z"))
+        session.add(
+            author(
+                "dave", "Dave", ["dave@x", "noreply@github.com"], "2026-01-01T00:00:00Z"
+            )
+        )
+        session.add(
+            author("renovate[bot]", "Renovate", ["renovate@x"], "2026-10-04T00:00:00Z")
+        )
+        for sha, when, name, email, path, extra in commits:
+            session.add(_row_commit(sha, when, name=name, email=email, **extra))
+            session.add(CommitFileChange(commit_sha=sha, path=path, change_type="M"))
+        session.commit()
+    return chat_repo
+
+
+def _owners(**kwargs) -> dict:
+    return _result(
+        ToolRegistry(max_rationale_generations=0), "get_area_owners", **kwargs
+    )
+
+
+def test_area_owners_counts_shares_and_excludes_noise(owned: Path) -> None:
+    result = _owners(area="checkout")
+
+    assert result["scope"] == {
+        "area": "checkout",
+        "paths": ["src/checkout/"],
+        "since_days": 365,
+    }
+    assert result["excluded"] == {"merges": 1, "bots": 2, "refactors": 1}
+    assert result["total_commits"] == 7
+    owners = {o["name"]: o for o in result["owners"]}
+    assert [o["name"] for o in result["owners"]] == [
+        "Alice",
+        "Bob",
+        "Carol",
+        "Dave Web",
+    ]
+    assert owners["Alice"] == {
+        "name": "Alice",
+        "login": "alice",
+        "commits": 3,
+        "share": 0.43,
+        "files_touched": 2,
+        "last_touched_at": "2026-10-01T00:00:00Z",
+        "last_active_at": "2026-10-02T00:00:00Z",
+    }
+    # The shared address sits in two clusters: no login, the commit's name.
+    assert owners["Dave Web"]["login"] is None
+    assert owners["Dave Web"]["last_active_at"] == "2026-10-05T00:00:00Z"
+    # 3 + 2 of 7 reach half; among the active (Bob is not), Alice alone does.
+    assert result["contributor_absence_factor"] == 2
+    assert result["active_contributor_absence_factor"] == 1
+    assert "ownership, not performance" in result["note"]
+    assert "omitted" not in result
+
+
+def test_area_owners_by_path(owned: Path) -> None:
+    result = _owners(path="./src/checkout/a.py")
+    assert result["scope"] == {"path": "src/checkout/a.py", "since_days": 365}
+    assert {o["name"]: o["commits"] for o in result["owners"]} == {"Alice": 2, "Bob": 2}
+
+
+def test_area_owners_needs_exactly_one_of_area_or_path(owned: Path) -> None:
+    assert "exactly one" in _owners()["error"]
+    assert "exactly one" in _owners(area="checkout", path="src")["error"]
+    assert "checkout" in _owners(area="nope")["error"]
+
+
+def test_area_owners_clamps(owned: Path) -> None:
+    result = _owners(area="checkout", limit=1, since_days=0)
+    assert result["scope"]["since_days"] == 1
+    assert result["owners"] == []
+    assert result["total_commits"] == 0
+    assert result["contributor_absence_factor"] == 0
+    assert result["active_contributor_absence_factor"] == 0
+
+    wide = _owners(area="checkout", limit=1, since_days=99_999)
+    assert wide["scope"]["since_days"] == 3650
+    assert len(wide["owners"]) == 1
+    assert wide["omitted"] == 3
+    # The window now reaches the 2024 commit; the factor covers every owner.
+    assert wide["total_commits"] == 8
+    assert wide["contributor_absence_factor"] == 2

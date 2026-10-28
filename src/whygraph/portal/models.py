@@ -113,7 +113,11 @@ KEY_SCOPES: tuple[str, ...] = ("project", "org", "environment", "none")
 COST_SOURCES: tuple[str, ...] = ("provider", "estimated", "unpriced")
 """Where a call's cost came from (``usage_events.cost_source``)."""
 AGENT_CALL_SOURCES: tuple[str, ...] = ("mcp", "agent")
-"""Who made an agent call (``agent_call_days.source``)."""
+"""Who made an agent call: the MCP and ``/api/v1`` sources the Overview's
+agent activity, ``last_call_day`` and the onboarding check read."""
+COUNTED_CALL_SOURCES: tuple[str, ...] = (*AGENT_CALL_SOURCES, "chat")
+"""Every source ``agent_call_days.source`` accepts: the agent sources plus
+``chat`` (the Chat assistant's own tool calls, counted without a member)."""
 BUDGET_SCOPES: tuple[str, ...] = ("org", "project", "member_default", "member")
 """What a monthly budget caps (``budgets.scope``)."""
 BUDGET_THRESHOLDS: tuple[int, ...] = (50, 75, 100)
@@ -1275,7 +1279,7 @@ class AgentCallDay(PortalBase, table=True):
     day : str
         UTC date, ``YYYY-MM-DD``.
     source : str
-        One of :data:`AGENT_CALL_SOURCES`.
+        One of :data:`COUNTED_CALL_SOURCES`.
     user_id : int or None
         The calling member; no foreign key, the counters outlive the user.
     connection_id : int or None
@@ -1293,7 +1297,7 @@ class AgentCallDay(PortalBase, table=True):
             "day ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'", name="ck_agent_call_days_day"
         ),
         CheckConstraint(
-            _in("source", AGENT_CALL_SOURCES), name="ck_agent_call_days_source"
+            _in("source", COUNTED_CALL_SOURCES), name="ck_agent_call_days_source"
         ),
         CheckConstraint(
             "length(kind) BETWEEN 1 AND 64", name="ck_agent_call_days_kind"

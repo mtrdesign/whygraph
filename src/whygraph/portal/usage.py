@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 from whygraph.core.config import Config
 from whygraph.core.usage import UsageRecord, UsageScope
 
-from .models import AGENT_CALL_SOURCES
+from .models import COUNTED_CALL_SOURCES
 from .prices import PriceOverrides, cost, has_custom_endpoint, price_for
 from .usage_store import PriceBook, SpendBook, UsageRow, UsageWriter
 
@@ -342,10 +342,10 @@ class PortalUsageSink:
     def count_call(self, kind: str) -> None:
         """Count one agent call of ``kind`` (M2f-3 plan section 4.10).
 
-        Only for the agent sources (``mcp``, ``agent``): an Explorer or chat
-        binding counts nothing. The call is attributed as the sink's
+        Only for the counted sources (``mcp``, ``agent``, ``chat``): an
+        Explorer binding counts nothing. The call is attributed as the sink's
         LLM calls are - org, project, member and connection - on today's
-        UTC row.
+        UTC row; a ``chat`` call carries neither member nor connection.
 
         Parameters
         ----------
@@ -356,15 +356,16 @@ class PortalUsageSink:
         if (
             self._calls is None
             or a.project_id is None
-            or self.scope.source not in AGENT_CALL_SOURCES
+            or self.scope.source not in COUNTED_CALL_SOURCES
         ):
             return
+        chat = self.scope.source == "chat"
         self._calls.add(
             org_id=a.org_id,
             project_id=a.project_id,
             source=self.scope.source,
-            user_id=a.user_id,
-            connection_id=a.connection_id,
+            user_id=None if chat else a.user_id,
+            connection_id=None if chat else a.connection_id,
             kind=kind,
         )
 

@@ -350,9 +350,16 @@ def _agent_rows(
 
 def _last_call_day(db: Session, state: PortalState, project_id: int) -> str | None:
     flushed = db.exec(
-        select(func.max(AgentCallDay.day)).where(AgentCallDay.project_id == project_id)
+        select(func.max(AgentCallDay.day)).where(
+            AgentCallDay.project_id == project_id,
+            col(AgentCallDay.source).in_(AGENT_CALL_SOURCES),
+        )
     ).one()
-    pending = [key.day for key, _ in state.agent_calls.pending(project_id)]
+    pending = [
+        key.day
+        for key, _ in state.agent_calls.pending(project_id)
+        if key.source in AGENT_CALL_SOURCES
+    ]
     days = [day for day in (flushed, *pending) if day]
     return max(days) if days else None
 
@@ -431,12 +438,17 @@ def _agents(
         (today - timedelta(days=n)).isoformat() for n in range(AGENT_DAYS - 1, -1, -1)
     ]
     first_day = days[0]
-    rows = _agent_rows(db, state, project.id, first_day)
+    all_rows = _agent_rows(db, state, project.id, first_day)
+    rows = [row for row in all_rows if row[1] in AGENT_CALL_SOURCES]
+    chat_kinds: Counter[str] = Counter()
+    for _, source, _, _, kind, calls in all_rows:
+        if source == "chat":
+            chat_kinds[kind] += calls
     per_day = {day: {"day": day, "mcp": 0, "agent": 0} for day in days}
     kinds: Counter[str] = Counter()
     total = 0
     for day, source, _, _, kind, calls in rows:
-        if day in per_day and source in AGENT_CALL_SOURCES:
+        if day in per_day:
             per_day[day][source] += calls
         kinds[kind] += calls
         total += calls
@@ -467,6 +479,15 @@ def _agents(
         if production and project_allowed(role, Action.PROJECT_CONFIGURE)
         else None,
         "last_call_day": _last_call_day(db, state, project.id),
+        "chat_tools": {
+            "total_calls": sum(chat_kinds.values()),
+            "by_kind": [
+                {"kind": kind, "calls": calls}
+                for kind, calls in sorted(
+                    chat_kinds.items(), key=lambda kv: (-kv[1], kv[0])
+                )[:TOP_KINDS]
+            ],
+        },
     }
 
 

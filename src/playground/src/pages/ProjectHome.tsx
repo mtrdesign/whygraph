@@ -294,7 +294,7 @@ function AgentActivity({
   // Closed, the disclosure mounts nothing (so nothing inside fetches or mints).
   const [setupOpen, setSetupOpen] = useState(false);
   const cg = codegraph && codegraph.server.available ? <CodegraphLines codegraph={codegraph} /> : null;
-  if (agents.total_calls === 0) {
+  if (agents.total_calls === 0 && agents.chat_tools.total_calls === 0) {
     return (
       setup ?? (
         <section className={CARD} data-testid="agent-activity" aria-labelledby="agents-title">
@@ -318,7 +318,9 @@ function AgentActivity({
           Agent activity
         </h2>
         <p className="text-xs text-muted-foreground" data-testid="agent-summary">
-          {plural(agents.total_calls, "agent call")} in 30 days{llm}.
+          {agents.total_calls === 0
+            ? "No agent called this project in the last 30 days."
+            : `${plural(agents.total_calls, "agent call")} in 30 days${llm}.`}
           {agents.last_call_day && ` Last call ${formatDate(`${agents.last_call_day}T12:00:00Z`)}.`}
         </p>
       </div>
@@ -333,6 +335,19 @@ function AgentActivity({
             {agents.by_kind.map((k) => (
               <li key={k.kind} className="flex items-center justify-between gap-3">
                 <span>{agentKindLabel(k.kind)}</span>
+                <span className="tabular-nums text-muted-foreground">{formatNumber(k.calls)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {agents.chat_tools.by_kind.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <h3 className="text-xs font-medium text-muted-foreground">Chat tool calls</h3>
+          <ul className="flex flex-col gap-1 text-xs" data-testid="chat-tool-kinds">
+            {agents.chat_tools.by_kind.map((k) => (
+              <li key={k.kind} className="flex items-center justify-between gap-3">
+                <span>{k.kind}</span>
                 <span className="tabular-nums text-muted-foreground">{formatNumber(k.calls)}</span>
               </li>
             ))}

@@ -61,6 +61,7 @@ _AGENT_KEYS = {
     "people",
     "connections",
     "last_call_day",
+    "chat_tools",
 }
 
 
@@ -359,6 +360,41 @@ def test_usage_and_agent_activity(local: SimpleNamespace) -> None:
     assert usage["month"] == TODAY.strftime("%Y-%m")
     # This month's ledger, every source (the 40-day-old row is last month's).
     assert usage["by_task"] == [{"task": "analyze", "calls": 2, "cost_usd": 1.25}]
+
+
+def test_chat_tool_rows_appear_only_in_chat_tools(local: SimpleNamespace) -> None:
+    w = local
+    day = (TODAY - timedelta(days=2)).isoformat()
+    _calls(w, day, "find_changes", 4, source="chat")
+    _calls(w, day, "get_commit", 2, source="chat")
+    _calls(w, day, "whygraph_commit", 1)
+    w.state.agent_calls.add(
+        org_id=w.org_id,
+        project_id=w.project_id,
+        source="chat",
+        user_id=None,
+        connection_id=None,
+        kind="find_changes",
+    )
+    agents = _overview(w.client)["agents"]
+    assert agents["chat_tools"] == {
+        "total_calls": 7,
+        "by_kind": [
+            {"kind": "find_changes", "calls": 5},
+            {"kind": "get_commit", "calls": 2},
+        ],
+    }
+    assert agents["total_calls"] == 1
+    assert agents["by_kind"] == [{"kind": "whygraph_commit", "calls": 1}]
+    assert agents["last_call_day"] == day
+    assert sum(d["mcp"] + d["agent"] for d in agents["days"]) == 1
+    assert agents["people"] is None
+
+
+def test_last_call_day_ignores_chat_rows(local: SimpleNamespace) -> None:
+    w = local
+    _calls(w, TODAY.isoformat(), "find_changes", 1, source="chat")
+    assert _overview(w.client)["agents"]["last_call_day"] is None
 
 
 # ---------------------------------------------------------------------------

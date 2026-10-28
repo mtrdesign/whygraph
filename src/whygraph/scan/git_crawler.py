@@ -21,6 +21,12 @@ is not, the ref it was first seen on (``first_seen_ref``). A reconcile
 pass at the end of each crawl recomputes the flag for *existing* rows too,
 so the database self-heals as branches merge or get rewritten — see the
 plan's §4.2 / §4.3.
+
+Tags come from the same local repository: each crawl mirrors the newest
+tags (:meth:`Repository.tags`) into the ``tag`` table and deletes the
+rows for tags that are gone, so a tag deleted upstream (and pruned by the
+portal's fetch) never shows as a release. A failed listing leaves the
+table as it was and becomes a warning, never a failed crawl.
 """
 
 from __future__ import annotations
@@ -29,13 +35,15 @@ import logging
 from datetime import datetime, timezone
 
 from rich.progress import Progress
-from sqlmodel import col, select, update
+from sqlmodel import col, delete, select, update
 
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.db.models.commit_file_change import CommitFileChange
-from whygraph.services.git import FileChange, Repository
+from whygraph.db.models.tag import Tag as TagRow
+from whygraph.services.git import FileChange, GitError, Repository
 from whygraph.services.git.commit import Commit as CommitDC
+from whygraph.services.git.tag import GitTag
 
 from .crawler import Crawler
 from .refactor_score import compute_refactor_score
@@ -134,6 +142,14 @@ class GitCrawler(Crawler):
                 session, default_shas, skip=self._repository.is_shallow
             )
 
+            try:
+                tags: tuple[GitTag, ...] | None = self._repository.tags()
+            except GitError as exc:
+                tags = None
+                _log.warning("tags not refreshed: %s", exc)
+            if tags is not None:
+                _replace_tags(session, tags)
+
         parts = [f"{inserted} new"]
         if promoted:
             parts.append(f"{promoted} promoted")
@@ -150,6 +166,8 @@ class GitCrawler(Crawler):
             )
         noun = "commit" if len(commits) == 1 else "commits"
         self.summary = f"{len(commits)} {noun} ({', '.join(parts)})"
+        if tags:
+            self.summary += f" · {len(tags)} {'tag' if len(tags) == 1 else 'tags'}"
 
 
 def _reconcile_branch_membership(
@@ -213,6 +231,20 @@ def _reconcile_branch_membership(
             " ".join(sorted(demoted_shas)),
         )
     return (len(promote), len(demoted_shas))
+
+
+def _replace_tags(session, tags: tuple[GitTag, ...]) -> None:
+    """Store the tag listing and delete the rows for tags it no longer has.
+
+    Names are bound parameters, never SQL text; the listing is capped at
+    a few hundred, well under SQLite's bound-parameter limit.
+    """
+    names = [t.name for t in tags]
+    session.exec(delete(TagRow).where(col(TagRow.name).not_in(names)))
+    for t in tags:
+        session.merge(
+            TagRow(name=t.name, sha=t.sha, tagged_at=t.tagged_at, subject=t.subject)
+        )
 
 
 def _set_flag(session, shas: list[str], value: int) -> None:

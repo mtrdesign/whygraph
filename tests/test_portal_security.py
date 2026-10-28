@@ -306,7 +306,12 @@ def test_config_accepts_ordinary_remote_and_branch(tmp_path: Path) -> None:
 
 def test_git_commands_end_options_before_the_remote() -> None:
     assert GitFetchRefsCmd("a:b", remote="up").argv()[-3:] == ["--", "up", "a:b"]
-    assert GitFetchDefaultCmd("up").argv()[-2:] == ["--", "up"]
+    assert GitFetchDefaultCmd("up").argv()[-4:] == [
+        "--",
+        "up",
+        "+refs/heads/*:refs/remotes/up/*",
+        "+refs/tags/*:refs/whygraph/tags/*",
+    ]
     assert GitRemoteUrlCmd("up").argv()[-2:] == ["--", "up"]
 
 

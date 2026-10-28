@@ -19,6 +19,13 @@ from .blame import BlameHunk
 from .commit import Commit
 from .credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV, github_git_config
 from .file_change import FileChange
+from .tag import GitTag
+
+TAGS_SOURCE_PREFIX = "refs/tags/"
+"""Where a repository keeps its tags (a local folder's, and the remote's)."""
+
+PRIVATE_TAGS_PREFIX = "refs/whygraph/tags/"
+"""Where :class:`GitFetchDefaultCmd` puts the remote's tags on a portal clone."""
 
 GitRevParseCmd = ShellCommand(
     argv=["git", "rev-parse", "--show-toplevel"],
@@ -408,6 +415,43 @@ class GitRemoteRefsContainingCmd(ShellCommand[tuple[str, ...]]):
         return tuple(line for line in result.stdout.splitlines() if line)
 
 
+class GitTagsCmd:
+    """``git for-each-ref --sort=-creatordate --count=<n> --format=... <prefix>``.
+
+    Lists the newest ``count`` tags under ``prefix`` by creator date (the
+    tagger date of an annotated tag, the commit date of a lightweight
+    one). Run for its **bytes** (tag names and messages need not be
+    UTF-8), so it pairs its argv with :meth:`parse_bytes` instead of a
+    :class:`ShellCommand` parser. The argv holds only constants: no tag
+    name ever reaches it.
+
+    Parameters
+    ----------
+    prefix : str
+        :data:`TAGS_SOURCE_PREFIX` or :data:`PRIVATE_TAGS_PREFIX`.
+    count : int
+        The most tags to list.
+    """
+
+    def __init__(self, prefix: str, count: int) -> None:
+        self.prefix = prefix
+        self.count = count
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "for-each-ref",
+            "--sort=-creatordate",
+            f"--count={self.count}",
+            f"--format={GitTag.FOR_EACH_REF_FORMAT}",
+            self.prefix,
+        ]
+
+    def parse_bytes(self, stdout: bytes) -> tuple[GitTag, ...]:
+        """Parse the raw listing; see :meth:`GitTag.from_for_each_ref`."""
+        return GitTag.from_for_each_ref(stdout, self.prefix)
+
+
 class GitDiffTreeFileChangesCmd(ShellCommand[tuple[FileChange, ...]]):
     """``git diff-tree -r -M -C --no-commit-id --root --raw --numstat <sha>``.
 
@@ -540,23 +584,42 @@ class GitCloneCmd(ShellCommand[None]):
 
 
 class GitFetchDefaultCmd(ShellCommand[None]):
-    """``git fetch --no-tags -- <remote>`` with https-only transport and the host-scoped helper.
+    """``git fetch --prune --no-tags -- <remote> <branches> <tags>``, https-only, host-scoped helper.
 
-    Fetches the remote's configured refspec, so every remote-tracking
-    branch (the default branch included) moves. Same credential and
-    protocol arguments as :class:`GitCloneCmd`.
+    Every remote-tracking branch (the default branch included) moves, and
+    the remote's tags land in the private ``refs/whygraph/tags/``
+    namespace rather than ``refs/tags/``, so a tag named like a branch
+    never sits where git's short-name lookup would find it. Both
+    refspecs are explicit because a refspec on the command line replaces
+    the configured one. Both are forced (``+``): a tag moved upstream
+    updates. ``--prune`` deletes only refs under the two destinations
+    that the remote no longer has (a deleted tag or branch); the PR pins
+    at ``refs/whygraph/pull/<N>`` (:class:`GitFetchRefsCmd`) and the
+    ``refs/remotes/<remote>/HEAD`` symbolic ref are left alone. Same
+    credential and protocol arguments as :class:`GitCloneCmd`.
 
     Parameters
     ----------
     remote : str, optional
-        Remote to fetch. Default ``"origin"``.
+        Remote to fetch. Default ``"origin"``. A validated remote name
+        (``core.config.REMOTE_NAME_RE``), so it holds no ``*`` or ``:``.
     """
 
     def __init__(self, remote: str = "origin") -> None:
         self.remote = remote
 
     def argv(self) -> list[str]:
-        return ["git", *github_git_config(), "fetch", "--no-tags", "--", self.remote]
+        return [
+            "git",
+            *github_git_config(),
+            "fetch",
+            "--prune",
+            "--no-tags",
+            "--",
+            self.remote,
+            f"+refs/heads/*:refs/remotes/{self.remote}/*",
+            f"+{TAGS_SOURCE_PREFIX}*:{PRIVATE_TAGS_PREFIX}*",
+        ]
 
     def parse(self, result: CompletedProcess[str]) -> None:
         return None

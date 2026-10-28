@@ -14,6 +14,8 @@ from whygraph.core.safe_paths import UnsafePathError, check_inside
 
 from .blame import BlameHunk
 from .commands import (
+    PRIVATE_TAGS_PREFIX,
+    TAGS_SOURCE_PREFIX,
     GitBlameCmd,
     GitCheckMailmapCmd,
     GitCheckoutPathsCmd,
@@ -42,6 +44,7 @@ from .commands import (
     GitSetConfigCmd,
     GitSetRemoteUrlCmd,
     GitSymbolicRefCmd,
+    GitTagsCmd,
 )
 from .commit import Commit
 from .commits import Commits
@@ -54,6 +57,7 @@ from .credentials import (
 )
 from .exceptions import GitError
 from .file_change import FileChange
+from .tag import GitTag
 
 # The ``ignore_revs_file`` default of :meth:`Repository.blame`: detect the
 # work tree's ``.git-blame-ignore-revs`` (see
@@ -90,6 +94,9 @@ _DEFAULT_BRANCH_CANDIDATES = ("main", "master")
 # Wall-clock cap for a clone or fetch. ``Shell.timeout`` defaults to 30 s,
 # which kills a real clone of anything non-trivial.
 _NETWORK_TIMEOUT = 900
+
+# Tags :meth:`Repository.tags` lists by default: the newest few hundred.
+_TAG_LIMIT = 500
 
 
 class Repository:
@@ -581,6 +588,51 @@ class Repository:
             )
         except ShellError:
             return ()
+
+    def tags(self, limit: int = _TAG_LIMIT) -> tuple[GitTag, ...]:
+        """The newest ``limit`` tags, by creator date, newest first (purely local).
+
+        Reads ``refs/whygraph/tags/`` when it holds any tag (a portal
+        clone, where :meth:`fetch_default` mirrors the remote's tags
+        there), else ``refs/tags/`` (a local folder, which never fetches
+        into the private namespace). Tag names are data: none reaches
+        ``git`` argv.
+
+        Parameters
+        ----------
+        limit : int, optional
+            The most tags to return. Default ``500``.
+
+        Returns
+        -------
+        tuple[GitTag, ...]
+            The tags that point at a commit, newest first; empty when the
+            repository has none.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails or times out.
+        """
+        for prefix in (PRIVATE_TAGS_PREFIX, TAGS_SOURCE_PREFIX):
+            cmd = GitTagsCmd(prefix, limit)
+            try:
+                result = subprocess.run(
+                    cmd.argv(),
+                    cwd=self.root,
+                    capture_output=True,
+                    timeout=self._shell.timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise GitError("failed to list the tags") from exc
+            if result.returncode != 0:
+                lines = os.fsdecode(result.stderr).strip().splitlines()
+                detail = lines[-1] if lines else f"exit {result.returncode}"
+                raise GitError(f"failed to list the tags: {detail}")
+            if result.stdout:
+                return cmd.parse_bytes(result.stdout)
+        return ()
 
     def commit_file_changes(self, commit: Commit) -> tuple[FileChange, ...]:
         """Per-file structural changes recorded by ``commit``.

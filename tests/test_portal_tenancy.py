@@ -1151,6 +1151,7 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("GET", "/api/projects/{slug}/chat/providers"): Call(
         200, shows=lambda o: [f"{o.mark}-model"]
     ),
+    ("GET", "/api/projects/{slug}/chat/modes"): Call(200),
     # Each org's seed has one nested canary path; the sweep fails if the
     # other org's mark shows in the answer.
     ("GET", "/api/projects/{slug}/areas/suggest"): Call(

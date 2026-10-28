@@ -30,6 +30,7 @@ from sqlmodel import select
 
 from test_portal_app import env  # noqa: F401 -- `env` is a fixture
 from test_portal_serve_api import ScopedClient, portal_with_project, use_project_config
+from whygraph.chat.modes import MODE_IDS
 from whygraph.chat.harness import (
     BudgetStop,
     ContextTrimmed,
@@ -408,6 +409,7 @@ def test_local_mode_writes_the_owner_but_filters_nothing(chat_client) -> None:
         "provider",
         "model",
         "effort",
+        "mode",
         "streaming",
         "created_at",
         "updated_at",
@@ -2118,6 +2120,66 @@ def test_effort_resolution_and_session_fields(chat_client, monkeypatch) -> None:
     response = chat_client.post("/api/chat/sessions", json={"effort": "turbo"})
     assert response.status_code == 400 and response.json()["code"] == "bad_effort"
     assert _new_session(chat_client, effort="xhigh")["effort"] == "xhigh"
+
+
+def test_mode_resolution_and_session_fields(chat_client, monkeypatch) -> None:
+    use_project_config(
+        chat_client,
+        monkeypatch,
+        Config(llm=_llm(*CHAT_PROVIDER_TAGS), chat=ChatConfig(mode="lead")),
+    )
+    listing = chat_client.get("/api/chat/modes").json()
+    assert listing["default"] == "lead"
+    assert [m["id"] for m in listing["modes"]] == list(MODE_IDS)
+    assert set(listing["modes"][0]) == {"id", "label", "description", "starters"}
+    assert all("<area>" not in s for m in listing["modes"] for s in m["starters"])
+
+    seen: list = []
+
+    def _record(*, client, history, registry=None, mode=None, **kwargs):
+        seen.append(mode)
+        yield from _reply("a")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _record)
+
+    session = _new_session(chat_client)
+    sid = session["id"]
+    assert session["mode"] == "lead"  # stored explicitly
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    assert seen[-1] == "lead"
+    assert _transcript(chat_client, sid)["messages"][-1]["mode"] == "lead"
+
+    # A mode-only PATCH leaves updated_at; a mode + title PATCH bumps it.
+    before = chat_client.get(_url(sid)).json()["updated_at"]
+    patched = chat_client.patch(_url(sid), json={"mode": "onboarding"})
+    assert patched.json()["mode"] == "onboarding"
+    assert patched.json()["updated_at"] == before
+    # The last-used mode follows the most recently active session.
+    assert chat_client.get("/api/chat/modes").json()["default"] in MODE_IDS
+    chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    assert seen[-1] == "onboarding"
+    assert chat_client.get("/api/chat/modes").json()["default"] == "onboarding"
+    assert _new_session(chat_client)["mode"] == "onboarding"
+
+    # An explicit null resets to the project's mode.
+    assert chat_client.patch(_url(sid), json={"mode": None}).json()["mode"] == "lead"
+
+    # Stored junk runs as the project's mode.
+    with use_project(chat_client.context()), project_session() as db:
+        row = db.get(ChatSessionRow, sid)
+        row.mode = "retired"
+        db.add(row)
+        db.commit()
+    chat_client.post(_url(sid, "/messages"), json={"content": "q3"})
+    assert seen[-1] == "lead"
+
+    for bad in ("turbo", ""):
+        response = chat_client.patch(_url(sid), json={"mode": bad})
+        assert response.status_code == 400 and response.json()["code"] == "bad_mode"
+    response = chat_client.post("/api/chat/sessions", json={"mode": "turbo"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_mode"
+    assert _new_session(chat_client, mode="engineer")["mode"] == "engineer"
 
 
 def test_a_continued_reply_is_one_message_next_turn(chat_client, monkeypatch) -> None:

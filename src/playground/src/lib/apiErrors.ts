@@ -349,6 +349,7 @@ export const MESSAGES: Record<string, Resolver> = {
   bad_model: (_err, ctx) => (ctx === "usage" ? "Enter the model id as the provider names it." : "Pick a model."),
   bad_content: "Write a message first.",
   bad_effort: "Pick one of the listed effort levels.",
+  bad_mode: "Pick one of the listed chat modes.",
   effort_unsupported: {
     message: "This model doesn't take an effort level. Set Effort to Default, or pick another model.",
   },

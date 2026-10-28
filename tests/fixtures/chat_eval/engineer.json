@@ -1,0 +1,112 @@
+{
+  "suite": "engineer",
+  "cases": [
+    {
+      "id": "E1",
+      "question": "Who calls `run_turn`, and what happens if it raises mid-turn?",
+      "expect": {
+        "tools_any": [
+          "search_symbols",
+          "get_symbol"
+        ]
+      }
+    },
+    {
+      "id": "E2",
+      "question": "Why is `ToolRegistry` built once per user turn instead of once per session?",
+      "expect": {
+        "tools_any": [
+          "get_rationale",
+          "get_evidence"
+        ]
+      }
+    },
+    {
+      "id": "E3",
+      "question": "What changed in `serve/chat.py` in the last month, and why?",
+      "expect": {
+        "tools_any": [
+          "get_area_history",
+          "find_changes"
+        ]
+      }
+    },
+    {
+      "id": "E4",
+      "question": "How would I add a fifth chat provider?",
+      "expect": {
+        "tools_any": [
+          "get_area_outline",
+          "search_symbols",
+          "get_rationale"
+        ]
+      }
+    },
+    {
+      "id": "E5",
+      "question": "Is it safe to change `check_inside` to follow symlinks that stay inside the root?",
+      "expect": {
+        "tools_any": [
+          "get_rationale",
+          "get_evidence",
+          "search_symbols"
+        ]
+      }
+    },
+    {
+      "id": "E6",
+      "question": "Which files change together with `portal/runner.py` most often?",
+      "expect": {
+        "tools_any": [
+          "run_project_stats"
+        ]
+      }
+    },
+    {
+      "id": "E7",
+      "question": "Where is the chat context window trimmed, and by what budget?",
+      "expect": {
+        "tools_any": [
+          "search_symbols",
+          "get_symbol"
+        ]
+      }
+    },
+    {
+      "id": "E8",
+      "question": "Why does `default_branch_refs` union the local branch with the remote one?",
+      "expect": {
+        "tools_any": [
+          "get_rationale",
+          "get_evidence"
+        ]
+      }
+    },
+    {
+      "id": "E9",
+      "question": "What does `count_agent_call` record, and what does it never record?",
+      "expect": {
+        "tools_any": [
+          "get_symbol",
+          "search_symbols"
+        ]
+      }
+    },
+    {
+      "id": "E10",
+      "question": "Show me commit volume per month this year as a chart.",
+      "expect": {
+        "tools_any": [
+          "run_project_stats",
+          "render_chart"
+        ],
+        "args": {
+          "render_chart": {
+            "x": "."
+          }
+        },
+        "max_rounds": 6
+      }
+    }
+  ]
+}

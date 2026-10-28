@@ -77,6 +77,11 @@ Mapped per provider: Anthropic ``output_config.effort``, OpenAI and
 DeepSeek ``reasoning_effort``, OpenRouter ``reasoning.effort``. Mirrors
 :data:`whygraph.services.llm.chat.EFFORT_LEVELS` (pinned by a test)."""
 
+MODE_IDS: tuple[str, ...] = ("engineer", "lead", "onboarding")
+"""The chat modes a project can default to (``[chat].mode``).
+
+Pinned against the mode registry in ``whygraph.chat.modes`` by a test."""
+
 TASKS: tuple[str, ...] = ("analyze", "rationale", "chat")
 """The tasks :meth:`Config.model_for` resolves a ``(provider, model)`` for."""
 
@@ -703,6 +708,10 @@ class ChatConfig:
         Default effort level for chats that have none of their own. One
         of :data:`EFFORT_LEVELS`, or ``None`` (default) to send no effort
         parameter.
+    mode : str or None
+        The mode new chats start in, one of :data:`MODE_IDS`, or ``None``
+        (default) for the built-in default. Project layer only; an unknown
+        stored value loads as ``None`` with a warning.
     """
 
     provider: str | None = None
@@ -714,6 +723,7 @@ class ChatConfig:
     max_tokens: int | None = None
     max_continuations: int = 1
     effort: str | None = None
+    mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -978,7 +988,12 @@ def _build_chat_config(raw: dict) -> ChatConfig:
     known = {f.name for f in fields(ChatConfig)}
     for unknown in set(raw) - known:
         _log.warning("ignoring unknown key in [chat]: %r", unknown)
-    return ChatConfig(**{k: v for k, v in raw.items() if k in known})
+    kept = {k: v for k, v in raw.items() if k in known}
+    mode = kept.get("mode")
+    if mode is not None and mode not in MODE_IDS:
+        _log.warning("ignoring unknown [chat].mode %r; using the default", mode)
+        del kept["mode"]
+    return ChatConfig(**kept)
 
 
 def _resolve_path(value: object, base: Path) -> object:

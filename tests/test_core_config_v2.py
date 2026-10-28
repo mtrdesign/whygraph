@@ -23,6 +23,7 @@ from whygraph.core import config as config_mod
 from whygraph.core.config import (
     CHAT_PROVIDERS,
     EFFORT_LEVELS,
+    MODE_IDS,
     KNOWN_PROVIDERS,
     AnalyzeConfig,
     Config,
@@ -379,6 +380,18 @@ def test_core_effort_levels_mirror_services() -> None:
     from whygraph.services.llm.chat import EFFORT_LEVELS as SERVICE_EFFORT
 
     assert EFFORT_LEVELS == SERVICE_EFFORT == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_mode_ids_pin_and_lenient_load(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    assert MODE_IDS == ("engineer", "lead", "onboarding")
+    assert Config.from_dict({"chat": {"mode": "lead"}}, tmp_path).chat.mode == "lead"
+    assert Config.from_dict({}, tmp_path).chat.mode is None
+    with caplog.at_level("WARNING"):
+        cfg = Config.from_dict({"chat": {"mode": "gone"}}, tmp_path)
+    assert cfg.chat.mode is None
+    assert "gone" in caplog.text
 
 
 # ---- rationale-cache identity ---------------------------------------------

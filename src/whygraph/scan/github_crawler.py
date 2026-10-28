@@ -4,6 +4,9 @@ Reads the pull requests and issues exposed by
 :class:`whygraph.services.github.GitHubClient` into the ``pullrequest``
 and ``issue`` tables, one row per number. PR ``closing_issue_numbers``
 are flattened into ``prissuelink`` rows under ``link_kind='closes'``.
+Milestones are few: every crawl re-lists all of them into the ``milestone``
+table and deletes the ones GitHub no longer has (kind ``"milestone"`` keeps
+a state row too, but its watermark is never used to filter).
 
 Each kind keeps a ``forge_crawl_state`` row (the repository and the
 newest ``updatedAt`` seen). With a matching row the crawl is
@@ -31,16 +34,18 @@ from datetime import datetime, timezone
 from typing import NamedTuple, TypeVar
 
 from rich.progress import Progress
-from sqlmodel import delete, select
+from sqlmodel import col, delete, select
 
 from whygraph.db import get_session
 from whygraph.db.models.forge_crawl_state import ForgeCrawlState
 from whygraph.db.models.issue import Issue as IssueRow
+from whygraph.db.models.milestone import Milestone as MilestoneRow
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pull_request import PullRequest as PullRequestRow
 from whygraph.services.github import GitHubClient
 from whygraph.services.github.commands import parse_github_ts
 from whygraph.services.github.issue import Issue as IssueDC
+from whygraph.services.github.milestones import Milestone as MilestoneDC
 from whygraph.services.github.pull_request import PullRequest as PullRequestDC
 
 from .crawler import Crawler
@@ -149,6 +154,8 @@ class GitHubCrawler(Crawler):
         prs, pr_marks = self._drain_prs(pr_state, repo, stored_prs)
         issues = self._drain(self._iter_issues(issue_state, repo))
         issue_marks = [i.updated_at for i in issues]
+        milestones = self._drain(iter(self._client.milestones))
+        milestone_marks = [m.updated_at for m in milestones]
 
         # (c) rows in short chunked transactions, then the state last
         fetched_at = datetime.now(timezone.utc).isoformat()
@@ -174,16 +181,29 @@ class GitHubCrawler(Crawler):
                 )
             is_new, is_upd = is_new + n, is_upd + u
         with get_session() as session:
+            _replace_milestones(session, milestones, fetched_at=fetched_at)
+        with get_session() as session:
             _save_state(session, "pull_request", repo, pr_marks, pr_state, fetched_at)
             _save_state(session, "issue", repo, issue_marks, issue_state, fetched_at)
+            _save_state(
+                session,
+                "milestone",
+                repo,
+                milestone_marks,
+                states.get("milestone"),
+                fetched_at,
+            )
 
-        self.set_total(len(prs) + len(issues))
+        self.set_total(len(prs) + len(issues) + len(milestones))
         if full_pr and full_issue:
-            self.summary = f"{len(prs)} PRs · {len(issues)} issues"
+            self.summary = (
+                f"{len(prs)} PRs · {len(issues)} issues · {len(milestones)} milestones"
+            )
         else:
             self.summary = (
                 f"{pr_new} new · {pr_upd} updated PRs · "
-                f"{is_new} new · {is_upd} updated issues"
+                f"{is_new} new · {is_upd} updated issues · "
+                f"{len(milestones)} milestones"
             )
 
     def _drain(self, items: Iterator[_T]) -> list[_T]:
@@ -278,6 +298,29 @@ def _upsert_issues(
             session.merge(_issue_to_row(issue, fetched_at=fetched_at))
             updated += 1
     return new, updated
+
+
+def _replace_milestones(
+    session, milestones: list[MilestoneDC], *, fetched_at: str
+) -> None:
+    """Store the full milestone listing and delete the rows it no longer has."""
+    numbers = [m.number for m in milestones]
+    session.exec(delete(MilestoneRow).where(col(MilestoneRow.number).not_in(numbers)))
+    for m in milestones:
+        session.merge(
+            MilestoneRow(
+                number=m.number,
+                title=m.title,
+                description=m.description,
+                state=m.state,
+                due_on=m.due_on,
+                closed_at=m.closed_at,
+                updated_at=m.updated_at,
+                progress_pct=m.progress_pct,
+                html_url=m.html_url,
+                fetched_at=fetched_at,
+            )
+        )
 
 
 def _save_state(

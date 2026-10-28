@@ -155,6 +155,7 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("GET", f"/api/projects/{SLUG}/commit/abc", None),
     ("GET", f"/api/projects/{SLUG}/pr/1", None),
     ("GET", f"/api/projects/{SLUG}/issue/1", None),
+    ("GET", f"/api/projects/{SLUG}/areas/suggest", None),
     # The chat router: Chat opens on the platform too.
     ("GET", f"/api/projects/{SLUG}/chat/providers", None),
     ("GET", f"/api/projects/{SLUG}/chat/sessions", None),

@@ -193,3 +193,89 @@ def test_overview_lists_areas_only_in_chat(monkeypatch) -> None:
     _set_areas(monkeypatch, _area("ui", ("src/playground/",)))
     assert _result(reg, "get_repo_overview")["areas"]["items"][0]["name"] == "ui"
     assert "areas" not in _repo_overview_resource()
+
+
+# --- suggest_areas -----------------------------------------------------
+
+
+def _suggest_session(files_by_commit):
+    """An in-memory project DB with one commit per ``(sha, [paths])``, authored now."""
+    from datetime import datetime, timezone
+
+    from sqlmodel import Session, SQLModel, create_engine
+
+    from whygraph.db.models import Commit, CommitFileChange
+
+    engine = create_engine("sqlite://")
+    SQLModel.metadata.create_all(engine)
+    session = Session(engine)
+    now = datetime.now(timezone.utc).isoformat()
+    for sha, paths in files_by_commit:
+        session.add(
+            Commit(
+                sha=sha,
+                parent_shas="",
+                author_name="a",
+                author_email="a@example.com",
+                authored_at=now,
+                committed_at=now,
+                subject="s",
+                body="",
+                files_changed=len(paths),
+                insertions=1,
+                deletions=0,
+                scanned_at=now,
+            )
+        )
+        session.flush()
+        for path in paths:
+            session.add(CommitFileChange(commit_sha=sha, path=path, change_type="M"))
+    session.commit()
+    return session
+
+
+def _check_valid(suggestions):
+    from whygraph.core.config import area_errors, areas_table_errors
+
+    assert len(suggestions) <= 12
+    for entry in suggestions:
+        body = {k: v for k, v in entry.items() if k != "name"}
+        assert area_errors(entry["name"], body) == []
+    assert areas_table_errors({e["name"]: e for e in suggestions}) == []
+
+
+def test_suggest_descends_into_src_package():
+    from whygraph.chat.areas import suggest_areas
+
+    commits = [(f"c{i}", [f"src/pkg/{d}/x.py"]) for i, d in enumerate("aaabbbcccd")]
+    commits.append(("t", ["docs/readme.md", "src/pkg/a/y.py"]))
+    suggestions = suggest_areas(_suggest_session(commits))
+    _check_valid(suggestions)
+    paths = [e["paths"][0] for e in suggestions]
+    assert paths[0] == "src/pkg/a/"
+    assert "src/pkg/b/" in paths and "src/pkg/c/" in paths
+
+
+def test_suggest_packages_layout_and_denylist():
+    from whygraph.chat.areas import suggest_areas
+
+    commits = [
+        ("1", ["packages/web/a.ts"]),
+        ("2", ["packages/web/b.ts"]),
+        ("3", ["packages/api/a.ts"]),
+        ("4", ["packages/node_modules/x/a.js"]),
+        ("5", ["packages/api/dist/out.js"]),
+    ]
+    suggestions = suggest_areas(_suggest_session(commits))
+    _check_valid(suggestions)
+    assert [e["name"] for e in suggestions] == ["web", "api"]
+
+
+def test_suggest_caps_at_twelve_and_ignores_top_level_files():
+    from whygraph.chat.areas import suggest_areas
+
+    commits = [(f"c{i}", [f"d{i:02d}/f.py"]) for i in range(20)]
+    commits.append(("top", ["README.md"]))
+    suggestions = suggest_areas(_suggest_session(commits))
+    _check_valid(suggestions)
+    assert len(suggestions) == 12

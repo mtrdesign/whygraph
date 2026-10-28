@@ -80,7 +80,10 @@ def portal_port(portal_args: list[str]) -> int:
 
 
 def _say(msg: str) -> None:
-    print(f"[dev] {msg}", flush=True)
+    try:
+        print(f"[dev] {msg}", flush=True)
+    except OSError:  # the terminal is gone (SIGHUP); keep going so the stop runs
+        pass
 
 
 def _start(cmd: list[str], env: dict[str, str] | None = None) -> subprocess.Popen:
@@ -147,8 +150,12 @@ def main(argv: list[str] | None = None) -> int:
         nonlocal stopping
         stopping = True
 
+    # SIGHUP too: the children run in their own sessions, so closing the
+    # terminal reaches only this wrapper, and dying on it would orphan a
+    # portal that keeps holding the data dir's lock.
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGHUP, _on_signal)
 
     port = portal_port(portal_args)
     portal_cmd = [sys.executable, "-m", "whygraph", "portal", *portal_args]

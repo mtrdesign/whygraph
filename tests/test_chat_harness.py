@@ -40,6 +40,7 @@ from whygraph.chat.harness import (
     build_window,
     run_turn,
 )
+from whygraph.chat.grounding import with_references
 from whygraph.chat.modes import MODES, mode_block
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core.config import MODE_IDS, ChatConfig, Config
@@ -1114,6 +1115,51 @@ def test_an_empty_reply_after_a_tool_round_is_nudged_once() -> None:
     assert (third[-1].role, third[-1].content) == ("user", EMPTY_REPLY_PROMPT)
     # Nothing empty is appended for the silent round.
     assert [m.role for m in third[2:]] == ["user", "assistant", "tool", "user"]
+
+
+_BLOCK = '[{"text":"#4","kind":"issue","number":4,"state":"open"}]'
+
+
+def test_references_go_once_on_the_last_question_of_every_round() -> None:
+    client = _Client(
+        [
+            _tool_round("c1", 10),
+            [_done("end_turn")],
+            [TextDelta(text="Part"), _done("max_tokens")],
+            [TextDelta(text=" two."), _done("end_turn")],
+        ]
+    )
+    history = (
+        ChatMessage(role="user", content="first?"),
+        ChatMessage(role="assistant", content="one"),
+        ChatMessage(role="user", content="why #4?"),
+    )
+    list(
+        run_turn(
+            client=client,
+            history=history,
+            registry=StubRegistry(),
+            references=_BLOCK,
+        )
+    )
+    asked = with_references("why #4?", _BLOCK)
+    system = client.requests[0].messages[0]
+    for request in client.requests:
+        messages = request.messages
+        assert messages[0] == system  # the system prompt is untouched
+        users = [m.content for m in messages if m.role == "user"]
+        assert users[:2] == ["first?", asked]
+        # In-turn prompts never get the block.
+        assert all(_BLOCK not in u for u in users[2:])
+    last = [m.content for m in client.requests[-1].messages if m.role == "user"]
+    assert last[2:] == [EMPTY_REPLY_PROMPT, CONTINUE_PROMPT]
+    assert history[-1].content == "why #4?"  # the caller's history is not mutated
+
+
+def test_no_references_leave_the_question_as_it_is() -> None:
+    client = _Client([[TextDelta(text="ok"), _done("end_turn")]])
+    _run(client, StubRegistry(), references=None)
+    assert client.requests[0].messages[-1].content == "why?"
 
 
 def test_a_second_empty_reply_ends_the_turn() -> None:

@@ -65,6 +65,7 @@ from whygraph.services.llm.chat import (
 )
 from whygraph.services.llm.exceptions import UNREACHABLE_CAUSES
 
+from .grounding import with_references
 from .modes import Mode, get_mode, mode_block
 from .tools import SERIAL_TOOLS, ToolRegistry
 
@@ -685,6 +686,7 @@ def run_turn(
     max_continuations: int | None = None,
     continue_from_assistant: bool = False,
     mode: str | None = None,
+    references: str | None = None,
 ) -> Iterator[HarnessEvent]:
     """Run one user turn to completion, yielding harness events.
 
@@ -760,6 +762,14 @@ def run_turn(
         The chat mode id, already resolved by the caller (the session's
         mode). It changes only the system prompt's mode block, never the
         tools sent. ``None`` or an unknown id runs the default mode.
+    references : str, optional
+        This turn's References block (the list from
+        :func:`~whygraph.chat.grounding.references_suffix`), appended once,
+        before the first round, to the last user message of ``history``
+        with :func:`~whygraph.chat.grounding.with_references`. Never to an
+        in-turn continue or empty-reply prompt. Past turns' blocks are
+        already in ``history`` (the caller replays them), so the caller
+        passes ``None`` on a Continue or a Regenerate.
 
     Yields
     ------
@@ -805,6 +815,16 @@ def run_turn(
         build_window(history, token_budget=context_token_budget)
     )
     turn_start = len(messages)
+    if references:
+        last_user = next(
+            (i for i in range(turn_start - 1, -1, -1) if messages[i].role == "user"),
+            None,
+        )
+        if last_user is not None:
+            question = messages[last_user]
+            messages[last_user] = replace(
+                question, content=with_references(question.content, references)
+            )
     if continue_from_assistant:
         messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
 

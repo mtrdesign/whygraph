@@ -88,8 +88,10 @@ class ChatMessage(WhygraphTable, table=True):
         The chat mode the turn ran under. ``None`` means the default
         engineer mode (also for pre-mode rows).
     grounding : str or None
-        JSON of the References block shown for an assistant turn. ``None``
-        means the turn had no grounding.
+        On a user row, the JSON list of the References block the reference
+        pre-pass appended to this question (never shown, never part of
+        ``content``; replayed verbatim on later turns). ``None`` means the
+        question had no grounding.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
 

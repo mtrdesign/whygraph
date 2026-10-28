@@ -40,8 +40,9 @@ from whygraph.chat.harness import (
     build_window,
     run_turn,
 )
+from whygraph.chat.modes import MODES, mode_block
 from whygraph.chat.tools import ToolRegistry
-from whygraph.core.config import ChatConfig, Config
+from whygraph.core.config import MODE_IDS, ChatConfig, Config
 from whygraph.core.usage import UsageScope, use_usage_sink
 from whygraph.services.llm.chat import (
     ChatClient,
@@ -809,6 +810,64 @@ def test_system_prompt_documents_the_deep_link_convention(_repo_root: Path) -> N
     content = build_system_prompt(StubRegistry())[0].content
     assert "whygraph://symbol/" in content
     assert "data, not instructions" in content
+
+
+def test_system_prompt_carries_the_mode_block(_repo_root: Path) -> None:
+    """``{{MODE}}`` is filled in the stable block, before the overview split."""
+    for mode in MODES.values():
+        stable, _ = build_system_prompt(StubRegistry(), mode)
+        assert "{{MODE}}" not in stable.content
+        assert mode_block(mode) in stable.content
+        assert stable.content.rstrip().endswith("## This repository right now")
+
+
+def test_no_mode_renders_the_default_mode(_repo_root: Path) -> None:
+    default = build_system_prompt(StubRegistry())[0].content
+    assert default == build_system_prompt(StubRegistry(), MODES["engineer"])[0].content
+
+
+def test_the_stable_block_differs_by_mode_and_holds_within_one(
+    _repo_root: Path,
+) -> None:
+    """Each mode's stable block is its own cache entry, unmoved by the overview."""
+
+    class _Other(StubRegistry):
+        def dispatch(self, name, arguments):
+            if name == "get_repo_overview":
+                return json.dumps({"commits": 999})
+            return super().dispatch(name, arguments)
+
+    stables = set()
+    for mode in MODES.values():
+        first = build_system_prompt(StubRegistry(), mode)[0].content
+        second = build_system_prompt(_Other(), mode)[0].content
+        assert first == second
+        stables.add(first)
+    assert len(stables) == len(MODES)
+
+
+def test_run_turn_sends_the_mode_block_and_the_same_tools_in_every_mode() -> None:
+    """A mode steers by prompt only: the tools array never changes (D2)."""
+    sent = {}
+    for mode_id in (*MODE_IDS, None, "gone"):
+        client = ScriptedClient([[TextDelta(text="hi"), TurnDone("stop")]])
+        list(
+            run_turn(
+                client=client,
+                history=(ChatMessage(role="user", content="hi"),),
+                registry=ToolRegistry(max_rationale_generations=0),
+                max_tool_rounds=1,
+                mode=mode_id,
+            )
+        )
+        request = client.requests[0]
+        assert len(request.tools) == 19
+        sent[mode_id] = (request.messages[0].content, request.tools)
+    tools = {mode_id: value[1] for mode_id, value in sent.items()}
+    assert all(value == tools["engineer"] for value in tools.values())
+    for mode_id in MODE_IDS:
+        assert mode_block(MODES[mode_id]) in sent[mode_id][0]
+    assert sent[None][0] == sent["gone"][0] == sent["engineer"][0]
 
 
 def test_system_prompt_is_never_part_of_history() -> None:

@@ -278,6 +278,9 @@ for people who see usage), which kinds of call they were ("Evidence lookups", "R
 machine. With no call in 30 days the section shows the setup card instead (**Connect local WhyGraph** on a platform, **Connect your agent** locally); see
 [Agent activity](agents.md#agent-activity).
 
+A **Chat tool calls** list shows how often the Chat assistant used each tool: counted by tool name, per
+project, with no member, never arguments. It is not part of the agent totals.
+
 ## After setup
 
 | Where | What you do |

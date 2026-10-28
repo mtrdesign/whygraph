@@ -191,7 +191,7 @@ and the Explorer and Chat views are not agent activity and are not counted.
 The counter stores **counts only**: the project, the UTC day, the source (MCP or a connected machine),
 who made the call and through which connection, the call's name, and how many calls. Never a path, a
 symbol name, an argument or anything from the answer. The names are WhyGraph's own or one of the four
-CodeGraph tools. Counts are written to the portal database
+CodeGraph tools. The Chat assistant's tool calls are counted the same way, by tool name per project, with source `chat`, no member and no connection, under **Chat tool calls**, and never their arguments; they are not agent calls and stay out of the agent totals. Counts are written to the portal database
 every 30 seconds, so a crash can lose at most the last 30 seconds of counts, and they are kept 400
 days. A call that made an LLM request is also in the [usage ledger](usage.md), with its cost.
 

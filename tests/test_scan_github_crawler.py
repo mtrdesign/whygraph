@@ -11,11 +11,18 @@ from rich.progress import Progress
 from sqlmodel import select
 
 from whygraph.db import get_session
-from whygraph.db.models import ForgeCrawlState, Issue, PRIssueLink, PullRequest
+from whygraph.db.models import (
+    ForgeCrawlState,
+    Issue,
+    Milestone,
+    PRIssueLink,
+    PullRequest,
+)
 from whygraph.scan import github_crawler
 from whygraph.scan.github_crawler import GitHubCrawler
 from whygraph.services.github import GitHubError
 from whygraph.services.github.issue import Issue as IssueDC
+from whygraph.services.github.milestones import Milestone as MilestoneDC
 from whygraph.services.github.pull_request import Comment, Review
 from whygraph.services.github.pull_request import PullRequest as PullRequestDC
 
@@ -122,8 +129,21 @@ class FakeIssues:
         return iter(list(self.issues))
 
 
+class FakeMilestones:
+    def __init__(self, milestones: list[MilestoneDC]) -> None:
+        self.milestones = milestones
+        self.iter_calls = 0
+
+    def __iter__(self):
+        self.iter_calls += 1
+        return iter(list(self.milestones))
+
+
 class FakeClient:
-    def __init__(self, prs=(), issues=(), owner="Acme", name="Widgets") -> None:
+    def __init__(
+        self, prs=(), issues=(), owner="Acme", name="Widgets", milestones=()
+    ) -> None:
+        self.milestones = FakeMilestones(list(milestones))
         self.owner = owner
         self.name = name
         self.pull_requests = FakePRs(list(prs))
@@ -184,7 +204,7 @@ def test_first_crawl_walks_everything(whygraph_db_initialized: Path) -> None:
     c = crawl(client)
 
     assert c.error is None
-    assert c.summary == "3 PRs · 2 issues"
+    assert c.summary == "3 PRs · 2 issues · 0 milestones"
     assert (client.pull_requests.len_calls, client.pull_requests.iter_calls) == (1, 1)
     assert (client.issues.len_calls, client.issues.iter_calls) == (1, 1)
     assert client.pull_requests.since_marks == []
@@ -212,7 +232,9 @@ def test_second_crawl_with_nothing_changed(whygraph_db_initialized: Path) -> Non
     assert client.issues.since_marks == [T2]
     assert client.pull_requests.by_numbers_calls == [[]]
     assert client.pull_requests.len_calls == client.issues.len_calls == 0
-    assert c.summary == "0 new · 0 updated PRs · 0 new · 0 updated issues"
+    assert (
+        c.summary == "0 new · 0 updated PRs · 0 new · 0 updated issues · 0 milestones"
+    )
     after = snapshot()
     assert after["prs"] == before["prs"]
     assert after["issues"] == before["issues"]
@@ -240,7 +262,9 @@ def test_changed_prs_are_requested_and_rewritten(
 
     assert c.error is None
     assert sorted(client.pull_requests.by_numbers_calls[0]) == [5, 9]
-    assert c.summary == "0 new · 2 updated PRs · 0 new · 0 updated issues"
+    assert (
+        c.summary == "0 new · 2 updated PRs · 0 new · 0 updated issues · 0 milestones"
+    )
     with get_session() as session:
         row = session.get(PullRequest, 9)
         assert row.state == "closed"
@@ -328,7 +352,9 @@ def test_changed_issue_updated_and_lookback_issue_not_rewritten(
 
     c = crawl(client)
 
-    assert c.summary == "0 new · 0 updated PRs · 0 new · 1 updated issues"
+    assert (
+        c.summary == "0 new · 0 updated PRs · 0 new · 1 updated issues · 0 milestones"
+    )
     after = {i[0]: i for i in snapshot()["issues"]}
     assert after[3][1:3] == (T3, "closed")
     assert after[12] == before[12]
@@ -557,3 +583,47 @@ def test_old_fields_version_backfills_once_past_the_updated_at_skip(
     crawl(client)  # now current: incremental again
     assert client.pull_requests.len_calls == 0
     assert client.pull_requests.since_marks
+
+
+def ms_dc(number: int, **kw) -> MilestoneDC:
+    base = dict(
+        number=number,
+        title=f"M{number}",
+        description=None,
+        state="open",
+        due_on=None,
+        closed_at=None,
+        updated_at=T0,
+        progress_pct=50.0,
+        html_url=f"https://example.test/milestone/{number}",
+    )
+    base.update(kw)
+    return MilestoneDC(**base)
+
+
+def test_milestones_are_relisted_and_absent_ones_deleted(
+    whygraph_db_initialized: Path,
+) -> None:
+    client = FakeClient(milestones=[ms_dc(1), ms_dc(2, state="closed")])
+    c = crawl(client)
+    assert c.error is None
+    assert c.summary == "0 PRs · 0 issues · 2 milestones"
+    with get_session() as session:
+        rows = {m.number: m.model_dump() for m in session.exec(select(Milestone)).all()}
+    assert set(rows) == {1, 2}
+    assert rows[1]["progress_pct"] == 50.0 and rows[2]["state"] == "closed"
+    assert states()["milestone"].repo == "acme/widgets"
+
+    client.milestones.milestones = [ms_dc(2, title="renamed", progress_pct=100.0)]
+    c = crawl(client)
+    assert c.error is None
+    assert client.milestones.iter_calls == 2  # a full re-list each crawl
+    with get_session() as session:
+        rows = {m.number: m.model_dump() for m in session.exec(select(Milestone)).all()}
+    assert set(rows) == {2}
+    assert rows[2]["title"] == "renamed" and rows[2]["progress_pct"] == 100.0
+
+    client.milestones.milestones = []
+    crawl(client)
+    with get_session() as session:
+        assert session.exec(select(Milestone)).all() == []

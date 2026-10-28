@@ -23,6 +23,7 @@ from whygraph.services.git import Repository
 
 from .exceptions import GitHubError
 from .issues import Issues
+from .milestones import Milestones
 from .pull_requests import PullRequests
 from .token import GH_TOKEN_ENV, token_env
 
@@ -106,6 +107,9 @@ class GitHubClient:
         (cached on first access; constructed lazily).
     issues : Issues
         Reusable collection of every issue in the repository (cached on
+        first access; constructed lazily).
+    milestones : Milestones
+        Reusable listing of every milestone in the repository (cached on
         first access; constructed lazily).
     """
 
@@ -200,3 +204,14 @@ class GitHubClient:
             this client's ``owner/name`` and :attr:`shell`.
         """
         return Issues(self.owner, self.name, shell=self.shell)
+
+    @cached_property
+    def milestones(self) -> Milestones:
+        """Reusable listing of every milestone in the repository.
+
+        Returns
+        -------
+        Milestones
+            Iterating it re-lists all milestones, open and closed.
+        """
+        return Milestones(self.owner, self.name, shell=self.shell)

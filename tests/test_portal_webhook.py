@@ -351,12 +351,11 @@ def test_a_push_to_the_default_branch_syncs_and_scans(hooked: World) -> None:
     "payload",
     [
         push("refs/heads/feature"),
-        push("refs/tags/v1.0.0"),
         push(deleted=True),
         push("refs/heads/main", default_branch="trunk"),
         push(repo_id=API_REPO + 100),
     ],
-    ids=["other-branch", "tag", "deletion", "not-the-default", "unknown-repo"],
+    ids=["other-branch", "deletion", "not-the-default", "unknown-repo"],
 )
 def test_other_pushes_are_ignored(
     hooked: World, requests_seen: list[tuple[int, str]], payload: dict
@@ -658,3 +657,50 @@ def test_other_events_are_ignored(hooked: World) -> None:
     response = deliver(w, "repository", repository("archived"))
     assert response.status_code == 202
     assert row().access_lost_at is None
+
+
+def forge_payload(action: str, repo_id: int = API_REPO) -> dict:
+    return {
+        "action": action,
+        "repository": {"id": repo_id, "full_name": "acme/api"},
+        "installation": {"id": INSTALLATION},
+    }
+
+
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        ("pull_request", forge_payload("opened")),
+        ("pull_request_review", forge_payload("submitted")),
+        ("issues", forge_payload("milestoned")),
+        ("milestone", forge_payload("anything")),
+        ("push", push("refs/tags/v1.0.0")),
+    ],
+    ids=["pr", "review", "issue", "milestone", "tag"],
+)
+def test_forge_events_queue_a_forge_run(
+    hooked: World, event: str, payload: dict
+) -> None:
+    w = hooked
+    response = deliver(w, event, payload)
+    assert response.status_code == 202, response.text
+    runs = wait_idle(w)
+    assert runs[0]["trigger"] == "forge"
+
+
+@pytest.mark.parametrize(
+    ("event", "action"),
+    [
+        ("pull_request", "labeled"),
+        ("pull_request", "synchronize"),
+        ("pull_request_review", "edited"),
+        ("issues", "labeled"),
+    ],
+)
+def test_other_forge_actions_are_ignored(
+    hooked: World, event: str, action: str
+) -> None:
+    w = hooked
+    response = deliver(w, event, forge_payload(action))
+    assert (response.status_code, response.json()) == (202, {"status": "ignored"})
+    assert len(org_runs(w)) == 1

@@ -133,7 +133,7 @@ Developer settings, GitHub Apps, New GitHub App.
 | Redirect on update | On, so configuring the installation returns to the portal too |
 | Webhook | Active, URL `<your base URL>/github/webhook`, with a secret of **at least 32 characters** (`openssl rand -hex 32`) |
 | Repository permissions | **Contents**, **Metadata**, **Pull requests** and **Issues**, all **read-only**. Nothing else, and no account permissions |
-| Subscribe to events | **Push** and **Repository**. GitHub always sends the installation events, which the portal uses too |
+| Subscribe to events | **Push**, **Repository**, **Pull request**, **Pull request review**, **Issues** and **Milestone**. GitHub always sends the installation events, which the portal uses too. The last four refresh pull request, issue and milestone data, and a tag push refreshes tags, with at most one run per project every five minutes |
 | Where can this GitHub App be installed? | **Any account**, so that people can install it on their own GitHub organizations |
 
 Then, on the app's page, **generate a client secret** and **generate a private key** (GitHub downloads

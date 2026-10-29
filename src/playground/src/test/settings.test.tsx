@@ -1043,6 +1043,16 @@ describe("Chat mode", () => {
     expect(calls("PUT", "/api/projects/alpha/config")[1].body).toEqual({ config: { chat: { effort: "low", mode: "lead" } } });
   });
 
+  it("saves the Product mode", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    await pick(user, "Mode", "Product");
+    await user.click(within(region("Models and keys")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({ config: { chat: { mode: "product" } } });
+  });
+
   it("at the defaults scope there is no Mode select", async () => {
     mount("/settings");
     await screen.findByTestId("config-form");

@@ -31,6 +31,7 @@ __all__ = [
     "AREA_PLACEHOLDER",
     "DEFAULT_MODE",
     "MODES",
+    "MILESTONE_PLACEHOLDER",
     "MODE_IDS",
     "Mode",
     "get_mode",
@@ -48,6 +49,12 @@ AREA_PLACEHOLDER = "<area>"
 
 _GENERIC_AREA = "the core of this project"
 """What :data:`AREA_PLACEHOLDER` becomes when the project has no areas."""
+
+MILESTONE_PLACEHOLDER = "<milestone>"
+"""Stands in a starter question for the project's next open milestone."""
+
+_GENERIC_MILESTONE = "the next milestone"
+"""What :data:`MILESTONE_PLACEHOLDER` becomes when no milestone is open."""
 
 _PREFER_PLACEHOLDER = "{{PREFER}}"
 _AVOID_PLACEHOLDER = "{{AVOID}}"
@@ -68,7 +75,8 @@ class Mode:
         One line shown under the picker.
     starters : tuple[str, ...]
         Three starter questions for an empty chat. :data:`AREA_PLACEHOLDER`
-        is filled in by :func:`render_starters`.
+        and :data:`MILESTONE_PLACEHOLDER` are filled in by
+        :func:`render_starters`.
     prefer : tuple[str, ...]
         Tool names the block recommends first, rendered into its
         ``{{PREFER}}``. Every one is a chat tool (pinned by a test).
@@ -124,6 +132,28 @@ MODES: Mapping[str, Mode] = MappingProxyType(
                 "get_rationale",
             ),
             avoid=("get_symbol", "read_file"),
+        ),
+        "product": Mode(
+            id="product",
+            label="Product",
+            description=(
+                "Outcomes in plain language: what a release contained, issues "
+                "closed, and milestones on track or slipping."
+            ),
+            starters=(
+                "What shipped in the last release?",
+                f"How is {MILESTONE_PLACEHOLDER} tracking?",
+                "Which user-reported issues are still open?",
+            ),
+            prefer=(
+                "get_milestones",
+                "compare_refs",
+                "get_issue",
+                "list_recent_activity",
+                "get_work_in_flight",
+                "render_chart",
+            ),
+            avoid=("search_symbols", "get_symbol", "read_file"),
         ),
     }
 )
@@ -191,8 +221,10 @@ def mode_block(mode: Mode) -> str:
     return text.strip()
 
 
-def render_starters(mode: Mode, area: str | None) -> tuple[str, ...]:
-    """Fill a mode's starter questions with a real area name.
+def render_starters(
+    mode: Mode, area: str | None, milestone: str | None = None
+) -> tuple[str, ...]:
+    """Fill a mode's starter questions with real area and milestone names.
 
     Parameters
     ----------
@@ -201,13 +233,24 @@ def render_starters(mode: Mode, area: str | None) -> tuple[str, ...]:
     area : str or None
         The project's first configured area name, or ``None`` when it has
         none.
+    milestone : str or None, optional
+        The title of the project's next open milestone, or ``None`` when
+        none is open.
 
     Returns
     -------
     tuple[str, ...]
         The starters with :data:`AREA_PLACEHOLDER` replaced by
-        ``"the <area> area"``, or by a generic phrase when ``area`` is
-        ``None`` or empty.
+        ``"the <area> area"`` and :data:`MILESTONE_PLACEHOLDER` by
+        ``"the <milestone> milestone"``, each by a generic phrase when its
+        name is ``None`` or blank.
     """
-    phrase = f"the {area} area" if area else _GENERIC_AREA
-    return tuple(text.replace(AREA_PLACEHOLDER, phrase) for text in mode.starters)
+    area_phrase = f"the {area} area" if area else _GENERIC_AREA
+    title = (milestone or "").strip()
+    milestone_phrase = f"the {title} milestone" if title else _GENERIC_MILESTONE
+    return tuple(
+        text.replace(AREA_PLACEHOLDER, area_phrase).replace(
+            MILESTONE_PLACEHOLDER, milestone_phrase
+        )
+        for text in mode.starters
+    )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 
 import pytest
@@ -284,7 +285,9 @@ def _forbidden(*paths: list, extra: dict | None = None) -> ShellError:
 _RR = ["repository", "pullRequests", "nodes", 0, "reviewRequests", "nodes", 0]
 
 
-def test_forbidden_review_requests_are_dropped_not_fatal(caplog) -> None:
+def test_forbidden_review_requests_are_dropped_not_fatal(caplog, monkeypatch) -> None:
+    # A neighbour's configure_logging may have set propagate=False; caplog needs it.
+    monkeypatch.setattr(logging.getLogger("whygraph"), "propagate", True)
     shell = _Flaky([_forbidden(_RR, _RR)])
     with caplog.at_level("WARNING"):
         got = [*iter(PullRequests("o", "r", shell=shell))]

@@ -118,6 +118,7 @@ _CLASSES = {
     "PROriginEnricher": "pr-origins",
     "AuthorResolver": "authors",
     "CodeGraphCrawler": "codegraph",
+    "TagCrawler": "tags",
 }
 
 
@@ -820,6 +821,90 @@ def test_unknown_flags_are_refused(capsys: pytest.CaptureFixture[str]) -> None:
             child.main([flag])
         assert exc.value.code == 2
     capsys.readouterr()
+
+
+def test_codegraph_only_and_github_only_are_exclusive(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        child.main(["--codegraph-only", "--github-only"])
+    assert exc.value.code == 2
+    capsys.readouterr()
+
+
+# --------------------------------------------------------------------------- #
+# --github-only (the runner's ``forge`` trigger)
+# --------------------------------------------------------------------------- #
+
+
+def test_github_only_runs_the_forge_crawl_and_the_tags_only(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stubs = _patch_crawlers(monkeypatch)
+    _with_github(monkeypatch)
+
+    status, events, _ = _run(capsys, "--github-only")
+
+    assert status == 0
+    assert events[0] == {"type": "start", "phase_total": 1, "phases": ["Forge crawl"]}
+    assert stubs["github"].constructed == 1 and stubs["tags"].constructed == 1
+    for skipped in ("git", "pr-origins", "authors", "codegraph", "analyze"):
+        assert stubs[skipped].constructed == 0, skipped
+    result = events[-1]
+    assert result["type"] == "result" and result["status"] == "ok"
+    assert {c["name"] for c in result["crawlers"]} == {"github", "tags"}
+    assert result["analyze_skipped"] == "--github-only"
+    assert result["codegraph"] == {"status": "skipped"}
+
+
+def test_github_only_without_a_forge_still_mirrors_tags(
+    isolated_db: Path,
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real tag crawler: the tag table refreshes, no commit is crawled."""
+    from sqlmodel import select
+
+    from whygraph.db import get_session
+    from whygraph.db.models.commit import Commit as CommitRow
+    from whygraph.db.models.tag import Tag as TagRow
+
+    _git(repo, "config", "tag.gpgsign", "false")
+    _git(repo, "tag", "v1")
+
+    status, events, _ = _run(capsys, "--github-only")
+
+    assert status == 0
+    assert [c["name"] for c in events[-1]["crawlers"]] == ["tags"]
+    assert events[-1]["crawlers"][0]["summary"] == "1 tag"
+    with get_session() as session:
+        assert [t.name for t in session.exec(select(TagRow)).all()] == ["v1"]
+        assert session.exec(select(CommitRow)).all() == []
+
+    _git(repo, "tag", "-d", "v1")
+    _git(repo, "tag", "v2")
+    status, _, _ = _run(capsys, "--github-only")
+
+    assert status == 0
+    with get_session() as session:
+        assert [t.name for t in session.exec(select(TagRow)).all()] == ["v2"]
+
+
+def test_github_only_fails_when_the_forge_crawl_fails(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_crawlers(monkeypatch, failing=("github",))
+    _with_github(monkeypatch)
+
+    status, events, err = _run(capsys, "--github-only")
+
+    assert status == 1
+    assert events[-1]["status"] == "failed"
+    assert "crawler 'github' failed" in err
 
 
 # --------------------------------------------------------------------------- #

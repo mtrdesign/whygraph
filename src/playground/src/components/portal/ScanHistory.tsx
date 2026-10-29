@@ -27,6 +27,7 @@ const TRIGGER_OPTIONS: { id: string; label: string; triggers: ScanTrigger[] }[] 
   { id: "push", label: "GitHub push", triggers: ["push"] },
   { id: "sync", label: "Sync from GitHub", triggers: ["sync"] },
   { id: "scheduled", label: "Scheduled check", triggers: ["poll", "reconcile"] },
+  { id: "forge", label: "GitHub activity", triggers: ["forge"] },
 ];
 
 const TYPE_LABEL = { full: "Full", quick: "Quick", sync: "Sync" } as const;

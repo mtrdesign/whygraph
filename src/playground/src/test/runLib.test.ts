@@ -201,6 +201,7 @@ describe("scan formatting", () => {
     expect(runLabel(row({ trigger: "push", kind: "sync" }))).toBe("GitHub push");
     expect(runLabel(row({ trigger: "sync", kind: "sync" }))).toBe("Sync from GitHub");
     expect(runLabel(row({ trigger: "reconcile", kind: "sync" }))).toBe("Scheduled check");
+    expect(runLabel(row({ trigger: "forge", kind: "sync" }))).toBe("GitHub activity");
     expect(runTitle(row({ queued_at: "2026-10-09T14:02:00+00:00" }))).toMatch(/^Full rescan - .*2026/);
     expect(runTitle(row({}))).toMatch(/^Full rescan - /);
     expect(runTitle(row({}))).not.toMatch(/#\d/);
@@ -229,6 +230,9 @@ describe("scan formatting", () => {
     expect(syncOutcome({ trigger: "push" }, { moved: true, scanned: true })).toBe("Fetched new commits and scanned");
     expect(syncOutcome({ trigger: "push" }, { moved: false })).toBe("No new commits");
     expect(syncOutcome({ trigger: "initial" }, { moved: false })).toBeNull();
+    // A forge run fetched commits but scanned only the forge: never "... and scanned".
+    expect(syncOutcome({ trigger: "forge" }, { moved: true, scanned: true })).toBe("Pull requests and issues refreshed");
+    expect(syncOutcome({ trigger: "forge" }, { moved: false, scanned: true })).toBe("Pull requests and issues refreshed");
   });
 
   it("summarises a failure through the registry, with the raw text kept for details", () => {

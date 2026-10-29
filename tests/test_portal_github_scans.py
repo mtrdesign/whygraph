@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -69,7 +70,13 @@ from test_portal_identity_routes import (  # noqa: F401 -- `audit_log` is a fixt
     create_org,
     events,
 )
-from test_portal_runner import TERMINAL, FakeClock, scanner, wait_for  # noqa: F401
+from test_portal_runner import (  # noqa: F401
+    TERMINAL,
+    FakeClock,
+    runner_flags,
+    scanner,
+    wait_for,
+)
 from whygraph.core.context import use_project
 from whygraph.db import get_session as project_session
 from whygraph.db.models import RationaleCache
@@ -364,6 +371,93 @@ def test_a_sync_mirrors_tags_privately_and_prunes_them(
         "refs/remotes/origin/main"
     )
     assert git_out(root, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+
+
+# ---------------------------------------------------------------------------
+# Forge-only runs (plan 38, C3)
+# ---------------------------------------------------------------------------
+
+
+def forge(w: World) -> int:
+    """Queue a ``forge`` sync of ``acme/api``, as a webhook would; its run id."""
+    return w.client.portal.call(
+        partial(w.state.runner.request_sync, project_id(), trigger="forge")
+    )
+
+
+def test_a_forge_run_scans_github_only_even_when_head_did_not_move(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    imported(w)
+    before = project_row(ORG, "api").last_scanned_head
+
+    run = wait_run(w, forge(w))
+
+    assert (run["status"], run["kind"], run["trigger"]) == ("ok", "sync", "forge")
+    assert run["summary"]["moved"] is False
+    assert runner_flags(scanner.calls()[-1]) == ["--github-only"]
+    assert project_row(ORG, "api").last_scanned_head == before
+
+
+def test_a_forge_run_never_makes_a_later_sync_skip_the_git_scan(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    """The forge run moves the clone but not ``last_scanned_head``."""
+    w = world
+    root = imported(w)
+    before = project_row(ORG, "api").last_scanned_head
+    pushed = w.server.commit("acme/api", message="A push the forge run fetches")
+
+    run = wait_run(w, forge(w))
+    assert run["status"] == "ok" and run["summary"]["moved"] is True
+    assert head(root) == pushed
+    assert project_row(ORG, "api").last_scanned_head == before
+
+    # The reconcile still sees the push as unscanned, and scans git + CodeGraph.
+    reconcile(w)
+    run = wait_run(w, runs(w)[0]["id"])
+    assert (run["status"], run["trigger"]) == ("ok", "reconcile")
+    assert run["summary"]["moved"] is False and run["summary"]["scanned"] is True
+    assert runner_flags(scanner.calls()[-1]) == ["--skip-analyze"]
+    assert project_row(ORG, "api").last_scanned_head == pushed
+
+
+def test_forge_runs_are_debounced_per_project(
+    world: World, scanner: SimpleNamespace
+) -> None:
+    w = world
+    imported(w)
+    runner = w.state.runner
+    runner.forge_debounce = 1.5
+    first = forge(w)
+    assert wait_run(w, first)["status"] == "ok"
+    assert project_id() in runner._forge_started
+
+    # The window counts from the last forge run's start; restart it here so a
+    # slow first run cannot have used it up.
+    started = runner._forge_started[project_id()] = time.monotonic()
+    second = forge(w)
+    assert second != first
+    assert forge(w) == second  # coalesced into the held run
+    assert project_id() in runner._pending  # held, not started
+    run = wait_run(w, second)
+    assert run["status"] == "ok" and run["trigger"] == "forge"
+    assert time.monotonic() - started >= 1.0
+    assert len(scanner.calls()) == 3  # the import's scan and two forge runs
+
+    # A push request is never held: it lifts a pending forge run's debounce.
+    runner.forge_debounce = 300.0
+    third = forge(w)
+    assert project_id() in runner._pending  # held
+    assert (
+        w.client.portal.call(partial(runner.request_sync, project_id(), trigger="push"))
+        == third
+    )
+    assert project_id() not in runner._pending  # started at once
+    run = wait_run(w, third)
+    assert (run["status"], run["trigger"]) == ("ok", "push")
+    assert runner_flags(scanner.calls()[-1]) == ["--skip-analyze"]
 
 
 def test_a_new_default_branch_is_followed(

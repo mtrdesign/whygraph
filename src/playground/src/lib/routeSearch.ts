@@ -84,7 +84,7 @@ export const SCAN_STATUSES = [
   "cancelled",
 ] as const satisfies readonly ScanRunStatus[];
 /** `models.py` `SCAN_TRIGGERS`. */
-export const SCAN_TRIGGERS = ["initial", "manual", "describe", "hook", "poll", "sync", "push", "reconcile"] as const;
+export const SCAN_TRIGGERS = ["initial", "manual", "describe", "hook", "poll", "sync", "push", "reconcile", "forge"] as const;
 export type ScanTrigger = (typeof SCAN_TRIGGERS)[number];
 export const SCAN_TYPES = ["full", "quick", "sync"] as const;
 /** The history's Type filter (`GET .../scans?type=`): full, quick or a sync that only fetched. */

@@ -93,6 +93,7 @@ SCAN_TRIGGERS: tuple[str, ...] = (
     "sync",
     "push",
     "reconcile",
+    "forge",
 )
 SCAN_STATUSES: tuple[str, ...] = (
     "queued",
@@ -672,8 +673,9 @@ class ScanRun(PortalBase, table=True):
         ``"scan"`` or ``"sync"``.
     trigger : str
         ``"initial"``, ``"manual"``, ``"describe"``, ``"hook"``,
-        ``"poll"``, ``"sync"``, ``"push"`` (a GitHub webhook) or
-        ``"reconcile"`` (the periodic remote-head check).
+        ``"poll"``, ``"sync"``, ``"push"`` (a GitHub webhook),
+        ``"reconcile"`` (the periodic remote-head check) or ``"forge"``
+        (a GitHub-only run: pull requests, issues, milestones and tags).
     analyze : bool
         Whether the run describes commits (resolved from the trigger).
     requested_by : int or None

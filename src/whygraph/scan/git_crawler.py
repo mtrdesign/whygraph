@@ -170,6 +170,47 @@ class GitCrawler(Crawler):
             self.summary += f" · {len(tags)} {'tag' if len(tags) == 1 else 'tags'}"
 
 
+class TagCrawler(Crawler):
+    """Mirror the repository's tags into the ``tag`` table, and nothing else.
+
+    The ``--github-only`` scan's tag step (:mod:`whygraph.scan.child`): the
+    same listing and replacement as :class:`GitCrawler`'s, without the
+    commit walk, so a tag pushed upstream (fetched by the portal's sync)
+    shows up without a git scan. A failed listing leaves the table as it
+    was and becomes :attr:`warning`, never a failed crawl.
+
+    Parameters
+    ----------
+    progress : rich.progress.Progress
+        Shared Progress instance owned by the orchestrator.
+    repository : Repository
+        The git repository whose tags are listed.
+
+    Attributes
+    ----------
+    warning : str or None
+        Why the tags were not refreshed; ``None`` when they were.
+    """
+
+    def __init__(self, progress: Progress, *, repository: Repository) -> None:
+        super().__init__("tags", progress, total=1)
+        self._repository = repository
+        self.warning: str | None = None
+
+    def work(self) -> None:
+        try:
+            tags = self._repository.tags()
+        except GitError as exc:
+            self.warning = f"tags not refreshed: {exc}"
+            _log.warning("%s", self.warning)
+            self.advance(1)
+            return
+        with get_session() as session:
+            _replace_tags(session, tags)
+        self.advance(1)
+        self.summary = f"{len(tags)} {'tag' if len(tags) == 1 else 'tags'}"
+
+
 def _reconcile_branch_membership(
     session, default_shas: frozenset[str], *, skip: bool
 ) -> tuple[int, int]:

@@ -218,6 +218,8 @@ def test_the_allowlist_is_a_literal_not_derived() -> None:
         "issue",
         "pr_issue_link",
         "author",
+        "milestone",
+        "tag",
     }
     # The two that must never be readable, named explicitly.
     assert "chat_message" not in _ALLOWED_TABLES

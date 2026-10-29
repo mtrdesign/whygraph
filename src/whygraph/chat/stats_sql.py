@@ -45,6 +45,8 @@ _ALLOWED_TABLES = frozenset(
         "issue",
         "pr_issue_link",
         "author",
+        "milestone",
+        "tag",
     }
 )
 """The read allowlist — **the** security boundary of this module.
@@ -212,10 +214,28 @@ pull_request
   created_at, updated_at, closed_at, merged_at TEXT (merged_at NULL if unmerged)
   Cycle time: julianday(merged_at) - julianday(created_at) WHERE merged_at
   IS NOT NULL  -- days
+  milestone INTEGER NULL -- milestone.number
+  assignees, review_requests, files TEXT -- JSON ARRAYS (logins / logins /
+    paths); match with instr(), never json_each
+  review_decision TEXT NULL · latest_reviews TEXT -- JSON, latest review per
+    reviewer
+  first_review_at TEXT NULL -- the pickup-time anchor: earliest submitted
+    review by someone other than the author. Pickup time:
+    julianday(first_review_at) - julianday(created_at) -- days
+  additions, deletions, changed_files INTEGER NULL
 
 issue
   number INTEGER PK · title, body, state, author TEXT
   created_at, updated_at, closed_at TEXT
+  milestone INTEGER NULL -- milestone.number
+  assignees TEXT -- JSON ARRAY of logins; match with instr(), never json_each
+  state_reason TEXT NULL
+
+milestone — number INTEGER PK · title, description, state TEXT
+  due_on, closed_at TEXT NULL · updated_at TEXT · progress_pct REAL NULL
+  html_url, fetched_at TEXT
+
+tag — name TEXT PK · sha TEXT · tagged_at TEXT NULL · subject TEXT NULL
 
 pr_issue_link — pr_number, issue_number, link_kind ('closes')
 

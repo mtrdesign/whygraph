@@ -385,8 +385,10 @@ def test_core_effort_levels_mirror_services() -> None:
 def test_mode_ids_pin_and_lenient_load(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    assert MODE_IDS == ("engineer", "lead")
+    assert MODE_IDS == ("engineer", "lead", "product")
     assert Config.from_dict({"chat": {"mode": "lead"}}, tmp_path).chat.mode == "lead"
+    product = Config.from_dict({"chat": {"mode": "product"}}, tmp_path)
+    assert product.chat.mode == "product"
     assert Config.from_dict({}, tmp_path).chat.mode is None
     with caplog.at_level("WARNING"):
         cfg = Config.from_dict({"chat": {"mode": "gone"}}, tmp_path)

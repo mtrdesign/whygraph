@@ -2075,11 +2075,14 @@ def test_invalid_chat_mode_is_dropped_on_import() -> None:
     from whygraph.portal.policy import _drop_invalid_values, invalid_values
 
     layer = {"chat": {"mode": "gone", "effort": "low"}}
-    assert invalid_values(layer) == {"chat.mode": "must be one of engineer, lead"}
+    assert invalid_values(layer) == {
+        "chat.mode": "must be one of engineer, lead, product"
+    }
     assert _drop_invalid_values(layer) == ["chat.mode"]
     assert layer == {"chat": {"effort": "low"}}
     assert invalid_values({"chat": {"mode": "gone"}}, {"chat": {"mode": "gone"}}) == {}
     assert invalid_values({"chat": {"mode": "lead"}}) == {}
+    assert invalid_values({"chat": {"mode": "product"}}) == {}
 
 
 def test_a_stored_onboarding_chat_mode_loads_as_unset_and_cannot_be_written(

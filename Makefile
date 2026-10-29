@@ -19,7 +19,9 @@
 UV_RUN ?= uv run
 
 # Scratch state for all dev modes (canonical path: Docker shares it at the same path).
-DEV ?= $(shell cd "$${TMPDIR:-/tmp}" && pwd -P)/whygraph-dev
+# Not under $TMPDIR: macOS deletes files there that were not opened for three days,
+# which left the dev Postgres without its catalogs and the data dir without secret.key.
+DEV ?= $(shell d="$${XDG_STATE_HOME:-$$HOME/.local/state}"; mkdir -p "$$d" && cd "$$d" && pwd -P)/whygraph-dev
 DEV_LOCAL_DATA := $(DEV)/local/data
 DEV_PORT ?= 8777
 DEV_PROD_PORT ?= 8778
@@ -226,7 +228,7 @@ dev-db:  ## Start the dev portal's Postgres (whygraph-dev-postgres on 127.0.0.1,
 	done; \
 	echo "$(PG_DEV_NAME) ready: $(DEV_DATABASE_URL)"
 
-dev-db-down:  ## Stop and remove the dev Postgres (its data stays under $TMPDIR/whygraph-dev/local)
+dev-db-down:  ## Stop and remove the dev Postgres (its data stays under ~/.local/state/whygraph-dev/local)
 	@if docker inspect $(PG_DEV_NAME) >/dev/null 2>&1; then \
 		docker stop -t 30 $(PG_DEV_NAME) >/dev/null && docker rm $(PG_DEV_NAME) >/dev/null && echo "$(PG_DEV_NAME) stopped (data stays in $(DEV)/local/postgres)"; \
 	else echo "$(PG_DEV_NAME) is not running"; fi

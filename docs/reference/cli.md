@@ -118,6 +118,7 @@ scan. At most two projects scan at once.
 | `initial` | Any request while the project has no successful scan yet | No (structure only) |
 | `hook` | A git hook after a commit, merge, rebase or checkout, and the catch-up check | No, and offline (a Quick rescan) |
 | `push`, `reconcile` | Production mode: a push to the default branch (the GitHub App's webhook), and the hourly check of the default branch on GitHub | No |
+| `forge` | Production mode: GitHub activity on pull requests, issues, milestones or tags. It refreshes only those and the tags, never the commits or the code index | No |
 | `manual` | **Scan now** | Yes (unless turned off for that run) |
 | `describe` | **Describe now** on the first-scan estimate | Yes |
 
@@ -129,7 +130,9 @@ project whose checkout moved past the last scanned commit while the portal was n
 In production mode every run of a project first **syncs** its server copy: it fetches the default
 branch with a repository-scoped installation token and checks it out, then scans. A `push` or
 `reconcile` run scans only when the branch moved past the last scanned commit; **Scan now**, `initial` and `describe`
-always scan. The scan gets the token through a `0600` file named by `WHYGRAPH_GITHUB_TOKEN_FILE`,
+always scan. A `forge` run always refreshes the GitHub data, at most once every 5 minutes per project
+(later activity waits and joins one queued run), and never counts as a scan of the branch, so the
+next `push` or `reconcile` run still scans the commits it fetched. The scan gets the token through a `0600` file named by `WHYGRAPH_GITHUB_TOKEN_FILE`,
 rewritten before it expires, never through its environment. `hook` scans exist only in local mode.
 
 Only an allowlist of the portal's environment reaches a scan (`PATH`, `HOME`, locale, `TZ`, the TLS

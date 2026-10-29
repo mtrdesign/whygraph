@@ -10,7 +10,7 @@ process:
   and syncs if any request did. Its ``scan_runs`` row is created by the
   **first** request, so every coalesced request gets the same ``run_id``;
   it records the highest-precedence trigger
-  (``describe > manual > initial > sync > poll > hook``) and keeps the
+  (``describe > manual > initial > sync > poll > hook > forge``) and keeps the
   first explicit ``requested_by`` - unless a later request is the first
   to ask for analysis, whose requester then takes over (attribution
   follows the spend, M2f-2 plan section 0.2 #7). A project with no
@@ -22,6 +22,15 @@ process:
   project's slot, then runs the scan in the same slot when HEAD differs
   from ``last_scanned_head`` (or when a merged request asked for a scan
   anyway) - so a checkout never moves the tree under a running crawl.
+* **Forge-only runs** (plan 38, C3). A ``trigger=forge`` sync (a webhook
+  about pull requests, issues, milestones or a tag) always scans, with
+  ``--github-only``: the forge crawl and the tag mirror, never the commits
+  or the code index - so it never writes ``last_scanned_head``, and a
+  later push sync or reconcile still scans git and CodeGraph. ``forge`` is
+  the lowest trigger, so a forge request merged with any other runs the
+  other's fuller scan. A project's next forge-only run starts no sooner
+  than :data:`FORGE_DEBOUNCE_SEC` after its previous one started: until
+  then it waits in the queue, where later requests coalesce into it.
 * **Production GitHub projects** (M2d-2 plan sections 0.2 #5, #6, #14,
   #23, 4.6). Every request to scan one is a ``sync`` with
   ``scan_requested`` (manual, describe and initial scans included: the
@@ -254,7 +263,11 @@ TAIL_INTERVAL_SEC = 0.25
 ACCESS_CHECK_SEC = 5.0
 """How often an SSE stream re-checks that its caller may still read the run."""
 
+FORGE_DEBOUNCE_SEC = 5 * 60
+"""Seconds between the starts of a project's forge-only (``forge``) runs."""
+
 TRIGGER_PRECEDENCE: tuple[str, ...] = (
+    "forge",
     "hook",
     "poll",
     "reconcile",
@@ -509,13 +522,16 @@ def scan_flags(trigger: str, analyze: bool, source: str = "local") -> list[str]:
     Returns
     -------
     list[str]
-        ``hook`` -> ``--skip-analyze --no-remote``; ``initial`` / ``poll``
-        / ``sync`` -> ``--skip-analyze``; ``manual`` / ``describe`` -> none
-        (full scan), or ``--skip-analyze`` when ``analyze`` is off. A
+        ``hook`` -> ``--skip-analyze --no-remote``; ``forge`` ->
+        ``--github-only``; ``initial`` / ``poll`` / ``sync`` / ``push`` /
+        ``reconcile`` -> ``--skip-analyze``; ``manual`` / ``describe`` ->
+        none (full scan), or ``--skip-analyze`` when ``analyze`` is off. A
         ``platform`` project's scan is always ``--codegraph-only``.
     """
     if source == "platform":
         return ["--codegraph-only"]
+    if trigger == "forge":
+        return ["--github-only"]
     if trigger == "hook":
         return ["--skip-analyze", "--no-remote"]
     if trigger in EXPLICIT_TRIGGERS and analyze:
@@ -957,6 +973,8 @@ class _Pending:
     """The project's org (per-org import fairness in ``_dispatch``)."""
     importing: bool = False
     """Whether the run clones the project first (an import, M2f-3 plan section 4.8)."""
+    not_before: float | None = None
+    """``time.monotonic()`` before which a debounced ``forge`` run is not started."""
 
     def merge(
         self,
@@ -986,6 +1004,8 @@ class _Pending:
             self.requested_by = requested_by
         self.analyze = self.analyze or analyze
         self.scan_requested = self.scan_requested or scan_requested
+        if self.trigger != "forge":
+            self.not_before = None  # a fuller run is never debounced
 
 
 def _int_in(value: Any, high: int) -> bool:
@@ -1348,6 +1368,7 @@ class ScanRunner:
         self.token_refresh_margin: float = TOKEN_REFRESH_MARGIN_SEC
         self.token_retry: float = TOKEN_RETRY_SEC
         self.org_delete_wait: float = ORG_DELETE_WAIT_SEC
+        self.forge_debounce: float = FORGE_DEBOUNCE_SEC
         self._sleep = sleep or anyio.sleep
         self._state: PortalState | None = None
         self._tg: Any = None
@@ -1356,6 +1377,8 @@ class ScanRunner:
         self._pending: dict[int, _Pending] = {}
         self._running: dict[int, _Job] = {}
         self._live: set[int] = set()
+        # When each project's last forge-only run started (time.monotonic()).
+        self._forge_started: dict[int, float] = {}
         self._stopping = False
         # Removal vs request claims (threading: removal runs in a worker thread).
         self._claims = threading.Lock()
@@ -1730,10 +1753,12 @@ class ScanRunner:
         project_id : int
             ``projects.id``.
         trigger : str
-            ``sync`` (default), ``push`` or ``reconcile`` - a member of
-            :data:`TRIGGER_PRECEDENCE`.
+            ``sync`` (default), ``push``, ``reconcile`` or ``forge`` - a
+            member of :data:`TRIGGER_PRECEDENCE`. A ``forge`` request always
+            scans (``--github-only``) and is debounced
+            (:data:`FORGE_DEBOUNCE_SEC`).
         scan_requested : bool
-            Scan even when HEAD did not move.
+            Scan even when HEAD did not move (forced on for ``forge``).
         principal : Principal or None
             Recorded as ``requested_by``.
 
@@ -1763,7 +1788,8 @@ class ScanRunner:
             trigger=trigger,
             analyze=False,
             requested_by=principal.user_id if principal else None,
-            scan_requested=scan_requested,
+            # A forge event moves no HEAD: the GitHub crawl must run anyway.
+            scan_requested=scan_requested or trigger == "forge",
             may_spend=False,  # a sync never describes
         )
 
@@ -1907,6 +1933,7 @@ class ScanRunner:
                 pending.run_id = run_id
                 self._pending[project_id] = pending
                 self._live.add(run_id)
+                self._debounce(pending)
             else:
                 pending.merge(
                     kind=kind,
@@ -2223,7 +2250,8 @@ class ScanRunner:
 
         An import waits while another import of its org runs (M2f-3 plan
         decision 0.3 #41), so one org's multi-repo import clones one
-        repository at a time and never holds every slot.
+        repository at a time and never holds every slot. A debounced
+        ``forge`` run waits until its ``not_before``.
         """
         while not self._stopping and self._tg is not None:
             if len(self._running) >= self.max_concurrent:
@@ -2231,19 +2259,47 @@ class ScanRunner:
             cloning = {
                 j.spec.org_id for j in self._running.values() if j.spec.importing
             }
+            now = time.monotonic()
             waiting = [
                 p
                 for pid, p in self._pending.items()
                 if pid not in self._running
                 and not (p.importing and p.org_id in cloning)
+                and not (p.not_before is not None and p.not_before > now)
             ]
             if not waiting:
                 return
             spec = min(waiting, key=lambda p: p.run_id)
             del self._pending[spec.project_id]
+            if spec.trigger == "forge":
+                self._forge_started[spec.project_id] = now
             job = _Job(spec=spec)
             self._running[spec.project_id] = job
             self._tg.start_soon(self._run_job, job)
+
+    def _debounce(self, pending: _Pending) -> None:
+        """Hold a new ``forge`` run until :attr:`forge_debounce` after the project's last one started.
+
+        Loop-thread only. Sets ``not_before`` and starts one wake-up task
+        that dispatches at that moment; a fuller request merged in clears
+        ``not_before`` (:meth:`_Pending.merge`), and the wake-up then finds
+        nothing to do.
+        """
+        if pending.trigger != "forge" or self._tg is None:
+            return
+        last = self._forge_started.get(pending.project_id)
+        if last is None:
+            return
+        not_before = last + self.forge_debounce
+        if not_before <= time.monotonic():
+            return
+        pending.not_before = not_before
+        self._tg.start_soon(self._dispatch_at, not_before)
+
+    async def _dispatch_at(self, when: float) -> None:
+        """Dispatch once ``time.monotonic()`` reaches ``when`` (a debounced run's start)."""
+        await anyio.sleep(max(0.0, when - time.monotonic()))
+        self._dispatch()
 
     async def _run_job(self, job: _Job) -> None:
         try:
@@ -3525,7 +3581,10 @@ def _finish_run(
             project = session.get(Project, job.spec.project_id)
             if project is not None:
                 project.last_scan_at = now
-                if job.head:
+                # A forge-only run (--github-only) scanned neither the commits
+                # nor the code index: HEAD stays "not scanned", so the next
+                # push sync or reconcile still runs them (plan 38, C3).
+                if job.head and job.spec.trigger != "forge":
                     project.last_scanned_head = job.head
                 session.add(project)
 
@@ -3852,6 +3911,7 @@ def _read_frames(path: Path, pos: int) -> tuple[list[str], int]:
 __all__ = [
     "COST_SUMMARY_KEYS",
     "EXPLICIT_TRIGGERS",
+    "FORGE_DEBOUNCE_SEC",
     "LOG_TAIL_BYTES",
     "MAX_CONCURRENT",
     "MAX_EVENT_LINE",

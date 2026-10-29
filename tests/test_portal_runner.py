@@ -286,6 +286,7 @@ def first_scan(client: TestClient, slug: str) -> dict:
         ("manual", True, []),
         ("manual", False, ["--skip-analyze"]),
         ("describe", None, []),
+        ("forge", None, ["--github-only"]),
     ],
 )
 def test_trigger_to_flags(trigger: str, analyze: bool | None, flags: list[str]) -> None:
@@ -304,6 +305,7 @@ def test_default_argv_runs_this_interpreter() -> None:
 
 def test_trigger_precedence() -> None:
     assert TRIGGER_PRECEDENCE == (
+        "forge",
         "hook",
         "poll",
         "reconcile",
@@ -321,6 +323,10 @@ def test_trigger_precedence() -> None:
     assert merge_trigger("push", "reconcile") == "push"
     assert merge_trigger("reconcile", "poll") == "reconcile"
     assert merge_trigger("push", "sync") == "sync"
+    # The lowest: merged with anything, the fuller run's flags win.
+    assert merge_trigger("forge", "hook") == "hook"
+    assert merge_trigger("reconcile", "forge") == "reconcile"
+    assert merge_trigger("forge", "forge") == "forge"
 
 
 def test_child_env_allowlist_and_injected_secrets(
@@ -1156,6 +1162,94 @@ def test_dispatch_runs_one_import_per_org_at_a_time() -> None:
     del runner._running[1]
     runner._dispatch()
     assert tasks.started == [3, 4, 2] and runner._pending == {}
+
+
+class _WakeTasks(_Tasks):
+    """Also records the debounce's wake-ups (``start_soon(fn, when)``)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wakes: list[float] = []
+
+    def start_soon(self, fn, arg) -> None:  # noqa: ANN001
+        if isinstance(arg, float):
+            self.wakes.append(arg)
+        else:
+            super().start_soon(fn, arg)
+
+
+def _forge(run_id: int) -> _Pending:
+    return _Pending(
+        run_id=run_id,
+        project_id=7,
+        kind="sync",
+        trigger="forge",
+        analyze=False,
+        requested_by=None,
+        scan_requested=True,
+    )
+
+
+def test_a_forge_run_waits_out_the_debounce_after_the_last_one_started() -> None:
+    runner = ScanRunner()
+    tasks = _WakeTasks()
+    runner._tg = tasks
+    runner.forge_debounce = 300.0
+
+    first = _forge(1)
+    runner._debounce(first)  # no earlier forge run: not held
+    assert first.not_before is None and tasks.wakes == []
+    runner._pending[7] = first
+    runner._dispatch()
+    assert tasks.started == [1]
+    started = runner._forge_started[7]
+
+    del runner._running[7]
+    second = _forge(2)
+    runner._debounce(second)
+    assert second.not_before == started + 300.0
+    assert tasks.wakes == [second.not_before]  # one wake-up at the window's end
+    runner._pending[7] = second
+    runner._dispatch()
+    assert tasks.started == [1] and runner._pending == {7: second}
+
+    # A later forge request coalesces into the held run and stays held ...
+    second.merge(
+        kind="sync",
+        trigger="forge",
+        analyze=False,
+        requested_by=None,
+        scan_requested=True,
+    )
+    assert second.not_before is not None
+    # ... and once the window has passed, the wake-up's dispatch starts it.
+    second.not_before = time.monotonic() - 1
+    runner._dispatch()
+    assert tasks.started == [1, 2] and runner._pending == {}
+
+
+def test_a_fuller_request_lifts_the_forge_debounce() -> None:
+    runner = ScanRunner()
+    tasks = _WakeTasks()
+    runner._tg = tasks
+    runner._forge_started[7] = before = time.monotonic()
+    held = _forge(3)
+    runner._debounce(held)
+    assert held.not_before is not None
+    held.merge(
+        kind="sync",
+        trigger="push",
+        analyze=False,
+        requested_by=None,
+        scan_requested=False,
+    )
+    assert (held.trigger, held.not_before, held.scan_requested) == ("push", None, True)
+    runner._pending[7] = held
+    runner._dispatch()
+    assert tasks.started == [3]
+    # A push run is not a forge-only run: the window is not restarted.
+    assert runner._forge_started[7] == before
+    assert scan_flags(held.trigger, held.analyze, "github") == ["--skip-analyze"]
 
 
 def test_delete_refuses_while_a_scan_request_is_in_flight(

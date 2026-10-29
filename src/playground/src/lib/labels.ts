@@ -49,6 +49,7 @@ const TRIGGER: Record<string, string> = {
   sync: "Sync",
   push: "Push",
   reconcile: "Reconcile",
+  forge: "GitHub activity",
 };
 
 /** `Owner` / `Admin` / `Member`; an unknown role is shown as sent. */

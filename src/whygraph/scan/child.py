@@ -5,7 +5,7 @@ The portal runs every scan as this child process, with the repository as
 it: it refuses to run without that variable (exit ``2``), and a full scan
 also needs the config's ``whygraph_db``.
 
-Flags (the runner passes at most the first three):
+Flags (the runner passes at most the first four):
 
 ``--skip-analyze``
     Skip the LLM-descriptions phase; the descriptor probe is bypassed too.
@@ -14,6 +14,10 @@ Flags (the runner passes at most the first three):
 ``--codegraph-only``
     Refresh only the CodeGraph index (a linked project has no WhyGraph
     DB); a CodeGraph failure fails the run.
+``--github-only``
+    Crawl only the forge (pull requests, issues, milestones) and mirror
+    the tags the portal's sync fetched: no commit walk, no CodeGraph, no
+    descriptions. The runner's ``forge`` trigger.
 ``--no-codegraph``
     Hidden test seam: skip the CodeGraph refresh of a full scan.
 
@@ -36,7 +40,7 @@ from typing import TYPE_CHECKING
 
 from .authors import AuthorResolver
 from .codegraph_crawler import CodeGraphCrawler
-from .git_crawler import GitCrawler
+from .git_crawler import GitCrawler, TagCrawler
 from .github_crawler import GitHubCrawler
 from .json_progress import JsonProgress, JsonUsageSink
 from .pr_origin_enricher import PROriginEnricher
@@ -98,12 +102,18 @@ def main(argv: list[str] | None = None) -> int:
 
     _log.info(
         "scan starting: mode=%s flags=%s",
-        "codegraph-only" if args.codegraph_only else "full",
+        "codegraph-only"
+        if args.codegraph_only
+        else "github-only"
+        if args.github_only
+        else "full",
         " ".join(_flag_list(args)) or "(none)",
     )
     t0 = time.monotonic()
     if args.codegraph_only:
         status = _scan_codegraph_only()
+    elif args.github_only:
+        status = _scan_github_only()
     else:
         status = _scan(
             skip_analyze=args.skip_analyze,
@@ -126,7 +136,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--skip-analyze", dest="skip_analyze", action="store_true")
     parser.add_argument("--no-remote", dest="remote", action="store_false")
-    parser.add_argument("--codegraph-only", dest="codegraph_only", action="store_true")
+    only = parser.add_mutually_exclusive_group()
+    only.add_argument("--codegraph-only", dest="codegraph_only", action="store_true")
+    only.add_argument("--github-only", dest="github_only", action="store_true")
     parser.add_argument(
         "--no-codegraph",
         dest="refresh_codegraph",
@@ -145,6 +157,8 @@ def _flag_list(args: argparse.Namespace) -> list[str]:
         flags.append("--no-remote")
     if args.codegraph_only:
         flags.append("--codegraph-only")
+    if args.github_only:
+        flags.append("--github-only")
     if not args.refresh_codegraph:
         flags.append("--no-codegraph")
     return flags
@@ -374,6 +388,56 @@ def _scan_codegraph_only() -> int:
         print(f"crawler {crawler.name!r} failed: {crawler.error}", file=sys.stderr)
         return 1
     return 0
+
+
+def _scan_github_only() -> int:
+    """Crawl the forge and mirror the tags, nothing else (``--github-only``).
+
+    The GitHub crawl (when ``[scan].forge`` resolves a client) and the tag
+    mirror (:class:`~whygraph.scan.git_crawler.TagCrawler`) run
+    concurrently: no commit walk, no PR-origin recovery, no author
+    resolution, no CodeGraph refresh and no LLM. A crawler failure fails
+    the run, as in a full scan.
+    """
+    from whygraph.core import get_config
+    from whygraph.core.usage import use_usage_sink
+    from whygraph.db import ensure_initialized
+    from whygraph.services.git import Repository
+
+    ensure_initialized()
+    config = get_config()
+    repository = Repository(
+        Path.cwd(),
+        origin_remote=config.scan_remote,
+        default_branch=config.scan_default_branch,
+    )
+    github_client = _select_github_client(config.scan_forge, repository)
+    t0 = time.monotonic()
+    with JsonProgress() as progress, use_usage_sink(JsonUsageSink(progress)):
+        progress.start_event(1, ["Forge crawl"])
+        progress.phase(1, "Forge crawl")
+        crawlers: list[Crawler] = [TagCrawler(progress, repository=repository)]
+        if github_client is not None:
+            crawlers.append(GitHubCrawler(progress, client=github_client))
+        for c in crawlers:
+            c.start()
+        for c in crawlers:
+            c.join()
+
+        elapsed = time.monotonic() - t0
+        progress.flush()
+        progress.emit(
+            _result_event(
+                crawlers=crawlers,
+                phase_timings={"Forge crawl": elapsed},
+                total_elapsed=elapsed,
+                analyze_skip="--github-only",
+            )
+        )
+    failed = [c for c in crawlers if c.error is not None]
+    for c in failed:
+        print(f"crawler {c.name!r} failed: {c.error}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def _codegraph_summary(crawler: Crawler | None, root: Path) -> dict:

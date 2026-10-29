@@ -8,6 +8,8 @@ export const BUDGET_STOPPED = "Stopped: monthly budget reached";
 export const BUDGET_SKIPPED = "LLM phase skipped: monthly budget reached";
 /** A linked project's run (`--codegraph-only`): only the code index, its history is on the platform. */
 export const CODE_INDEX_REFRESHED = "Code index refreshed";
+/** A `forge` run (`--github-only`): pull requests, issues, milestones and tags, never the commits. */
+export const FORGE_REFRESHED = "Pull requests and issues refreshed";
 
 /** "LLM usage: ~$0.42, 12 calls", only when the run made calls. */
 export function usageLine(summary: Pick<ScanRunSummary, "usage"> | null | undefined): string | null {
@@ -43,8 +45,8 @@ type RunLike = Pick<ScanRunRow, "trigger" | "kind" | "analyze">;
 
 /**
  * What a run was, for its title and the history: First scan, Import, Quick rescan,
- * Full rescan, Describe, Commit hook, GitHub push, Sync from GitHub or Scheduled
- * check (quick vs full is visible on every row).
+ * Full rescan, Describe, Commit hook, GitHub push, Sync from GitHub, Scheduled
+ * check or GitHub activity (quick vs full is visible on every row).
  */
 export function runLabel(run: RunLike): string {
   switch (run.trigger) {
@@ -63,6 +65,8 @@ export function runLabel(run: RunLike): string {
     case "poll":
     case "reconcile":
       return "Scheduled check";
+    case "forge":
+      return "GitHub activity";
     default:
       return run.kind === "sync" ? "Sync from GitHub" : run.trigger;
   }
@@ -179,13 +183,15 @@ export const runStatus = (status: ScanRunStatus) =>
 /**
  * What a finished sync did, in the words of the run page and the history:
  * "Imported and scanned", "Fetched new commits and scanned", "No new commits"
- * (never on a first run) or `null` when none of them applies.
+ * (never on a first run), the forge refresh of a `forge` run (which never scans
+ * the commits it fetched) or `null` when none of them applies.
  */
 export function syncOutcome(
   run: Pick<ScanRunRow, "trigger">,
   summary: Pick<ScanRunSummary, "cloned" | "scanned" | "moved"> | null | undefined,
 ): string | null {
   if (summary?.cloned) return "Imported and scanned";
+  if (run.trigger === "forge" && summary?.scanned) return FORGE_REFRESHED;
   if (summary?.moved && summary.scanned) return "Fetched new commits and scanned";
   if (summary?.moved) return "Fetched new commits";
   if (summary?.moved === false && run.trigger !== "initial") return "No new commits";
@@ -216,6 +222,7 @@ export function runOutcome(run: ScanRunRow, viewerUid?: string | null): string |
   // reason descriptions could not run (no key, unreachable endpoint).
   if (s.analyze_skipped === "budget") return BUDGET_SKIPPED;
   if (s.analyze_skipped === "--codegraph-only") return CODE_INDEX_REFRESHED;
+  if (s.analyze_skipped === "--github-only") return FORGE_REFRESHED;
   if (s.analyze_skipped) return s.analyze_skipped === "--skip-analyze" ? "Structure only" : "Descriptions skipped";
   if (run.status !== "ok") return null;
   return run.analyze ? "With descriptions" : "Structure only";

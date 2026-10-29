@@ -244,7 +244,8 @@ REMOVE_CLAUDE_CLI = "bd0a25e6df74"
 USAGE = "e46b50366a4c"
 UX = "a7c3e91f5b20"
 CHAT_TOOLS = "f2b8d4a60c13"
-HEAD = CHAT_TOOLS
+FORGE_TRIGGER = "c9d4e2f7a815"
+HEAD = FORGE_TRIGGER
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -1255,6 +1256,32 @@ def test_chat_tools_downgrade_narrows_the_source_check(
         ids = _seed_usage_org(conn)
     with pytest.raises(IntegrityError), portal_db.get_engine().begin() as conn:
         _agent_call(conn, ids, source="chat")
+    portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+
+
+def test_forge_trigger_check_and_downgrade(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        project = _seed_usage_org(conn)["project"]
+        _insert_run(conn, project, "forge")
+    portal_db._reset_engine()
+    with pytest.raises(RuntimeError, match="forge trigger revision.*1 forge"):
+        command.downgrade(portal_db.alembic_config(), CHAT_TOOLS)
+    portal_db._reset_engine()
+    with portal_db.get_engine().begin() as conn:
+        assert conn.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar() == (HEAD)
+        conn.execute(text("DELETE FROM scan_runs"))
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), CHAT_TOOLS)
+    portal_db._reset_engine()
+    with pytest.raises(IntegrityError, match="ck_scan_runs_trigger"):
+        with portal_db.get_engine().begin() as conn:
+            _insert_run(conn, project, "forge")
+    with portal_db.get_engine().begin() as conn:
+        _insert_run(conn, project, "reconcile")
     portal_db._reset_engine()
     command.upgrade(portal_db.alembic_config(), "head")
 

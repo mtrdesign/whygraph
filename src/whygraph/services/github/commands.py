@@ -191,8 +191,12 @@ def floor_for(watermark: str) -> datetime:
     return parse_github_ts(watermark) - LOOKBACK
 
 
-GATEWAY_TIMEOUTS = ("HTTP 502", "HTTP 504")
-"""``gh`` stderr markers of a query GitHub gave up on (too heavy for its limit)."""
+GATEWAY_TIMEOUTS = ("HTTP 502", "HTTP 504", "unexpected end of JSON input")
+"""``gh`` stderr markers of a query GitHub gave up on (too heavy for its limit).
+
+The last is ``gh``'s message for an empty or cut-off response body, which a
+~1 MB page of full PR fields can produce.
+"""
 
 PAGE_SIZES = (50, 25, 10)
 """Page sizes tried in turn when a page times out upstream.
@@ -203,7 +207,7 @@ A 100-PR page of the full PR fields took 8-12 s on ``biomejs/biome`` (often a
 
 
 def is_gateway_timeout(exc: ShellError) -> bool:
-    """Return whether ``exc`` is a GitHub 502 / 504 (an over-heavy query).
+    """Return whether ``exc`` is a GitHub 502 / 504 or a truncated answer.
 
     Parameters
     ----------
@@ -213,7 +217,8 @@ def is_gateway_timeout(exc: ShellError) -> bool:
     Returns
     -------
     bool
-        ``True`` when stderr names ``HTTP 502`` or ``HTTP 504``.
+        ``True`` when stderr names ``HTTP 502``, ``HTTP 504`` or
+        ``unexpected end of JSON input``.
     """
     return any(marker in exc.stderr for marker in GATEWAY_TIMEOUTS)
 
@@ -251,7 +256,7 @@ def paginate_graphql(
         injected by this function and overrides any caller value.
     query_for_size : Callable[[int], str], optional
         Builds the query for a page size. When given, ``query`` is
-        ignored; a ``HTTP 502`` / ``504`` retries the same cursor at the
+        ignored; a ``HTTP 502`` / ``504`` or truncated answer retries the same cursor at the
         next size of :data:`PAGE_SIZES` (50, 25, 10) and the reduced
         size stays for the rest of the crawl. Without it a failure
         raises at once.

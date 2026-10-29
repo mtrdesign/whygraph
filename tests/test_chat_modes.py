@@ -3,7 +3,7 @@
 A mode is a preset - a prompt block, preferred tools and starters - never a
 tool subset, so these pin the presets themselves: every mode loads and
 renders, its tool names are real chat tools, a stale id falls back to the
-default, and the Lead and Product blocks carry their behavioural rules.
+default, and the Lead block carries its behavioural rules.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from whygraph.chat import modes
 from whygraph.chat.modes import (
     AREA_PLACEHOLDER,
     DEFAULT_MODE,
-    MILESTONE_PLACEHOLDER,
     MODES,
     get_mode,
     mode_block,
@@ -127,51 +126,3 @@ def test_starters_take_the_first_area_or_a_generic_phrase() -> None:
 def test_engineer_starters_have_no_area() -> None:
     engineer = MODES["engineer"]
     assert render_starters(engineer, "chat") == engineer.starters
-
-
-def test_the_product_block_carries_its_rules() -> None:
-    """Plain language, data date, not tracked, dates both ways, never rank."""
-    block = mode_block(MODES["product"])
-    assert "product manager" in block
-    assert "No\n  symbol names or file paths unless asked" in block
-    assert "forge_data_as_of" in block and "freshness_warning" in block
-    assert "not_tracked" in block and '"not tracked"' in block
-    assert "Dates both ways" in block
-    assert "Never rank people" in block
-    assert "`compare_refs`" in block and "`get_milestones`" in block
-
-
-def test_product_prefers_the_outcome_tools_and_avoids_code() -> None:
-    product = MODES["product"]
-    assert product.prefer[:4] == (
-        "get_milestones",
-        "compare_refs",
-        "get_issue",
-        "list_recent_activity",
-    )
-    assert {"get_symbol", "read_file"} <= set(product.avoid)
-
-
-def test_product_starters_take_the_newest_milestone_or_a_generic_phrase() -> None:
-    product = MODES["product"]
-    assert any(MILESTONE_PLACEHOLDER in text for text in product.starters)
-    named = render_starters(product, "chat", "v2.1")
-    assert named == (
-        "What shipped in the last release?",
-        "How is the v2.1 milestone tracking?",
-        "Which user-reported issues are still open?",
-    )
-    generic = render_starters(product, "chat", None)
-    assert "How is the next milestone tracking?" in generic
-    assert all(MILESTONE_PLACEHOLDER not in text for text in generic)
-    assert render_starters(product, "chat", "  ") == generic
-    assert render_starters(product, "chat") == generic
-
-
-def test_no_starter_keeps_a_placeholder() -> None:
-    for mode in MODES.values():
-        for text in render_starters(mode, None, None) + render_starters(
-            mode, "chat", "v2.1"
-        ):
-            assert AREA_PLACEHOLDER not in text
-            assert MILESTONE_PLACEHOLDER not in text

@@ -72,7 +72,11 @@
       "question": "Explain the project area to me without code.",
       "expect": {
         "tools_any": [
-          "get_repo_overview"
+          "get_area_owners",
+          "get_area_outline",
+          "get_repo_overview",
+          "find_changes",
+          "list_recent_activity"
         ]
       }
     },

@@ -2185,39 +2185,6 @@ def test_mode_resolution_and_session_fields(chat_client, monkeypatch) -> None:
     assert _new_session(chat_client, mode="engineer")["mode"] == "engineer"
 
 
-def test_product_starters_name_the_next_open_milestone(chat_client) -> None:
-    """``<milestone>`` is the open milestone due soonest; generic when none is open."""
-    from whygraph.db.models import Milestone
-
-    def _product_starters() -> list[str]:
-        listing = chat_client.get("/api/chat/modes").json()
-        return {m["id"]: m["starters"] for m in listing["modes"]}["product"]
-
-    assert "How is the next milestone tracking?" in _product_starters()
-
-    def _milestone(number: int, title: str, state: str, due_on: str | None):
-        return Milestone(
-            number=number,
-            title=title,
-            state=state,
-            due_on=due_on,
-            updated_at="2026-10-01T00:00:00Z",
-            html_url=f"https://example.invalid/milestone/{number}",
-            fetched_at="2026-10-25T00:00:00Z",
-        )
-
-    with use_project(chat_client.context()), project_session() as db:
-        db.add(_milestone(1, "v1.0", "closed", "2027-06-01T00:00:00Z"))
-        db.add(_milestone(2, "Someday", "open", None))
-        db.add(_milestone(3, "v2.1", "open", "2026-12-01T00:00:00Z"))
-        db.add(_milestone(4, "v2.0", "open", "2026-11-01T00:00:00Z"))
-        db.commit()
-
-    starters = _product_starters()
-    assert "How is the v2.0 milestone tracking?" in starters
-    assert all("<milestone>" not in text for text in starters)
-
-
 def test_a_session_stored_in_the_removed_onboarding_mode_runs_as_engineer(
     chat_client, monkeypatch
 ) -> None:
@@ -2250,6 +2217,43 @@ def test_a_session_stored_in_the_removed_onboarding_mode_runs_as_engineer(
     response = chat_client.patch(_url(sid), json={"mode": "onboarding"})
     assert response.status_code == 400 and response.json()["code"] == "bad_mode"
     response = chat_client.post("/api/chat/sessions", json={"mode": "onboarding"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_mode"
+
+
+def test_a_session_stored_in_the_removed_product_mode_runs_as_engineer(
+    chat_client, monkeypatch
+) -> None:
+    """Product lost the phase 2 gate; its stored sessions and replies load as the default."""
+    sid, _q1, a1 = _truncated_session(chat_client, monkeypatch)
+    with use_project(chat_client.context()), project_session() as db:
+        row = db.get(ChatSessionRow, sid)
+        row.mode = "product"
+        db.add(row)
+        reply = db.get(ChatMessageRow, a1)
+        reply.mode = "product"
+        db.add(reply)
+        db.commit()
+
+    assert chat_client.get(_url(sid)).json()["mode"] == "engineer"
+    listed = chat_client.get("/api/chat/sessions").json()
+    assert {s["id"]: s["mode"] for s in listed}[sid] == "engineer"
+    assert chat_client.get("/api/chat/modes").json()["default"] == "engineer"
+
+    # Continuing a reply written in Product runs in the default mode.
+    spy = _stub_harness(monkeypatch, _reply(" and the rest"))
+    response = chat_client.post(_url(sid, f"/messages/{a1}/continue"))
+    assert response.status_code == 200
+    assert spy.kwargs["mode"] == "engineer"
+    spy = _stub_harness(monkeypatch, _reply("a2"))
+    response = chat_client.post(_url(sid, "/messages"), json={"content": "q2"})
+    assert response.status_code == 200
+    assert spy.kwargs["mode"] == "engineer"
+    assert _transcript(chat_client, sid)["messages"][-1]["mode"] == "engineer"
+
+    # A new write of the retired id is refused like any unknown mode.
+    response = chat_client.patch(_url(sid), json={"mode": "product"})
+    assert response.status_code == 400 and response.json()["code"] == "bad_mode"
+    response = chat_client.post("/api/chat/sessions", json={"mode": "product"})
     assert response.status_code == 400 and response.json()["code"] == "bad_mode"
 
 

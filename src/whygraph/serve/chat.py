@@ -74,7 +74,7 @@ from whygraph.core.usage import (
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
-from whygraph.db.models import Commit, Issue, Milestone, PullRequest
+from whygraph.db.models import Commit, Issue, PullRequest
 from whygraph.mcp.rationale_cache import lookup_exact
 from whygraph.mcp.targets import indexed_symbol_target, repo_root
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, Symbol
@@ -341,12 +341,10 @@ def modes(request: Request) -> dict:
 
     ``default`` is the mode a new session starts in: the caller's last-used
     mode in this project, else the project's ``[chat].mode``, else engineer.
-    ``<area>`` in a starter becomes the first configured area's name and
-    ``<milestone>`` the next open milestone's title.
+    ``<area>`` in a starter becomes the first configured area's name.
     """
     areas = configured_areas()
     area = areas[0].name if areas else None
-    milestone = _next_open_milestone()
     return {
         "default": _new_session_mode(request),
         "modes": [
@@ -354,26 +352,11 @@ def modes(request: Request) -> dict:
                 "id": mode.id,
                 "label": mode.label,
                 "description": mode.description,
-                "starters": list(render_starters(mode, area, milestone)),
+                "starters": list(render_starters(mode, area)),
             }
             for mode in MODES.values()
         ],
     }
-
-
-def _next_open_milestone() -> str | None:
-    """Title of the next open milestone (soonest due, undated last, then highest number)."""
-    with get_session() as session:
-        return session.exec(
-            select(Milestone.title)
-            .where(Milestone.state == "open")
-            .order_by(
-                col(Milestone.due_on).is_(None),
-                col(Milestone.due_on),
-                col(Milestone.number).desc(),
-            )
-            .limit(1)
-        ).first()
 
 
 @router.get("/models")

@@ -32,7 +32,7 @@ export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 /** The chat modes (`MODE_IDS` in `core/config.py`), in the order the select lists them. */
-export const MODE_IDS = ["engineer", "lead", "product"] as const;
+export const MODE_IDS = ["engineer", "lead"] as const;
 
 /** The Chat task's pick: a model, plus `[chat].effort` and `[chat].mode` ("" = unset, inherit). */
 export interface ChatPick extends ModelPick {

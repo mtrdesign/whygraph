@@ -1,0 +1,98 @@
+{
+  "suite": "product",
+  "cases": [
+    {
+      "id": "P1",
+      "question": "What's in the next release?",
+      "expect": {
+        "tools_any": [
+          "get_milestones"
+        ]
+      }
+    },
+    {
+      "id": "P2",
+      "question": "What changed between the last two releases?",
+      "expect": {
+        "tools_any": [
+          "compare_refs"
+        ]
+      }
+    },
+    {
+      "id": "P3",
+      "question": "Is the current milestone on track?",
+      "expect": {
+        "tools_any": [
+          "get_milestones"
+        ]
+      }
+    },
+    {
+      "id": "P4",
+      "question": "Which customer-facing features shipped this quarter?",
+      "expect": {
+        "tools_any": [
+          "list_recent_activity",
+          "find_changes"
+        ]
+      }
+    },
+    {
+      "id": "P5",
+      "question": "What's the oldest open bug?",
+      "expect": {
+        "tools_any": [
+          "run_project_stats",
+          "get_issue"
+        ]
+      }
+    },
+    {
+      "id": "P6",
+      "question": "Which areas got the most work this month?",
+      "expect": {
+        "tools_any": [
+          "run_project_stats",
+          "get_work_in_flight"
+        ]
+      }
+    },
+    {
+      "id": "P7",
+      "question": "What did release `@biomejs/biome@2.6.3` fix?",
+      "expect": {
+        "tools_any": [
+          "compare_refs"
+        ]
+      }
+    },
+    {
+      "id": "P8",
+      "question": "Explain the project area to me without code.",
+      "expect": {
+        "tools_any": [
+          "get_repo_overview"
+        ]
+      }
+    },
+    {
+      "id": "P9",
+      "question": "What's waiting on review right now?",
+      "expect": {
+        "tools_any": [
+          "get_work_in_flight"
+        ]
+      }
+    },
+    {
+      "id": "P10",
+      "question": "Draft release notes since `@biomejs/biome@2.6.2`.",
+      "expect": {
+        "tools_any": [
+          "compare_refs"
+        ]
+      }
+    }
+  ]
+}

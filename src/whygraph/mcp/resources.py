@@ -49,7 +49,7 @@ import json
 import logging
 import re
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -74,8 +74,10 @@ from whygraph.db.models import (
     CommitFileChange,
     ForgeCrawlState,
     Issue,
+    Milestone,
     PRIssueLink,
     PullRequest,
+    Tag,
 )
 from whygraph.scan.authors import is_bot
 from whygraph.scan.refactor_score import BORING_THRESHOLD
@@ -595,6 +597,50 @@ def _pr_commit_shas(pr: PullRequest) -> set[str]:
     return shas
 
 
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
+"""A full SHA-1 commit id: the only revision text that may reach ``git`` argv."""
+
+_LINK_CHUNK = 100
+"""SHAs per query in :func:`_linked_prs_many` (three bound values each)."""
+
+
+def _linked_prs_many(session: Session, shas: set[str]) -> dict[str, list[PullRequest]]:
+    """Pull requests per commit, for many commits in a few queries.
+
+    The batched form of :func:`whygraph.mcp.evidence._linked_prs`, with the
+    same three sources (merge commit, head commit, ``commit_titles``): one
+    query per :data:`_LINK_CHUNK` SHAs instead of one per commit, each match
+    confirmed by :func:`_pr_commit_shas` rather than by the ``LIKE`` alone.
+    Only full hex SHAs are looked up, so none needs ``LIKE`` escaping.
+
+    Returns
+    -------
+    dict[str, list[PullRequest]]
+        For each SHA some PR contains, those PRs by number; SHAs no PR
+        contains are absent.
+    """
+    wanted = sorted(sha for sha in shas if _FULL_SHA.fullmatch(sha))
+    found: dict[int, PullRequest] = {}
+    for start in range(0, len(wanted), _LINK_CHUNK):
+        chunk = wanted[start : start + _LINK_CHUNK]
+        stmt = select(PullRequest).where(
+            or_(
+                col(PullRequest.merge_commit_sha).in_(chunk),
+                col(PullRequest.head_sha).in_(chunk),
+                *(col(PullRequest.commit_titles).like(f"%{sha}%") for sha in chunk),
+            )
+        )
+        for pr in session.exec(stmt).all():
+            found[pr.number] = pr
+    wanted_set = set(wanted)
+    linked: dict[str, list[PullRequest]] = {}
+    for number in sorted(found):
+        pr = found[number]
+        for sha in _pr_commit_shas(pr) & wanted_set:
+            linked.setdefault(sha, []).append(pr)
+    return linked
+
+
 def _find_changes_resource(
     query: str | None = None,
     path: str | None = None,
@@ -980,14 +1026,14 @@ many may have newer comments the crawl never saw, so its last activity falls
 back to ``updated_at``."""
 
 _WIP_NOT_TRACKED = (
-    "review_decision",
-    "assignees",
-    "milestone",
-    "pr_files",
+    "team_review_requests",
     "deployments",
     "incidents",
 )
-"""Fields a lead would ask about that the crawl does not store (yet)."""
+"""Fields a lead would ask about that the crawl does not store.
+
+Team review requests are left out of the crawl on purpose: an installation
+token cannot read teams, so only user and bot requests are stored."""
 
 _SQL_IN_CHUNK = 500
 """Batch size for ``IN (...)`` lists, well under SQLite's variable limit."""
@@ -1018,6 +1064,50 @@ def _pr_last_activity(pr: PullRequest) -> str:
         and (parsed := _parse_ts(c.get("created_at")))
     ]
     return max(human)[1] if human else pr.updated_at
+
+
+def _pr_areas(
+    pr: PullRequest,
+    labels: list[str],
+    commit_paths: dict[str, set[str]],
+    *,
+    labels_to_areas: Callable[[list[str]], list[str]] | None,
+    paths_to_areas: Callable[[list[str]], list[str]] | None,
+) -> tuple[list[str], str | None]:
+    """A pull request's areas and where they came from.
+
+    Labels first (``"labels"``); else the PR's changed files as the crawl
+    stored them, the first 100 (``"files"``); else the recorded file changes
+    of its commits that are in ``commit_paths`` (``"commits"``); else no area
+    (``None``). A source that yields paths decides, even when they map to no
+    area.
+    """
+    areas = labels_to_areas(labels) if labels_to_areas is not None else []
+    if areas:
+        return areas, "labels"
+    if paths_to_areas is None:
+        return [], None
+    files = sorted({str(p) for p in _json_list(pr.files) if isinstance(p, str) and p})
+    if files:
+        return paths_to_areas(files), "files"
+    touched = sorted(
+        {p for sha in _pr_commit_shas(pr) for p in commit_paths.get(sha, ())}
+    )
+    if touched:
+        return paths_to_areas(touched), "commits"
+    return [], None
+
+
+def _str_list(raw: str | None) -> list[str]:
+    """Decode a JSON list column of strings (logins), dropping anything else."""
+    return [str(item) for item in _json_list(raw) if isinstance(item, str)]
+
+
+def _milestone_ref(number: int | None, titles: dict[int, str]) -> dict | None:
+    """``{"number", "title"}`` for a milestone number, ``None`` without one."""
+    if number is None:
+        return None
+    return {"number": number, "title": titles.get(number)}
 
 
 def _paths_by_sha(session: Session, shas: set[str]) -> dict[str, set[str]]:
@@ -1085,12 +1175,15 @@ def _work_in_flight_resource(
 
     Notes
     -----
-    **Area attribution is labels first.** A PR whose labels map to an area
-    gets ``area_source="labels"``. Otherwise, when any of its commits has
-    recorded file changes (open-PR commits are not crawled, so only commits
-    already scanned locally qualify), its areas come from those paths with
-    ``area_source="commits"``. Otherwise ``area_source`` is ``None``. Issues
-    are attributed by labels only.
+    **Area attribution is labels, then files, then commits** (see
+    :func:`_pr_areas`): a PR's labels, else its changed files as crawled
+    (``area_source="files"``), else the recorded file changes of its commits
+    (open-PR commits are not crawled, so only commits already scanned locally
+    qualify). Issues are attributed by labels only.
+
+    Each PR carries its review decision, requested reviewers (users and bots;
+    team requests are not crawled), first review time, assignees, milestone
+    and diff size; each issue its assignees and milestone.
 
     A PR's ``last_activity_at`` is its newest non-bot comment, else
     ``updated_at`` (see :func:`_pr_last_activity`). Drafts are never
@@ -1111,6 +1204,9 @@ def _work_in_flight_resource(
                 select(PullRequest).where(col(PullRequest.state) == "open")
             ).all()
             issues = session.exec(select(Issue).where(col(Issue.state) == "open")).all()
+            milestone_titles = dict(
+                session.exec(select(Milestone.number, Milestone.title)).all()
+            )
             open_numbers = {pr.number for pr in prs}
             closes: dict[int, list[int]] = {}
             closed_by: dict[int, list[int]] = {}
@@ -1134,14 +1230,13 @@ def _work_in_flight_resource(
             pr_rows: list[dict] = []
             for pr in prs:
                 labels = [str(label) for label in _json_list(pr.labels)]
-                areas = labels_to_areas(labels) if labels_to_areas is not None else []
-                source = "labels" if areas else None
-                if not areas and paths_to_areas is not None:
-                    touched = sorted(
-                        {p for sha in pr_shas[pr.number] for p in paths.get(sha, ())}
-                    )
-                    if touched:
-                        areas, source = paths_to_areas(touched), "commits"
+                areas, source = _pr_areas(
+                    pr,
+                    labels,
+                    paths,
+                    labels_to_areas=labels_to_areas,
+                    paths_to_areas=paths_to_areas,
+                )
                 if area is not None and area not in areas:
                     continue
                 last_activity = _pr_last_activity(pr)
@@ -1163,6 +1258,14 @@ def _work_in_flight_resource(
                         "labels": labels,
                         "areas": areas,
                         "area_source": source,
+                        "review_decision": pr.review_decision,
+                        "review_requests": _str_list(pr.review_requests),
+                        "first_review_at": pr.first_review_at,
+                        "assignees": _str_list(pr.assignees),
+                        "milestone": _milestone_ref(pr.milestone, milestone_titles),
+                        "additions": pr.additions,
+                        "deletions": pr.deletions,
+                        "changed_files": pr.changed_files,
                         "closes_issues": closes.get(pr.number, []),
                     }
                 )
@@ -1184,6 +1287,8 @@ def _work_in_flight_resource(
                         "stale": idle is not None and idle >= issue_stale_days,
                         "labels": labels,
                         "areas": areas,
+                        "assignees": _str_list(issue.assignees),
+                        "milestone": _milestone_ref(issue.milestone, milestone_titles),
                         "linked_open_prs": closed_by.get(issue.number, []),
                     }
                 )
@@ -1233,6 +1338,591 @@ def _work_in_flight_resource(
             f"{omitted} more open item(s) are counted in summary but not "
             f"listed (limit {limit} per list). Narrow with `area` or raise "
             f"`limit` (max {_WIP_MAX_LIMIT})."
+        )
+    return result
+
+
+# ---- compare refs and milestones (chat-only reads) ------------------------
+
+
+_COMPARE_MAX_LIMIT = 50
+"""Upper clamp on the per-list ``limit`` of ``compare_refs``."""
+
+_SHA_PREFIX = re.compile(r"[0-9a-fA-F]{7,40}")
+"""What ``compare_refs`` tries as a commit SHA (after a tag name)."""
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+_REF_HINT_TAGS = 10
+"""How many of the newest tag names an unresolvable ref's error lists."""
+
+
+def _date_cutoff(text: str) -> str | None:
+    """An inclusive ``authored_at`` upper bound for an ISO date, else ``None``.
+
+    A bare date (``YYYY-MM-DD``) means the end of that day; a datetime is
+    taken as given (UTC when it carries no offset). The bound is compared
+    lexically with stored timestamps, so a commit under a non-UTC offset can
+    land a few hours either side, as with :func:`_since_cutoff`.
+    """
+    if _ISO_DATE.fullmatch(text):
+        try:
+            day = date.fromisoformat(text)
+        except ValueError:
+            return None
+        return f"{day.isoformat()}T23:59:59Z"
+    if "T" not in text:
+        return None
+    parsed = _parse_ts(text)
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ") if parsed else None
+
+
+def _resolve_ref(session: Session, ref: str | None, *, role: str) -> dict:
+    """Resolve one ``compare_refs`` endpoint to a scanned commit.
+
+    Tried in order: a tag name (the ``tag`` table), a SHA prefix of 7-40 hex
+    characters (``commit``, by key range), an ISO date (the newest
+    default-branch commit authored on or before it). An empty ``to_ref``
+    means the newest scanned default-branch commit. Every resolved ``sha`` is
+    a full 40-hex id read from the DB; the caller's text never is one.
+
+    Returns
+    -------
+    dict
+        ``{"ref", "kind", "sha", "date"}``, ``kind`` one of ``"tag"``,
+        ``"sha"``, ``"date"``, ``"latest"``.
+
+    Raises
+    ------
+    WhyGraphError
+        The ref resolves to nothing, or a SHA prefix to several commits.
+    """
+    text = (ref or "").strip()
+    if not text:
+        if role == "from_ref":
+            raise WhyGraphError(
+                "from_ref is required: a tag name, a commit SHA or an ISO date"
+            )
+        row = session.exec(
+            select(Commit.sha, Commit.authored_at)
+            .where(Commit.on_default_branch == 1)
+            .order_by(col(Commit.authored_at).desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            raise WhyGraphError(_DB_UNSCANNED_MESSAGE)
+        return {"ref": None, "kind": "latest", "sha": row[0], "date": row[1]}
+
+    tag = session.get(Tag, text)
+    if tag is not None and _FULL_SHA.fullmatch(tag.sha or ""):
+        return {"ref": text, "kind": "tag", "sha": tag.sha, "date": tag.tagged_at}
+
+    if _SHA_PREFIX.fullmatch(text):
+        prefix = text.lower()
+        rows = session.exec(
+            select(Commit.sha, Commit.authored_at)
+            .where(
+                col(Commit.sha) >= prefix,
+                col(Commit.sha) <= prefix + "f" * (40 - len(prefix)),
+            )
+            .limit(2)
+        ).all()
+        if len(rows) > 1:
+            raise WhyGraphError(
+                f"{role} {text!r} matches more than one commit: give more characters"
+            )
+        if rows and _FULL_SHA.fullmatch(rows[0][0]):
+            return {"ref": text, "kind": "sha", "sha": rows[0][0], "date": rows[0][1]}
+
+    cutoff = _date_cutoff(text)
+    if cutoff is not None:
+        row = session.exec(
+            select(Commit.sha, Commit.authored_at)
+            .where(Commit.on_default_branch == 1, col(Commit.authored_at) <= cutoff)
+            .order_by(col(Commit.authored_at).desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            raise WhyGraphError(
+                f"{role} {text!r}: no default-branch commit on or before that date"
+            )
+        return {"ref": text, "kind": "date", "sha": row[0], "date": row[1]}
+
+    newest = session.exec(
+        select(Tag.name)
+        .order_by(col(Tag.tagged_at).desc(), col(Tag.name))
+        .limit(_REF_HINT_TAGS)
+    ).all()
+    known = ", ".join(newest) if newest else "(no tags recorded)"
+    raise WhyGraphError(
+        f"{role} {text!r} is not a known tag, a scanned commit SHA (7-40 hex) "
+        f"or an ISO date (YYYY-MM-DD). Newest tags: {known}."
+    )
+
+
+def _compare_refs_resource(
+    from_ref: str | None,
+    to_ref: str | None = None,
+    limit: int | None = 25,
+    *,
+    labels_to_areas: Callable[[list[str]], list[str]] | None = None,
+    paths_to_areas: Callable[[list[str]], list[str]] | None = None,
+) -> dict:
+    """What ``to_ref`` adds on top of ``from_ref``: commits, PRs, closed issues.
+
+    The release question ("what shipped in v1.4", "what changed since
+    <date>"): two fixed endpoints and everything between them, grouped by
+    area. History reads without endpoints are
+    :func:`_recent_activity_resource` and :func:`_find_changes_resource`.
+
+    Parameters
+    ----------
+    from_ref : str
+        The older endpoint; resolved by :func:`_resolve_ref`.
+    to_ref : str, optional
+        The newer endpoint; ``None`` or empty means the newest scanned
+        default-branch commit.
+    limit : int, optional
+        Maximum rows per list (commits, pull requests, issues). Default 25,
+        clamped to ``[1, _COMPARE_MAX_LIMIT]``; the rest is counted in
+        ``omitted``.
+    labels_to_areas, paths_to_areas : callable, optional
+        Map labels / repo paths to configured area names, as for
+        :func:`_work_in_flight_resource`; ``None`` groups nothing.
+
+    Returns
+    -------
+    dict
+        ``{"from", "to", "total_commits", "not_scanned", "by_area",
+        "pull_requests", "issues_closed", "commits", "forge_data_as_of",
+        "limit", "omitted"}``, plus a ``"note"`` when something needs saying.
+
+    Raises
+    ------
+    WhyGraphError
+        The DB is missing or unscanned, a ref does not resolve, or ``git``
+        cannot list the range.
+
+    Notes
+    -----
+    The range is read from the local repository (``git rev-list
+    --end-of-options <to> ^<from>`` through
+    :meth:`~whygraph.services.git.Repository.range_shas`), and only the two
+    DB-resolved 40-hex SHAs reach its argv. Pull requests come from one
+    batched lookup (:func:`_linked_prs_many`), and a commit or PR counts in
+    every area it touches.
+
+    Not registered in :func:`register` - the chat tool is its only caller.
+    """
+    limit = _clamp(limit, 25, _COMPARE_MAX_LIMIT)
+    try:
+        with get_session() as session:
+            start = _resolve_ref(session, from_ref, role="from_ref")
+            end = _resolve_ref(session, to_ref, role="to_ref")
+            if not (
+                _FULL_SHA.fullmatch(start["sha"]) and _FULL_SHA.fullmatch(end["sha"])
+            ):
+                raise WhyGraphError("a ref resolved to something other than a commit")
+            try:
+                shas = Repository(repo_root()).range_shas(start["sha"], end["sha"])
+            except GitError as exc:
+                raise WhyGraphError(
+                    f"git could not list {start['sha'][:7]}..{end['sha'][:7]} "
+                    "in the local repository - both commits must be in this "
+                    "checkout"
+                ) from exc
+
+            commits: list[Commit] = []
+            ordered = sorted(shas)
+            for offset in range(0, len(ordered), _SQL_IN_CHUNK):
+                chunk = ordered[offset : offset + _SQL_IN_CHUNK]
+                commits.extend(
+                    session.exec(select(Commit).where(col(Commit.sha).in_(chunk))).all()
+                )
+            scanned = {c.sha for c in commits}
+            linked = _linked_prs_many(session, scanned)
+            prs = {pr.number: pr for found in linked.values() for pr in found}
+            mapped = paths_to_areas is not None
+            commit_paths = _paths_by_sha(session, scanned) if mapped else {}
+            if mapped and prs:
+                pr_only = set().union(*(_pr_commit_shas(pr) for pr in prs.values()))
+                commit_paths.update(_paths_by_sha(session, pr_only - scanned))
+
+            closes: dict[int, list[int]] = {}
+            issues: list[Issue] = []
+            if prs:
+                links = session.exec(
+                    select(PRIssueLink.pr_number, PRIssueLink.issue_number).where(
+                        col(PRIssueLink.pr_number).in_(sorted(prs)),
+                        col(PRIssueLink.link_kind) == "closes",
+                    )
+                ).all()
+                for pr_number, issue_number in sorted(links):
+                    closes.setdefault(pr_number, []).append(issue_number)
+                numbers = sorted({n for found in closes.values() for n in found})
+                if numbers:
+                    issues = list(
+                        session.exec(
+                            select(Issue).where(col(Issue.number).in_(numbers))
+                        ).all()
+                    )
+            forge_as_of = _forge_data_as_of(session)
+            session.expunge_all()  # rows are read after the session closes
+    except OperationalError as exc:
+        raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
+
+    def _commit_areas(sha: str) -> list[str]:
+        paths = commit_paths.get(sha)
+        return paths_to_areas(sorted(paths)) if mapped and paths else []
+
+    commits.sort(key=lambda c: (c.authored_at, c.sha), reverse=True)
+    commit_rows = [
+        {
+            "sha": c.sha,
+            "subject": c.subject,
+            "author_name": c.author_name,
+            "authored_at": c.authored_at,
+            "areas": _commit_areas(c.sha),
+            "pull_requests": [pr.number for pr in linked.get(c.sha, [])],
+        }
+        for c in commits
+    ]
+
+    pr_rows: list[dict] = []
+    for pr in prs.values():
+        labels = [str(label) for label in _json_list(pr.labels)]
+        areas, source = _pr_areas(
+            pr,
+            labels,
+            commit_paths,
+            labels_to_areas=labels_to_areas,
+            paths_to_areas=paths_to_areas,
+        )
+        pr_rows.append(
+            {
+                "number": pr.number,
+                "title": pr.title,
+                "author": pr.author,
+                "state": pr.state,
+                "merged_at": pr.merged_at,
+                "labels": labels,
+                "areas": areas,
+                "area_source": source,
+                "closes_issues": closes.get(pr.number, []),
+            }
+        )
+    pr_rows.sort(key=lambda r: (r["merged_at"] or "", r["number"]), reverse=True)
+    issue_rows = [
+        {
+            "number": i.number,
+            "title": i.title,
+            "state": i.state,
+            "state_reason": i.state_reason,
+            "closed_at": i.closed_at,
+        }
+        for i in sorted(issues, key=lambda i: i.number)
+    ]
+
+    by_area: list[dict] = []
+    if mapped:
+        groups: dict[str | None, dict] = {}
+        for row in commit_rows:
+            for name in row["areas"] or [None]:
+                groups.setdefault(name, {"commits": 0, "prs": set()})["commits"] += 1
+        for row in pr_rows:
+            for name in row["areas"] or [None]:
+                groups.setdefault(name, {"commits": 0, "prs": set()})["prs"].add(
+                    row["number"]
+                )
+        for name, group in groups.items():
+            numbers = sorted(group["prs"], reverse=True)
+            by_area.append(
+                {
+                    "area": name,
+                    "commits": group["commits"],
+                    "pull_request_count": len(numbers),
+                    "pull_requests": numbers[:limit],
+                }
+            )
+        by_area.sort(key=lambda g: (g["area"] is None, -g["commits"], g["area"] or ""))
+
+    omitted = (
+        max(0, len(commit_rows) - limit)
+        + max(0, len(pr_rows) - limit)
+        + max(0, len(issue_rows) - limit)
+    )
+    result: dict = {
+        "from": start,
+        "to": end,
+        "total_commits": len(shas),
+        "not_scanned": len(shas) - len(scanned),
+        "by_area": by_area,
+        "pull_requests": pr_rows[:limit],
+        "issues_closed": issue_rows[:limit],
+        "commits": commit_rows[:limit],
+        "forge_data_as_of": forge_as_of,
+        "limit": limit,
+        "omitted": omitted,
+    }
+    notes: list[str] = []
+    if not shas and (start["date"] or "") > (end["date"] or ""):
+        notes.append(
+            "from_ref is newer than to_ref, so nothing is between them; swap them."
+        )
+    if not mapped:
+        notes.append("No areas are configured, so by_area is empty.")
+    if omitted:
+        notes.append(
+            f"{omitted} more row(s) are counted but not listed (limit {limit} "
+            f"per list, max {_COMPARE_MAX_LIMIT}); by_area covers them all."
+        )
+    if notes:
+        result["note"] = " ".join(notes)
+    return result
+
+
+_MILESTONE_STATES = ("open", "closed", "all")
+
+_MILESTONE_MAX_LIMIT = 50
+"""Upper clamp on the ``limit`` of ``get_milestones``."""
+
+_BURNDOWN_POINTS = 60
+"""At most about this many burndown rows: past it, each row spans more days."""
+
+_MILESTONE_DESCRIPTION_CHARS = 240
+"""Milestone descriptions are clipped like the recent-activity ones."""
+
+_BURNDOWN_NOTE = (
+    "Each item counts from its creation date, because when it joined the "
+    "milestone is not tracked; items moved out of the milestone are not "
+    "counted, and a reopened item counts as open throughout."
+)
+
+
+def _burndown_rows(
+    items: list[tuple[datetime, datetime | None]], end: datetime
+) -> tuple[list[list], int, str | None]:
+    """Open / closed counts per day for one milestone's items.
+
+    Parameters
+    ----------
+    items : list of (created, closed or None)
+        Every issue and PR in the milestone, parsed.
+    end : datetime
+        The last day to plot (the milestone's close, else now).
+
+    Returns
+    -------
+    tuple
+        ``(rows, step_days, start_date)``: rows of ``[date, open, closed]``
+        from the earliest creation to ``end``, one every ``step_days`` days
+        and always ending on ``end``'s date; empty with no items.
+    """
+    if not items:
+        return [], 1, None
+    first = min(created for created, _ in items).date()
+    last = max(end.date(), first)
+    span = (last - first).days
+    step = max(1, -(-span // _BURNDOWN_POINTS))
+    days = [first + timedelta(days=n) for n in range(0, span + 1, step)]
+    if days[-1] != last:
+        days.append(last)
+    rows: list[list] = []
+    for day in days:
+        cut = datetime.combine(day, datetime.max.time(), tzinfo=timezone.utc)
+        created = [(c, d) for c, d in items if c <= cut]
+        closed = sum(1 for _, d in created if d is not None and d <= cut)
+        rows.append([day.isoformat(), len(created) - closed, closed])
+    return rows, step, first.isoformat()
+
+
+def _milestones_resource(
+    state: str | None = "open",
+    number: int | None = None,
+    limit: int | None = 20,
+) -> dict:
+    """Milestones with their progress, plus one milestone's burndown.
+
+    Parameters
+    ----------
+    state : {"open", "closed", "all"}, optional
+        Which milestones to list. Default ``"open"``.
+    number : int, optional
+        The milestone to draw the burndown for; it need not be in the listed
+        state. Default: the first one listed.
+    limit : int, optional
+        Maximum milestones listed. Default 20, clamped to
+        ``[1, _MILESTONE_MAX_LIMIT]``; the rest is counted in ``omitted``.
+
+    Returns
+    -------
+    dict
+        ``{"as_of", "forge_data_as_of", "state", "milestones", "burndown",
+        "columns", "rows", "omitted"}``, plus ``"freshness_warning"`` and
+        ``"note"`` when they apply. ``columns`` / ``rows`` are the burndown
+        (``date``, ``open``, ``closed``) of ``burndown.number``, top level so
+        the chat registry can mint a chart ref for them.
+
+    Raises
+    ------
+    WhyGraphError
+        The DB is missing or unscanned, ``state`` is unknown, or ``number``
+        names no milestone.
+
+    Notes
+    -----
+    Open milestones are listed by due date (none last), closed ones newest
+    close first. Counts come from the crawled issues and PRs that carry the
+    milestone; ``progress_pct`` is GitHub's own figure. Not registered in
+    :func:`register` - the chat tool is its only caller.
+    """
+    state = (state or "open").strip().lower()
+    if state not in _MILESTONE_STATES:
+        raise WhyGraphError(
+            f"state must be one of {', '.join(_MILESTONE_STATES)}; got {state!r}"
+        )
+    limit = _clamp(limit, 20, _MILESTONE_MAX_LIMIT)
+    now = _utcnow()
+    try:
+        with get_session() as session:
+            every = session.exec(select(Milestone)).all()
+            issue_rows = session.exec(
+                select(
+                    Issue.milestone, Issue.state, Issue.created_at, Issue.closed_at
+                ).where(col(Issue.milestone).is_not(None))
+            ).all()
+            pr_rows = session.exec(
+                select(
+                    PullRequest.milestone,
+                    PullRequest.state,
+                    PullRequest.created_at,
+                    PullRequest.closed_at,
+                    PullRequest.merged_at,
+                ).where(col(PullRequest.milestone).is_not(None))
+            ).all()
+            stamps = session.exec(
+                select(ForgeCrawlState.crawled_at).where(
+                    col(ForgeCrawlState.kind).in_(
+                        ("milestone", "pull_request", "issue")
+                    )
+                )
+            ).all()
+            session.expunge_all()  # rows are read after the session closes
+    except OperationalError as exc:
+        raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
+
+    dated = [(parsed, raw) for raw in stamps if (parsed := _parse_ts(raw))]
+    forge_as_of = min(dated)[1] if dated else None
+
+    counts: dict[int, dict] = {}
+    items: dict[int, list[tuple[datetime, datetime | None]]] = {}
+    for kind, rows in (("issues", issue_rows), ("pull_requests", pr_rows)):
+        for row in rows:
+            ms, item_state, created_raw = row[0], (row[1] or "").lower(), row[2]
+            closed_raw = row[3] or (row[4] if len(row) > 4 else None)
+            tally = counts.setdefault(
+                ms,
+                {
+                    "issues": {"open": 0, "closed": 0},
+                    "pull_requests": {"open": 0, "merged": 0, "closed": 0},
+                },
+            )[kind]
+            tally[item_state if item_state in tally else "closed"] += 1
+            created = _parse_ts(created_raw)
+            if created is not None:
+                closed = _parse_ts(closed_raw) if item_state != "open" else None
+                items.setdefault(ms, []).append((created, closed))
+
+    def _due_order(m: Milestone) -> tuple:
+        return (m.due_on is None, m.due_on or "", m.number)
+
+    open_ms = sorted((m for m in every if m.state == "open"), key=_due_order)
+    closed_ms = sorted(
+        (m for m in every if m.state != "open"),
+        key=lambda m: (m.closed_at or "", m.number),
+        reverse=True,
+    )
+    listed = {"open": open_ms, "closed": closed_ms, "all": open_ms + closed_ms}[state]
+
+    def _row(m: Milestone) -> dict:
+        due = _parse_ts(m.due_on)
+        days_to_due = None if due is None else (due.date() - now.date()).days
+        description = m.description
+        if description and len(description) > _MILESTONE_DESCRIPTION_CHARS:
+            description = description[:_MILESTONE_DESCRIPTION_CHARS] + "…"
+        tally = counts.get(m.number) or {
+            "issues": {"open": 0, "closed": 0},
+            "pull_requests": {"open": 0, "merged": 0, "closed": 0},
+        }
+        return {
+            "number": m.number,
+            "title": m.title,
+            "state": m.state,
+            "description": description,
+            "due_on": m.due_on,
+            "days_to_due": days_to_due,
+            "overdue": m.state == "open"
+            and days_to_due is not None
+            and days_to_due < 0,
+            "closed_at": m.closed_at,
+            "progress_pct": m.progress_pct,
+            **tally,
+            "html_url": m.html_url,
+        }
+
+    target: Milestone | None
+    if number is not None:
+        target = next((m for m in every if m.number == int(number)), None)
+        if target is None:
+            raise WhyGraphError(
+                f"no milestone #{int(number)}; known: "
+                + (", ".join(f"#{m.number}" for m in open_ms + closed_ms) or "none")
+            )
+    else:
+        target = listed[0] if listed else None
+
+    burndown: dict | None = None
+    columns: list[str] = ["date", "open", "closed"]
+    rows: list[list] = []
+    if target is not None:
+        end = _parse_ts(target.closed_at) if target.state != "open" else None
+        rows, step, start = _burndown_rows(items.get(target.number, []), end or now)
+        burndown = {
+            "number": target.number,
+            "title": target.title,
+            "start": start,
+            "end": rows[-1][0] if rows else None,
+            "step_days": step,
+            "note": _BURNDOWN_NOTE,
+        }
+
+    omitted = max(0, len(listed) - limit)
+    result: dict = {
+        "as_of": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "forge_data_as_of": forge_as_of,
+    }
+    warning = _freshness_warning(forge_as_of, now)
+    if warning:
+        result["freshness_warning"] = warning
+    result.update(
+        {
+            "state": state,
+            "milestones": [_row(m) for m in listed[:limit]],
+            "burndown": burndown,
+            "columns": columns,
+            "rows": rows,
+            "omitted": omitted,
+        }
+    )
+    if omitted:
+        result["note"] = (
+            f"{omitted} more milestone(s) not listed (limit {limit}, max "
+            f"{_MILESTONE_MAX_LIMIT})."
+        )
+    elif not every:
+        result["note"] = (
+            "No milestones are recorded: the repository has none, or GitHub "
+            "access is off."
         )
     return result
 

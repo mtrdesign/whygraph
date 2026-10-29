@@ -125,10 +125,10 @@ def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_nineteen_tools_with_unique_names_and_object_schemas() -> None:
+def test_twenty_one_tools_with_unique_names_and_object_schemas() -> None:
     names = [spec.name for spec in TOOL_SPECS]
-    assert len(names) == 19
-    assert len(set(names)) == 19
+    assert len(names) == 21
+    assert len(set(names)) == 21
     assert set(names) == {
         "search_symbols",
         "get_symbol",
@@ -144,6 +144,8 @@ def test_nineteen_tools_with_unique_names_and_object_schemas() -> None:
         "list_recent_activity",
         "get_work_in_flight",
         "get_area_owners",
+        "compare_refs",
+        "get_milestones",
         "run_project_stats",
         "run_graph_stats",
         "render_chart",
@@ -1821,10 +1823,7 @@ def test_work_in_flight_lists_open_items_with_idle_time(in_flight: Path) -> None
     assert result["forge_data_as_of"] == "2026-10-25T08:12:00+00:00"
     assert "3 days old" in result["freshness_warning"]
     assert result["not_tracked"] == [
-        "review_decision",
-        "assignees",
-        "milestone",
-        "pr_files",
+        "team_review_requests",
         "deployments",
         "incidents",
     ]
@@ -2153,3 +2152,474 @@ def test_area_owners_clamps(owned: Path) -> None:
     # The window now reaches the 2024 commit; the factor covers every owner.
     assert wide["total_commits"] == 8
     assert wide["contributor_absence_factor"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: get_work_in_flight fields, compare_refs, get_milestones (plan 38)
+# ---------------------------------------------------------------------------
+
+
+def _milestone(number: int, **overrides):
+    from whygraph.db.models import Milestone
+
+    fields = {
+        "number": number,
+        "title": f"M{number}",
+        "state": "open",
+        "updated_at": "2026-10-01T00:00:00Z",
+        "html_url": f"https://example.invalid/milestone/{number}",
+        "fetched_at": "2026-10-25T00:00:00Z",
+    }
+    fields.update(overrides)
+    return Milestone(**fields)
+
+
+def test_work_in_flight_carries_the_phase_2_fields(in_flight: Path) -> None:
+    from sqlmodel import select
+
+    from whygraph.db import get_session
+    from whygraph.db.models import Issue, PullRequest
+
+    with get_session() as session:
+        session.add(_milestone(3, title="v2.1"))
+        pr = session.exec(select(PullRequest).where(PullRequest.number == 414)).one()
+        pr.files = json.dumps(["src/checkout/cart.py", "README.md"])
+        pr.review_decision = "CHANGES_REQUESTED"
+        pr.review_requests = json.dumps(["bob"])
+        pr.first_review_at = "2026-10-27T09:00:00Z"
+        pr.assignees = json.dumps(["alice"])
+        pr.milestone = 3
+        pr.additions, pr.deletions, pr.changed_files = 120, 4, 2
+        session.add(pr)
+        labelled = session.exec(
+            select(PullRequest).where(PullRequest.number == 412)
+        ).one()
+        labelled.files = json.dumps(["src/billing/pay.py"])  # labels still win
+        session.add(labelled)
+        issue = session.exec(select(Issue).where(Issue.number == 300)).one()
+        issue.assignees = json.dumps(["carol"])
+        issue.milestone = 9  # not in the milestone table: title unknown
+        session.add(issue)
+        session.commit()
+
+    result = _wip()
+    prs = {p["number"]: p for p in result["pull_requests"]}
+    assert (prs[414]["areas"], prs[414]["area_source"]) == (["checkout"], "files")
+    assert prs[414]["review_decision"] == "CHANGES_REQUESTED"
+    assert prs[414]["review_requests"] == ["bob"]
+    assert prs[414]["first_review_at"] == "2026-10-27T09:00:00Z"
+    assert prs[414]["assignees"] == ["alice"]
+    assert prs[414]["milestone"] == {"number": 3, "title": "v2.1"}
+    assert (prs[414]["additions"], prs[414]["changed_files"]) == (120, 2)
+    assert (prs[412]["areas"], prs[412]["area_source"]) == (["checkout"], "labels")
+    # No labels and no files: still placed by its scanned commits.
+    assert (prs[413]["areas"], prs[413]["area_source"]) == (["billing"], "commits")
+    assert prs[413]["milestone"] is None and prs[413]["review_requests"] == []
+
+    issues = {i["number"]: i for i in result["issues"]}
+    assert issues[300]["assignees"] == ["carol"]
+    assert issues[300]["milestone"] == {"number": 9, "title": None}
+
+    assert [p["number"] for p in _wip(area="checkout")["pull_requests"]] == [
+        412,
+        414,
+    ]
+
+
+def test_work_in_flight_files_that_map_nowhere_still_decide(in_flight: Path) -> None:
+    """A PR whose files touch no area has none, rather than falling to commits."""
+    from sqlmodel import select
+
+    from whygraph.db import get_session
+    from whygraph.db.models import PullRequest
+
+    with get_session() as session:
+        pr = session.exec(select(PullRequest).where(PullRequest.number == 413)).one()
+        pr.files = json.dumps(["docs/index.md"])
+        session.add(pr)
+        session.commit()
+    prs = {p["number"]: p for p in _wip()["pull_requests"]}
+    assert (prs[413]["areas"], prs[413]["area_source"]) == ([], "files")
+
+
+def _git(root: Path, *args: str, when: str | None = None) -> str:
+    import os
+    import subprocess
+
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "dev",
+        "GIT_AUTHOR_EMAIL": "dev@example.com",
+        "GIT_COMMITTER_NAME": "dev",
+        "GIT_COMMITTER_EMAIL": "dev@example.com",
+    }
+    if when:
+        env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = when
+    return subprocess.run(
+        ["git", *args], cwd=root, env=env, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+@pytest.fixture
+def released(chat_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """A real four-commit repository with two tags, scanned into the DB.
+
+    * ``c1`` (2026-03-01, ``src/checkout/a.py``) is tagged ``v1.0``;
+    * ``c2`` (2026-03-02, ``src/billing/b.py``) is #50's merge commit;
+    * ``c3`` (2026-03-03, ``src/checkout/c.py``) is in #51's commit list and
+      tagged ``v1.1``; #51 is labelled ``area:checkout`` and closes #20;
+    * ``c4`` (2026-03-04, ``docs/notes.md``) is in no area and no PR.
+    """
+    import shutil
+
+    from alembic import command
+
+    from whygraph.core.config import AreaConfig
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+    from whygraph.db.models import CommitFileChange, PRIssueLink, Tag
+
+    shutil.rmtree(chat_repo / ".git")
+    _git(chat_repo, "init", "-q", "-b", "main")
+    files = ["src/checkout/a.py", "src/billing/b.py", "src/checkout/c.py"]
+    files.append("docs/notes.md")
+    shas: list[str] = []
+    for n, path in enumerate(files, start=1):
+        target = chat_repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"{n}\n", encoding="utf-8")
+        when = f"2026-03-0{n}T12:00:00+00:00"
+        _git(chat_repo, "add", path)
+        _git(chat_repo, "commit", "-q", "-m", f"commit {n}", when=when)
+        shas.append(_git(chat_repo, "rev-parse", "HEAD"))
+
+    command.upgrade(alembic_config(), "head")
+    _areas(
+        monkeypatch,
+        AreaConfig("checkout", "Checkout", ("src/checkout/",), ("area:checkout",)),
+        AreaConfig("billing", "Billing", ("src/billing",)),
+    )
+    with get_session() as session:
+        for n, (sha, path) in enumerate(zip(shas, files), start=1):
+            session.add(
+                _row_commit(sha, f"2026-03-0{n}T12:00:00+00:00", subject=f"commit {n}")
+            )
+            session.add(CommitFileChange(commit_sha=sha, path=path, change_type="A"))
+        session.add(Tag(name="v1.0", sha=shas[0], tagged_at="2026-03-01T12:00:00Z"))
+        session.add(Tag(name="v1.1", sha=shas[2], tagged_at="2026-03-03T12:00:00Z"))
+        session.add(
+            _pr(
+                50,
+                state="merged",
+                merge_commit_sha=shas[1],
+                merged_at="2026-03-02T12:00:00Z",
+            )
+        )
+        session.add(
+            _pr(
+                51,
+                state="merged",
+                labels='["area:checkout"]',
+                commit_titles=json.dumps([{"oid": shas[2], "title": "commit 3"}]),
+                merged_at="2026-03-03T13:00:00Z",
+            )
+        )
+        session.add(_issue(20, state="closed", closed_at="2026-03-03T13:00:00Z"))
+        session.add(PRIssueLink(pr_number=51, issue_number=20, link_kind="closes"))
+        session.commit()
+    return SimpleNamespace(root=chat_repo, shas=shas)
+
+
+def _compare(**kwargs) -> dict:
+    return _result(ToolRegistry(max_rationale_generations=0), "compare_refs", **kwargs)
+
+
+def test_compare_refs_between_two_tags_groups_by_area(released) -> None:
+    c1, c2, c3, _ = released.shas
+    result = _compare(from_ref="v1.0", to_ref="v1.1")
+
+    assert result["from"] == {
+        "ref": "v1.0",
+        "kind": "tag",
+        "sha": c1,
+        "date": "2026-03-01T12:00:00Z",
+    }
+    assert (result["to"]["kind"], result["to"]["sha"]) == ("tag", c3)
+    assert result["total_commits"] == 2 and result["not_scanned"] == 0
+    assert [c["sha"] for c in result["commits"]] == [c3, c2]
+    commits = {c["sha"]: c for c in result["commits"]}
+    assert commits[c3]["areas"] == ["checkout"]
+    assert commits[c3]["pull_requests"] == [51]
+    assert commits[c2]["pull_requests"] == [50]
+
+    prs = {p["number"]: p for p in result["pull_requests"]}
+    assert [p["number"] for p in result["pull_requests"]] == [51, 50]
+    assert (prs[51]["areas"], prs[51]["area_source"]) == (["checkout"], "labels")
+    assert (prs[50]["areas"], prs[50]["area_source"]) == (["billing"], "commits")
+    assert prs[51]["closes_issues"] == [20]
+    assert [i["number"] for i in result["issues_closed"]] == [20]
+
+    assert result["by_area"] == [
+        {
+            "area": "billing",
+            "commits": 1,
+            "pull_request_count": 1,
+            "pull_requests": [50],
+        },
+        {
+            "area": "checkout",
+            "commits": 1,
+            "pull_request_count": 1,
+            "pull_requests": [51],
+        },
+    ]
+    assert result["omitted"] == 0 and "note" not in result
+
+
+def test_compare_refs_resolves_sha_prefixes_dates_and_the_latest(released) -> None:
+    c1, c2, c3, c4 = released.shas
+    by_sha = _compare(from_ref=c1[:8].upper(), to_ref="2026-03-03")
+    assert (by_sha["from"]["kind"], by_sha["from"]["sha"]) == ("sha", c1)
+    assert (by_sha["to"]["kind"], by_sha["to"]["sha"]) == ("date", c3)
+    assert [c["sha"] for c in by_sha["commits"]] == [c3, c2]
+
+    # A datetime is a point in time: c3 at noon is after 06:00.
+    morning = _compare(from_ref="v1.0", to_ref="2026-03-03T06:00:00Z")
+    assert morning["to"]["sha"] == c2
+
+    latest = _compare(from_ref="v1.1")
+    assert (latest["to"]["kind"], latest["to"]["sha"]) == ("latest", c4)
+    assert [c["sha"] for c in latest["commits"]] == [c4]
+    assert latest["by_area"] == [
+        {"area": None, "commits": 1, "pull_request_count": 0, "pull_requests": []}
+    ]
+
+
+def test_compare_refs_only_full_db_shas_reach_git_argv(
+    released, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.services.git import repository
+
+    argvs: list[list[str]] = []
+    real = repository.GitRevListShasCmd
+
+    class Recording(real):
+        def argv(self) -> list[str]:
+            argv = super().argv()
+            argvs.append(argv)
+            return argv
+
+    monkeypatch.setattr(repository, "GitRevListShasCmd", Recording)
+    c1, _, c3, _ = released.shas
+    _compare(from_ref="v1.0", to_ref=c3[:10])
+    assert argvs == [["git", "rev-list", "--end-of-options", c3, f"^{c1}"]]
+
+    argvs.clear()
+    for hostile in ("--output=/tmp/x", "HEAD~1", "main", "v1.0..v1.1", "^v1.0"):
+        result = _compare(from_ref=hostile, to_ref="v1.1")
+        assert "is not a known tag" in result["error"], hostile
+    assert argvs == []
+
+
+def test_range_shas_refuses_anything_but_full_shas(released) -> None:
+    from whygraph.services.git import GitError, Repository
+
+    c1, _, c3, _ = released.shas
+    repo = Repository(released.root)
+    assert repo.range_shas(c1, c3) == frozenset(released.shas[1:3])
+    for bad in (c1[:12], "--all", f"{c1}\n", "HEAD"):
+        with pytest.raises(GitError):
+            repo.range_shas(bad, c3)
+
+
+def test_compare_refs_errors_are_results(released) -> None:
+    from whygraph.db import get_session
+
+    unknown = _compare(from_ref="v9")["error"]
+    assert "v1.1, v1.0" in unknown  # the newest tags, newest first
+    assert "required" in _compare(from_ref="  ")["error"]
+    assert "on or before" in _compare(from_ref="2020-01-01")["error"]
+
+    with get_session() as session:
+        session.add(_row_commit("abcdef1" + "0" * 33, "2026-01-01T00:00:00Z"))
+        session.add(_row_commit("abcdef1" + "1" * 33, "2026-01-01T00:00:00Z"))
+        session.commit()
+    assert "more than one commit" in _compare(from_ref="abcdef1")["error"]
+
+
+def test_compare_refs_swapped_refs_say_so(released) -> None:
+    result = _compare(from_ref="v1.1", to_ref="v1.0")
+    assert result["total_commits"] == 0
+    assert "swap" in result["note"]
+
+
+def test_compare_refs_batches_the_pr_lookup_and_clamps(
+    released, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.mcp import resources
+
+    def _per_commit(*_args, **_kwargs):
+        raise AssertionError("compare_refs must not look PRs up one commit at a time")
+
+    monkeypatch.setattr(resources, "_linked_prs", _per_commit)
+    result = _compare(from_ref="v1.0", limit=1)
+    assert len(result["commits"]) == 1 and len(result["pull_requests"]) == 1
+    assert result["omitted"] == 2 + 1  # commits c3, c2 and PR #50
+    assert result["total_commits"] == 3
+    assert "limit 1" in result["note"]
+    assert _compare(from_ref="v1.0", limit=999)["limit"] == 50
+
+
+def test_compare_refs_without_areas_groups_nothing(
+    released, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _areas(monkeypatch)
+    result = _compare(from_ref="v1.0", to_ref="v1.1")
+    assert result["by_area"] == []
+    assert all(c["areas"] == [] for c in result["commits"])
+    assert "No areas are configured" in result["note"]
+
+
+@pytest.fixture
+def milestones(chat_repo: Path, monkeypatch: pytest.MonkeyPatch):
+    """Four milestones at a frozen clock (2026-10-28), #2 with real items.
+
+    #2 (due 2026-11-15) holds issues opened 10-01 (closed 10-10), 10-05 and
+    10-20 (both open), and PR #60 opened 10-02 and merged 10-12.
+    """
+    from alembic import command
+
+    from whygraph.db import get_session
+    from whygraph.db.bootstrap import alembic_config
+
+    command.upgrade(alembic_config(), "head")
+    _freeze(monkeypatch)
+    with get_session() as session:
+        session.add(
+            _milestone(1, title="v1", state="closed", closed_at="2026-09-30T00:00:00Z")
+        )
+        session.add(
+            _milestone(
+                2,
+                title="v2",
+                due_on="2026-11-15T00:00:00Z",
+                progress_pct=50.0,
+                description="x" * 500,
+            )
+        )
+        session.add(_milestone(3, title="v3"))
+        session.add(_milestone(4, title="v2.5", due_on="2026-10-20T00:00:00Z"))
+        session.add(
+            _issue(
+                70,
+                milestone=2,
+                state="closed",
+                created_at="2026-10-01T09:00:00Z",
+                closed_at="2026-10-10T09:00:00Z",
+            )
+        )
+        session.add(_issue(71, milestone=2, created_at="2026-10-05T09:00:00Z"))
+        session.add(_issue(72, milestone=2, created_at="2026-10-20T09:00:00Z"))
+        session.add(
+            _pr(
+                60,
+                milestone=2,
+                state="merged",
+                created_at="2026-10-02T09:00:00Z",
+                merged_at="2026-10-12T09:00:00Z",
+                closed_at="2026-10-12T09:00:00Z",
+            )
+        )
+        session.commit()
+    return chat_repo
+
+
+def test_milestones_list_open_by_due_date_with_counts(milestones: Path) -> None:
+    result = _result(ToolRegistry(max_rationale_generations=0), "get_milestones")
+
+    assert result["state"] == "open"
+    assert [m["number"] for m in result["milestones"]] == [4, 2, 3]
+    listed = {m["number"]: m for m in result["milestones"]}
+    assert (listed[4]["days_to_due"], listed[4]["overdue"]) == (-8, True)
+    assert (listed[2]["days_to_due"], listed[2]["overdue"]) == (18, False)
+    assert (listed[3]["days_to_due"], listed[3]["overdue"]) == (None, False)
+    assert listed[2]["issues"] == {"open": 2, "closed": 1}
+    assert listed[2]["pull_requests"] == {"open": 0, "merged": 1, "closed": 0}
+    assert listed[2]["progress_pct"] == 50.0
+    assert len(listed[2]["description"]) == 241
+    # The first listed (#4) has no items: nothing to chart, so no ref.
+    assert result["burndown"]["number"] == 4
+    assert result["rows"] == [] and "chart_ref" not in result
+    assert result["forge_data_as_of"] is None
+    assert "No GitHub crawl" in result["freshness_warning"]
+
+    closed = _result(
+        ToolRegistry(max_rationale_generations=0), "get_milestones", state="closed"
+    )
+    assert [m["number"] for m in closed["milestones"]] == [1]
+
+
+def test_milestone_burndown_is_chartable(milestones: Path) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_milestones", number=2)
+
+    assert result["burndown"]["number"] == 2
+    assert result["burndown"]["start"] == "2026-10-01"
+    assert result["burndown"]["step_days"] == 1
+    assert result["columns"] == ["date", "open", "closed"]
+    rows = {row[0]: row[1:] for row in result["rows"]}
+    assert len(result["rows"]) == 28
+    assert rows["2026-10-01"] == [1, 0]
+    assert rows["2026-10-12"] == [1, 2]  # 70 and #60 closed, 71 open
+    assert rows["2026-10-28"] == [2, 2]
+
+    chart = _result(
+        registry,
+        "render_chart",
+        chart_ref=result["chart_ref"],
+        kind="line",
+        title="v2 burndown",
+        x="date",
+        y="open",
+    )
+    assert "error" not in chart
+    assert chart["chart"]["kind"] == "line"
+    assert chart["row_count"] == 28
+
+
+def test_milestones_bad_arguments_are_results(milestones: Path) -> None:
+    registry = ToolRegistry(max_rationale_generations=0)
+    assert (
+        "state must be one of"
+        in _result(registry, "get_milestones", state="x")["error"]
+    )
+    error = _result(registry, "get_milestones", number=99)["error"]
+    assert "#99" in error and "#2" in error
+    clamped = _result(registry, "get_milestones", state="all", limit=1)
+    assert len(clamped["milestones"]) == 1 and clamped["omitted"] == 3
+
+
+def test_milestones_empty_table_says_why(chat_repo: Path) -> None:
+    from alembic import command
+
+    from whygraph.db.bootstrap import alembic_config
+
+    command.upgrade(alembic_config(), "head")
+    result = _result(ToolRegistry(max_rationale_generations=0), "get_milestones")
+    assert result["milestones"] == [] and result["burndown"] is None
+    assert "No milestones are recorded" in result["note"]
+
+
+def test_a_long_burndown_is_thinned_but_ends_on_its_last_day() -> None:
+    from datetime import datetime, timezone
+
+    from whygraph.mcp.resources import _BURNDOWN_POINTS, _burndown_rows
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    rows, step, first = _burndown_rows([(start, None)], end)
+    assert first == "2026-01-01" and step > 1
+    assert len(rows) <= _BURNDOWN_POINTS + 2
+    assert rows[-1] == ["2026-07-20", 1, 0]

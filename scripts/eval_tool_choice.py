@@ -43,7 +43,7 @@ initialize and scan this repository from its Projects page::
 
     WHYGRAPH_SHARED_FOLDERS=$(cd .. && pwd) \\
     WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:55432/whygraph \\
-      uv run whygraph portal --data "${TMPDIR:-/tmp}/whygraph-dev" --port 8321
+      uv run whygraph portal --data "${XDG_STATE_HOME:-$HOME/.local/state}/whygraph-dev" --port 8321
 
 Then, from the repository root (``--slug`` is the project's slug in the
 portal; it defaults to this checkout's directory name)::
@@ -1088,7 +1088,7 @@ def main() -> int:
         print(f"! cannot reach {args.base}: {exc}", file=sys.stderr)
         print(
             "  start a dev portal first: uv run whygraph portal --data "
-            '"${TMPDIR:-/tmp}/whygraph-dev" --port 8321'
+            '"${XDG_STATE_HOME:-$HOME/.local/state}/whygraph-dev" --port 8321'
         )
         return 2
 

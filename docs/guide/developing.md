@@ -36,7 +36,7 @@ The portal keeps its own data in Postgres, so every mode needs one:
   `whygraph-dev-postgres`, laid out like the shim's database container (the same pinned image, read
   from `POSTGRES_IMAGE` in `cli/commands/install.py`, a per-major `PGDATA`, your user, the same health
   check) but published on `127.0.0.1:55432` (`PG_DEV_PORT=...` to change it) with the dev-only
-  password `whygraph-dev`. Its files are in `$TMPDIR/whygraph-dev/local/postgres`, beside the dev data
+  password `whygraph-dev`. Its files are in `~/.local/state/whygraph-dev/local/postgres`, beside the dev data
   directory. `make dev-db` waits until it is healthy; `make dev-local` then points the portal at it
   with `WHYGRAPH_DATABASE_URL=postgresql+psycopg://whygraph:whygraph-dev@127.0.0.1:55432/whygraph`.
   `make dev-db-down` stops and removes the container and keeps its files; delete the directory for a
@@ -55,7 +55,7 @@ differs from `make prod`, which is the *released image in local mode* (what a us
 production mode:
 
 - It uses a separate database, `whygraph_prod`, created on demand in the `make dev-db` container, and
-  its own data directory under `$TMPDIR/whygraph-dev/production`, so it never touches `dev-local`'s
+  its own data directory under `~/.local/state/whygraph-dev/production`, so it never touches `dev-local`'s
   state. No shared folders are given.
 - The base URL is `http://whygraph.localhost:5173` - the **Vite** address, so the browser, the session
   cookie and the portal's host check all see one origin per host. Vite passes the `Host` header
@@ -64,12 +64,12 @@ production mode:
 - **GitHub is a fake.** Sign-in and projects need a GitHub, so `make dev-production` also starts a
   small fake one (`tests/github_fake.py`) on `DEV_GITHUB_PORT` that serves **both apps**: the OAuth
   App and the GitHub App. It points every `WHYGRAPH_GITHUB_*` variable at it, with a generated app
-  key, client secrets and webhook secret kept under `$TMPDIR/whygraph-dev/production/github/`
+  key, client secrets and webhook secret kept under `~/.local/state/whygraph-dev/production/github/`
   (generating them needs `openssl`). Nothing leaves your machine. Its sign-in page offers four users,
   `ben`, `cy`, `dee` and `nofa` (no two-factor authentication), to try members, roles and two-factor
   refusals.
 - **The fake's repositories.** It serves two fixture repositories, `ben/demo` and `ben/notes`, as bare
-  repositories in `$TMPDIR/whygraph-dev/production/github/repos`, covered by installation `100` on
+  repositories in `~/.local/state/whygraph-dev/production/github/repos`, covered by installation `100` on
   Ben's account: sign in as `ben` to import them. Its control routes change its state and send the
   matching signed webhook to the portal, so you can try the webhook paths without a real GitHub:
 
@@ -121,10 +121,10 @@ another. They no longer collide - the local portal's Vite is on `:5174`, the pla
    started the link, it skips its Allow page and the browser comes back to
    `http://127.0.0.1:5174/connect/callback`.
 4. Point the link at a checkout under `make dev-local`'s shared folder,
-   `$TMPDIR/whygraph-dev/repos`, whose `origin` names the platform's repository (or which holds the
+   `~/.local/state/whygraph-dev/repos`, whose `origin` names the platform's repository (or which holds the
    commit the platform scanned). The fake GitHub serves git only to an installation token, so the
    quickest one is a clone of the platform's **own** server clone -
-   `$TMPDIR/whygraph-dev/production/data/repos/<org>/<slug>` - with its `origin` set to
+   `~/.local/state/whygraph-dev/production/data/repos/<org>/<slug>` - with its `origin` set to
    `http://127.0.0.1:18767/ben/demo.git`.
 
 `make dev-local` exports the two switches this needs, because a platform on
@@ -166,8 +166,10 @@ Every mode keeps to itself, so none of them touches your own portal:
 
 - its own container name (`whygraph-portal-dev`, `whygraph-portal-prod`, and
   `whygraph-portal-smoke` for the smoke test), data directory and `HOME`, all under
-  `$TMPDIR/whygraph-dev`;
-- one scratch folder of repos, `$TMPDIR/whygraph-dev/repos`, shared by every mode and created
+  `~/.local/state/whygraph-dev` (`$XDG_STATE_HOME/whygraph-dev` when that is set; `DEV=...` moves
+  it). It is not under `$TMPDIR` on purpose: macOS deletes files there that were not opened for
+  three days, which breaks a dev Postgres and loses the data directory's `secret.key`;
+- one scratch folder of repos, `~/.local/state/whygraph-dev/repos`, shared by every mode and created
   offline on first use: a copy of your checkout (`git clone --no-hardlinks`, real history to
   dogfood) and a tiny three-commit demo repo. Delete one to get a fresh copy next time.
 
@@ -187,11 +189,11 @@ To try a dev portal on repos outside the scratch folder, list their folders in `
 DEV_FOLDERS=$HOME/Projects/demos:$HOME/work/clones
 ```
 
-`make dev-local`, `make dev-docker` and `make prod` share them beside `$TMPDIR/whygraph-dev/repos`;
+`make dev-local`, `make dev-docker` and `make prod` share them beside `~/.local/state/whygraph-dev/repos`;
 `make dev-production` ignores them (production mode has no shared folders). For one run, pass
 `make dev-local DEV_FOLDERS=...` instead; a non-empty value there or in your shell wins over the
 file. A folder that is missing, relative, `/`, holds a `,` or `"`, or overlaps
-`$TMPDIR/whygraph-dev` stops the target before anything starts. The Docker modes match their shared
+`~/.local/state/whygraph-dev` stops the target before anything starts. The Docker modes match their shared
 folders to the list on every run, so a folder you remove from it is no longer mounted. Under Docker
 Desktop the folder must also be in its file-sharing settings (`/Users` is by default).
 

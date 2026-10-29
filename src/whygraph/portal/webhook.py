@@ -81,8 +81,41 @@ MAX_BODY_BYTES = 5 * 1024 * 1024
 DELIVERY_IDS_MAX = 10_000
 """How many ``X-GitHub-Delivery`` ids are remembered (the oldest is dropped)."""
 
+FORGE_ACTIONS: dict[str, frozenset[str] | None] = {
+    "pull_request": frozenset(
+        {
+            "opened",
+            "closed",
+            "reopened",
+            "ready_for_review",
+            "converted_to_draft",
+            "assigned",
+            "unassigned",
+            "milestoned",
+            "demilestoned",
+            "review_requested",
+            "review_request_removed",
+        }
+    ),
+    "pull_request_review": frozenset({"submitted", "dismissed"}),
+    "issues": frozenset(
+        {
+            "opened",
+            "closed",
+            "reopened",
+            "assigned",
+            "unassigned",
+            "milestoned",
+            "demilestoned",
+        }
+    ),
+    "milestone": None,
+}
+"""Forge events that queue a ``forge`` run, with the actions that do (``None``: all)."""
+
 HANDLED_EVENTS = frozenset(
     {"push", "installation", "installation_repositories", "repository"}
+    | set(FORGE_ACTIONS)
 )
 """Events with a handler; anything else (``ping``, ``github_app_authorization``) is ignored."""
 
@@ -253,6 +286,10 @@ async def github_webhook(request: Request) -> JSONResponse:
         return _answer(400, {"error": "the body is not JSON"})
     if not isinstance(payload, dict):
         return _answer(400, {"error": "the body is not a JSON object"})
+    if event in FORGE_ACTIONS:
+        actions = FORGE_ACTIONS[event]
+        if actions is not None and payload.get("action") not in actions:
+            return _answer(202, {"status": "ignored"})
     return _answer(
         202,
         {"status": "queued"},
@@ -280,6 +317,8 @@ async def handle_event(state: PortalState, event: str, payload: dict) -> None:
     try:
         if event == "push":
             await _on_push(state, payload)
+        elif event in FORGE_ACTIONS:
+            await _on_forge(state, payload)
         elif event == "installation":
             await anyio.to_thread.run_sync(_on_installation, payload)
         elif event == "installation_repositories":
@@ -330,14 +369,27 @@ async def _on_push(state: PortalState, payload: dict) -> None:
     branch = _branch(repo.get("default_branch"))
     if repo_id is None or branch is None:
         return
-    if (
-        payload.get("ref") != f"refs/heads/{branch}"
-        or payload.get("deleted") is not False
-    ):
-        return  # another branch, a tag, or the branch's deletion
+    ref = payload.get("ref")
+    if isinstance(ref, str) and ref.startswith("refs/tags/"):
+        await _queue(state, repo_id, "forge")  # tags are forge data
+        return
+    if ref != f"refs/heads/{branch}" or payload.get("deleted") is not False:
+        return  # another branch, or the branch's deletion
+    await _queue(state, repo_id, "push")
+
+
+async def _on_forge(state: PortalState, payload: dict) -> None:
+    """A pull request, review, issue or milestone change queues a ``forge`` run."""
+    repo_id = _id(_obj(payload, "repository").get("id"))
+    if repo_id is not None:
+        await _queue(state, repo_id, "forge")
+
+
+async def _queue(state: PortalState, repo_id: int, trigger: str) -> None:
+    """Queue ``trigger`` for every project of ``repo_id`` that may be synced."""
     for project_id in await anyio.to_thread.run_sync(_push_targets, repo_id):
         try:
-            await state.runner.request_sync(project_id, trigger="push")
+            await state.runner.request_sync(project_id, trigger=trigger)
         except (ProjectBusy, RunnerUnavailable, ProjectAccessLost, SourceNotAllowed):
             continue  # removed or its org deleted, stopping, access lost
 

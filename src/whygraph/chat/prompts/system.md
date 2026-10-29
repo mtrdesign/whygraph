@@ -69,6 +69,10 @@ and `read_file` for those without hesitating.
   each has been idle, and which look stuck.
 - `get_area_owners` - **who knows** an area or a path: each person's share
   of its commits. Ownership of the code, never a ranking of people.
+- `compare_refs` - what lies **between two releases**, commits or dates:
+  the commits, the PRs they belong to and the issues those closed, by area.
+- `get_milestones` - how each **milestone** is tracking, with a burndown you
+  can chart.
 - `get_commit` — follow up on a specific SHA another tool surfaced.
 
 **Which history field to trust.** Every commit carries an `llm_description`
@@ -94,7 +98,8 @@ wrong: cite them for intent, never for fact.
   fan-out. A different database from `run_project_stats`, with no history in
   it — anything about *time* belongs to `run_project_stats`.
 - `render_chart` — draw a chart from an aggregate you already computed. Pass
-  the `chart_ref` the stats tool handed back and name columns of that result.
+  the `chart_ref` the stats tool (or `get_milestones`) handed back and name
+  columns of that result.
   You never retype a number into a chart. One `y` column per chart: two
   measures means two charts. Skip the chart for a single number — say it.
 - To break a chart down by category — commits per month **by author**,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from functools import cached_property
@@ -97,6 +98,9 @@ _NETWORK_TIMEOUT = 900
 
 # Tags :meth:`Repository.tags` lists by default: the newest few hundred.
 _TAG_LIMIT = 500
+
+# A full SHA-1 commit id, the only revision :meth:`Repository.range_shas` passes.
+_FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class Repository:
@@ -1135,6 +1139,39 @@ class Repository:
             )
         except ShellError:
             return None
+
+    def range_shas(self, base: str, head: str) -> frozenset[str]:
+        """Commits reachable from ``head`` but not from ``base`` (purely local).
+
+        ``git rev-list --end-of-options <head> ^<base>``: the commits ``head``
+        adds on top of ``base``, as in ``base..head``.
+
+        Parameters
+        ----------
+        base, head : str
+            Full 40-hex commit SHAs. Anything else is refused before ``git``
+            runs, so no caller-supplied text reaches argv.
+
+        Returns
+        -------
+        frozenset[str]
+            The SHAs, unordered; empty when ``head`` adds nothing.
+
+        Raises
+        ------
+        GitError
+            If either argument is not a full SHA, or ``git`` fails (an unknown
+            commit, a broken repository).
+        """
+        for sha in (base, head):
+            if not _FULL_SHA.fullmatch(sha or ""):
+                raise GitError("range_shas takes full 40-hex commit SHAs")
+        try:
+            return self._shell.run(
+                GitRevListShasCmd((head, f"^{base}")), cwd=self.root, env=git_env()
+            )
+        except ShellError as exc:
+            raise GitError(f"failed to list {base[:7]}..{head[:7]}") from exc
 
     def check_mailmap(self, contacts: Sequence[str]) -> tuple[str, ...]:
         """Canonicalize ``Name <email>`` contacts through the repo's mailmap.

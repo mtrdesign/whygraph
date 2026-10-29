@@ -6,7 +6,7 @@ drift from the rest of WhyGraph, because there is one implementation per
 capability and both surfaces are adapters over it. No MCP protocol
 roundtrip is involved — these are plain in-process calls.
 
-The nineteen tools span **five sources**, and the system prompt tells the
+The twenty-one tools span **five sources**, and the system prompt tells the
 model which to reach for:
 
 * **CodeGraph** answers *what the code is* — structure, relationships, and
@@ -14,14 +14,17 @@ model which to reach for:
 * **WhyGraph** answers *why it is that way* and *what has happened* —
   rationale, evidence, path history, and content search over the
   diff-derived commit descriptions — plus *what is open now*
-  (``get_work_in_flight``) and *who knows the code* (``get_area_owners``).
+  (``get_work_in_flight``), *who knows the code* (``get_area_owners``),
+  *what lies between two releases* (``compare_refs``) and *how each
+  milestone is tracking* (``get_milestones``).
 * **The statistics tools** answer *how much* — aggregate-only SQL, fenced so
   neither can become a record reader. There are **two**, because there are two
   databases: :mod:`.stats_sql` over commit history and :mod:`.graph_stats_sql`
   over CodeGraph's index. No SQL in the first can reach the second.
 * **``render_chart``** (see :mod:`.charts`) draws any aggregate either statistics
-  tool computed. The model passes the ``chart_ref`` that result carried and names
-  **columns of it** — it never retypes a value into a chart.
+  tool computed, and ``get_milestones``' burndown. The model passes the
+  ``chart_ref`` that result carried and names **columns of it** — it never
+  retypes a value into a chart.
 * **The file tools** supply ground-truth source (see :mod:`.files`).
 
 Registry rules
@@ -58,8 +61,10 @@ from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import (
     _area_owners_resource,
     _commit_resource,
+    _compare_refs_resource,
     _find_changes_resource,
     _issue_resource,
+    _milestones_resource,
     _pr_resource,
     _recent_activity_resource,
     _repo_overview_resource,
@@ -377,7 +382,8 @@ _SPECS: tuple[ToolSpec, ...] = (
             "number, an exact file path). Returns a compact index — subject "
             "or title, author, date, a truncated description — then use "
             "get_commit / get_pr / get_issue on the entries that matter. "
-            "For what is still OPEN or stuck right now, use get_work_in_flight."
+            "For what is still OPEN or stuck right now, use get_work_in_flight; "
+            "for what lies between two releases or dates, compare_refs."
             + DESCRIPTION_AUTHORITY
         ),
         parameters={
@@ -405,14 +411,16 @@ _SPECS: tuple[ToolSpec, ...] = (
             "run_project_stats. A PR's last activity is its newest comment, else "
             "its last update; a PR with 100+ comments uses the update time, and "
             "bot comments may count unless the login ends in [bot]. Drafts are "
-            "never stale. `area` keeps items whose LABELS map to a configured "
-            "area; a PR without such labels is placed by its commits only when "
-            "they are already scanned locally (`area_source` says which). PR "
-            "files are not tracked yet, so per-area grouping rests on labels "
-            "and many PRs have no area. State `forge_data_as_of` (when GitHub "
-            "was last crawled) and say 'not tracked' for anything in "
-            "`not_tracked`. Items past `limit` are counted in `omitted`: narrow "
-            "with `area` or raise `limit`."
+            "never stale. Each PR carries its review decision, requested "
+            "reviewers, first review time, assignees, milestone and diff size; "
+            "each issue its assignees and milestone. `area` keeps items placed "
+            "in a configured area: a PR by its labels, else its changed files "
+            "(the first 100), else its commits when they are scanned locally "
+            "(`area_source` says which); an issue by its labels only. For "
+            "milestone progress use get_milestones. State `forge_data_as_of` "
+            "(when GitHub was last crawled) and say 'not tracked' for anything "
+            "in `not_tracked`. Items past `limit` are counted in `omitted`: "
+            "narrow with `area` or raise `limit`."
         ),
         parameters={
             "type": "object",
@@ -488,6 +496,89 @@ _SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
+        name="compare_refs",
+        description=(
+            "What lies BETWEEN TWO FIXED POINTS - two releases (tags), two "
+            "commits, or two dates: the commits `to_ref` adds on top of "
+            "`from_ref` (git's from..to), the pull requests they belong to and "
+            "the issues those PRs closed, grouped by configured area in "
+            "`by_area`. THE tool for 'what shipped in v1.4', 'what changed "
+            "between v1.3 and v1.4', 'what landed since <date>'. Each ref is "
+            "tried as a tag name, then a commit SHA (7-40 hex), then an ISO "
+            "date (YYYY-MM-DD: the last default-branch commit on or before "
+            "that day); omit `to_ref` for the newest scanned commit. An "
+            "unknown ref's error lists the newest tags. Not for open work "
+            "(get_work_in_flight), a recent-activity index without endpoints "
+            "(list_recent_activity), or a keyword / path search "
+            "(find_changes). Rows past `limit` are counted in `omitted`; "
+            "`by_area` and `total_commits` cover them all."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "from_ref": {
+                    "type": "string",
+                    "description": (
+                        "The older point: a tag name, a commit SHA or an ISO "
+                        "date, e.g. 'v1.3.0'."
+                    ),
+                },
+                "to_ref": {
+                    "type": "string",
+                    "description": (
+                        "The newer point, same forms. Omit for the newest "
+                        "scanned commit."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "Max commits, PRs and issues listed. Default 25, max 50."
+                    ),
+                },
+            },
+            "required": ["from_ref"],
+        },
+    ),
+    ToolSpec(
+        name="get_milestones",
+        description=(
+            "Milestones and how each is tracking: due date, days to due, "
+            "overdue flag, GitHub's progress percentage, and open / closed "
+            "issue and open / merged / closed PR counts, plus a BURNDOWN (open "
+            "and closed items per day) for one milestone - the first listed, "
+            "or `number`. For 'how is the <milestone> milestone tracking', "
+            "'which milestones are slipping', 'what is due next'. The burndown "
+            "comes back as `columns` / `rows` with a `chart_ref`: pass it to "
+            "render_chart (`line`, x 'date', y 'open') rather than retyping "
+            "the numbers. Items count from their creation date (when they "
+            "joined the milestone is not tracked). Not for open work in "
+            "general (get_work_in_flight) or what shipped between releases "
+            "(compare_refs). State `forge_data_as_of`."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed", "all"],
+                    "description": "Which milestones to list. Default 'open'.",
+                },
+                "number": {
+                    "type": "integer",
+                    "description": (
+                        "The milestone to draw the burndown for. Default: the "
+                        "first listed (the soonest due when open)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max milestones listed. Default 20, max 50.",
+                },
+            },
+        },
+    ),
+    ToolSpec(
         name="run_project_stats",
         description=stats_sql._SCHEMA_DOC,
         parameters={
@@ -525,7 +616,8 @@ _SPECS: tuple[ToolSpec, ...] = (
         name="render_chart",
         description=(
             "Draw a chart from an aggregate you have ALREADY computed. Pass the "
-            "`chart_ref` that run_project_stats or run_graph_stats returned, and "
+            "`chart_ref` that run_project_stats, run_graph_stats or "
+            "get_milestones returned, and "
             "name COLUMNS OF THAT RESULT — never retype the values. "
             "`line` for ordered buckets over time; `bar` for ranked categories "
             "with short labels; `bar_h` when labels are long (file paths, "
@@ -645,15 +737,17 @@ SERIAL_TOOLS: frozenset[str] = frozenset(
         "render_chart",
         "run_project_stats",
         "run_graph_stats",
+        "get_milestones",
     }
 )
 """Tools a round must run one at a time, in the model's order.
 
 ``get_rationale`` spends the turn's generation budget; ``get_evidence`` and
 ``get_area_history`` run the lazy backfill, which writes and spends; the
-stats tools mint chart refs into the registry and ``render_chart`` reads
-them. Every other tool is a read with its own handle per call, so a round
-made only of those runs its calls concurrently (see
+stats tools (and ``get_milestones``, for its burndown) mint chart refs into
+the registry and ``render_chart`` reads them. Every other tool is a read
+with its own handle per call, so a round made only of those runs its calls
+concurrently (see
 :func:`whygraph.chat.harness.run_turn`).
 """
 
@@ -961,6 +1055,35 @@ def _get_area_owners(
     )
 
 
+def _compare_refs(
+    from_ref: str | None = None,
+    to_ref: str | None = None,
+    limit: int | None = 25,
+) -> dict:
+    """Handler for ``compare_refs``.
+
+    Hands the resource the label and path mappers when areas are configured,
+    as :func:`_get_work_in_flight` does.
+    """
+    mapped = bool(configured_areas())
+    return _compare_refs_resource(
+        from_ref,
+        to_ref,
+        limit,
+        labels_to_areas=areas_for_labels if mapped else None,
+        paths_to_areas=areas_for_paths if mapped else None,
+    )
+
+
+def _get_milestones(
+    state: str | None = "open",
+    number: int | None = None,
+    limit: int | None = 20,
+) -> dict:
+    """Handler body for ``get_milestones`` - no ref minting (see the registry)."""
+    return _milestones_resource(state=state, number=number, limit=limit)
+
+
 def _run_project_stats(sql: str) -> dict:
     """Handler body for ``run_project_stats`` — no ref minting.
 
@@ -1026,6 +1149,8 @@ class ToolRegistry:
             "list_recent_activity": _list_recent_activity,
             "get_work_in_flight": _get_work_in_flight,
             "get_area_owners": _get_area_owners,
+            "compare_refs": _compare_refs,
+            "get_milestones": self._chartable_milestones,
             "run_project_stats": self._chartable_project_stats,
             "run_graph_stats": self._chartable_graph_stats,
             "render_chart": self._render_chart,
@@ -1084,6 +1209,17 @@ class ToolRegistry:
     def _chartable_graph_stats(self, sql: str) -> dict:
         """Handler for ``run_graph_stats`` — the aggregate, plus a ref."""
         return self._mint_chart_ref(_run_graph_stats(sql))
+
+    def _chartable_milestones(
+        self,
+        state: str | None = "open",
+        number: int | None = None,
+        limit: int | None = 20,
+    ) -> dict:
+        """Handler for ``get_milestones`` - the listing, plus a burndown ref."""
+        return self._mint_chart_ref(
+            _get_milestones(state=state, number=number, limit=limit)
+        )
 
     def _render_chart(
         self,

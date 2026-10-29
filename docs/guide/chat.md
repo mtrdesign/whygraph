@@ -119,7 +119,7 @@ a change costs a little more.
 ## Modes
 
 The **Mode** select beside the model pickers sets how the assistant approaches a question. A mode is a
-preset, not a restriction: every mode can use all nineteen tools, and a mode only changes which ones the
+preset, not a restriction: every mode can use all twenty-one tools, and a mode only changes which ones the
 assistant reaches for first and how it words the answer. Each mode also has its own starter questions
 for an empty chat.
 
@@ -127,6 +127,7 @@ for an empty chat.
 |---|---|
 | **Engineer** | Code-first answers: symbols, files and lines, and why the code is the way it is. |
 | **Lead** | The state of the work: what shipped, what is in flight or stuck, and who knows each area. |
+| **Product** | Outcomes in plain language: what a release contained, issues closed, and milestones on track or slipping. Its starters name the project's next open milestone. |
 
 You can switch a chat's mode at any time; it applies from the next reply, and each reply records the
 mode it was written in. Changing it starts a fresh prompt cache for that reply, as changing the effort
@@ -223,7 +224,8 @@ the assistant can and cannot reach.
     ---
 
     `get_rationale`, `get_evidence`, `get_area_history`, `find_changes`, `get_commit`, `get_pr`,
-    `get_issue`, `get_repo_overview`, `list_recent_activity`, `get_work_in_flight`, `get_area_owners`
+    `get_issue`, `get_repo_overview`, `list_recent_activity`, `get_work_in_flight`, `get_area_owners`,
+    `compare_refs`, `get_milestones`
 
 -   __Statistics__ (aggregate SQL)
 
@@ -253,10 +255,13 @@ can narrow `find_changes` with `area` (or a path, not both) and `since_days`;
 
 - **`get_work_in_flight`** lists what is open right now: pull requests (drafts included) and issues,
   each with its idle time and a stale flag (a PR idle 7 days, an issue 30, by default; drafts are never
-  stale), plus counts. With `area` it keeps items whose labels map to that area; a PR without such
-  labels is placed by its commits only when they are already scanned. It states `forge_data_as_of`
-  (when GitHub was last crawled) and lists anything it cannot know under `not_tracked`, such as a PR's
-  files, so the assistant says "not tracked" instead of guessing. Items past the limit are counted
+  stale), plus counts. Each PR also carries its review decision, who was asked to review (users and
+  bots), when it got its first review, its assignees, its milestone and its diff size; each issue its
+  assignees and milestone. With `area` it keeps items placed in that area: a PR by its labels, else by
+  its changed files, else by its commits when they are already scanned (`area_source` says which); an
+  issue by its labels only. It states `forge_data_as_of` (when GitHub was last crawled) and lists
+  anything it cannot know under `not_tracked`, such as review requests to a team, deployments and
+  incidents, so the assistant says "not tracked" instead of guessing. Items past the limit are counted
   in `omitted`.
 - **`get_area_owners`** answers "who knows this code": for an area or a path (exactly one), each
   person's share of the commits, files touched, last touch and last activity anywhere, plus the
@@ -265,6 +270,16 @@ can narrow `find_changes` with `area` (or a path, not both) and `since_days`;
   (365 days by default) and leaves out merges, bots and formatting or refactor sweeps;
   `Co-authored-by` trailers and CODEOWNERS are not read. This is **ownership of the code, not anyone's
   performance**.
+
+- **`compare_refs`** answers "what lies between two fixed points": the commits one ref adds on top of
+  another (`from..to`), the pull requests they belong to, the issues those closed, and a grouping by
+  area. A ref is a tag name, a commit SHA (7 to 40 hex characters) or an ISO date (`YYYY-MM-DD`, the
+  last default-branch commit on or before that day); leave the newer one out for the newest scanned
+  commit. An unknown ref's error lists the newest tags. Use it for "what shipped in v1.4".
+- **`get_milestones`** answers "how is this milestone tracking": due date, days to due, an overdue
+  flag, GitHub's progress percentage and the open and closed counts of issues and pull requests, plus
+  a **burndown** (open and closed items per day) for one milestone, which the assistant draws with
+  `render_chart`. Items count from their creation date; when they joined the milestone is not tracked.
 
 Area matching follows the paths you configured; directory renames are not followed (see
 [Areas](../reference/configuration.md#areas)).

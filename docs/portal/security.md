@@ -263,6 +263,21 @@ path, a symbol, an argument or anything a call returned. The names are WhyGraph'
 CodeGraph tools; any other name is never stored. Tool calls the Chat assistant makes are counted the same way (source `chat`, no person or connection, never arguments). A caller can only add to its own rows, and rows are kept 400 days. See [Agent
 activity](agents.md#agent-activity).
 
+## What the GitHub crawl stores
+
+Besides commits, pull requests and issues, the scan keeps a few more facts from GitHub, in the
+project's own database:
+
+- **Reviewer identities.** For a pull request, the logins of the users and bots asked to review it and
+  of those who reviewed it, with the review decision and the time of the first review. Team review
+  requests are not read: an installation token cannot read teams. If GitHub answers `FORBIDDEN` under
+  `reviewRequests`, that part is dropped and the rest of the crawl is kept.
+- **Milestones**, with their due dates and counts.
+- **Tags**, fetched into a private namespace, `refs/whygraph/tags/*`, with `--prune`. Fetching them
+  into `refs/tags/*` would let a hostile tag shadow a branch or another ref WhyGraph resolves, and
+  pruning makes a tag deleted upstream disappear here too. Tag names are untrusted data: they are
+  never used as a path, in a shell command or as instructions in a prompt.
+
 ## Repository content is not trusted
 
 A repository - a GitHub clone above all - can contain anything. The portal treats it that way.

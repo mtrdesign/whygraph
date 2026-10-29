@@ -216,6 +216,38 @@ def test_pull_request_list_fails_after_three_gateway_errors() -> None:
     assert _size(shell.query(2)) == 10
 
 
+def _truncated() -> ShellError:
+    return ShellError(["gh"], 1, "", "unexpected end of JSON input")
+
+
+def test_pull_request_list_retries_a_truncated_answer_at_half_the_page_size() -> None:
+    page = _page("pullRequests", [_node(1), _node(2)])
+    shell = _Flaky([_truncated(), page])
+    assert [pr.number for pr in PullRequests("o", "r", shell=shell)] == [1, 2]
+    assert _size(shell.query(0)) == 50
+    assert _size(shell.query(1)) == 25
+
+
+def test_pull_request_list_fails_after_repeated_truncated_answers() -> None:
+    shell = _Flaky([_truncated(), _truncated(), _truncated()])
+    with pytest.raises(GitHubError, match="unexpected end of JSON input"):
+        [*iter(PullRequests("o", "r", shell=shell))]
+    assert _size(shell.query(2)) == 10
+
+
+def test_by_numbers_splits_a_batch_on_a_truncated_answer() -> None:
+    nums = list(range(1, DETAILS_BATCH + 1))
+    shell = _Flaky(
+        [
+            _truncated(),
+            {"repository": {f"pr{n}": _node(n) for n in nums[:10]}},
+            {"repository": {f"pr{n}": _node(n) for n in nums[10:]}},
+        ]
+    )
+    got = [pr.number for pr in PullRequests("o", "r", shell=shell).by_numbers(nums)]
+    assert got == nums
+
+
 def test_pull_request_list_does_not_retry_other_failures() -> None:
     shell = _Flaky([ShellError(["gh"], 1, "", "HTTP 403 forbidden")])
     with pytest.raises(GitHubError, match="403"):

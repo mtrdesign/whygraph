@@ -12,6 +12,7 @@ import {
   type InitResult,
   type ProjectDetails,
 } from "../../api";
+import { CLAUDE_SETTINGS_FILE } from "../../lib/agents";
 import { errorInfo } from "../../lib/apiErrors";
 import { loadDetected } from "../../lib/detected";
 import { usePortalState } from "../../lib/identity";
@@ -141,7 +142,9 @@ export function InitializeStep({
   const pending = (preview.data?.agent_files ?? [])
     .filter((f) => f.status === "needs_confirmation")
     .map((f) => f.file);
-  const unconfirmed = pending.filter((f) => !confirmed.has(f));
+  // An unconfirmed `.claude/settings.json` only leaves the Claude Code hooks out.
+  const unconfirmed = pending.filter((f) => !confirmed.has(f) && f !== CLAUDE_SETTINGS_FILE);
+  const doneUnconfirmed = (done?.needs_confirmation ?? []).filter((f) => f !== CLAUDE_SETTINGS_FILE);
   // Bundled files the person edited, whose packaged copy changed: left alone unless forced.
   const editedAssets = (preview.data?.asset_files ?? []).filter((f) => f.status === "needs_confirmation");
 
@@ -398,7 +401,7 @@ export function InitializeStep({
           <AlertTitle>Not finished yet</AlertTitle>
           <AlertDescription>
             These files are committed to git and still await your confirmation:{" "}
-            <span className="font-mono break-all">{done.needs_confirmation.join(", ")}</span>.
+            <span className="font-mono break-all">{doneUnconfirmed.join(", ")}</span>.
           </AlertDescription>
         </Alert>
       )}

@@ -699,6 +699,8 @@ export interface FileOutcome {
   reason: string | null;
   snippet: string | null;
   diff: string | null;
+  // `.claude/settings.json`: hook entries that run the WhyGraph helper but are not its own.
+  foreign_hooks?: string | null;
 }
 
 export interface InitBody {

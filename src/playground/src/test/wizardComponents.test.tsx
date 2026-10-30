@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DetectedAgent, Detected, FileOutcome, InitResult } from "../api";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AgentPicker } from "../components/portal/AgentPicker";
 import { DetectedPanel } from "../components/portal/DetectedPanel";
 import { InitPreview, StatusBadge } from "../components/portal/InitPreview";
+import { InitializeStep } from "../components/portal/InitializeStep";
 import { NotSharedAlert } from "../components/portal/NotSharedAlert";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
 import { ScanProgress } from "../components/portal/ScanProgress";
@@ -287,6 +289,89 @@ describe("InitPreview", () => {
 });
 
 // ---- detected panel -------------------------------------------------------------------
+
+// ---- a declined .claude/settings.json (plan 40 step 12) ---------------------------
+
+describe("InitializeStep with a committed .claude/settings.json", () => {
+  const json = (body: unknown) =>
+    Promise.resolve(new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }));
+
+  async function renderStep(pending: FileOutcome[]) {
+    const initBodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/init")) {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          initBodies.push(body);
+          const done = body.dry_run !== true;
+          return json({
+            ...result(done ? [] : pending),
+            agent_files: pending,
+            dry_run: !done,
+            initialized: done,
+            marker_written: done,
+          });
+        }
+        if (url.endsWith("/portal/state")) return json({ port: 8765 });
+        return json({ slug: "demo", source: "local", agent_files: null });
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await renderWithRouter(
+      <QueryClientProvider client={client}>
+        <InitializeStep slug="demo" onDone={() => {}} />
+      </QueryClientProvider>,
+    );
+    return initBodies;
+  }
+
+  const settings = file({
+    file: ".claude/settings.json",
+    status: "needs_confirmation",
+    agent: "claude-settings",
+    reason: "hooks not installed: confirm to add them to the tracked .claude/settings.json",
+    diff: "+    \"SessionStart\": [",
+  });
+
+  it("does not disable Set up for a pending .claude/settings.json alone, and sends no confirm for it", async () => {
+    const user = userEvent.setup();
+    const bodies = await renderStep([file({ file: ".mcp.json", status: "write", agent: "claude" }), settings]);
+
+    const row = await screen.findByTestId("file-.claude/settings.json");
+    expect(within(row).getByRole("checkbox", { name: /Add the WhyGraph hooks to this committed file/ })).not.toBeChecked();
+    const setUp = screen.getByRole("button", { name: "Set up project" });
+    expect(setUp).toBeEnabled();
+    expect(screen.queryByTestId("confirm-hint")).not.toBeInTheDocument();
+
+    await user.click(setUp);
+    await waitFor(() => expect(bodies.find((b) => b.dry_run !== true)?.confirm_tracked).toEqual([]));
+  });
+
+  it("sends the confirmation when the hooks box is ticked", async () => {
+    const user = userEvent.setup();
+    const bodies = await renderStep([settings]);
+
+    const row = await screen.findByTestId("file-.claude/settings.json");
+    await user.click(within(row).getByRole("checkbox"));
+    await user.click(screen.getByRole("button", { name: "Set up project" }));
+    await waitFor(() =>
+      expect(bodies.find((b) => b.dry_run !== true)?.confirm_tracked).toEqual([".claude/settings.json"]),
+    );
+  });
+
+  it("still disables Set up for a pending .mcp.json", async () => {
+    await renderStep([
+      file({ file: ".mcp.json", status: "needs_confirmation", agent: "claude", diff: "+x" }),
+      settings,
+    ]);
+
+    await screen.findByTestId("file-.mcp.json");
+    expect(screen.getByRole("button", { name: "Set up project" })).toBeDisabled();
+    expect(screen.getByTestId("confirm-hint")).toHaveTextContent("Confirm the committed file above");
+  });
+});
 
 describe("DetectedPanel", () => {
   const detected: Detected = {

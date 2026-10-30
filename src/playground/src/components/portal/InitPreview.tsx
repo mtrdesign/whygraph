@@ -2,7 +2,7 @@ import { useId } from "react";
 import { TriangleAlertIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { FileOutcome, FileStatus, InitResult } from "../../api";
-import { selectionNotes } from "../../lib/agents";
+import { CLAUDE_SETTINGS_FILE, selectionNotes } from "../../lib/agents";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Checkbox } from "../ui/checkbox";
@@ -77,6 +77,12 @@ function AgentFileRow({
         )}
       </div>
 
+      {file.foreign_hooks && (
+        <p className="text-xs text-muted-foreground" data-testid="foreign-hooks">
+          Left as it was: {file.foreign_hooks}.
+        </p>
+      )}
+
       {file.status === "refused" && (
         <Alert>
           <TriangleAlertIcon />
@@ -105,12 +111,22 @@ function AgentFileRow({
           {file.diff && <DiffView diff={file.diff} />}
           <label htmlFor={id} className="flex cursor-pointer items-start gap-2 text-sm">
             <Checkbox id={id} checked={confirmed} onCheckedChange={onConfirmChange} className="mt-0.5" />
-            <span>
-              This file is committed to git. Change it as shown above.
-              <span className="block text-xs text-muted-foreground">
-                The entry is commit-safe: teammates get the same one.
+            {file.file === CLAUDE_SETTINGS_FILE ? (
+              <span>
+                Add the WhyGraph hooks to this committed file
+                <span className="block text-xs text-muted-foreground">
+                  Optional. The hooks hold no port or project name and do nothing in a clone without
+                  WhyGraph. Left unticked, the hooks are not installed.
+                </span>
               </span>
-            </span>
+            ) : (
+              <span>
+                This file is committed to git. Change it as shown above.
+                <span className="block text-xs text-muted-foreground">
+                  The entry is commit-safe: teammates get the same one.
+                </span>
+              </span>
+            )}
           </label>
         </div>
       )}

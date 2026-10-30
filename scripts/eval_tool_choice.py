@@ -1232,9 +1232,7 @@ def _replay_session(
         )
         history = _load_history(session_id, user_id)
         rounds = _load_history(session_id, end)[len(history) :]
-        messages, turn_start = begin_turn_messages(
-            history, token_budget=budget, overhead_tokens=fixed
-        )
+        messages, turn_start = begin_turn_messages(history, token_budget=budget)
         requests: list[dict] = []
         index = tool_rounds = 0
         latest_round = turn_start
@@ -1265,15 +1263,7 @@ def _replay_session(
             while index < len(rounds) and rounds[index].role == "tool":
                 messages.append(rounds[index])
                 index += 1
-            _trim_turn(
-                messages,
-                turn_start,
-                latest_round,
-                tool_rounds,
-                budget,
-                None,
-                overhead_tokens=fixed,
-            )
+            _trim_turn(messages, turn_start, latest_round, tool_rounds, budget)
         turns.append({"user_row_id": user_id, "requests": requests})
     return turns
 

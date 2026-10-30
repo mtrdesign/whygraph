@@ -100,16 +100,6 @@ the bulk of the transcript cheap — the same shape as Claude Code's
 context-editing behaviour.
 """
 
-_ELIDE_MIN_TOKENS = 8_000
-"""Stale tool results are elided under budget only in batches of this size.
-
-The client-side counterpart of Anthropic's ``clear_at_least``: eliding an
-older turn's result changes the request's prefix, so the cached part after
-it is re-written instead of read. Advancing the elision boundary in whole
-batches of this many estimated tokens makes that a one-off per batch, and
-between moves the window extends the previous turn's byte for byte.
-"""
-
 
 @dataclass(frozen=True, slots=True)
 class ToolCallStarted:
@@ -495,33 +485,11 @@ def _elide(turn: Sequence[ChatMessage]) -> list[ChatMessage]:
     ]
 
 
-def _elide_boundary(turns: Sequence[Sequence[ChatMessage]], cutoff: int) -> int:
-    """Where under-budget elision stops: the end of the last full stale batch.
-
-    Walks the stale turns (``turns[:cutoff]``) oldest first, adding up their
-    tool-result estimated tokens; each time the sum reaches
-    :data:`_ELIDE_MIN_TOKENS` the boundary moves to the end of that turn and
-    the sum restarts. Computed from the history alone (it is reloaded
-    unelided every turn), so the boundary only moves when a batch completes.
-    """
-    boundary = running = 0
-    for index in range(cutoff):
-        running += sum(
-            _estimate_tokens(m)
-            for m in turns[index]
-            if m.role == "tool" and m.content != ELIDED_MARKER
-        )
-        if running >= _ELIDE_MIN_TOKENS:
-            boundary, running = index + 1, 0
-    return boundary
-
-
 def build_window(
     history: Sequence[ChatMessage],
     *,
     token_budget: int,
     system: ChatMessage | None = None,
-    overhead_tokens: int = 0,
 ) -> tuple[ChatMessage, ...]:
     """Trim ``history`` to fit ``token_budget``, tool-pair-safe.
 
@@ -529,16 +497,11 @@ def build_window(
 
     1. The system prompt is **pinned** — never trimmed, never counted
        against the drop decision (a request without it is a different
-       assistant). The caller counts it, with the tool specs, through
-       ``overhead_tokens``.
-    2. **Elide stale results in batches.** Tool-result bodies older than the
-       last two turns become :data:`ELIDED_MARKER`, even under budget, but
-       only up to the boundary of the last complete batch of
-       :data:`_ELIDE_MIN_TOKENS` (:func:`_elide_boundary`), so the prefix
-       changes once per batch rather than every turn.
-    3. **Elide every stale result** when that is still over budget.
-    4. **Drop whole turns**, oldest first, only if still over budget.
-    5. **Never return an empty history.** A single turn that is itself over
+       assistant).
+    2. **Elide before dropping.** Tool-result bodies older than the last
+       two turns become :data:`ELIDED_MARKER`.
+    3. **Drop whole turns**, oldest first, only if still over budget.
+    4. **Never return an empty history.** A single turn that is itself over
        budget is kept — the provider may reject it, which is a clear error,
        whereas an empty message list is a silent one.
 
@@ -547,16 +510,11 @@ def build_window(
     history : Sequence[ChatMessage]
         The conversation so far, oldest first, excluding the system prompt.
     token_budget : int
-        Approximate ceiling for the whole request (see
+        Approximate ceiling for the returned messages (see
         :func:`_estimate_tokens`).
     system : ChatMessage or None, optional
         The system prompt to pin at the front. ``None`` returns history
         only.
-    overhead_tokens : int, optional
-        The estimated tokens every request carries besides the history
-        (system messages and tool specs). The history is windowed against
-        ``max(token_budget - overhead_tokens, token_budget // 4)``. ``0``
-        (default) gives the history the whole budget.
 
     Returns
     -------
@@ -564,7 +522,6 @@ def build_window(
         ``(system?, *kept_history)`` — ready for :class:`ChatRequest`.
     """
     turns = _split_turns(history)
-    budget = max(token_budget - overhead_tokens, token_budget // 4)
 
     def _finish(kept: list[list[ChatMessage]]) -> tuple[ChatMessage, ...]:
         flat = [m for turn in kept for m in turn]
@@ -573,21 +530,17 @@ def build_window(
     def _total(kept: list[list[ChatMessage]]) -> int:
         return sum(_estimate_tokens(m) for turn in kept for m in turn)
 
-    # Step 2 — elide stale tool results in whole batches, even under budget;
-    # the newest _ELIDE_KEEP_TURNS always stay intact.
+    if _total(turns) <= token_budget:
+        return _finish(turns)
+
+    # Step 2 — elide stale tool results, newest _ELIDE_KEEP_TURNS intact.
     cutoff = max(0, len(turns) - _ELIDE_KEEP_TURNS)
-    boundary = _elide_boundary(turns, cutoff)
-    working = [_elide(t) if i < boundary else list(t) for i, t in enumerate(turns)]
-    if _total(working) <= budget:
+    working = [_elide(t) if i < cutoff else t for i, t in enumerate(turns)]
+    if _total(working) <= token_budget:
         return _finish(working)
 
-    # Step 3 — over budget: elide every stale turn, batch or not.
-    working = [_elide(t) if i < cutoff else t for i, t in enumerate(working)]
-    if _total(working) <= budget:
-        return _finish(working)
-
-    # Step 4 — drop whole turns, oldest first, keeping at least one.
-    while len(working) > 1 and _total(working) > budget:
+    # Step 3 — drop whole turns, oldest first, keeping at least one.
+    while len(working) > 1 and _total(working) > token_budget:
         working.pop(0)
     return _finish(working)
 
@@ -724,9 +677,6 @@ def _trim_turn(
     latest_round: int,
     tool_rounds: int,
     token_budget: int,
-    last_input_tokens: int | None = None,
-    *,
-    overhead_tokens: int = 0,
 ) -> int:
     """Elide this turn's older tool results once it outgrows the budget.
 
@@ -736,14 +686,6 @@ def _trim_turn(
     replayed Anthropic thinking, so every assistant message also loses its
     replayed ``content`` (the documented recovery is to strip it).
 
-    The size compared with the **full** ``token_budget`` is the measured one
-    when there is one: ``last_input_tokens`` (what the previous round's
-    request was, system and specs included) plus the estimate of the
-    messages added since (``messages[latest_round:]``, the latest reply and
-    its results). Without it (``None`` or ``0``: a provider that reports
-    nothing, or the offline replay), it is the estimate of every message
-    plus ``overhead_tokens``.
-
     Returns
     -------
     int
@@ -751,13 +693,7 @@ def _trim_turn(
     """
     if tool_rounds < 2:
         return 0
-    if last_input_tokens:
-        size = last_input_tokens + sum(
-            _estimate_tokens(m) for m in messages[latest_round:]
-        )
-    else:
-        size = overhead_tokens + sum(_estimate_tokens(m) for m in messages)
-    if size <= token_budget:
+    if sum(_estimate_tokens(m) for m in messages) <= token_budget:
         return 0
     changed = False
     for index in range(turn_start, latest_round):
@@ -788,7 +724,6 @@ def begin_turn_messages(
     token_budget: int,
     references: str | None = None,
     continue_from_assistant: bool = False,
-    overhead_tokens: int = 0,
 ) -> tuple[list[ChatMessage], int]:
     """Build the working transcript a turn's first request starts from.
 
@@ -805,14 +740,11 @@ def begin_turn_messages(
     history : Sequence[ChatMessage]
         The conversation so far, ending with the user's question.
     token_budget : int
-        The request token budget handed to :func:`build_window`.
+        The history token budget handed to :func:`build_window`.
     references : str or None, optional
         The question's References block, appended to the last user message.
     continue_from_assistant : bool, optional
         Whether the turn continues a truncated reply.
-    overhead_tokens : int, optional
-        The system messages' and tool specs' estimated tokens, handed to
-        :func:`build_window`.
 
     Returns
     -------
@@ -820,11 +752,7 @@ def begin_turn_messages(
         The transcript (a new list) and ``turn_start``, the index where this
         turn's own messages begin.
     """
-    messages: list[ChatMessage] = list(
-        build_window(
-            history, token_budget=token_budget, overhead_tokens=overhead_tokens
-        )
-    )
+    messages: list[ChatMessage] = list(build_window(history, token_budget=token_budget))
     turn_start = len(messages)
     if references:
         last_user = next(
@@ -905,8 +833,7 @@ def run_turn(
     max_tool_rounds : int, optional
         Round bound. ``None`` reads ``[chat].max_tool_rounds``.
     context_token_budget : int, optional
-        Request budget: the system messages, the tool specs and the
-        history together. ``None`` reads ``[chat].context_token_budget``.
+        History budget. ``None`` reads ``[chat].context_token_budget``.
     max_tokens : int, optional
         Per-call output cap. ``None`` reads ``[chat].max_tokens`` (whose
         own default lets the adapter pick).
@@ -977,9 +904,6 @@ def run_turn(
         max_continuations = config.max_continuations
 
     system = build_system_prompt(registry, get_mode(mode))
-    # What every request carries besides the transcript, counted against the
-    # budget; once per turn (the specs tuple is unhashable, so no cache).
-    overhead = sum(_estimate_tokens(m) for m in system) + _specs_tokens(registry.specs)
     # The working transcript: the windowed history plus whatever this turn
     # appends. Windowing between turns happens once, up front; inside the
     # turn only stale tool results are elided (`_trim_turn`), never a
@@ -989,7 +913,6 @@ def run_turn(
         token_budget=context_token_budget,
         references=references,
         continue_from_assistant=continue_from_assistant,
-        overhead_tokens=overhead,
     )
 
     # One TurnDone per provider call, in order; the turn total is their sum.
@@ -1142,13 +1065,7 @@ def run_turn(
                 "chat round %d dispatched %d tool call(s)", rounds_used, len(calls)
             )
             elided = _trim_turn(
-                messages,
-                turn_start,
-                latest_round,
-                tool_rounds,
-                context_token_budget,
-                done.input_tokens,
-                overhead_tokens=overhead,
+                messages, turn_start, latest_round, tool_rounds, context_token_budget
             )
             if elided and not trimmed:
                 trimmed = True

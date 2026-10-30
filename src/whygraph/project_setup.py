@@ -56,6 +56,9 @@ PORTAL_JSON = Path(".whygraph") / "portal.json"
 PORTAL_ENV = Path(".whygraph") / "portal.env"
 """Marker parsed - never sourced - by the git hook helper."""
 
+CLAUDE_SETTINGS = ".claude/settings.json"
+"""The Claude Code hooks file; its pending confirmation never withholds the markers."""
+
 
 @dataclass(frozen=True, slots=True)
 class PortalMarker:
@@ -153,6 +156,7 @@ def initialize_project(
     dry_run: bool = False,
     contained: bool = False,
     replace_codegraph: Iterable[str | Path] = (),
+    claude_hooks: bool = True,
 ) -> InitializeResult:
     """Wire a repository for WhyGraph: gitignore, hooks, agent configs, assets.
 
@@ -197,6 +201,14 @@ def initialize_project(
         entry (for example CodeGraph's own stdio one) the caller agreed
         to replace with the portal's. Any other foreign entry is left
         byte-identical and reported on the file's outcome.
+    claude_hooks : bool
+        For Claude Code on ``migrate``: merge the WhyGraph hooks into
+        ``.claude/settings.json`` (:func:`whygraph.agents.apply_claude_hooks`)
+        and write the agent hook helper. The portal passes ``False`` for a
+        linked project. A Claude Code ``remove`` strips the hooks and
+        deletes the helper whatever this is. A ``needs_confirmation``
+        outcome for ``.claude/settings.json`` never withholds the markers:
+        the hooks just stay uninstalled.
     contained : bool
         Refuse to follow a symlink out of the repository: before any
         step runs (dry run included), every path the call could read or
@@ -232,7 +244,7 @@ def initialize_project(
         actions[agents_mod.resolve_agent(name).name] = action
     replace_files = {Path(p).as_posix() for p in replace_codegraph}
     if contained:
-        for path in _touched_paths(root, actions, marker):
+        for path in _touched_paths(root, actions, marker, claude_hooks=claude_hooks):
             check_inside(root, path)
 
     gitignore_added: tuple[str, ...] = ()
@@ -241,6 +253,12 @@ def initialize_project(
     if not dry_run:
         gitignore_added = tuple(ensure_gitignore_entries(root, GITIGNORE_ENTRIES))
         try:
+            # The agent hook is independent of [scan].hooks; deleted before
+            # sync_hooks, which removes the helper directory only when empty.
+            if actions.get("claude") == "migrate" and claude_hooks:
+                _hooks.sync_agent_hook_helper(root)
+            elif actions.get("claude") == "remove":
+                _hooks.remove_agent_hook_helper(root)
             names = _hooks.resolve_hook_names(hooks)
             hooks_result = _hooks.sync_hooks(root, names)
         except _hooks.HooksError as exc:
@@ -258,6 +276,12 @@ def initialize_project(
                 target, root, confirm_tracked=confirm_tracked, dry_run=dry_run
             )
             agent_files.append(outcome)
+            if name == "claude":
+                agent_files.append(
+                    agents_mod.remove_claude_hooks(
+                        root, confirm_tracked=confirm_tracked, dry_run=dry_run
+                    )
+                )
             continue
 
         outcome = agents_mod.apply_http_entry(
@@ -277,6 +301,12 @@ def initialize_project(
             )
             asset_results[name] = installed
             asset_files.extend(_asset_outcomes(root, name, installed))
+        if name == "claude" and claude_hooks:
+            agent_files.append(
+                agents_mod.apply_claude_hooks(
+                    root, confirm_tracked=confirm_tracked, dry_run=dry_run
+                )
+            )
 
     if (
         manifest_before is not None
@@ -297,7 +327,10 @@ def initialize_project(
         configured_agents=tuple(configured),
     )
 
-    if marker is not None and not dry_run and not result.needs_confirmation:
+    # A declined .claude/settings.json leaves the hooks uninstalled; it never
+    # withholds the markers.
+    blocking = [f for f in result.needs_confirmation if f.file != CLAUDE_SETTINGS]
+    if marker is not None and not dry_run and not blocking:
         _remove_stale_scan_lock(root)
         write_portal_marker(root, marker)
         return replace(result, marker_written=True)
@@ -305,7 +338,11 @@ def initialize_project(
 
 
 def _touched_paths(
-    root: Path, actions: Mapping[str, AgentAction], marker: PortalMarker | None
+    root: Path,
+    actions: Mapping[str, AgentAction],
+    marker: PortalMarker | None,
+    *,
+    claude_hooks: bool = True,
 ) -> Iterator[Path]:
     """Every work-tree path :func:`initialize_project` may read, write or delete.
 
@@ -322,6 +359,8 @@ def _touched_paths(
         target = agents_mod.AGENTS[name]
         if target.scope == "project":
             paths.append(agents_mod.config_path_for(target, root))
+        if name == "claude" and (action == "remove" or claude_hooks):
+            paths.append(root / CLAUDE_SETTINGS)
         if action == "migrate" and target.has_assets:
             assert target.assets_dest is not None
             dest = root.joinpath(*target.assets_dest)

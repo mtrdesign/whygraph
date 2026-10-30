@@ -780,7 +780,11 @@ def test_initialize_two_agents_write_two_files(repo: Path) -> None:
         mcp=HttpMcp(slug="demo"),
         marker=None,
     )
-    assert {f.file for f in result.agent_files} == {".mcp.json", ".codex/config.toml"}
+    assert {f.file for f in result.agent_files} == {
+        ".mcp.json",
+        ".claude/settings.json",
+        ".codex/config.toml",
+    }
     assert (repo / ".mcp.json").is_file()
     assert (repo / ".codex" / "config.toml").is_file()
     assert (repo / "AGENTS.md").is_file()
@@ -925,7 +929,11 @@ def test_agent_actions_remove_and_migrate(repo: Path) -> None:
     assert json.loads(cursor.read_text()) == {"mcpServers": {"other": {"command": "o"}}}
     assert result.configured_agents == ("claude",)
     assert not (repo / ".cursor" / "rules").exists()  # removal installs no assets
-    assert {f.file for f in result.agent_files} == {".mcp.json", ".cursor/mcp.json"}
+    assert {f.file for f in result.agent_files} == {
+        ".mcp.json",
+        ".claude/settings.json",
+        ".cursor/mcp.json",
+    }
 
 
 def test_agent_actions_can_override_an_agent_to_remove(repo: Path) -> None:
@@ -1218,3 +1226,116 @@ def test_removing_an_agent_leaves_retired_asset_files(
     _init(repo, agents=[], agent_actions={"cursor": "remove"})
 
     assert old.read_text() == "OLD COMMAND"
+
+
+# ---- Claude Code hooks (plan 40 step 12) -----------------------------------
+
+
+def test_claude_hooks_false_writes_no_settings_entries_and_no_helper(
+    repo: Path,
+) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    result = initialize_project(
+        repo,
+        agents=["claude"],
+        hooks=True,
+        mcp=MCP,
+        marker=PortalMarker(slug="demo", port=8765),
+        contained=True,
+        claude_hooks=False,
+    )
+
+    assert [f.file for f in result.agent_files] == [".mcp.json"]
+    assert not (repo / ".claude" / "settings.json").exists()
+    assert not agent_hook_helper_path(repo).exists()
+    assert result.marker_written is True
+
+
+def test_claude_hooks_install_the_settings_entries_and_the_helper(repo: Path) -> None:
+    from whygraph.hooks import AGENT_HOOK_HELPER, agent_hook_helper_path
+
+    result = initialize_project(
+        repo, agents=["claude"], hooks=False, mcp=MCP, marker=None, contained=True
+    )
+
+    by_file = {f.file: f for f in result.agent_files}
+    assert by_file[".claude/settings.json"].status == "write"
+    assert by_file[".claude/settings.json"].agent == "claude-settings"
+    assert result.configured_agents == ("claude",)
+    settings = json.loads((repo / ".claude" / "settings.json").read_text())
+    assert set(settings["hooks"]) == {"SessionStart", "PostToolUse"}
+    assert agent_hook_helper_path(repo).read_text() == AGENT_HOOK_HELPER
+
+
+def test_a_dry_run_writes_no_settings_and_no_helper(repo: Path) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    result = initialize_project(
+        repo, agents=["claude"], hooks=True, mcp=MCP, marker=None, dry_run=True
+    )
+
+    assert {f.file: f.status for f in result.agent_files} == {
+        ".mcp.json": "write",
+        ".claude/settings.json": "write",
+    }
+    assert not (repo / ".claude").exists()
+    assert not agent_hook_helper_path(repo).exists()
+
+
+@pytest.mark.parametrize("claude_hooks", [True, False])
+def test_claude_remove_strips_the_hooks_and_deletes_the_helper(
+    repo: Path, claude_hooks: bool
+) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    settings = repo / ".claude" / "settings.json"
+    initialize_project(repo, agents=["claude"], hooks=False, mcp=MCP, marker=None)
+    data = json.loads(settings.read_text())
+    data["permissions"] = {"allow": []}
+    settings.write_text(json.dumps(data))
+    assert agent_hook_helper_path(repo).is_file()
+
+    result = initialize_project(
+        repo,
+        agents=[],
+        hooks=False,
+        mcp=MCP,
+        marker=None,
+        agent_actions={"claude": "remove"},
+        contained=True,
+        claude_hooks=claude_hooks,
+    )
+
+    assert {f.file for f in result.agent_files} == {
+        ".mcp.json",
+        ".claude/settings.json",
+    }
+    assert json.loads(settings.read_text()) == {"permissions": {"allow": []}}
+    assert not agent_hook_helper_path(repo).exists()
+    assert not (repo / ".git" / "whygraph").exists()  # deleted before sync_hooks
+
+
+def test_another_agent_leaves_the_agent_helper_alone(repo: Path) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    initialize_project(repo, agents=["claude"], hooks=False, mcp=MCP, marker=None)
+    initialize_project(repo, agents=["cursor"], hooks=False, mcp=MCP, marker=None)
+
+    assert agent_hook_helper_path(repo).is_file()
+
+
+def test_touched_paths_follow_claude_hooks(repo: Path) -> None:
+    settings = repo / ".claude" / "settings.json"
+
+    def touched(action: str, claude_hooks: bool) -> list[Path]:
+        return list(
+            project_setup._touched_paths(
+                repo, {"claude": action}, None, claude_hooks=claude_hooks
+            )
+        )
+
+    assert settings in touched("migrate", True)
+    assert settings not in touched("migrate", False)
+    assert settings in touched("remove", True)
+    assert settings in touched("remove", False)

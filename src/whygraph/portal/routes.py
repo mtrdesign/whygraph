@@ -56,6 +56,7 @@ from whygraph.agents import (
     UnknownAgentError,
     config_path_for,
     detect_codegraph_hooks,
+    remove_claude_hooks,
     remove_entry,
     resolve_agent,
 )
@@ -67,11 +68,13 @@ from whygraph.hooks import (
     LEGACY_HELPER_RELPATH,
     HooksError,
     HooksResult,
+    remove_agent_hook_helper,
     resolve_hook_names,
     sync_hooks,
 )
 from whygraph.serve.chat import default_chat_provider
 from whygraph.project_setup import (
+    CLAUDE_SETTINGS,
     PORTAL_ENV,
     PORTAL_JSON,
     HttpMcp,
@@ -2497,12 +2500,29 @@ def _remove_project(
                 warnings.append(f"left the {target.name} entry: {unsafe}")
             else:
                 targets.append(target)
+        claude_hooks = False
+        if "claude" in agents:
+            unsafe = _unsafe_reason(
+                project.root,
+                project.root / CLAUDE_SETTINGS,
+                project.root / BACKUPS_DIR,
+            )
+            if unsafe:
+                warnings.append(f"left the Claude Code hooks: {unsafe}")
+            else:
+                claude_hooks = True
         preview = [
             remove_entry(
                 t, project.root, confirm_tracked=body.confirm_tracked, dry_run=True
             )
             for t in targets
         ]
+        if claude_hooks:
+            preview.append(
+                remove_claude_hooks(
+                    project.root, confirm_tracked=body.confirm_tracked, dry_run=True
+                )
+            )
         pending = [asdict(f) for f in preview if f.status == "needs_confirmation"]
         if pending:
             raise ApiError(
@@ -2515,6 +2535,14 @@ def _remove_project(
             asdict(remove_entry(t, project.root, confirm_tracked=body.confirm_tracked))
             for t in targets
         ]
+        if claude_hooks:
+            agent_files.append(
+                asdict(
+                    remove_claude_hooks(
+                        project.root, confirm_tracked=body.confirm_tracked
+                    )
+                )
+            )
 
     if state.codegraph_host is not None:
         # Drops the project's bridge state; the shared child stays.
@@ -2530,6 +2558,8 @@ def _remove_project(
             warnings.append(f"left the git hooks: {unsafe}")
         elif state.mode != "production":  # production installs no hooks
             try:
+                # First: sync_hooks removes the helper directory only when empty.
+                remove_agent_hook_helper(project.root)
                 hooks = _hooks_dict(sync_hooks(project.root, []))
             except HooksError as exc:
                 warnings.append(str(exc))
@@ -2833,6 +2863,7 @@ def init_project(
             dry_run=body.dry_run,
             contained=True,
             replace_codegraph=body.replace_codegraph,
+            claude_hooks=project.source != "platform",
         )
     except UnsafePathError as exc:
         raise unsafe_path_error(exc) from exc

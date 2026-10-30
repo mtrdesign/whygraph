@@ -203,18 +203,18 @@ def test_history_tools_state_which_description_field_is_authoritative() -> None:
 
 
 def test_the_stats_spec_ships_the_annotated_schema() -> None:
-    """The shipped description *is* the schema summary — not a paraphrase of it.
+    """The shipped description *is* the schema doc — not a paraphrase of it.
 
     Detailed content assertions live in ``test_chat_stats_sql.py``; this guards
     the wiring, which is the part that could silently regress to a short
     summary "to save tokens".
     """
-    from whygraph.chat.stats_sql import _SCHEMA_SUMMARY
+    from whygraph.chat.stats_sql import _SCHEMA_DOC
 
     spec = next(s for s in TOOL_SPECS if s.name == "run_project_stats")
-    assert spec.description == _SCHEMA_SUMMARY
+    assert spec.description == _SCHEMA_DOC
     assert "FIVE REQUIRED RULES" in spec.description
-    assert "=== TABLES" in spec.description
+    assert "=== TABLES ===" in spec.description
 
 
 def test_every_spec_has_a_handler() -> None:
@@ -1633,12 +1633,12 @@ def test_the_render_chart_spec_tells_the_model_to_name_columns() -> None:
 def test_the_graph_stats_spec_ships_its_own_schema_doc() -> None:
     """The two stats tools must not share a description — the whole risk is that
     the model confuses one database for the other."""
-    from whygraph.chat.graph_stats_sql import _GRAPH_SCHEMA_SUMMARY
-    from whygraph.chat.stats_sql import _SCHEMA_SUMMARY
+    from whygraph.chat.graph_stats_sql import _GRAPH_SCHEMA_DOC
+    from whygraph.chat.stats_sql import _SCHEMA_DOC
 
     spec = next(s for s in TOOL_SPECS if s.name == "run_graph_stats")
-    assert spec.description == _GRAPH_SCHEMA_SUMMARY
-    assert spec.description != _SCHEMA_SUMMARY
+    assert spec.description == _GRAPH_SCHEMA_DOC
+    assert spec.description != _SCHEMA_DOC
     assert "DIFFERENT DATABASE from run_project_stats" in spec.description
 
 

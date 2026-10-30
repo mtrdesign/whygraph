@@ -10,8 +10,7 @@ The **four security layers** that fence that capability live in
 shared with CodeGraph's surface (:mod:`whygraph.chat.graph_stats_sql`) so there is
 one authorizer to audit rather than two that drift. What stays here is the part
 that is genuinely per-database: :data:`_ALLOWED_TABLES` (a frozenset **literal**)
-and :data:`_SCHEMA_SUMMARY` (the tool description; per-table prose is in
-:data:`_SCHEMA_SECTIONS`, served in the tool's own error payload).
+and :data:`_SCHEMA_DOC` (the tool description).
 
 Chat-only — never registered with MCP.
 """
@@ -20,7 +19,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import replace
 from pathlib import Path
 
 from whygraph.db import get_engine
@@ -107,7 +105,7 @@ def run_stats_query(sql: str, *, db_path: Path | None = None) -> dict:
     return run_aggregate_query(sql, _SURFACE, db_path=db_path)
 
 
-_SCHEMA_SUMMARY = """\
+_SCHEMA_DOC = """\
 Run a read-only aggregate SQL query for PROJECT STATISTICS — velocity, churn,
 hotspots, contributor and PR-cycle-time breakdowns. Aggregates only: the query
 MUST use COUNT/SUM/AVG/MIN/MAX or GROUP BY, and returns at most 200 rows.
@@ -177,22 +175,82 @@ follow rename chains and git blame, which raw SQL here does NOT.
 
    Never present a commit count as a measure of productivity.
 
-=== TABLES (main columns; an unknown table or column gets the full notes back) ===
+=== TABLES ===
 
-"commit" (quote it): sha, author_name, author_email (raw, rule 5), authored_at,
-  subject, body, llm_description, files_changed, insertions, deletions,
-  refactor_score, on_default_branch, first_seen_ref
-commit_file_change: commit_sha, path, change_type (M/A/D/R/C), renamed_from,
-  lines_added, lines_deleted
-pull_request: number, title, state, author, created_at, closed_at, merged_at,
-  milestone, assignees, files (JSON arrays: instr()), review_decision,
-  first_review_at, additions, deletions, changed_files
-issue: number, title, state, author, created_at, closed_at, milestone
-milestone: number, title, state, due_on, progress_pct
-tag: name, sha, tagged_at
-pr_issue_link: pr_number, issue_number, link_kind
-author: id, primary_login, primary_name, primary_email, emails, commit_count,
-  pr_count, issue_count
+commit  — one row per scanned commit (first-parent walk of the default branch)
+  NOTE: `commit` is a SQL keyword — quote it as "commit".
+  sha TEXT PK · parent_shas TEXT (space-delimited, not JSON)
+  author_name, author_email TEXT   -- RAW git identity, one human may have
+                       -- several. Never group developers by these — see rule 5.
+  authored_at TEXT   -- when written; use THIS for velocity
+  committed_at TEXT  -- when committed; differs after rebase/cherry-pick
+  subject, body TEXT -- developer-written; may be terse or wrong
+  llm_description TEXT -- generated from the DIFF ALONE; authoritative for
+                       -- what changed. NULL for ~23% (unbackfilled).
+  files_changed, insertions, deletions INTEGER  -- per-commit totals
+  refactor_score INTEGER 0-100 -- heuristic likelihood this is a refactor /
+                       -- formatter sweep. Observed: 201 commits 0-24,
+                       -- 13 at 25-49, 5 at 50-74. Not a quality measure.
+  on_default_branch INTEGER 0/1 -- see rule 1
+  first_seen_ref TEXT NULL -- NULL = was on the default branch when scanned.
+                       -- Otherwise the ref a flag-0 row came from: a branch
+                       -- name (unmerged local work) or refs/pull/<N>/head
+                       -- (a squash-merge recovery).
+  scanned_at TEXT
+
+commit_file_change — one row per (commit, path AT THAT COMMIT)
+  commit_sha TEXT (indexed, FK commit.sha) · path TEXT (indexed)
+  change_type TEXT — single git letter: 'M' modified, 'A' added, 'D' deleted,
+                     'R' renamed, 'C' copied. NOT words.
+  renamed_from TEXT NULL -- previous path when change_type='R'
+  similarity INTEGER NULL -- rename similarity %, only on renames
+  lines_added, lines_deleted INTEGER
+  NOTE: `path` does not follow renames. A file moved mid-history appears under
+  both names and a path filter under-reports it.
+
+pull_request
+  number INTEGER PK · title TEXT · body TEXT · state TEXT ('open'|'closed')
+  draft INTEGER 0/1 · author TEXT · base_ref TEXT · head_sha, merge_commit_sha
+  created_at, updated_at, closed_at, merged_at TEXT (merged_at NULL if unmerged)
+  Cycle time: julianday(merged_at) - julianday(created_at) WHERE merged_at
+  IS NOT NULL  -- days
+  milestone INTEGER NULL -- milestone.number
+  assignees, review_requests, files TEXT -- JSON ARRAYS (logins / logins /
+    paths); match with instr(), never json_each
+  review_decision TEXT NULL · latest_reviews TEXT -- JSON, latest review per
+    reviewer
+  first_review_at TEXT NULL -- the pickup-time anchor: earliest submitted
+    review by someone other than the author. Pickup time:
+    julianday(first_review_at) - julianday(created_at) -- days
+  additions, deletions, changed_files INTEGER NULL
+
+issue
+  number INTEGER PK · title, body, state, author TEXT
+  created_at, updated_at, closed_at TEXT
+  milestone INTEGER NULL -- milestone.number
+  assignees TEXT -- JSON ARRAY of logins; match with instr(), never json_each
+  state_reason TEXT NULL
+
+milestone — number INTEGER PK · title, description, state TEXT
+  due_on, closed_at TEXT NULL · updated_at TEXT · progress_pct REAL NULL
+  html_url, fetched_at TEXT
+
+tag — name TEXT PK · sha TEXT · tagged_at TEXT NULL · subject TEXT NULL
+
+pr_issue_link — pr_number, issue_number, link_kind ('closes')
+
+author — resolved contributor identities, ONE ROW PER HUMAN. Built by the
+  scan's author phase from evidence only (git mailmap, GitHub's own
+  login/name/email triples, noreply parsing, byte-equal emails) — never from
+  a display name, so two people who share a name are never merged.
+  id INTEGER PK · primary_login TEXT NULL (GitHub login; NULL if they never
+    appeared in a PR/issue) · primary_name, primary_email TEXT
+  emails, logins, names TEXT -- JSON ARRAYS of every known value, sorted
+  commit_count INTEGER -- default-branch commits only (rule 1 already applied)
+  pr_count, issue_count INTEGER · first_seen, last_seen TEXT
+  Rebuilt from scratch each scan, so it is current or absent, never stale.
+  If it is EMPTY the author phase has not run — fall back to
+  commit.author_email and say the identities are unresolved.
 
 If a table returns nothing, that source has not been scanned — say so rather
 than reporting zero as a finding.\
@@ -215,96 +273,6 @@ against the JSON array treats ``_`` as a single-character wildcard — so one
 person's commits can be attributed to a different person whose address differs
 only at that position. That false merge is undetectable from the output.
 """
-_SCHEMA_SECTIONS: dict[str, str] = {
-    "commit": """\
-commit  — one row per scanned commit (first-parent walk of the default branch)
-  NOTE: `commit` is a SQL keyword — quote it as "commit".
-  sha TEXT PK · parent_shas TEXT (space-delimited, not JSON)
-  author_name, author_email TEXT   -- RAW git identity, one human may have
-                       -- several. Never group developers by these — see rule 5.
-  authored_at TEXT   -- when written; use THIS for velocity
-  committed_at TEXT  -- when committed; differs after rebase/cherry-pick
-  subject, body TEXT -- developer-written; may be terse or wrong
-  llm_description TEXT -- generated from the DIFF ALONE; authoritative for
-                       -- what changed. NULL for ~23% (unbackfilled).
-  files_changed, insertions, deletions INTEGER  -- per-commit totals
-  refactor_score INTEGER 0-100 -- heuristic likelihood this is a refactor /
-                       -- formatter sweep. Observed: 201 commits 0-24,
-                       -- 13 at 25-49, 5 at 50-74. Not a quality measure.
-  on_default_branch INTEGER 0/1 -- see rule 1
-  first_seen_ref TEXT NULL -- NULL = was on the default branch when scanned.
-                       -- Otherwise the ref a flag-0 row came from: a branch
-                       -- name (unmerged local work) or refs/pull/<N>/head
-                       -- (a squash-merge recovery).
-  scanned_at TEXT\
-""",
-    "commit_file_change": """\
-commit_file_change — one row per (commit, path AT THAT COMMIT)
-  commit_sha TEXT (indexed, FK commit.sha) · path TEXT (indexed)
-  change_type TEXT — single git letter: 'M' modified, 'A' added, 'D' deleted,
-                     'R' renamed, 'C' copied. NOT words.
-  renamed_from TEXT NULL -- previous path when change_type='R'
-  similarity INTEGER NULL -- rename similarity %, only on renames
-  lines_added, lines_deleted INTEGER
-  NOTE: `path` does not follow renames. A file moved mid-history appears under
-  both names and a path filter under-reports it.\
-""",
-    "pull_request": """\
-pull_request
-  number INTEGER PK · title TEXT · body TEXT · state TEXT ('open'|'closed')
-  draft INTEGER 0/1 · author TEXT · base_ref TEXT · head_sha, merge_commit_sha
-  created_at, updated_at, closed_at, merged_at TEXT (merged_at NULL if unmerged)
-  Cycle time: julianday(merged_at) - julianday(created_at) WHERE merged_at
-  IS NOT NULL  -- days
-  milestone INTEGER NULL -- milestone.number
-  assignees, review_requests, files TEXT -- JSON ARRAYS (logins / logins /
-    paths); match with instr(), never json_each
-  review_decision TEXT NULL · latest_reviews TEXT -- JSON, latest review per
-    reviewer
-  first_review_at TEXT NULL -- the pickup-time anchor: earliest submitted
-    review by someone other than the author. Pickup time:
-    julianday(first_review_at) - julianday(created_at) -- days
-  additions, deletions, changed_files INTEGER NULL\
-""",
-    "issue": """\
-issue
-  number INTEGER PK · title, body, state, author TEXT
-  created_at, updated_at, closed_at TEXT
-  milestone INTEGER NULL -- milestone.number
-  assignees TEXT -- JSON ARRAY of logins; match with instr(), never json_each
-  state_reason TEXT NULL\
-""",
-    "milestone": """\
-milestone — number INTEGER PK · title, description, state TEXT
-  due_on, closed_at TEXT NULL · updated_at TEXT · progress_pct REAL NULL
-  html_url, fetched_at TEXT\
-""",
-    "tag": """\
-tag — name TEXT PK · sha TEXT · tagged_at TEXT NULL · subject TEXT NULL\
-""",
-    "pr_issue_link": """\
-pr_issue_link — pr_number, issue_number, link_kind ('closes')\
-""",
-    "author": """\
-author — resolved contributor identities, ONE ROW PER HUMAN. Built by the
-  scan's author phase from evidence only (git mailmap, GitHub's own
-  login/name/email triples, noreply parsing, byte-equal emails) — never from
-  a display name, so two people who share a name are never merged.
-  id INTEGER PK · primary_login TEXT NULL (GitHub login; NULL if they never
-    appeared in a PR/issue) · primary_name, primary_email TEXT
-  emails, logins, names TEXT -- JSON ARRAYS of every known value, sorted
-  commit_count INTEGER -- default-branch commits only (rule 1 already applied)
-  pr_count, issue_count INTEGER · first_seen, last_seen TEXT
-  Rebuilt from scratch each scan, so it is current or absent, never stale.
-  If it is EMPTY the author phase has not run — fall back to
-  commit.author_email and say the identities are unresolved.\
-""",
-}
-"""Per-table schema prose, keyed by table: sent only in an error payload."""
-
-
-_SURFACE = replace(_SURFACE, schema_sections=_SCHEMA_SECTIONS)
-"""Binds the sections to the guard, which serves them in an error payload."""
 
 
 __all__ = ["SqlNotAllowed", "run_stats_query"]

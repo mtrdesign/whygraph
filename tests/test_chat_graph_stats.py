@@ -355,9 +355,9 @@ def test_the_allowlist_is_a_literal_not_derived_from_the_schema() -> None:
     assert "sqlite_master" not in graph_stats_sql._ALLOWED_TABLES
 
 
-def test_the_graph_schema_summary_carries_its_five_rules() -> None:
+def test_the_graph_schema_doc_carries_its_five_rules() -> None:
     """Each rule is a trap that produces a *plausible* wrong number."""
-    doc = graph_stats_sql._GRAPH_SCHEMA_SUMMARY
+    doc = graph_stats_sql._GRAPH_SCHEMA_DOC
     # Rule 1 — imports outnumber functions, so an unfiltered count is inflated.
     assert "kind IN ('function','method','class','interface','route','constant'," in doc
     assert "imports OUTNUMBER functions" in doc
@@ -382,26 +382,10 @@ def test_the_graph_schema_summary_carries_its_five_rules() -> None:
 
 def test_the_graph_schema_doc_ships_the_measured_cardinalities() -> None:
     """Measured, not assumed — so the model need not discover them by query."""
-    doc = "\n".join(graph_stats_sql._SCHEMA_SECTIONS.values())
+    doc = graph_stats_sql._GRAPH_SCHEMA_DOC
     assert "function 1288, import 1111" in doc
     assert "contains 3128, calls 2618" in doc
     assert "python 182, tsx 23" in doc
     # `updated_at` is an index timestamp, and reading it as a commit date is the
     # single most likely two-database confusion.
     assert "INDEX timestamp, NOT a commit date" in doc
-
-
-def test_the_graph_summary_is_under_its_cap_and_names_every_table() -> None:
-    summary = graph_stats_sql._GRAPH_SCHEMA_SUMMARY
-    assert len(summary) <= 2_900
-    assert set(graph_stats_sql._SCHEMA_SECTIONS) == set(_ALLOWED_TABLES)
-    for table in _ALLOWED_TABLES:
-        assert table in summary
-    assert "function 1288" not in summary
-
-
-def test_an_unknown_column_error_carries_that_tables_section(graph_db: Path) -> None:
-    result = run_graph_query("SELECT COUNT(nope) FROM edges", db_path=graph_db)
-    assert result["layer"] == "sqlite"
-    assert result["schema"] == graph_stats_sql._SCHEMA_SECTIONS["edges"]
-    assert "contains 3128" in result["schema"]

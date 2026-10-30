@@ -727,10 +727,12 @@ def _ref_failures(
 ) -> tuple[list[str], list[str]]:
     """``(failures, notes)`` of one answer's cited refs.
 
-    ``resolve_sha`` returns ``ok``, ``missing``, ``ambiguous`` or
-    ``unverified``; ``resolve_number`` whether ``#N`` is a PR or an issue. A
-    miss is ``invented_ref:<ref>``; an ambiguous prefix and an unverifiable
-    one (no checkout to ask git) are notes, not failures.
+    ``resolve_sha`` returns ``ok``, ``missing``, ``ambiguous``,
+    ``unverified`` or ``identifier``; ``resolve_number`` whether ``#N`` is a
+    PR or an issue. A miss is ``invented_ref:<ref>``; an ambiguous prefix, an
+    unverifiable one (no checkout to ask git) and a hex token that is not a
+    commit but appears in the repository's files (an Alembic revision id, a
+    hash constant) are notes, not failures.
     """
     shas, numbers = _extract_refs(answer)
     failures: list[str] = []
@@ -739,7 +741,7 @@ def _ref_failures(
         verdict = resolve_sha(sha)
         if verdict == "missing":
             failures.append(f"invented_ref:{sha}")
-        elif verdict in ("ambiguous", "unverified"):
+        elif verdict in ("ambiguous", "unverified", "identifier"):
             notes.append(f"{verdict}_ref:{sha}")
     for number in numbers:
         if not resolve_number(number):
@@ -801,6 +803,10 @@ def _live_resolvers(args) -> tuple[Callable[[str], str], Callable[[int], bool]]:
             candidates = _git(root, "rev-parse", f"--disambiguate={sha}")
             if len(candidates.stdout.split()) > 1:
                 return "ambiguous"
+            # Not a commit, but a real identifier the repository contains
+            # (an Alembic revision id such as `6f1b3d8a2c94`): not invented.
+            if _git(root, "grep", "-q", "-I", "-i", "-F", sha).returncode == 0:
+                return "identifier"
             return "missing"
         return (
             "ok"
@@ -1768,6 +1774,10 @@ def _self_test_refs() -> bool:
     )
     ok &= failures == ["invented_ref:ffff123", "invented_ref:#8"]
     ok &= notes == ["ambiguous_ref:abc1234"]
+    failures, notes = _ref_failures(
+        "revision 6f1b3d8a2c94", lambda sha: "identifier", bool
+    )
+    ok &= failures == [] and notes == ["identifier_ref:6f1b3d8a2c94"]
     real = globals()["_get_json"]
     try:
         globals()["_get_json"] = lambda url: {"error": "not_found"}

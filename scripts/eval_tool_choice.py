@@ -56,6 +56,16 @@ portal; it defaults to this checkout's directory name)::
     uv run python scripts/eval_tool_choice.py \\
       --target deepseek:deepseek-v4-flash --target deepseek:deepseek-v4-pro
 
+Project notes (plan 40)::
+
+    # a suite with a `setup.notes` block creates and confirms its `[eval] `
+    # notes through /api/projects/<slug>/notes first (idempotent by body)
+    uv run python scripts/eval_tool_choice.py --suite tests/fixtures/chat_eval/engineer.json \\
+      --slug whygraph --mode engineer --target anthropic:claude-sonnet-5-5
+
+    # retire every `[eval] ` note of the slug afterwards (one run per slug)
+    uv run python scripts/eval_tool_choice.py --cleanup-notes --slug whygraph
+
 Notes
 -----
 * A target whose turns all fail is reported **SKIPPED** with the provider's
@@ -255,6 +265,7 @@ def _stream_turn(base: str, session_id: int, question: str) -> dict:
         "rounds": 0,
         "tool_errors": 0,
         "misuse": [],
+        "note_limit": False,
         "input_tokens": None,
         "output_tokens": None,
     }
@@ -282,6 +293,8 @@ def _stream_turn(base: str, session_id: int, question: str) -> dict:
                 misuse = _misuse_kind(frame.get("result", ""))
                 if misuse:
                     turn["misuse"].append(misuse)
+                if NOTE_LIMIT_RE.search(frame.get("result", "")):
+                    turn["note_limit"] = True
             elif kind == "text_delta":
                 turn["answer"] += frame.get("text", "")
             elif kind == "error":
@@ -299,6 +312,16 @@ def _stream_turn(base: str, session_id: int, question: str) -> dict:
 # a substring test would fire on repository text that quotes the phrase.
 UNKNOWN_TOOL_PREFIX = '{"error": "unknown tool '
 INVALID_ARGS_PREFIX = '{"error": "invalid arguments for '
+
+
+NOTE_LIMIT_RE = re.compile(
+    r'^\{"error": "[^"]*agent proposals (are waiting for review|per (member|project) per day)'
+)
+"""A ``propose_note`` result refused by a ``note_limit`` cap.
+
+The chat tool body returns ``{"error": <message>}`` without the code, so the
+caps' messages (``mcp/notes.py`` ``_check_caps``) are matched as a prefix.
+"""
 
 
 def _misuse_kind(result: str) -> str:
@@ -688,6 +711,137 @@ def _spent(args) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Project notes: suite setup, per-case cleanup, --cleanup-notes (plan 40)
+# ---------------------------------------------------------------------------
+
+EVAL_PREFIX = "[eval] "
+"""Every ``setup.notes`` body starts with this; ``--cleanup-notes`` finds them by it."""
+
+
+def _notes_api(args) -> str:
+    """The project's notes routes."""
+    return f"{_project_api(args)}/notes"
+
+
+def _list_notes(args, **params) -> list[dict]:
+    """Every note matching ``params`` (the list route's filters), newest first."""
+    found: list[dict] = []
+    before: int | None = None
+    while True:
+        query = {"limit": 200, **params}
+        if before is not None:
+            query["before_id"] = before
+        page = _post_get(f"{_notes_api(args)}?{urllib.parse.urlencode(query)}")
+        found += page
+        if len(page) < 200:
+            return found
+        before = min(note["id"] for note in page)
+
+
+def _setup_notes(args, suite: dict) -> dict[str, int]:
+    """Create and confirm a suite's ``setup.notes``; return ``{name: note id}``.
+
+    Each entry is ``{"body", "kind", "anchor", "as"?, "confirm"?}``. Notes are
+    matched by body among the non-retired ones, so a rerun reuses them: a
+    proposal is confirmed unless ``"confirm": false``. A note that exists in the
+    wrong state (confirmed where a proposal was wanted) stops the run, because
+    the case would not test what it says. Only ``as``-named notes are returned.
+    """
+    entries = (suite.get("setup") or {}).get("notes") or []
+    ids: dict[str, int] = {}
+    if not entries:
+        return ids
+    existing = [n for n in _list_notes(args) if n.get("status") != "retired"]
+    for entry in entries:
+        body = entry["body"]
+        if not body.startswith(EVAL_PREFIX):
+            raise SystemExit(f"! setup note body must start with {EVAL_PREFIX!r}")
+        wanted = "confirmed" if entry.get("confirm", True) else "proposed"
+        note = next((n for n in existing if n["body"] == body), None)
+        if note is None:
+            payload = {k: entry[k] for k in ("body", "kind", "anchor") if k in entry}
+            try:
+                note = _post(_notes_api(args), payload)
+            except urllib.error.HTTPError as exc:
+                raise SystemExit(
+                    f"! setup note refused: {exc.code} {exc.read()[:200]!r}"
+                )
+            existing.append(note)
+        if note["status"] == "proposed" and wanted == "confirmed":
+            note = _post(f"{_notes_api(args)}/{note['id']}/confirm", None)
+        if note["status"] != wanted:
+            raise SystemExit(
+                f"! setup note #{note['id']} is {note['status']}, wanted {wanted}: "
+                "run --cleanup-notes and retry"
+            )
+        if entry.get("as"):
+            ids[entry["as"]] = note["id"]
+    return ids
+
+
+def _substitute(expect: dict, ids: dict[str, int]) -> dict:
+    """``expect`` with every ``{<name>}`` of ``cites`` / ``forbid`` replaced by a note id.
+
+    A literal ``str.replace`` per name, never ``str.format``: the patterns are
+    regexes, and ``\\d{1,3}`` must survive.
+    """
+    if not ids:
+        return expect
+    out = dict(expect)
+    for key in ("cites", "forbid"):
+        patterns = []
+        for pattern in expect.get(key) or []:
+            for name, note_id in ids.items():
+                pattern = pattern.replace("{" + name + "}", str(note_id))
+            patterns.append(pattern)
+        if key in expect:
+            out[key] = patterns
+    return out
+
+
+def _expects_proposal(case: dict) -> bool:
+    """Whether a case is a "remember that" case (it expects ``propose_note``)."""
+    return "propose_note" in ((case.get("expect") or {}).get("tools_any") or [])
+
+
+def _reject_session_proposals(args, session_id: int) -> int:
+    """Retire the pending proposals a chat session made; return how many.
+
+    One ``POST /notes/reject-agent-proposals`` per proposer found among the
+    session's proposals (``origin`` ``chat:<session id>``).
+    """
+    origin = f"chat:{session_id}"
+    proposers = {
+        n["proposed_by"]
+        for n in _list_notes(args, status="proposed")
+        if n.get("origin") == origin
+    }
+    return sum(
+        _post(
+            f"{_notes_api(args)}/reject-agent-proposals",
+            {"proposed_by": uid, "origin": origin},
+        )["rejected"]
+        for uid in sorted(proposers)
+    )
+
+
+def _cleanup_notes(args) -> int:
+    """``--cleanup-notes``: retire every non-retired ``[eval] `` note of ``--slug``.
+
+    A proposal is retired as ``rejected``, a confirmed note as ``outdated`` (the
+    only reasons each state accepts). One run per slug; returns 0.
+    """
+    count = 0
+    for status, reason in (("proposed", "rejected"), ("confirmed", "outdated")):
+        for note in _list_notes(args, status=status):
+            if note["body"].startswith(EVAL_PREFIX):
+                _post(f"{_notes_api(args)}/{note['id']}/retire", {"reason": reason})
+                count += 1
+    print(f"retired {count} [eval] note(s) in {args.slug}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Deterministic checks: cites_exist (every cited SHA and #N is real)
 # ---------------------------------------------------------------------------
 
@@ -696,28 +850,46 @@ def _spent(args) -> float:
 _SHA_BOUNDED = re.compile(rf"(?<![0-9A-Za-z]){_SHA_TOKEN.pattern}(?![0-9A-Za-z])")
 
 
-def _extract_refs(answer: str) -> tuple[list[str], list[int]]:
-    """The commit SHAs (lowercased) and ``#N`` numbers an answer cites.
+_NOTE_LIST = re.compile(
+    r"\bnotes\s+(#\d{1,9}(?:(?:\s*,\s*and\s+|\s*,\s*|\s+and\s+|\s+or\s+|\s*&\s*)#\d{1,9})*)"
+    r"|\bnote\s+(#\d{1,9})",
+    re.IGNORECASE,
+)
+"""``note #12`` (one id) and ``notes #3, #4 and #5`` (a list): the ids are notes."""
+
+
+def _extract_refs(answer: str) -> tuple[list[str], list[int], list[int]]:
+    """The commit SHAs (lowercased), ``#N`` numbers and note ids an answer cites.
 
     ``deadbeef`` (no digit), ``added`` (too short) and ``20261029`` (no
-    letter) are not SHAs. A ``#N`` directly preceded by ``note `` is a note
-    reference, resolved by plan 40, and an HTML entity (``&#39;``) is not a
-    reference; both are skipped here.
+    letter) are not SHAs. A ``#N`` that follows ``note `` is a note id (and so
+    is every id of a ``notes #3, #4 and #5`` list); it is returned as the
+    third result and never as a PR or issue number. An HTML entity
+    (``&#39;``) is not a reference.
     """
     shas: list[str] = []
     for match in _SHA_BOUNDED.finditer(answer):
         token = match.group(0)
         if _is_sha(token) and token.lower() not in shas:
             shas.append(token.lower())
+    note_ids: list[int] = []
+    note_starts: set[int] = set()
+    for listed in _NOTE_LIST.finditer(answer):
+        group = 1 if listed.group(1) else 2
+        for item in _NUMBER_TOKEN.finditer(listed.group(group)):
+            note_starts.add(listed.start(group) + item.start())
+            number = int(item.group(1))
+            if number not in note_ids:
+                note_ids.append(number)
     numbers: list[int] = []
     for match in _NUMBER_TOKEN.finditer(answer):
-        before = answer[max(0, match.start() - 5) : match.start()]
-        if before.lower() == "note " or before.endswith("&"):
+        before = answer[max(0, match.start() - 1) : match.start()]
+        if match.start() in note_starts or before == "&":
             continue  # a note reference, or an HTML entity such as &#39;
         number = int(match.group(1))
         if number not in numbers:
             numbers.append(number)
-    return shas, numbers
+    return shas, numbers, note_ids
 
 
 def _ref_failures(
@@ -725,6 +897,7 @@ def _ref_failures(
     resolve_sha: Callable[[str], str],
     resolve_number: Callable[[int], bool],
     pr_sha: Callable[[str, list[int]], bool] | None = None,
+    resolve_note: Callable[[int], str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """``(failures, notes)`` of one answer's cited refs.
 
@@ -736,8 +909,13 @@ def _ref_failures(
     hash constant) are notes, not failures. So is a SHA git cannot resolve
     that is the head or merge commit of a ``#N`` the same answer cites
     (``pr_sha``): a squash-merged PR's branch commit is never in the clone.
+
+    ``resolve_note`` returns ``confirmed``, ``unconfirmed`` or ``missing`` for
+    a cited ``note #N``: ``missing`` fails ``invented_ref:note#N`` and
+    ``unconfirmed`` (proposed or retired) fails ``unconfirmed_ref:note#N``, so a
+    cited proposal never counts as real. Without it note ids are not checked.
     """
-    shas, numbers = _extract_refs(answer)
+    shas, numbers, note_ids = _extract_refs(answer)
     failures: list[str] = []
     notes: list[str] = []
     for sha in shas:
@@ -751,6 +929,13 @@ def _ref_failures(
     for number in numbers:
         if not resolve_number(number):
             failures.append(f"invented_ref:#{number}")
+    if resolve_note is not None:
+        for note_id in note_ids:
+            verdict = resolve_note(note_id)
+            if verdict == "missing":
+                failures.append(f"invented_ref:note#{note_id}")
+            elif verdict != "confirmed":
+                failures.append(f"unconfirmed_ref:note#{note_id}")
     return failures, notes
 
 
@@ -798,7 +983,10 @@ def _git(root: str, *argv: str) -> subprocess.CompletedProcess:
 def _live_resolvers(
     args,
 ) -> tuple[
-    Callable[[str], str], Callable[[int], bool], Callable[[str, list[int]], bool]
+    Callable[[str], str],
+    Callable[[int], bool],
+    Callable[[str, list[int]], bool],
+    Callable[[int], str],
 ]:
     """The portal-backed resolvers :func:`_ref_failures` takes."""
     api = _project_api(args)
@@ -841,7 +1029,22 @@ def _live_resolvers(
                 return True
         return False
 
-    return resolve_sha, resolve_number, pr_sha
+    def resolve_note(note_id: int) -> str:
+        """``confirmed``, ``unconfirmed`` or ``missing`` (a 404 body has ``error``)."""
+        try:
+            body = _get_json(f"{api}/notes/{note_id}")
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read())
+            except ValueError:
+                return "missing"
+        except (urllib.error.URLError, OSError, ValueError):
+            return "missing"
+        if not isinstance(body, dict) or "error" in body:
+            return "missing"
+        return "confirmed" if body.get("status") == "confirmed" else "unconfirmed"
+
+    return resolve_sha, resolve_number, pr_sha, resolve_note
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +1070,7 @@ def _merge_turns(turns: list[dict]) -> dict:
     merged["names"] = [n for t in turns for n in t["names"]]
     merged["calls"] = [c for t in turns for c in t["calls"]]
     merged["misuse"] = [m for t in turns for m in t["misuse"]]
+    merged["note_limit"] = any(t.get("note_limit") for t in turns)
     merged["tool_errors"] = sum(t["tool_errors"] for t in turns)
     merged["error"] = next((t["error"] for t in turns if t["error"]), "")
     merged["latency"] = sum(t["latency"] for t in turns)
@@ -918,8 +1122,11 @@ def _run_suite_pass(
     if args.mode:
         session_body["mode"] = args.mode
     trials: list[dict] = []
+    note_ids = suite.get("_note_ids") or {}
     for case in suite["cases"]:
         turns = _case_turns(case)
+        if note_ids:
+            case = {**case, "expect": _substitute(case.get("expect") or {}, note_ids)}
         for trial in range(1, k + 1):
             if args.stop_above is not None and (
                 _spent(args) + TURN_COST_MARGIN * len(turns) > args.stop_above
@@ -932,6 +1139,16 @@ def _run_suite_pass(
                 return trials
             session = _post(f"{_project_api(args)}/chat/sessions", session_body or None)
             turn, failures, notes = _run_case_turns(args, session["id"], case)
+            if _expects_proposal(case):
+                _reject_session_proposals(args, session["id"])
+            if turn.get("note_limit"):
+                print(
+                    f"! ABORTED at {case['id']} t{trial}: propose_note was refused "
+                    "by a note_limit cap (not scored as a pass or a fail); at most "
+                    "four full runs per UTC day, or --cleanup-notes and wait",
+                    file=sys.stderr,
+                )
+                return trials
             usage = _turn_cost(args, session["id"])
             turn.update(
                 case=case["id"],
@@ -1069,6 +1286,8 @@ def _suite_main(args, targets: list[tuple[str | None, str | None]]) -> int:
     """Run ``--suite`` files over each target; write the report and sidecar."""
     suites = [_load_suite(path) for path in args.suite]
     suite_k = {name: int(n) for name, _, n in (a.partition("=") for a in args.suite_k)}
+    for suite in suites:
+        suite["_note_ids"] = _setup_notes(args, suite)
     for provider, model in targets:
         label = f"{provider or '(config default)'}{':' + model if model else ''}"
         before = _spent(args)
@@ -1786,9 +2005,14 @@ def _self_test_refs() -> bool:
         "a1b2c3d, `0123456789ab` and A1B2C3D are. note #12 is a note, "
         "see #7 and (#9). Entity &#39; is not a ref."
     )
-    shas, numbers = _extract_refs(answer)
+    shas, numbers, note_ids = _extract_refs(answer)
     ok = shas == ["a1b2c3d", "0123456789ab"] and numbers == [7, 9]
-    ok &= _extract_refs("sha deadbeefdeadbeef1 here") == (["deadbeefdeadbeef1"], [])
+    ok &= note_ids == [12]  # `note #12` is a note, never `#12`
+    ok &= _extract_refs("sha deadbeefdeadbeef1 here") == (
+        ["deadbeefdeadbeef1"],
+        [],
+        [],
+    )
     failures, notes = _ref_failures(
         "fixed in a1b2c3d, abc1234 and ffff123, see #7 and #8",
         lambda sha: {"a1b2c3d": "ok", "abc1234": "ambiguous"}.get(sha, "missing"),
@@ -1823,6 +2047,133 @@ def _self_test_refs() -> bool:
     ok &= _check_case({}, {**_fake_turn(), "misuse": ["unknown_tool"]}) == [
         "tool_misuse:unknown_tool"
     ]
+    return bool(ok)
+
+
+def _self_test_notes() -> bool:
+    """Note references, their resolver, ``setup.notes`` and the substitution."""
+    ok = _extract_refs("see note #12 and #7") == ([], [7], [12])
+    ok &= _extract_refs("Notes #3 and #4 apply") == ([], [], [3, 4])
+    ok &= _extract_refs("notes #3, #4, and #5; see #9") == ([], [9], [3, 4, 5])
+    ok &= _extract_refs("notes #1 & #2 or #6") == ([], [], [1, 2, 6])
+    ok &= _extract_refs("note #5, but PR #6") == ([], [6], [5])
+    ok &= _extract_refs("&#39; is an entity, note: #8") == ([], [8], [])
+    verdicts = {5: "confirmed", 6: "unconfirmed"}
+    ok_sha, ok_pr = (lambda sha: "ok"), (lambda number: True)
+
+    def resolve_note(note_id: int) -> str:
+        return verdicts.get(note_id, "missing")
+
+    failures, _ = _ref_failures("note #5", ok_sha, ok_pr, None, resolve_note)
+    ok &= failures == []
+    failures, _ = _ref_failures("note #99", ok_sha, ok_pr, None, resolve_note)
+    ok &= failures == ["invented_ref:note#99"]  # missing
+    failures, _ = _ref_failures("notes #5 and #6", ok_sha, ok_pr, None, resolve_note)
+    ok &= failures == ["unconfirmed_ref:note#6"]  # a proposed note
+    failures, _ = _ref_failures("note #99", ok_sha, ok_pr)
+    ok &= failures == []  # no resolver: not checked
+    # A note id is never looked up as a PR or an issue.
+    looked_up: list[int] = []
+    _ref_failures(
+        "note #12", ok_sha, lambda n: looked_up.append(n) or True, None, resolve_note
+    )
+    ok &= looked_up == []
+    # The live resolver: a 404 body (`error`) is missing, a status decides.
+    args = argparse.Namespace(base="http://x", slug="s")
+    real = globals()["_get_json"]
+    try:
+        bodies = {
+            "1": {"id": 1, "status": "confirmed"},
+            "2": {"id": 2, "status": "proposed"},
+            "3": {"error": "not found", "code": "note_not_found"},
+        }
+        globals()["_get_json"] = lambda url: bodies[url.rsplit("/", 1)[1]]
+        resolver = _live_resolvers(args)[3]
+        ok &= [resolver(1), resolver(2), resolver(3)] == [
+            "confirmed",
+            "unconfirmed",
+            "missing",
+        ]
+    finally:
+        globals()["_get_json"] = real
+    # {name} substitution is a literal replace: \d{1,3} survives.
+    expect = {
+        "cites": ["note #{confirmed}\\b", "\\d{1,3} days"],
+        "forbid": ["note #{pending}\\b"],
+        "tools_any": ["x"],
+    }
+    ids = {"confirmed": 14, "pending": 15}
+    out = _substitute(expect, ids)
+    ok &= out["cites"] == ["note #14\\b", "\\d{1,3} days"]
+    ok &= out["forbid"] == ["note #15\\b"] and out["tools_any"] == ["x"]
+    ok &= expect["cites"][0] == "note #{confirmed}\\b"  # the input is untouched
+    ok &= _substitute(expect, {}) is expect
+    # The substituted patterns decide a case: the proposal's id is forbidden.
+    turn = _fake_turn(names=["x"], answer="Per note #14 ... also note #150")
+    ok &= _check_case(out, turn) == ["answer does not cite \\d{1,3} days"]
+    turn = _fake_turn(names=["x"], answer="note #14, 5 days; the draft note #15 says")
+    ok &= _check_case(out, turn) == ["answer matches forbidden note #15\\b"]
+    # setup.notes: matched by body (idempotent), confirmed unless confirm=false.
+    sent: list[tuple[str, object]] = []
+    store = [{"id": 20, "body": "[eval] have", "status": "proposed"}]
+
+    def fake_post(url, payload):
+        sent.append((url.rsplit("/notes", 1)[1], payload))
+        if url.endswith("/confirm"):
+            note = next(n for n in store if n["id"] == int(url.split("/")[-2]))
+            note["status"] = "confirmed"
+            return note
+        note = {"id": 21 + len(store), "body": payload["body"], "status": "proposed"}
+        store.append(note)
+        return note
+
+    suite = {
+        "setup": {
+            "notes": [
+                {"body": "[eval] have", "kind": "decision", "anchor": {}, "as": "a"},
+                {"body": "[eval] new", "kind": "gotcha", "anchor": {}, "as": "b"},
+                {
+                    "body": "[eval] draft",
+                    "kind": "gotcha",
+                    "anchor": {},
+                    "as": "c",
+                    "confirm": False,
+                },
+            ]
+        }
+    }
+    patched = {
+        "_post": fake_post,
+        "_list_notes": lambda a, **kw: [dict(n) for n in store],
+    }
+    saved = {name: globals()[name] for name in patched}
+    try:
+        globals().update(patched)
+        first = _setup_notes(args, suite)
+        sent.clear()
+        second = _setup_notes(args, suite)
+    finally:
+        globals().update(saved)
+    ok &= first == {"a": 20, "b": 22, "c": 23} and second == first
+    ok &= [n["status"] for n in store] == ["confirmed", "confirmed", "proposed"]
+    ok &= not any(path == "" for path, _ in sent)  # the rerun created nothing
+    try:
+        globals().update(patched)
+        _setup_notes(args, {"setup": {"notes": [{"body": "no prefix"}]}})
+        ok = False
+    except SystemExit:
+        pass
+    finally:
+        globals().update(saved)
+    # note_limit refusals are recognised in a propose_note result.
+    ok &= bool(
+        NOTE_LIMIT_RE.search(
+            '{"error": "at most 20 agent proposals per member per day (UTC)"}'
+        )
+    )
+    ok &= not NOTE_LIMIT_RE.search('{"status": "proposed", "note": "agent proposals"}')
+    ok &= _expects_proposal({"expect": {"tools_any": ["propose_note"]}})
+    ok &= not _expects_proposal({"expect": {"tools_any": ["get_pr"]}})
     return bool(ok)
 
 
@@ -2265,6 +2616,7 @@ def _self_test() -> int:
     print(table)
     for name, part in (
         ("refs and misuse", _self_test_refs),
+        ("notes", _self_test_notes),
         ("multi-turn", _self_test_multi_turn),
         ("window elision", _self_test_window),
         ("replay", _self_test_replay),
@@ -2389,6 +2741,12 @@ def main() -> int:
         help="--replay: reuse the overview text a previous replay recorded.",
     )
     parser.add_argument(
+        "--cleanup-notes",
+        action="store_true",
+        help="Retire every '[eval] ' note of --slug (what a suite's setup.notes "
+        "created) and exit. Uses the portal's notes routes; no provider key.",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Exercise --judge-packets and --judge-tally on a fake report.",
@@ -2397,6 +2755,12 @@ def main() -> int:
 
     if args.self_test:
         return _self_test()
+    if args.cleanup_notes:
+        try:
+            return _cleanup_notes(args)
+        except (urllib.error.URLError, OSError) as exc:
+            print(f"! cannot reach {args.base}: {exc}", file=sys.stderr)
+            return 2
     if args.replay:
         if not (args.data_dir and args.out):
             parser.error("--replay needs --data-dir and --out")

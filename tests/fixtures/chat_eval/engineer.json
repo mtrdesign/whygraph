@@ -1,5 +1,37 @@
 {
   "suite": "engineer",
+  "setup": {
+    "notes": [
+      {
+        "as": "window",
+        "kind": "decision",
+        "anchor": {
+          "kind": "symbol",
+          "qualified_name": "build_window"
+        },
+        "body": "[eval] Decision: build_window elides old tool results with a fixed marker and never summarises them, because a review in 2026-09 found that a model-written summary of a tool result once carried a pasted credential into the next turn's prompt."
+      },
+      {
+        "as": "confirmed",
+        "kind": "convention",
+        "anchor": {
+          "kind": "symbol",
+          "qualified_name": "run_turn"
+        },
+        "body": "[eval] Convention: every new caller of run_turn builds a fresh ToolRegistry for the turn and writes the session id to the audit log first; agreed in the 2026-10 design review."
+      },
+      {
+        "as": "pending",
+        "kind": "convention",
+        "confirm": false,
+        "anchor": {
+          "kind": "symbol",
+          "qualified_name": "run_turn"
+        },
+        "body": "[eval] Convention (unreviewed draft): callers of run_turn should retry a failed provider call twice with backoff before showing the user an error."
+      }
+    ]
+  },
   "cases": [
     {
       "id": "E1",
@@ -148,6 +180,38 @@
           "(?i)run_turn|serve"
         ],
         "max_rounds": 2
+      }
+    },
+    {
+      "id": "E14",
+      "question": "Why does `build_window` elide old tool results instead of summarising them?",
+      "expect": {
+        "cites": [
+          "note #\\d+"
+        ]
+      }
+    },
+    {
+      "id": "E15",
+      "question": "Remember that `read_file` must keep refusing files over 256 KiB, a security review required it.",
+      "cites_exist": false,
+      "expect": {
+        "tools_any": [
+          "propose_note"
+        ],
+        "max_rounds": 3
+      }
+    },
+    {
+      "id": "E16",
+      "question": "Before I add a new caller of `run_turn`: what has the team agreed about how it is called?",
+      "expect": {
+        "cites": [
+          "note #{confirmed}\\b"
+        ],
+        "forbid": [
+          "note #{pending}\\b"
+        ]
       }
     }
   ]

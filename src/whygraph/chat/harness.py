@@ -61,6 +61,7 @@ from whygraph.services.llm.chat import (
     TextDelta,
     ToolCall,
     ToolCallMade,
+    ToolSpec,
     TurnDone,
 )
 from whygraph.services.llm.exceptions import UNREACHABLE_CAUSES
@@ -411,6 +412,30 @@ def _estimate_tokens(message: ChatMessage) -> int:
     return size
 
 
+def _specs_tokens(specs: Sequence[ToolSpec]) -> int:
+    """Estimate the tokens the tool specs add to every request.
+
+    ``len(json.dumps(...)) // 4`` over each spec's name, description and
+    parameters, the same approximation as :func:`_estimate_tokens`. Pure and
+    uncached (``ToolSpec`` holds a ``dict``, so a spec tuple is unhashable).
+    """
+    return (
+        len(
+            json.dumps(
+                [
+                    {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": spec.parameters,
+                    }
+                    for spec in specs
+                ]
+            )
+        )
+        // 4
+    )
+
+
 def _split_turns(history: Sequence[ChatMessage]) -> list[list[ChatMessage]]:
     """Group ``history`` into turns, each starting at a ``user`` message.
 
@@ -672,6 +697,57 @@ def _trim_turn(
     )
 
 
+def begin_turn_messages(
+    history: Sequence[ChatMessage],
+    *,
+    token_budget: int,
+    references: str | None = None,
+    continue_from_assistant: bool = False,
+) -> tuple[list[ChatMessage], int]:
+    """Build the working transcript a turn's first request starts from.
+
+    The pure part of :func:`run_turn` that decides what a request carries
+    besides the system prompt and tools: the windowed history
+    (:func:`build_window`), the question's References block, and the
+    continue prompt. A round's request is these messages (plus whatever the
+    turn appended, trimmed by :func:`_trim_turn`) behind the system
+    messages; the offline replay of ``scripts/eval_tool_choice.py`` calls
+    this and :func:`_trim_turn` so a change to either reaches it.
+
+    Parameters
+    ----------
+    history : Sequence[ChatMessage]
+        The conversation so far, ending with the user's question.
+    token_budget : int
+        The history token budget handed to :func:`build_window`.
+    references : str or None, optional
+        The question's References block, appended to the last user message.
+    continue_from_assistant : bool, optional
+        Whether the turn continues a truncated reply.
+
+    Returns
+    -------
+    tuple[list[ChatMessage], int]
+        The transcript (a new list) and ``turn_start``, the index where this
+        turn's own messages begin.
+    """
+    messages: list[ChatMessage] = list(build_window(history, token_budget=token_budget))
+    turn_start = len(messages)
+    if references:
+        last_user = next(
+            (i for i in range(turn_start - 1, -1, -1) if messages[i].role == "user"),
+            None,
+        )
+        if last_user is not None:
+            question = messages[last_user]
+            messages[last_user] = replace(
+                question, content=with_references(question.content, references)
+            )
+    if continue_from_assistant:
+        messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
+    return messages, turn_start
+
+
 def run_turn(
     *,
     client: ChatClient,
@@ -811,22 +887,12 @@ def run_turn(
     # appends. Windowing between turns happens once, up front; inside the
     # turn only stale tool results are elided (`_trim_turn`), never a
     # message, because the next round may depend on any of them.
-    messages: list[ChatMessage] = list(
-        build_window(history, token_budget=context_token_budget)
+    messages, turn_start = begin_turn_messages(
+        history,
+        token_budget=context_token_budget,
+        references=references,
+        continue_from_assistant=continue_from_assistant,
     )
-    turn_start = len(messages)
-    if references:
-        last_user = next(
-            (i for i in range(turn_start - 1, -1, -1) if messages[i].role == "user"),
-            None,
-        )
-        if last_user is not None:
-            question = messages[last_user]
-            messages[last_user] = replace(
-                question, content=with_references(question.content, references)
-            )
-    if continue_from_assistant:
-        messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
 
     # One TurnDone per provider call, in order; the turn total is their sum.
     rounds: list[TurnDone] = []

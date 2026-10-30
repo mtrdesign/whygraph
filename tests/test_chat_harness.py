@@ -37,6 +37,9 @@ from whygraph.chat.harness import (
     ToolResultReady,
     TurnCancelled,
     build_system_prompt,
+    _specs_tokens,
+    _trim_turn,
+    begin_turn_messages,
     build_window,
     run_turn,
 )
@@ -918,6 +921,58 @@ def _assert_no_orphans(messages) -> None:
 def test_under_budget_history_is_unchanged() -> None:
     history = _history(3)
     assert build_window(history, token_budget=1_000_000) == tuple(history)
+
+
+def test_begin_turn_messages_is_the_window_plus_references_and_continue() -> None:
+    history = _history(3)
+    messages, start = begin_turn_messages(history, token_budget=1_000_000)
+    assert messages == list(build_window(history, token_budget=1_000_000))
+    assert start == len(messages)
+    messages, start = begin_turn_messages(
+        history,
+        token_budget=1_000_000,
+        references="refs",
+        continue_from_assistant=True,
+    )
+    assert start == len(history)
+    assert messages[start - 4].content == with_references("question 2", "refs")
+    assert messages[-1] == ChatMessage(role="user", content=CONTINUE_PROMPT)
+    # The caller's history is never mutated.
+    assert history == _history(3)
+
+
+def test_begin_turn_messages_matches_what_run_turn_sends() -> None:
+    history = [ChatMessage(role="user", content="question 0")]
+    client = ScriptedClient([[TextDelta("hi"), TurnDone("stop", 1, 1)]])
+    list(run_turn(client=client, history=history, registry=StubRegistry()))
+    expected, _ = begin_turn_messages(
+        history, token_budget=ChatConfig().context_token_budget
+    )
+    assert list(client.requests[0].messages[-len(expected) :]) == expected
+
+
+def test_trim_turn_is_callable_on_the_helper_output() -> None:
+    messages, start = begin_turn_messages(_history(1), token_budget=1_000_000)
+    messages += _turn(5, tool_body="y" * 4_000) + _turn(6, tool_body="z" * 4_000)
+    elided = _trim_turn(messages, start, len(messages) - 3, 2, 100)
+    assert elided >= 1
+    assert messages[start + 2].content == ELIDED_MARKER
+
+
+def test_specs_tokens_counts_name_description_and_parameters() -> None:
+    specs = (
+        ToolSpec(name="a", description="x" * 100, parameters={"type": "object"}),
+        ToolSpec(name="b", description="", parameters={}),
+    )
+    text = json.dumps(
+        [
+            {"name": s.name, "description": s.description, "parameters": s.parameters}
+            for s in specs
+        ]
+    )
+    assert _specs_tokens(specs) == len(text) // 4
+    assert _specs_tokens(()) == len("[]") // 4
+    assert _specs_tokens(ToolRegistry(max_rationale_generations=0).specs) > 1_000
 
 
 def test_system_prompt_is_pinned_at_the_front() -> None:

@@ -76,13 +76,18 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+
+from whygraph.chat.grounding import _NUMBER_TOKEN, _SHA_TOKEN, _is_sha
 
 # Each case is (class, question, tools that count as the RIGHT first reach).
 # "Right" is about the *first* tool: a good investigation interleaves several,
@@ -245,6 +250,7 @@ def _stream_turn(base: str, session_id: int, question: str) -> dict:
         "answer": "",
         "rounds": 0,
         "tool_errors": 0,
+        "misuse": [],
         "input_tokens": None,
         "output_tokens": None,
     }
@@ -269,6 +275,9 @@ def _stream_turn(base: str, session_id: int, question: str) -> dict:
                 in_results = True
                 if _result_is_error(frame.get("result", "")):
                     turn["tool_errors"] += 1
+                misuse = _misuse_kind(frame.get("result", ""))
+                if misuse:
+                    turn["misuse"].append(misuse)
             elif kind == "text_delta":
                 turn["answer"] += frame.get("text", "")
             elif kind == "error":
@@ -278,6 +287,23 @@ def _stream_turn(base: str, session_id: int, question: str) -> dict:
                 turn["output_tokens"] = frame.get("output_tokens")
     turn["latency"] = time.monotonic() - started
     return turn
+
+
+# The exact ``json.dumps`` output of ``ToolRegistry.dispatch`` for a call to a
+# tool that does not exist and for wrong argument names (``chat/tools.py``
+# ``dispatch`` and ``_encode``). Matched as a prefix of the frame's ``result``:
+# a substring test would fire on repository text that quotes the phrase.
+UNKNOWN_TOOL_PREFIX = '{"error": "unknown tool '
+INVALID_ARGS_PREFIX = '{"error": "invalid arguments for '
+
+
+def _misuse_kind(result: str) -> str:
+    """``unknown_tool`` / ``invalid_arguments`` for a misused call, else ``""``."""
+    if result.startswith(UNKNOWN_TOOL_PREFIX):
+        return "unknown_tool"
+    if result.startswith(INVALID_ARGS_PREFIX):
+        return "invalid_arguments"
+    return ""
 
 
 def _result_is_error(result: str) -> bool:
@@ -533,6 +559,11 @@ def _load_suite(path: str) -> dict:
     return suite
 
 
+def _misuse_failures(turn: dict) -> list[str]:
+    """``tool_misuse:<kind>`` per unknown-tool or bad-arguments result of a turn."""
+    return [f"tool_misuse:{kind}" for kind in turn.get("misuse") or []]
+
+
 def _check_case(expect: dict, turn: dict) -> list[str]:
     """The failed expectations of one trial; empty means the trial passed.
 
@@ -541,10 +572,13 @@ def _check_case(expect: dict, turn: dict) -> list[str]:
     matching (``re.search``) in at least one of its calls. ``cites``: regexes the
     final answer must match. ``forbid``: regexes the final answer must not
     match (the never-rank cases). ``max_rounds``: tool rounds at most this many.
+    A turn that got an ``unknown tool`` or ``invalid arguments`` tool result
+    always fails (``tool_misuse``).
     """
     failures: list[str] = []
     if turn["error"]:
         failures.append(f"turn error: {turn['error'][:60]}")
+    failures += _misuse_failures(turn)
     names = set(turn["names"])
     wanted = expect.get("tools_any") or []
     if wanted and not names & set(wanted):
@@ -569,24 +603,68 @@ def _check_case(expect: dict, turn: dict) -> list[str]:
     return failures
 
 
-def _turn_cost(args, session_id: int) -> float | None:
-    """The turn's spend from ``GET /api/usage/calls``, or None if unavailable.
-
-    Usage rows are written by a background thread, so poll until the sum is
-    stable across two reads.
-    """
+def _usage_items(args, session_id: int) -> list[dict]:
+    """Every ``/api/usage/calls`` item of one chat session (all pages)."""
     url = (
         f"{args.base.rstrip('/')}/api/usage/calls"
         f"?project={args.slug}&chat_session={session_id}"
     )
-    total: float | None = None
+    items: list[dict] = []
+    page_url = url
+    for _ in range(200):
+        page = _get_json(page_url)
+        items += page.get("items", [])
+        following = page.get("next")
+        if not following:
+            break
+        page_url = f"{url}&before={urllib.parse.quote(following)}"
+    return items
+
+
+def _sum_usage(items: list[dict]) -> dict | None:
+    """Split a session's usage items into chat spend and side spend.
+
+    The token columns and ``cost`` sum only ``task == "chat"`` items. Nested
+    rationale generation and description backfill rows carry the same chat
+    session id; they are reported as ``side_spend`` and never enter a keep
+    rule. ``cost_usd`` arrives as a decimal string. ``None`` without items.
+    """
+    if not items:
+        return None
+    chat = [i for i in items if i.get("task") == "chat"]
+
+    def total(rows: list[dict], key: str) -> int:
+        return sum(int(i.get(key) or 0) for i in rows)
+
+    def money(rows: list[dict]) -> float:
+        return sum(float(i.get("cost_usd") or 0.0) for i in rows)
+
+    read = total(chat, "cache_read_tokens")
+    write = total(chat, "cache_write_tokens")
+    return {
+        "cost": money(chat),
+        "input_tokens": total(chat, "input_tokens"),
+        "output_tokens": total(chat, "output_tokens"),
+        "cache_read_tokens": read,
+        "cache_write_tokens": write,
+        "uncached_in": total(chat, "input_tokens") - read - write,
+        "side_spend": money([i for i in items if i.get("task") != "chat"]),
+    }
+
+
+def _turn_cost(args, session_id: int) -> dict | None:
+    """The session's spend from ``GET /api/usage/calls``, or None if unavailable.
+
+    Usage rows are written by a background thread, so poll until the sums are
+    stable across two reads. Returns the :func:`_sum_usage` dict.
+    """
+    total: dict | None = None
     for _ in range(12):
         time.sleep(0.5)
         try:
-            items = _get_json(url).get("items", [])
+            seen = _sum_usage(_usage_items(args, session_id))
         except (urllib.error.URLError, OSError, ValueError):
             return None
-        seen = sum(item.get("cost_usd") or 0.0 for item in items) if items else None
         if seen is not None and seen == total:
             return seen
         total = seen
@@ -605,6 +683,197 @@ def _spent(args) -> float:
     return _get_json(f"{args.base.rstrip('/')}/api/budgets")["org"]["spent_usd"]
 
 
+# ---------------------------------------------------------------------------
+# Deterministic checks: cites_exist (every cited SHA and #N is real)
+# ---------------------------------------------------------------------------
+
+# Grounding's SHA rule (`_SHA_TOKEN` + `_is_sha`), bounded by non-alphanumerics
+# so a backticked or bare 7-40 char hex run inside a longer word is not a SHA.
+_SHA_BOUNDED = re.compile(rf"(?<![0-9A-Za-z]){_SHA_TOKEN.pattern}(?![0-9A-Za-z])")
+
+
+def _extract_refs(answer: str) -> tuple[list[str], list[int]]:
+    """The commit SHAs (lowercased) and ``#N`` numbers an answer cites.
+
+    ``deadbeef`` (no digit), ``added`` (too short) and ``20261029`` (no
+    letter) are not SHAs. A ``#N`` directly preceded by ``note `` is a note
+    reference, resolved by plan 40, and an HTML entity (``&#39;``) is not a
+    reference; both are skipped here.
+    """
+    shas: list[str] = []
+    for match in _SHA_BOUNDED.finditer(answer):
+        token = match.group(0)
+        if _is_sha(token) and token.lower() not in shas:
+            shas.append(token.lower())
+    numbers: list[int] = []
+    for match in _NUMBER_TOKEN.finditer(answer):
+        before = answer[max(0, match.start() - 5) : match.start()]
+        if before.lower() == "note " or before.endswith("&"):
+            continue  # a note reference, or an HTML entity such as &#39;
+        number = int(match.group(1))
+        if number not in numbers:
+            numbers.append(number)
+    return shas, numbers
+
+
+def _ref_failures(
+    answer: str,
+    resolve_sha: Callable[[str], str],
+    resolve_number: Callable[[int], bool],
+) -> tuple[list[str], list[str]]:
+    """``(failures, notes)`` of one answer's cited refs.
+
+    ``resolve_sha`` returns ``ok``, ``missing``, ``ambiguous`` or
+    ``unverified``; ``resolve_number`` whether ``#N`` is a PR or an issue. A
+    miss is ``invented_ref:<ref>``; an ambiguous prefix and an unverifiable
+    one (no checkout to ask git) are notes, not failures.
+    """
+    shas, numbers = _extract_refs(answer)
+    failures: list[str] = []
+    notes: list[str] = []
+    for sha in shas:
+        verdict = resolve_sha(sha)
+        if verdict == "missing":
+            failures.append(f"invented_ref:{sha}")
+        elif verdict in ("ambiguous", "unverified"):
+            notes.append(f"{verdict}_ref:{sha}")
+    for number in numbers:
+        if not resolve_number(number):
+            failures.append(f"invented_ref:#{number}")
+    return failures, notes
+
+
+def _body_resolves(url: str) -> bool:
+    """Whether a lookup route answered a JSON body without an ``error`` key.
+
+    Never judged by HTTP status: these routes answer a miss with 200 and
+    ``{"error": "not_found"}``.
+    """
+    try:
+        body = _get_json(url)
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read())
+        except ValueError:
+            return False
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return isinstance(body, dict) and "error" not in body
+
+
+_ROOTS: dict[str, str | None] = {}
+
+
+def _project_root(args) -> str | None:
+    """The project's checkout, the ``root`` of ``GET /api/projects/{slug}``."""
+    if args.slug not in _ROOTS:
+        try:
+            _ROOTS[args.slug] = _get_json(_project_api(args)).get("root")
+        except (urllib.error.URLError, OSError, ValueError):
+            _ROOTS[args.slug] = None
+    return _ROOTS[args.slug]
+
+
+def _git(root: str, *argv: str) -> subprocess.CompletedProcess:
+    """Run git in ``root`` ignoring the global config."""
+    return subprocess.run(
+        ["git", "-C", root, *argv],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull},
+    )
+
+
+def _live_resolvers(args) -> tuple[Callable[[str], str], Callable[[int], bool]]:
+    """The portal-backed resolvers :func:`_ref_failures` takes."""
+    api = _project_api(args)
+
+    def resolve_sha(sha: str) -> str:
+        root = _project_root(args)
+        if not root or not Path(root).is_dir():
+            return "unverified"
+        found = _git(root, "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}")
+        if found.returncode != 0:
+            candidates = _git(root, "rev-parse", f"--disambiguate={sha}")
+            if len(candidates.stdout.split()) > 1:
+                return "ambiguous"
+            return "missing"
+        return (
+            "ok"
+            if _body_resolves(f"{api}/commit/{found.stdout.strip()}")
+            else "missing"
+        )
+
+    def resolve_number(number: int) -> bool:
+        return _body_resolves(f"{api}/pr/{number}") or _body_resolves(
+            f"{api}/issue/{number}"
+        )
+
+    return resolve_sha, resolve_number
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn cases
+# ---------------------------------------------------------------------------
+
+
+def _case_turns(case: dict) -> list[str]:
+    """The questions of a case: its ``turns``, else its one ``question``."""
+    return list(case["turns"]) if case.get("turns") else [case["question"]]
+
+
+def _merge_turns(turns: list[dict]) -> dict:
+    """One trial dict from a multi-turn case's per-turn dicts.
+
+    Tokens and latency are summed over the turns; ``rounds`` and ``answer``
+    are the last turn's; tool names, calls and misuse cover every turn.
+    ``expect`` is checked against the last turn only (the caller does that
+    before merging); ``turn_answers`` keeps every answer for the ref check.
+    """
+    last = turns[-1]
+    merged = dict(last)
+    merged["names"] = [n for t in turns for n in t["names"]]
+    merged["calls"] = [c for t in turns for c in t["calls"]]
+    merged["misuse"] = [m for t in turns for m in t["misuse"]]
+    merged["tool_errors"] = sum(t["tool_errors"] for t in turns)
+    merged["error"] = next((t["error"] for t in turns if t["error"]), "")
+    merged["latency"] = sum(t["latency"] for t in turns)
+    for key in ("input_tokens", "output_tokens"):
+        values = [t[key] for t in turns if t[key] is not None]
+        merged[key] = sum(values) if values else None
+    merged["turn_answers"] = [t["answer"] for t in turns]
+    return merged
+
+
+def _run_case_turns(
+    args,
+    session_id: int,
+    case: dict,
+    resolvers: tuple[Callable[[str], str], Callable[[int], bool]] | None = None,
+) -> tuple[dict, list[str], list[str]]:
+    """Send a case's turns in one session; return ``(merged, failures, notes)``.
+
+    ``expect`` applies to the last turn only. ``tool_misuse`` and
+    ``cites_exist`` run on every turn.
+    """
+    resolvers = resolvers or _live_resolvers(args)
+    per_turn: list[dict] = []
+    for question in _case_turns(case):
+        per_turn.append(_stream_turn(_project_api(args), session_id, question))
+        if per_turn[-1]["error"]:
+            break
+    failures = _check_case(case.get("expect") or {}, per_turn[-1])
+    notes: list[str] = []
+    for index, turn in enumerate(per_turn):
+        if index < len(per_turn) - 1:
+            failures += _misuse_failures(turn)
+        if case.get("cites_exist", True):
+            more, found = _ref_failures(turn["answer"], *resolvers)
+            failures += more
+            notes += found
+    return _merge_turns(per_turn), list(dict.fromkeys(failures)), notes
+
+
 def _run_suite_pass(
     args, provider: str | None, model: str | None, suite: dict, k: int
 ) -> list[dict]:
@@ -618,9 +887,10 @@ def _run_suite_pass(
         session_body["mode"] = args.mode
     trials: list[dict] = []
     for case in suite["cases"]:
+        turns = _case_turns(case)
         for trial in range(1, k + 1):
             if args.stop_above is not None and (
-                _spent(args) + TURN_COST_MARGIN > args.stop_above
+                _spent(args) + TURN_COST_MARGIN * len(turns) > args.stop_above
             ):
                 print(
                     f"! org spend would cross {args.stop_above}: stopping before "
@@ -629,16 +899,22 @@ def _run_suite_pass(
                 )
                 return trials
             session = _post(f"{_project_api(args)}/chat/sessions", session_body or None)
-            turn = _stream_turn(_project_api(args), session["id"], case["question"])
-            failures = _check_case(case.get("expect") or {}, turn)
+            turn, failures, notes = _run_case_turns(args, session["id"], case)
+            usage = _turn_cost(args, session["id"])
             turn.update(
                 case=case["id"],
-                question=case["question"],
+                question=turns[-1],
+                turns=turns,
                 trial=trial,
                 session_id=session["id"],
                 failures=failures,
+                notes=notes,
                 passed=not failures,
-                cost=_turn_cost(args, session["id"]),
+                usage=usage,
+                cost=usage["cost"] if usage else None,
+                tokens_total=(
+                    usage["input_tokens"] + usage["output_tokens"] if usage else None
+                ),
             )
             trials.append(turn)
             cost = f"${turn['cost']:.3f}" if turn["cost"] is not None else "$?"
@@ -657,6 +933,27 @@ def _mean(values: list) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _usage_field(trial: dict, key: str):
+    """One field of a trial's usage sums, or None without usage rows."""
+    usage = trial.get("usage")
+    return usage[key] if usage else None
+
+
+def _trial_tokens(trial: dict) -> int:
+    """Whole-turn tokens (in+out): the usage sum, else the ``done`` frames' total."""
+    if trial.get("tokens_total") is not None:
+        return trial["tokens_total"]
+    return (trial["input_tokens"] or 0) + (trial["output_tokens"] or 0)
+
+
+def _cache_fraction(trial: dict) -> float | None:
+    """Cache-read share of the input tokens, or None without usage."""
+    usage = trial.get("usage")
+    if not usage or not usage["input_tokens"]:
+        return None
+    return usage["cache_read_tokens"] / usage["input_tokens"]
+
+
 def _summarize(trials: list[dict]) -> dict:
     """Aggregate trials: pass rate, pass^k, rounds, tokens, latency, errors."""
     by_case: dict[str, list[dict]] = {}
@@ -670,9 +967,11 @@ def _summarize(trials: list[dict]) -> dict:
             [1.0 if all(t["passed"] for t in ts) else 0.0 for ts in by_case.values()]
         ),
         "rounds": _mean([t["rounds"] for t in trials]),
-        "tokens": _mean(
-            [(t["input_tokens"] or 0) + (t["output_tokens"] or 0) for t in trials]
-        ),
+        "tokens": _mean([_trial_tokens(t) for t in trials]),
+        "cache_pct": _mean([_cache_fraction(t) for t in trials]),
+        "uncached_in": _mean([_usage_field(t, "uncached_in") for t in trials]),
+        "side_spend": _mean([_usage_field(t, "side_spend") for t in trials]),
+        "side_spend_total": sum(_usage_field(t, "side_spend") or 0.0 for t in trials),
         "latency": _mean([t["latency"] for t in trials]),
         "tool_error_rate": (sum(t["tool_errors"] for t in trials) / calls)
         if calls
@@ -706,15 +1005,19 @@ def _suite_markdown(
             f"- Pass rate: {summ['pass_rate']:.0%} of {summ['trials']} trials",
             f"- pass^{run['k']}: {summ['pass_k']:.0%} of cases",
             f"- Mean tool rounds: {summ['rounds']:.2f}",
-            f"- Mean tokens (in+out, last call): {summ['tokens']:.0f}",
+            f"- Mean tokens (in+out, whole turn): {summ['tokens']:.0f}",
+            f"- Mean cache %: {summ['cache_pct']:.0%} (cache read / input)",
+            f"- Mean uncached in: {summ['uncached_in']:.0f}",
+            f"- Side spend (non-chat usage rows of the sessions): "
+            f"${summ['side_spend']:.4f} per turn (total ${summ['side_spend_total']:.2f})",
             f"- Mean latency: {summ['latency']:.1f}s",
             f"- Tool-error rate: {summ['tool_error_rate']:.1%} of tool calls",
             f"- Cost per turn: ${summ['cost']:.4f} (total ${summ['cost_total']:.2f})",
             "- Tool counts: "
             + ", ".join(f"{n} {c}" for n, c in summ["tools"].most_common()),
             "",
-            "| case | passed | pass^k | rounds | tokens | latency | cost | failures |",
-            "|---|---|---|---|---|---|---|---|",
+            "| case | passed | pass^k | rounds | tokens (whole turn) | cache % | uncached in | latency | cost | side spend | failures |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for case_id, ts in summ["by_case"].items():
             one = _summarize(ts)
@@ -722,8 +1025,9 @@ def _suite_markdown(
             out.append(
                 f"| {case_id} | {sum(t['passed'] for t in ts)}/{len(ts)} "
                 f"| {'yes' if one['pass_k'] else 'no'} | {one['rounds']:.1f} "
-                f"| {one['tokens']:.0f} | {one['latency']:.0f}s "
-                f"| ${one['cost']:.3f} | {fails or '-'} |"
+                f"| {one['tokens']:.0f} | {one['cache_pct']:.0%} "
+                f"| {one['uncached_in']:.0f} | {one['latency']:.0f}s "
+                f"| ${one['cost']:.3f} | ${one['side_spend']:.3f} | {fails or '-'} |"
             )
         out.append("")
     return "\n".join(out)
@@ -751,6 +1055,7 @@ def _suite_main(args, targets: list[tuple[str | None, str | None]]) -> int:
                     "k": k,
                     "mode": args.mode,
                     "slug": args.slug,
+                    "root": _project_root(args),
                     "trials": trials,
                 }
             )
@@ -780,6 +1085,273 @@ def _suite_main(args, targets: list[tuple[str | None, str | None]]) -> int:
             )
         )
         print(f"wrote {out} and {sidecar}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Offline replay: rebuild every request of a report's sessions, no model calls
+# ---------------------------------------------------------------------------
+
+DEFAULT_PRICE_TARGET = ("anthropic", "claude-sonnet-5-5")
+CACHE_LOOKBACK_BLOCKS = 20
+"""Anthropic's cache lookback: a hit is found within this many blocks."""
+
+
+def _blocks(message) -> int:
+    """Content blocks a message adds to the cache lookback count."""
+    return 1 + len(message.tool_calls)
+
+
+def _shared_prefix(previous: list, current: list) -> int:
+    """How many leading messages two requests share."""
+    count = 0
+    for old, new in zip(previous, current):
+        if old != new:
+            break
+        count += 1
+    return count
+
+
+def _modelled_cost(
+    previous: list | None,
+    current: list,
+    *,
+    fixed_tokens: int,
+    price,
+) -> tuple[int, float]:
+    """``(cached_tokens, usd)`` of one request, an estimate and nothing more.
+
+    The part shared with the session's previous request is priced at
+    ``cache_read`` when its first changed block lies within
+    :data:`CACHE_LOOKBACK_BLOCKS` of the previous request's last block;
+    otherwise only the fixed prefix (system and tools) is read. Everything
+    else is priced at ``cache_write``. Output tokens are excluded.
+    ``fixed_tokens`` is the system and tool-spec estimate.
+    """
+    from whygraph.chat.harness import _estimate_tokens
+
+    total = sum(_estimate_tokens(m) for m in current) + fixed_tokens
+    cached = 0
+    if previous is not None:
+        shared = _shared_prefix(previous, current)
+        shared_blocks = sum(_blocks(m) for m in previous[:shared])
+        previous_blocks = sum(_blocks(m) for m in previous)
+        if previous_blocks - shared_blocks <= CACHE_LOOKBACK_BLOCKS:
+            cached = fixed_tokens + sum(_estimate_tokens(m) for m in current[:shared])
+        else:
+            system = min(shared, _system_count(current))
+            cached = fixed_tokens + sum(_estimate_tokens(m) for m in current[:system])
+    cached = min(cached, total)
+    read = float(price.cache_read if price.cache_read is not None else price.input)
+    write = float(price.cache_write if price.cache_write is not None else price.input)
+    usd = (cached * read + (total - cached) * write) / 1_000_000
+    return cached, usd
+
+
+def _system_count(messages: list) -> int:
+    """How many leading messages are system messages."""
+    count = 0
+    for message in messages:
+        if message.role != "system":
+            break
+        count += 1
+    return count
+
+
+def _replay_session(
+    session_id: int,
+    mode: str | None,
+    *,
+    budget: int,
+    price,
+    system: tuple,
+    specs_tokens: int,
+) -> list[dict]:
+    """Rebuild every request of one stored session; return a record per turn.
+
+    A turn's history is ``serve.chat._load_history`` up to that turn's user
+    row (it merges continuations, sanitizes and re-appends grounding, as the
+    live turn did); its rounds are the rows after the user row. Each request
+    is :func:`~whygraph.chat.harness.begin_turn_messages` plus
+    :func:`~whygraph.chat.harness._trim_turn` behind the system messages, so
+    a change to either reaches the replay. Must run under ``use_project``.
+    """
+    from whygraph.chat.harness import (
+        _estimate_tokens,
+        _trim_turn,
+        begin_turn_messages,
+    )
+    from whygraph.db import get_session
+    from whygraph.serve.chat import _load_history, _path_ids, _session_rows
+
+    with get_session() as db:
+        rows = _session_rows(db, session_id)
+        path = _path_ids(rows, max(rows) if rows else None)
+        roles = {row_id: rows[row_id].role for row_id in path}
+    user_ids = [i for i in path if roles[i] == "user"]
+    fixed = sum(_estimate_tokens(m) for m in system) + specs_tokens
+    previous: list | None = None
+    turns: list[dict] = []
+    for position, user_id in enumerate(user_ids):
+        end = (
+            path[path.index(user_ids[position + 1]) - 1]
+            if position + 1 < len(user_ids)
+            else path[-1]
+        )
+        history = _load_history(session_id, user_id)
+        rounds = _load_history(session_id, end)[len(history) :]
+        messages, turn_start = begin_turn_messages(history, token_budget=budget)
+        requests: list[dict] = []
+        index = tool_rounds = 0
+        latest_round = turn_start
+        while True:
+            current = [*system, *messages]
+            cached, usd = _modelled_cost(
+                previous, current, fixed_tokens=specs_tokens, price=price
+            )
+            requests.append(
+                {
+                    "est_tokens": sum(_estimate_tokens(m) for m in current)
+                    + specs_tokens,
+                    "fixed_tokens": fixed,
+                    "cached_tokens": cached,
+                    "modelled_usd": round(usd, 6),
+                }
+            )
+            previous = current
+            if index >= len(rounds) or rounds[index].role != "assistant":
+                break
+            reply = rounds[index]
+            index += 1
+            if not reply.tool_calls:
+                break
+            tool_rounds += 1
+            latest_round = len(messages)
+            messages.append(reply)
+            while index < len(rounds) and rounds[index].role == "tool":
+                messages.append(rounds[index])
+                index += 1
+            _trim_turn(messages, turn_start, latest_round, tool_rounds, budget)
+        turns.append({"user_row_id": user_id, "requests": requests})
+    return turns
+
+
+def _price_target(label: str):
+    """``(provider, model, Price, version)`` for a report's target label."""
+    from whygraph.portal.prices import NO_OVERRIDES, price_for
+
+    provider, _, model = label.partition(":")
+    if not provider or provider.startswith("("):
+        provider, model = DEFAULT_PRICE_TARGET
+    model = model or DEFAULT_PRICE_TARGET[1]
+    found = price_for(provider, model, NO_OVERRIDES, custom_endpoint=False)
+    if found is None:
+        raise SystemExit(f"! no bundled price for {provider}:{model}")
+    return provider, model, found[0], found[1]
+
+
+def _replay_main(args) -> int:
+    """``--replay``: rebuild a report's requests in-process; write the JSON."""
+    from dataclasses import replace
+
+    from whygraph.chat.harness import _specs_tokens, build_system_prompt
+    from whygraph.chat.modes import get_mode
+    from whygraph.chat.tools import ToolRegistry
+    from whygraph.core import Config
+    from whygraph.core.config import ChatConfig
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.portal.paths import project_db_path
+
+    report = json.loads(Path(args.replay).read_text())
+    data_dir = Path(args.data_dir).resolve()
+    budget = args.context_budget or ChatConfig().context_token_budget
+    provider, model, price, version = _price_target(report.get("target", ""))
+    saved = (
+        json.loads(Path(args.overview_from).read_text()).get("overviews", {})
+        if args.overview_from
+        else {}
+    )
+    overviews: dict[str, str] = {}
+    runs_out: list[dict] = []
+    for run in report["runs"]:
+        slug = run["slug"]
+        root = run.get("root")
+        if not root:
+            root = _get_json(f"{args.base.rstrip('/')}/api/projects/{slug}")["root"]
+        config = replace(
+            Config.defaults(),
+            whygraph_db=project_db_path(data_dir, "local", slug),
+            codegraph_db=Path(root) / ".codegraph" / "codegraph.db",
+            chat=ChatConfig(context_token_budget=budget),
+        )
+        with use_project(ProjectContext(slug=slug, root=Path(root), config=config)):
+            registry = ToolRegistry(max_rationale_generations=0)
+            stable, overview = build_system_prompt(registry, get_mode(run.get("mode")))
+            if slug in saved:
+                overview = replace(overview, content=saved[slug])
+            overviews[slug] = overview.content
+            specs_tokens = _specs_tokens(registry.specs)
+            trials = []
+            for trial in run["trials"]:
+                if not trial.get("session_id"):
+                    continue
+                turns = _replay_session(
+                    trial["session_id"],
+                    run.get("mode"),
+                    budget=budget,
+                    price=price,
+                    system=(stable, overview),
+                    specs_tokens=specs_tokens,
+                )
+                trials.append(
+                    {
+                        "case": trial["case"],
+                        "trial": trial["trial"],
+                        "session_id": trial["session_id"],
+                        "turns": turns,
+                        "est_tokens": sum(
+                            r["est_tokens"] for t in turns for r in t["requests"]
+                        ),
+                        "modelled_usd": round(
+                            sum(
+                                r["modelled_usd"] for t in turns for r in t["requests"]
+                            ),
+                            6,
+                        ),
+                    }
+                )
+        runs_out.append(
+            {
+                "suite": run["suite"],
+                "slug": slug,
+                "mode": run.get("mode"),
+                "trials": trials,
+            }
+        )
+    out = {
+        "source_report": str(args.replay),
+        "context_token_budget": budget,
+        "tool_count": len(registry.specs),
+        "price": {
+            "provider": provider,
+            "model": model,
+            "version": version,
+            "cache_read": float(price.cache_read or price.input),
+            "cache_write": float(price.cache_write or price.input),
+        },
+        "cost_note": (
+            "modelled_usd is an ESTIMATE: tokens are len//4, a request is priced "
+            "at cache_read for the part shared with the session's previous "
+            f"request when the first changed block is within {CACHE_LOOKBACK_BLOCKS} "
+            "blocks of its last block (else only system and tools are read), "
+            "the rest at cache_write; output excluded."
+        ),
+        "overviews": overviews,
+        "runs": runs_out,
+    }
+    Path(args.out).write_text(json.dumps(out, indent=2))
+    total = sum(t["modelled_usd"] for r in runs_out for t in r["trials"])
+    print(f"wrote {args.out}: modelled input cost ${total:.4f} (estimate)")
     return 0
 
 
@@ -923,6 +1495,261 @@ def _tally_votes(out_dir: str) -> str:
     return "\n".join(lines)
 
 
+def _self_test_refs() -> bool:
+    """``cites_exist`` extraction, the not-found body and the misuse prefixes."""
+    answer = (
+        "deadbeef and added and 20261029 and 1698765432 are not refs; "
+        "a1b2c3d, `0123456789ab` and A1B2C3D are. note #12 is a note, "
+        "see #7 and (#9). Entity &#39; is not a ref."
+    )
+    shas, numbers = _extract_refs(answer)
+    ok = shas == ["a1b2c3d", "0123456789ab"] and numbers == [7, 9]
+    ok &= _extract_refs("sha deadbeefdeadbeef1 here") == (["deadbeefdeadbeef1"], [])
+    failures, notes = _ref_failures(
+        "fixed in a1b2c3d, abc1234 and ffff123, see #7 and #8",
+        lambda sha: {"a1b2c3d": "ok", "abc1234": "ambiguous"}.get(sha, "missing"),
+        lambda number: number == 7,
+    )
+    ok &= failures == ["invented_ref:ffff123", "invented_ref:#8"]
+    ok &= notes == ["ambiguous_ref:abc1234"]
+    real = globals()["_get_json"]
+    try:
+        globals()["_get_json"] = lambda url: {"error": "not_found"}
+        ok &= _body_resolves("x") is False
+        globals()["_get_json"] = lambda url: {"sha": "a1b2c3d"}
+        ok &= _body_resolves("x") is True
+    finally:
+        globals()["_get_json"] = real
+    ok &= _misuse_kind('{"error": "unknown tool \'nope\'"}') == "unknown_tool"
+    ok &= _misuse_kind('{"error": "invalid arguments for get_pr: x"}') == (
+        "invalid_arguments"
+    )
+    ok &= _misuse_kind('{"commits": ["{\\"error\\": \\"unknown tool "]}') == ""
+    ok &= _check_case({}, {**_fake_turn(), "misuse": ["unknown_tool"]}) == [
+        "tool_misuse:unknown_tool"
+    ]
+    return bool(ok)
+
+
+def _fake_turn(**fields) -> dict:
+    """A minimal per-turn dict as ``_stream_turn`` returns."""
+    turn = {
+        "names": [],
+        "calls": [],
+        "error": "",
+        "answer": "",
+        "rounds": 0,
+        "tool_errors": 0,
+        "misuse": [],
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "latency": 1.0,
+    }
+    return {**turn, **fields}
+
+
+def _self_test_multi_turn() -> bool:
+    """One session, one ``_turn_cost``, checks per turn and ``expect`` on the last."""
+    import argparse
+
+    args = argparse.Namespace(
+        base="http://x", slug="s", mode=None, stop_above=None, warmup=False
+    )
+    scripted = iter(
+        [
+            _fake_turn(
+                names=["search_symbols"],
+                calls=[{"name": "search_symbols", "arguments": {}}],
+                answer="first, see abc1234",
+                rounds=1,
+            ),
+            _fake_turn(answer="second", rounds=0, misuse=["unknown_tool"]),
+            _fake_turn(
+                names=["get_commit"],
+                calls=[{"name": "get_commit", "arguments": {}}],
+                answer="third #3",
+                rounds=2,
+            ),
+        ]
+    )
+    cost_calls: list[int] = []
+    patched = {
+        "_post": lambda url, payload: {"id": 41},
+        "_stream_turn": lambda base, sid, question: next(scripted),
+        "_turn_cost": lambda a, sid: (
+            cost_calls.append(sid)
+            or {
+                "cost": 0.1,
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_tokens": 60,
+                "cache_write_tokens": 10,
+                "uncached_in": 30,
+                "side_spend": 0.01,
+            }
+        ),
+        "_spent": lambda a: 0.0,
+        "_live_resolvers": lambda a: (
+            lambda sha: "missing" if sha == "abc1234" else "ok",
+            lambda number: True,
+        ),
+    }
+    saved = {name: globals()[name] for name in patched}
+    suite = {
+        "suite": "t",
+        "cases": [
+            {
+                "id": "M1",
+                "turns": ["q1", "q2", "q3"],
+                "expect": {"tools_any": ["get_commit"], "max_rounds": 2},
+            }
+        ],
+    }
+    try:
+        globals().update(patched)
+        trials = _run_suite_pass(args, None, None, suite, 1)
+    finally:
+        globals().update(saved)
+    ok = len(trials) == 1 and cost_calls == [41]
+    trial = trials[0]
+    # expect (tools_any get_commit, rounds <= 2) holds on the LAST turn only;
+    # the first turn's invented ref and the second's misuse fail the case.
+    ok &= set(trial["failures"]) == {
+        "invented_ref:abc1234",
+        "tool_misuse:unknown_tool",
+    }
+    ok &= trial["rounds"] == 2 and trial["question"] == "q3"
+    ok &= trial["input_tokens"] == 30 and trial["output_tokens"] == 15
+    ok &= trial["latency"] == 3.0 and trial["tokens_total"] == 120
+    ok &= trial["names"] == ["search_symbols", "get_commit"]
+    summary = _summarize(trials)
+    ok &= summary["tokens"] == 120 and round(summary["cache_pct"], 2) == 0.6
+    ok &= summary["uncached_in"] == 30 and summary["side_spend"] == 0.01
+    # --stop-above scales the margin by the number of turns.
+    args.stop_above = 0.5
+    globals()["_spent"] = lambda a: 0.0
+    try:
+        globals().update({k: v for k, v in patched.items() if k != "_spent"})
+        scripted = iter([])  # a call to _stream_turn would raise StopIteration
+        stopped = _run_suite_pass(args, None, None, suite, 1)
+    finally:
+        globals().update(saved)
+    ok &= stopped == [] and TURN_COST_MARGIN * 3 > 0.5
+    return bool(ok)
+
+
+def _self_test_window() -> bool:
+    """Which turns ``build_window`` elides for a 4-turn fixture."""
+    from whygraph.chat.harness import ELIDED_MARKER, build_window
+    from whygraph.services.llm.chat import ChatMessage, ToolCall
+
+    history = []
+    for n in range(4):
+        call = ToolCall(id=f"t{n}", name="get_evidence", arguments={"q": n})
+        history += [
+            ChatMessage(role="user", content=f"question {n}"),
+            ChatMessage(role="assistant", content="", tool_calls=(call,)),
+            ChatMessage(role="tool", content="x" * 4_000, tool_call_id=f"t{n}"),
+            ChatMessage(role="assistant", content=f"answer {n}"),
+        ]
+    roomy = build_window(history, token_budget=1_000_000)
+    tight = build_window(history, token_budget=2_500)
+    elided = [
+        n
+        for n in range(4)
+        if any(m.content == ELIDED_MARKER for m in tight if m.tool_call_id == f"t{n}")
+    ]
+    kept = [m for m in tight if m.role == "tool" and m.content != ELIDED_MARKER]
+    # The current turn and the one before it keep their results (2 kept turns).
+    return tuple(history) == roomy and elided == [0, 1] and len(kept) == 2
+
+
+def _self_test_replay() -> bool:
+    """Replay a fixture session stored in a throwaway DB."""
+    import tempfile
+    from decimal import Decimal
+
+    from whygraph.core import Config
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.db import bootstrap, get_session
+    from whygraph.db import engine as db_engine
+    from whygraph.db.models import ChatMessage as Row
+    from whygraph.db.models import ChatSession as Session
+    from whygraph.portal.prices import Price
+    from whygraph.services.llm.chat import ChatMessage
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        context = ProjectContext(
+            slug="selftest", root=root, config=Config(whygraph_db=root / "wg.db")
+        )
+        db_engine._reset_engine()
+        try:
+            with use_project(context):
+                bootstrap.ensure_initialized()
+                now = "2026-10-30T00:00:00+00:00"
+                with get_session() as db:
+                    db.add(
+                        Session(
+                            id=1,
+                            title="t",
+                            provider="p",
+                            model="m",
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    db.flush()
+
+                    def add(role, content, parent, calls="[]", call_id=None):
+                        row = Row(
+                            session_id=1,
+                            role=role,
+                            content=content,
+                            tool_calls=calls,
+                            tool_call_id=call_id,
+                            parent_id=parent,
+                            created_at=now,
+                        )
+                        db.add(row)
+                        db.flush()
+                        return row.id
+
+                    def call(n):
+                        return json.dumps(
+                            [{"id": f"c{n}", "name": "get_evidence", "arguments": {}}]
+                        )
+
+                    last = add("user", "q1", None)
+                    for n in (1, 2):
+                        last = add("assistant", "", last, call(n))
+                        last = add("tool", "r" * 4_000, last, call_id=f"c{n}")
+                    last = add("assistant", "answer one", last)
+                    last = add("user", "q2", last)
+                    add("assistant", "answer two", last)
+                system = (
+                    ChatMessage(role="system", content="s" * 400),
+                    ChatMessage(role="system", content="o" * 400),
+                )
+                price = Price(Decimal(2), Decimal(10), Decimal("0.1"), Decimal("2.5"))
+                turns = _replay_session(
+                    1, None, budget=500, price=price, system=system, specs_tokens=100
+                )
+        finally:
+            db_engine._reset_engine()
+    counts = [len(t["requests"]) for t in turns]
+    first, second = turns[0]["requests"], turns[1]["requests"]
+    return (
+        counts == [3, 1]
+        and first[0]["cached_tokens"] == 0
+        and first[1]["cached_tokens"] >= first[1]["fixed_tokens"]
+        and first[1]["modelled_usd"] > 0
+        # Round 3 elided the older result in place: smaller than the naive growth.
+        and first[2]["est_tokens"] < first[1]["est_tokens"] + 1_000
+        and second[0]["est_tokens"] > 0
+    )
+
+
 def _self_test() -> int:
     """Run both judge halves on an inline fake report; exit 0 on the expected table."""
     import tempfile
@@ -991,6 +1818,15 @@ def _self_test() -> int:
     # X1 and X2 win; X3 loses to engineer; X4 ties both without a win.
     ok &= row.split("|")[2].strip() == "2" and row.split("|")[3].strip() == "4"
     print(table)
+    for name, part in (
+        ("refs and misuse", _self_test_refs),
+        ("multi-turn", _self_test_multi_turn),
+        ("window elision", _self_test_window),
+        ("replay", _self_test_replay),
+    ):
+        passed = part()
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+        ok &= passed
     print("self-test:", "OK" if ok else "FAILED")
     return 0 if ok else 1
 
@@ -1065,6 +1901,26 @@ def main() -> int:
         help="Tally DIR/votes/*.json against DIR/key.json into a Markdown table.",
     )
     parser.add_argument(
+        "--replay",
+        metavar="REPORT_JSON",
+        help="Rebuild every request of a report's sessions in-process (no model "
+        "calls) and write per-request estimated tokens and modelled cost.",
+    )
+    parser.add_argument("--data-dir", metavar="DIR", help="--replay: portal data dir.")
+    parser.add_argument("--out", metavar="REPLAY_JSON", help="--replay: output file.")
+    parser.add_argument(
+        "--context-budget",
+        type=int,
+        default=None,
+        metavar="N",
+        help="--replay: [chat].context_token_budget (default: ChatConfig's).",
+    )
+    parser.add_argument(
+        "--overview-from",
+        metavar="REPLAY_JSON",
+        help="--replay: reuse the overview text a previous replay recorded.",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="Exercise --judge-packets and --judge-tally on a fake report.",
@@ -1073,6 +1929,10 @@ def main() -> int:
 
     if args.self_test:
         return _self_test()
+    if args.replay:
+        if not (args.data_dir and args.out):
+            parser.error("--replay needs --data-dir and --out")
+        return _replay_main(args)
     if args.judge_packets:
         _write_packets(*args.judge_packets)
         return 0

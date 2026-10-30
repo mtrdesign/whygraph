@@ -47,6 +47,13 @@ def test_bundled_table_shape() -> None:
         assert isinstance(price.input, Decimal)
 
 
+def test_sonnet_5_5_cache_read_is_a_twentieth_of_input() -> None:
+    price = bundled_prices().rows[("anthropic", "claude-sonnet-5-5")]
+    # The pricing page's 0.05x cache-hit multiplier: $0.10/MTok on $2.
+    assert price.cache_read == Decimal("0.10")
+    assert price.cache_read == price.input * Decimal("0.05")
+
+
 def test_bundled_table_covers_the_defaults() -> None:
     rows = bundled_prices().rows
     # Every model the first-scan estimate priced before the table moved.

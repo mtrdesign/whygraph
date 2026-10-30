@@ -126,6 +126,27 @@ broken; disable one of each pair.
 **Codex** loads `.codex/config.toml` only for projects you have marked as trusted. Trust the project
 in Codex for both servers to load.
 
+## Writing a decision down { #whygraph-note }
+
+`/whygraph-note <what to remember>` proposes a [project note](../guide/notes.md) from your editor. It
+is installed for Claude Code and Cursor (as a skill) and for VS Code (as a prompt under
+`.github/prompts/`); Codex's `AGENTS.md` carries one paragraph telling the agent to call
+`whygraph_propose_note`. The command asks for the anchor (a symbol, a file or lines, an area, or the
+whole project) when the context does not make it obvious, calls `whygraph_propose_note`, and prints the
+review link. The note then waits for a member to confirm it on the project's Notes page; nothing reads
+it before.
+
+The implementor subagent stays free of MCP tools, but its final report now ends with a
+**`## Decisions worth a note`** list: at most three decisions it made that deviate from the plan or
+that a future reader needs and the code does not show, each as a kind, an anchor and a short
+paragraph. `/whygraph-implement` in Claude Code and Cursor then proposes each one with
+`whygraph_propose_note` and prints the note ids and review links. In VS Code the implement prompt runs as
+the implementor, which has no WhyGraph tools, so it ends by telling you to run `/whygraph-note` for each
+listed decision.
+
+**Update agent files** brings an existing project up to date. In Claude Code, the `whygraph-implement`
+skill is then allowed to call `whygraph_propose_note`, and nothing else from WhyGraph.
+
 ## Reviewing a diff (Claude Code) { #whygraph-review }
 
 Claude Code gets one more slash command, `/whygraph-review [<base>] [--generate]`. It checks a diff
@@ -156,6 +177,8 @@ symbol's rationale card, and reports exactly one verdict - **Constraint at risk*
   lookup it makes to tell that the project is linked may let the platform describe one commit, under
   the platform's description limit. With `--generate` it asks the platform, which may generate cards
   under its own budget.
+- **Notes.** The reviewer reads the confirmed [project notes](../guide/notes.md) on a card, and a hunk
+  that contradicts one is reported as a finding.
 - **Other agents.** Cursor, VS Code and Codex do not get the reviewer yet. Cursor also loads
   `.claude/skills/`, so with Claude Code selected `/whygraph-review` shows up in Cursor's slash menu too;
   it is untested there.

@@ -6,6 +6,13 @@
 
 ## What's new
 
+- **Project notes.** A note is a short fact the code does not show - a decision, a constraint, a
+  gotcha, a convention - anchored to a symbol, lines, a path, an area or the whole project. Members
+  add and confirm notes in a new Notes page and the Explorer's Notes tab; the Chat assistant gets
+  `find_notes` and `propose_note` (23 tools now) and cites `note #N`; rationale cards carry the
+  confirmed notes under `notes`; MCP agents get `whygraph_propose_note` and `whygraph://note/{id}`; and
+  `/whygraph-note` proposes one from your editor. Agents only propose - a proposal does nothing until a
+  member confirms it. See [Project notes](../guide/notes.md).
 - **Rate a Chat reply.** A finished reply has a thumbs up and a thumbs down; thumbs down takes a reason
   and an optional note. See [Rating a reply](../guide/chat.md#rating-a-reply).
 - **Tool outcomes and timings in Agent activity.** The Overview now shows, per kind of call, the

@@ -18,7 +18,7 @@ against the running code, so it stays in step with what `whygraph` actually does
 
     ---
 
-    The three tools, four resources, and three prompts each project's `/mcp/<slug>` endpoint serves.
+    The four tools, five resources (one fixed, four templates), and three prompts each project's `/mcp/<slug>` endpoint serves.
 
     [:octicons-arrow-right-24: MCP reference](mcp.md)
 

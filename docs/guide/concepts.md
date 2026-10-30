@@ -84,7 +84,7 @@ WhyGraph sits on top of CodeGraph and stays out of its lane:
 When you target a symbol by `qualified_name`, WhyGraph asks CodeGraph to resolve it to a file and line
 range, then layers its own history on top.
 
-**WhyGraph's own MCP server exposes no graph-traversal tools** - three tools, all about history. To
+**WhyGraph's own MCP server exposes no graph-traversal tools** - four tools, all about history: evidence, rationale, area history, and one write that only proposes a [project note](notes.md) for a person to confirm. To
 walk callers and callees from your editor you do not install anything: the portal runs CodeGraph's own
 MCP server for you and serves it at a second endpoint, `/mcp/<slug>/code`, which your agent sees as a
 second server named `codegraph`. WhyGraph never adds graph tools to its own server. WhyGraph's other

@@ -115,6 +115,16 @@ default model, with the provider key from Settings - the same provider and model
 If that provider has no key yet, add one under Settings first. See
 [Configuration](../reference/configuration.md).
 
+### Notes { #notes }
+
+The **Notes** tab lists the [project notes](notes.md) that apply to the selected symbol: notes anchored
+to it, to lines that overlap it, to its file or folder, or to an area that contains it. Unlike what an
+agent sees, the tab also shows **proposals waiting for review** and notes whose code is `missing`, so
+you can review in place. Each note shows its kind, its anchor state (`current`, `changed`, `missing`,
+`unknown`) and who proposed and confirmed it. **Add note** proposes a note anchored to the symbol.
+Viewers see the tab read-only; the full workflow (Confirm, Still true, Revise, Retire) is on the
+project's Notes page. A linked project has no Notes tab.
+
 ### Coverage heatmap
 
 Because rationale cards are generated lazily, the overview colors each directory and file by how much

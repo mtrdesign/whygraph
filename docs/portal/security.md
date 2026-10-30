@@ -369,6 +369,46 @@ data. A clone made by an earlier version is fixed by its next sync, which rewrit
 disk as a plain file and drops the cached rationale cards of those files; at start the portal queues
 one such sync, with a scan, for every clone that does not have `core.symlinks=false` yet.
 
+## Project notes { #project-notes }
+
+A [project note](../guide/notes.md) is text a member (or an agent, for a member to confirm) wrote and
+the assistant and MCP agents later read, which makes it a channel for prompt injection: a hostile
+issue, pull request or file can talk an agent into proposing a note, and a confirmed note then sits in
+front of every later session. The controls:
+
+- **Agents propose; people confirm.** No surface a model reads - `find_notes`, the rationale card, the
+  note resource - ever returns a proposed note, and an agent has no tool to confirm one. Confirmation
+  is a member action and is audited (the note id, the actor, whether the confirmer was also the
+  proposer; never the text).
+- **A wide note needs a second confirmer.** A note anchored to the whole project, or to a top-level
+  folder or something broader, reaches nearly every session. Its proposer cannot confirm it or mark it
+  still true, and only a project admin can change its text while confirming it. `403
+  note_needs_second_confirmer`.
+- **MCP proposals need `project.read`.** The tool is a write, but it only creates a proposal that
+  waits for review, so any member who can read the project can propose through their agent. It is
+  capped: 20 per member and 50 per project per day, and 200 waiting at once. **Reject all from this
+  origin** clears one member's runaway agent without confirming anything.
+- **Notes are data, never instructions.** The assistant's system prompt and the MCP instructions say
+  so; a note is rendered on one line, its text quoted and whitespace collapsed, wherever it goes into
+  plain text; text with control characters is refused; notes are never fed to rationale generation; and
+  Chat's starting overview carries only a count of project-wide notes, never their text.
+- **Anchors are paths of an untrusted repository.** They go through the same symbolic-link and
+  containment checks as every other repository path; the denied paths of Chat's file tool (`.git`,
+  `.whygraph`, `.codegraph`, `whygraph.toml`, `.env*`) cannot be anchors.
+- **Chat cannot load images from a model.** A Markdown image in a reply is shown as its alt text and a
+  link, never fetched, because a loaded image URL could carry what the model had read out of the portal.
+- **No text in logs.** Audit and log fields carry ids and enums, never a note's text, an origin or a
+  ref.
+- **Statistics cannot read notes.** The Chat statistics tool refuses the notes table.
+
+**Residual risk in local mode.** The portal has no login, so any local process acts as the single local
+user. An agent that can run shell commands on your machine can call the portal's notes routes and
+confirm its own proposal, exactly as it could edit `CLAUDE.md` or your code. WhyGraph does not ask an
+agent to do that and no tool result or bundled file names those routes, but the confirmation step is
+a guard against injected text, not against a local program that already acts as you. On a production
+portal every member signs in, and a project note is visible to every member who can open the project
+(proposals included).
+
 ## What the portal writes to your repository
 
 Only when you initialize a project, only what the preview listed, and only after you confirm:

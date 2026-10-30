@@ -40,7 +40,7 @@ import logging
 import re
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -160,12 +160,17 @@ class SqlSurface:
         Refusal text when the file is missing or unreadable, formatted with
         ``{db_path}``. Per-surface because the remedy differs: one says the scan
         has not run, the other that the index is absent.
+    schema_sections : mapping of str to str, optional
+        Per-table schema prose, keyed by table. Not sent with the tool
+        description: a refused or failed query gets the sections for the tables
+        it names in its error payload (:func:`_schema_for`).
     """
 
     label: str
     allowed_tables: frozenset[str]
     db_path: Callable[[], Path]
     missing_db_message: str
+    schema_sections: Mapping[str, str] | None = None
 
     def connect(
         self, db_path: Path | None = None, denials: list[str] | None = None
@@ -296,6 +301,50 @@ def _check_shape(sql: str) -> str:
     return trimmed
 
 
+_SCHEMA_CAP = 6_000
+"""Longest ``schema`` an error payload carries."""
+
+
+def _schema_for(sql: str, surface: SqlSurface) -> str | None:
+    """Return the schema sections for the tables ``sql`` names, capped.
+
+    Parameters
+    ----------
+    sql : str
+        The query that failed.
+    surface : SqlSurface
+        Supplies ``schema_sections``.
+
+    Returns
+    -------
+    str or None
+        The sections of every table whose name appears as a word in ``sql`` (all
+        sections when none does), or ``None`` for a surface without sections.
+    """
+    sections = surface.schema_sections
+    if not sections:
+        return None
+    named = [
+        name
+        for name in sections
+        if re.search(rf"\b{re.escape(name)}\b", sql, re.IGNORECASE)
+    ]
+    text = "\n\n".join(sections[name] for name in (named or sections))
+    return text[:_SCHEMA_CAP]
+
+
+def _with_schema(result: dict, sql: str, surface: SqlSurface) -> dict:
+    """Add ``schema`` to a refusal that is about an unknown or refused table."""
+    message = result["error"].lower()
+    if result["layer"] == "authorizer" or (
+        result["layer"] == "sqlite" and ("no such" in message)
+    ):
+        schema = _schema_for(sql, surface)
+        if schema:
+            result["schema"] = schema
+    return result
+
+
 def run_aggregate_query(
     sql: str, surface: SqlSurface, *, db_path: Path | None = None
 ) -> dict:
@@ -361,20 +410,26 @@ def run_aggregate_query(
                 ),
                 "layer": "timeout",
             }
-        return {"error": f"SQL error: {message}", "layer": "sqlite"}
+        return _with_schema(
+            {"error": f"SQL error: {message}", "layer": "sqlite"}, sql, surface
+        )
     except sqlite3.DatabaseError as exc:
         # `not authorized` arrives as this. SQLite's own text often omits *what*
         # it refused, so the recorded denial is what makes the result actionable.
         _log.debug("stats query refused: %s (denials=%s)", exc, denials)
         refused = f" ({denials[0]} is not permitted)" if denials else ""
-        return {
-            "error": (
-                f"{exc}{refused} — this tool may read only "
-                f"{', '.join(sorted(surface.allowed_tables))} "
-                f"in the {surface.label} database, and only for reading"
-            ),
-            "layer": "authorizer",
-        }
+        return _with_schema(
+            {
+                "error": (
+                    f"{exc}{refused} — this tool may read only "
+                    f"{', '.join(sorted(surface.allowed_tables))} "
+                    f"in the {surface.label} database, and only for reading"
+                ),
+                "layer": "authorizer",
+            },
+            sql,
+            surface,
+        )
     finally:
         conn.set_progress_handler(None, 0)
         conn.close()

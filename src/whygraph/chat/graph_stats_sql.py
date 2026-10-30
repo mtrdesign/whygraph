@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from whygraph.core import get_config
@@ -116,7 +117,7 @@ def run_graph_query(sql: str, *, db_path: Path | None = None) -> dict:
     return run_aggregate_query(sql, _SURFACE, db_path=db_path)
 
 
-_GRAPH_SCHEMA_DOC = """\
+_GRAPH_SCHEMA_SUMMARY = """\
 Run a read-only aggregate SQL query over the CODE GRAPH — the structure of the
 codebase as it stands right now. How many functions per module, which files hold
 the most symbols, the distribution of symbol kinds, call fan-in and fan-out.
@@ -160,8 +161,31 @@ get_area_outline — they return readable, related detail that a bare count cann
    asker meant, so when you answer "how big is the codebase" SAY whether tests
    are in or out, and filter explicitly if they should be out.
 
-=== TABLES ===
+=== TABLES (columns only; an unknown table or column gets the full notes back) ===
 
+nodes: id, kind, name, qualified_name, file_path, language, start_line, end_line,
+  docstring, signature, visibility, is_exported, is_async, return_type, updated_at
+edges: id, source, target, kind, metadata, line, col, provenance
+files: path, content_hash, language, size, indexed_at, node_count, errors
+
+If a table returns nothing the index has not been built — say so rather than
+reporting zero as a finding.\
+"""
+"""The tool description, and the most important asset in this module.
+
+Same reasoning as ``stats_sql._SCHEMA_SUMMARY``: this is the one tool class whose
+wrong answers are undetectable by the reader, because a plausible number arrives
+with no way to tell it apart from a right one. So every value domain quoted was
+**measured on this repository**, and each rule is a trap that was actually hit
+while probing the schema — rule 1 (imports outnumber functions, so an unfiltered
+count reports 3,362 "symbols"), rule 3 (a `substr` directory grouping produced a
+junk bucket from a path with no separator at the expected offset), and rule 5
+(`tests` is the largest module by symbol count, which is true and misleading).
+
+Guarded by a test — the rules must not be paraphrased or trimmed to save tokens.
+"""
+_SCHEMA_SECTIONS: dict[str, str] = {
+    "nodes": """\
 nodes — one row per symbol, import, or file-as-node
   id TEXT PK -- opaque; join target for edges, never shown to a user
   kind TEXT -- see the cardinalities below
@@ -175,37 +199,29 @@ nodes — one row per symbol, import, or file-as-node
                      -- project-stats tool for anything temporal.
   Measured on this repo: function 1288, import 1111, method 268, variable 238,
   file 212, class 163, interface 38, route 22, constant 15, type_alias 4,
-  component 3.
-
+  component 3.\
+""",
+    "edges": """\
 edges — one row per relationship
   id INTEGER PK · source TEXT (nodes.id) · target TEXT (nodes.id)
   kind TEXT · metadata TEXT NULL · line, col INTEGER NULL · provenance TEXT NULL
   Measured: contains 3128, calls 2618, imports 1566, instantiates 972,
-  references 470, extends 35.
-
+  references 470, extends 35.\
+""",
+    "files": """\
 files — one row per indexed file
   path TEXT PK (repo-relative) · content_hash TEXT · language TEXT
   size INTEGER (bytes) · modified_at, indexed_at INTEGER
   node_count INTEGER -- symbols found in this file; cheaper than counting nodes
   errors TEXT NULL -- set when the parse partially failed
-  Measured languages: python 182, tsx 23, typescript 5, yaml 5, javascript 2.
+  Measured languages: python 182, tsx 23, typescript 5, yaml 5, javascript 2.\
+""",
+}
+"""Per-table schema prose, keyed by table: sent only in an error payload."""
 
-If a table returns nothing the index has not been built — say so rather than
-reporting zero as a finding.\
-"""
-"""The tool description, and the most important asset in this module.
 
-Same reasoning as ``stats_sql._SCHEMA_DOC``: this is the one tool class whose
-wrong answers are undetectable by the reader, because a plausible number arrives
-with no way to tell it apart from a right one. So every value domain quoted was
-**measured on this repository**, and each rule is a trap that was actually hit
-while probing the schema — rule 1 (imports outnumber functions, so an unfiltered
-count reports 3,362 "symbols"), rule 3 (a `substr` directory grouping produced a
-junk bucket from a path with no separator at the expected offset), and rule 5
-(`tests` is the largest module by symbol count, which is true and misleading).
-
-Guarded by a test — the rules must not be paraphrased or trimmed to save tokens.
-"""
+_SURFACE = replace(_SURFACE, schema_sections=_SCHEMA_SECTIONS)
+"""Binds the sections to the guard, which serves them in an error payload."""
 
 
 __all__ = ["SqlNotAllowed", "run_graph_query"]

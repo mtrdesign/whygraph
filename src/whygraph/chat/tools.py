@@ -581,7 +581,7 @@ _SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         name="run_project_stats",
-        description=stats_sql._SCHEMA_DOC,
+        description=stats_sql._SCHEMA_SUMMARY,
         parameters={
             "type": "object",
             "properties": {
@@ -598,7 +598,7 @@ _SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         name="run_graph_stats",
-        description=graph_stats_sql._GRAPH_SCHEMA_DOC,
+        description=graph_stats_sql._GRAPH_SCHEMA_SUMMARY,
         parameters={
             "type": "object",
             "properties": {

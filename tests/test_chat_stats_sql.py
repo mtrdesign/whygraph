@@ -401,13 +401,13 @@ def test_a_missing_database_is_an_error_result(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_doc_carries_all_five_silent_corruption_rules() -> None:
+def test_schema_summary_carries_all_five_silent_corruption_rules() -> None:
     """The rules cannot be paraphrased or trimmed to save tokens.
 
     Each guards a trap that produces a *plausible* wrong number, which no other
     test can catch because the tool did exactly what it was asked.
     """
-    doc = stats_sql._SCHEMA_DOC
+    doc = stats_sql._SCHEMA_SUMMARY
     # Rule 1 — commits that are not on the default branch.
     assert "on_default_branch = 1" in doc
     # Rule 2 — mixed ISO-8601 forms; substr() does not normalise, strftime does.
@@ -435,7 +435,7 @@ def test_schema_doc_carries_all_five_silent_corruption_rules() -> None:
 
 def test_schema_doc_documents_the_non_obvious_value_domains() -> None:
     """A field name alone is not enough to write a correct aggregate."""
-    doc = stats_sql._SCHEMA_DOC
+    doc = "\n".join(stats_sql._SCHEMA_SECTIONS.values())
     # change_type is git's single letter, not a word.
     assert "'M' modified" in doc
     assert "NOT words" in doc
@@ -457,7 +457,7 @@ def test_schema_doc_routes_developer_grouping_through_the_author_table() -> None
     one failure mode invisible in the output, so the wording is a contract — the
     eval greps the emitted SQL for this exact form.
     """
-    doc = stats_sql._SCHEMA_DOC
+    doc = stats_sql._SCHEMA_SUMMARY
     assert "author" in doc
     # The all-time form must aggregate: reading `commit_count` bare is refused
     # by `_check_shape`, so the rule ships the SUM/GROUP BY wrapper.
@@ -486,7 +486,7 @@ def test_schema_doc_describes_flag_zero_as_both_populations() -> None:
     Asserts on the rule's substance, not its wording, so a future rewording
     does not break the test.
     """
-    doc = stats_sql._SCHEMA_DOC
+    doc = stats_sql._SCHEMA_SUMMARY
     rule_one = doc.split("2. For dates")[0].split("1. ALWAYS")[1]
 
     # The instruction is unchanged and must stay.
@@ -497,3 +497,47 @@ def test_schema_doc_describes_flag_zero_as_both_populations() -> None:
     assert "already on the main walk" not in rule_one.lower()
     # The discriminator is documented in the commit schema block.
     assert "first_seen_ref" in doc
+
+
+def test_the_summary_is_under_its_cap_and_names_every_table() -> None:
+    """The always-sent description stays short; the prose lives in the sections."""
+    summary = stats_sql._SCHEMA_SUMMARY
+    assert len(summary) <= 4_600
+    for table in _ALLOWED_TABLES:
+        assert table in summary
+        assert table in stats_sql._SCHEMA_SECTIONS
+    assert set(stats_sql._SCHEMA_SECTIONS) == set(_ALLOWED_TABLES)
+    # The per-table prose is not in the description.
+    assert "'M' modified" not in summary
+
+
+def test_an_unknown_column_error_carries_that_tables_section(stats_db: Path) -> None:
+    result = run_stats_query('SELECT COUNT(nope) FROM "commit"', db_path=stats_db)
+    assert result["layer"] == "sqlite"
+    assert (
+        result["schema"]
+        == stats_sql._SCHEMA_SECTIONS["commit"][: sql_guard._SCHEMA_CAP]
+    )
+    assert "llm_description TEXT" in result["schema"]
+    assert "'M' modified" not in result["schema"]
+
+
+def test_an_unknown_table_error_carries_every_section(stats_db: Path) -> None:
+    result = run_stats_query("SELECT COUNT(*) FROM nowhere", db_path=stats_db)
+    assert result["layer"] == "sqlite"
+    assert len(result["schema"]) <= sql_guard._SCHEMA_CAP
+    assert "commit_file_change" in result["schema"]
+    assert "ONE ROW PER HUMAN" in result["schema"]
+
+
+def test_a_refused_table_error_carries_the_schema(stats_db: Path) -> None:
+    result = run_stats_query("SELECT COUNT(*) FROM chat_message", db_path=stats_db)
+    assert result["layer"] == "authorizer"
+    assert "schema" in result
+
+
+def test_a_success_and_a_shape_refusal_carry_no_schema(stats_db: Path) -> None:
+    assert "schema" not in run_stats_query(
+        "SELECT COUNT(*) FROM pull_request", db_path=stats_db
+    )
+    assert "schema" not in run_stats_query("DROP TABLE pull_request", db_path=stats_db)

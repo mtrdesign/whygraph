@@ -276,6 +276,36 @@ def test_mcp_unknown_slug_and_setup_gate(env: SimpleNamespace) -> None:  # noqa:
         assert unknown.status_code == 404
 
 
+def test_mcp_dispatch_binds_the_actor_from_the_principal(monkeypatch) -> None:
+    from whygraph.core.context import current_actor
+    from whygraph.portal import mcp_mount
+
+    ctx = SimpleNamespace(ctx=SimpleNamespace(slug="t"))
+    principal = SimpleNamespace(uid="u-mcp", user_id=7)
+    access = SimpleNamespace(org_slug="o", user_id=7)
+
+    async def _gate(state, scope):
+        return ctx, access, principal
+
+    async def _body(scope, receive):
+        return receive
+
+    seen: list[str | None] = []
+
+    async def _handle(scope, receive, send):
+        seen.append(current_actor())
+
+    monkeypatch.setattr(mcp_mount, "serves_mcp", lambda state: True)
+    monkeypatch.setattr(mcp_mount, "gate_project", _gate)
+    monkeypatch.setattr(mcp_mount, "capped_receive", _body)
+    monkeypatch.setattr(mcp_mount, "usage_sink_for", lambda *a, **k: None)
+    state = SimpleNamespace(session_manager=SimpleNamespace(handle_request=_handle))
+
+    asyncio.run(mcp_mount.McpDispatcher(state)({}, None, None))
+    assert seen == ["u-mcp"]
+    assert current_actor() is None
+
+
 # ---------------------------------------------------------------------------
 # End to end over a real server
 # ---------------------------------------------------------------------------

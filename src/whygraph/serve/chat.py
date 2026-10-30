@@ -66,7 +66,7 @@ from whygraph.chat.grounding import ground, with_references
 from whygraph.chat.modes import DEFAULT_MODE, MODE_IDS, MODES, render_starters
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import Config, ConfigError, get_config
-from whygraph.core.context import current_project
+from whygraph.core.context import current_project, use_actor
 from whygraph.core.usage import (
     BUDGET_EXCEEDED,
     UsageBlocked,
@@ -1821,7 +1821,8 @@ def _start_turn(
         job.mode = _resolve_mode(
             _message_mode(continue_of) if continue_of is not None else row.mode
         )
-        job.start()
+        with use_actor(_caller_uid(request)):
+            job.start()
     except BaseException:
         _release(key, job)
         _LIVE_TURNS.discard(job)

@@ -1998,3 +1998,36 @@ def test_openrouter_reasoning_details_text_streams_as_reasoning() -> None:
         ReasoningDelta(text="Think"),
         ReasoningDelta(text="Sum"),
     ]
+
+
+_EXAMPLE_TOOL = ToolSpec(
+    name="search_symbols",
+    description="Find symbols by name.",
+    parameters=SEARCH_TOOL.parameters,
+    examples=({"query": "run_turn"}, {"query": "ToolRegistry"}),
+)
+
+
+def test_anthropic_input_examples_sent() -> None:
+    adapter, fake = _anthropic_adapter([_an_message_delta()])
+    list(adapter.stream_turn(_request(user("go"), tools=(_EXAMPLE_TOOL, SEARCH_TOOL))))
+    tools = fake.last_kwargs["tools"]
+    assert tools[0]["input_examples"] == [
+        {"query": "run_turn"},
+        {"query": "ToolRegistry"},
+    ]
+    # A tool without examples sends no key, and the breakpoint stays on the last tool.
+    assert "input_examples" not in tools[1]
+    assert "cache_control" in tools[1] and "cache_control" not in tools[0]
+
+
+def test_openai_examples_in_description() -> None:
+    adapter, fake = _openai_adapter([_oa_chunk(finish_reason="stop")])
+    list(adapter.stream_turn(_request(user("go"), tools=(_EXAMPLE_TOOL, SEARCH_TOOL))))
+    first, second = (t["function"] for t in fake.last_kwargs["tools"])
+    assert first["description"] == (
+        "Find symbols by name.\n\nExample arguments:\n"
+        '{"query": "run_turn"}\n{"query": "ToolRegistry"}'
+    )
+    assert second["description"] == "Find symbols by name."
+    assert "examples" not in first

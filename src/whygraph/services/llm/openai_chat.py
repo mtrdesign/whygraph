@@ -150,7 +150,13 @@ def _tool_payload(tools: tuple[ToolSpec, ...]) -> list[dict]:
             "type": "function",
             "function": {
                 "name": spec.name,
-                "description": spec.description,
+                "description": spec.description
+                + (
+                    "\n\nExample arguments:\n"
+                    + "\n".join(json.dumps(e) for e in spec.examples)
+                    if spec.examples
+                    else ""
+                ),
                 "parameters": spec.parameters,
             },
         }

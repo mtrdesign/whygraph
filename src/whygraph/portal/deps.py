@@ -1303,10 +1303,38 @@ def project_db_access(
             if guard is not None:
                 guard(project)
             await require_initialized(state, project)
+            request.state.bound_project = project
             yield project
 
     dependency.whygraph_action = action  # type: ignore[attr-defined]
     return dependency
+
+
+def bound_project(request: Request) -> BoundProject:
+    """The :class:`BoundProject` that :func:`project_db_access` bound for ``request``.
+
+    A router-level dependency does not hand its value to the handler, so
+    :func:`project_db_access` also leaves the project on ``request.state``.
+
+    Parameters
+    ----------
+    request : Request
+        The request of a route mounted under :func:`project_db_access`.
+
+    Returns
+    -------
+    BoundProject
+        The project the request is bound to.
+
+    Raises
+    ------
+    RuntimeError
+        When no project was bound (a mounting bug, never a client error).
+    """
+    project = getattr(request.state, "bound_project", None)
+    if project is None:
+        raise RuntimeError("no project is bound to this request")
+    return project
 
 
 async def bind_v1_project(

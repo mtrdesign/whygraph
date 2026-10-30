@@ -17,6 +17,7 @@ until :data:`ROUTE_REQUESTS` says how to call it.
 
 from __future__ import annotations
 
+import itertools
 import atexit
 import dataclasses
 import json
@@ -115,6 +116,7 @@ class OrgWorld:
     run_id: int = 0
     session_id: int = 0
     message_id: int = 0  # the session's first user row
+    note_id: int = 0  # the org-marked confirmed note
     secrets: dict[str, str] = field(default_factory=dict)  # label -> value
     owner_uid: str = ""  # the owner's users.uid (production's members routes)
 
@@ -420,6 +422,24 @@ def seed_question(
     org.message_id = _ok(client.get(chat, headers=headers))["messages"][0]["id"]
 
 
+def seed_note(
+    client: TestClient, org: OrgWorld, *, prefix: str = "", headers: dict | None = None
+) -> None:
+    """Propose and confirm one org-marked note on ``org``'s marked symbol (plan 40)."""
+    notes = f"{prefix}/api/projects/api/notes"
+    proposed = client.post(
+        notes,
+        json={
+            "body": f"{org.mark} note: keep this call idempotent",
+            "kind": "constraint",
+            "anchor": {"kind": "symbol", "qualified_name": org.qualified_name},
+        },
+        headers=headers,
+    )
+    org.note_id = _ok(proposed, 201)["id"]
+    _ok(client.post(f"{notes}/{org.note_id}/confirm", json={}, headers=headers))
+
+
 def seed_usage(client: TestClient, org: OrgWorld) -> None:
     """Marked ledger rows and a price override for ``org`` (M2f-2 section 6.3 #3).
 
@@ -555,6 +575,7 @@ def two_orgs(env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> Iterator[
             (first,) = wait_idle(client, org.owner)
             assert first["status"] == "ok", first
             seed_usage(client, org)
+            seed_note(client, org, headers=org.owner)
         yield world
         scanner.hold.unlink(missing_ok=True)
 
@@ -667,6 +688,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{number}": lambda o: "1",
     "{session_id}": lambda o: str(o.session_id),
     "{message_id}": lambda o: str(o.message_id),
+    "{note_id}": lambda o: str(o.note_id),
     "{uid}": lambda o: o.owner_uid,
     "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
@@ -873,6 +895,9 @@ def _price_body(w: World, o: OrgWorld) -> dict:
 def _budget_body(amount: int) -> Callable[[World, OrgWorld], dict]:
     return lambda w, o: {"monthly_usd": amount, "hard_stop": False}
 
+
+_NOTE_SEQ = itertools.count(1)
+"""Makes each swept note proposal unique (a repeat is a ``200`` duplicate)."""
 
 ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     # Portal level
@@ -1152,6 +1177,41 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, shows=lambda o: [f"{o.mark}-model"]
     ),
     ("GET", "/api/projects/{slug}/chat/modes"): Call(200),
+    # Project notes (plan 40): the seeded note is confirmed, anchored to the
+    # org's marked symbol and carries its mark in the body.
+    ("GET", "/api/projects/{slug}/notes"): Call(200, shows=lambda o: [o.mark]),
+    ("GET", "/api/projects/{slug}/notes/summary"): Call(200),
+    ("GET", "/api/projects/{slug}/notes/for-target"): Call(
+        200, query=_qn, shows=lambda o: [o.mark, o.qualified_name]
+    ),
+    ("GET", "/api/projects/{slug}/notes/{note_id}"): Call(
+        200, shows=lambda o: [o.mark]
+    ),
+    ("POST", "/api/projects/{slug}/notes"): Call(
+        201,
+        body=lambda w, o: {
+            "body": f"{o.mark} second note {next(_NOTE_SEQ)}",
+            "kind": "gotcha",
+            "anchor": {"kind": "symbol", "qualified_name": o.qualified_name},
+        },
+        shows=lambda o: [f"{o.mark} second note"],
+    ),
+    # Retiring a confirmed note as "rejected" is refused, so the sweep keeps it.
+    # Already confirmed by the seed: the route's own 409.
+    ("POST", "/api/projects/{slug}/notes/{note_id}/confirm"): Call(
+        409, body=lambda w, o: {}, shows=lambda o: ["note_state"]
+    ),
+    ("POST", "/api/projects/{slug}/notes/{note_id}/reconfirm"): Call(
+        200, body=lambda w, o: {}, shows=lambda o: [o.mark]
+    ),
+    ("POST", "/api/projects/{slug}/notes/{note_id}/retire"): Call(
+        409, body=lambda w, o: {"reason": "rejected"}, shows=lambda o: ["note_state"]
+    ),
+    ("POST", "/api/projects/{slug}/notes/reject-agent-proposals"): Call(
+        200,
+        body=lambda w, o: {"proposed_by": o.owner_uid or "someone", "origin": "mcp"},
+        shows=lambda o: ["rejected"],
+    ),
     # Each org's seed has one nested canary path; the sweep fails if the
     # other org's mark shows in the answer.
     ("GET", "/api/projects/{slug}/areas/suggest"): Call(
@@ -2224,7 +2284,12 @@ def test_nothing_answers_signed_out_in_production(
             if (path, method) in LOCAL_ONLY_ROUTES:
                 continue
             org = SimpleNamespace(
-                run_id=1, marker_sha="abc", session_id=1, message_id=1, owner_uid="x"
+                run_id=1,
+                marker_sha="abc",
+                session_id=1,
+                message_id=1,
+                note_id=1,
+                owner_uid="x",
             )
             url = _url(path, org)
             response = client.request(method, bravo + url)

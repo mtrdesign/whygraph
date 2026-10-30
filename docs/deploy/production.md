@@ -664,6 +664,8 @@ plus these GitHub, member, project and organization events:
 | `project_imported`, `project_removed` | A repository was imported, or a project was removed. |
 | `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected machine (`pre_approved` is true when the platform's own card started the link and Allow was skipped), its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
+| `note_confirmed`, `note_reconfirmed`, `note_retired` | A member confirmed a project note, marked it still true, or retired it (with the note id, its source and anchor kind, and whether the confirmer was also the proposer; never the note text). |
+| `note_bulk_rejected` | A member rejected all of one person's pending agent proposals from one origin (with the proposer as the target, the origin and the count). |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
 | `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |

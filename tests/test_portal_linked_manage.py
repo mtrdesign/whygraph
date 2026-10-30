@@ -156,6 +156,16 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("GET", f"/api/projects/{SLUG}/pr/1", None),
     ("GET", f"/api/projects/{SLUG}/issue/1", None),
     ("GET", f"/api/projects/{SLUG}/areas/suggest", None),
+    # Notes live on the platform too (plan 40).
+    ("GET", f"/api/projects/{SLUG}/notes", None),
+    ("GET", f"/api/projects/{SLUG}/notes/summary", None),
+    ("GET", f"/api/projects/{SLUG}/notes/for-target", None),
+    ("GET", f"/api/projects/{SLUG}/notes/1", None),
+    ("POST", f"/api/projects/{SLUG}/notes", {}),
+    ("POST", f"/api/projects/{SLUG}/notes/1/confirm", None),
+    ("POST", f"/api/projects/{SLUG}/notes/1/reconfirm", None),
+    ("POST", f"/api/projects/{SLUG}/notes/1/retire", {"reason": "wrong"}),
+    ("POST", f"/api/projects/{SLUG}/notes/reject-agent-proposals", {}),
     # The chat router: Chat opens on the platform too.
     ("GET", f"/api/projects/{SLUG}/chat/providers", None),
     ("GET", f"/api/projects/{SLUG}/chat/modes", None),

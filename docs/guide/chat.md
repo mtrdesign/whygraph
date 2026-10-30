@@ -196,6 +196,25 @@ reasoning.
 
 The actions and arrows are hidden while a reply is being written.
 
+### Rating a reply
+
+A finished reply has a thumbs up and a thumbs down beside **Regenerate**. Thumbs down opens a small
+panel: pick what went wrong (Wrong, Incomplete, Not grounded, Too slow or Other) and, if you like, add a
+note of up to 500 characters. Click the active thumb again to clear the rating. The rating shows again
+when you reload the chat, and a **Branch from here** copy starts unrated.
+
+Only the reply that ends a turn can be rated: not your question, and not a step in the middle of a
+turn that is still calling tools. A reply that ends in an error, a stop or the budget limit can be
+rated. Rating needs no key, works while another reply is being written and does not move the chat in
+the session list. Ratings and notes stay in the project's own database; they are never in a log, the
+usage ledger or the audit log, and only the person who started the chat reads them back.
+
+For the developer of a local WhyGraph, `scripts/chat_signals.py` ranks the turns of a project's database
+by these ratings and by what happened to them (regenerated, edited, continued, stopped, errored,
+tool errors). It opens the database read-only and refuses a database with more than one chat owner
+unless `--owner` is given. Its output holds your questions: do not commit it until each question is
+rewritten.
+
 ### Stop
 
 Choose **Stop** while a reply is being written to end it at once. The text written so far stays in
@@ -353,6 +372,8 @@ Most turns end with a reply. These cases are handled for you:
   cut off, it ends with "The reply hit the output limit." and, on the latest reply, a **Continue**
   button that carries on from where it stopped. The rest is added to the same reply.
 - If the model writes nothing after using tools, WhyGraph asks it once to answer from what it gathered.
+  This includes the last allowed round: when that round comes back empty (even if the model tried to
+  call another tool, which is dropped), it is asked once more to answer in text.
 - In a long turn, the bodies of older tool results are shortened to fit `context_token_budget`, and
   the reply says "Older tool results in this turn were shortened to fit the context."
 - When the provider declines to answer, the reply says "The provider declined to answer."

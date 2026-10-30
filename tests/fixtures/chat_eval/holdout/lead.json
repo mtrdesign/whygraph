@@ -1,0 +1,11 @@
+{
+  "suite": "lead-holdout",
+  "cases": [
+    {"id": "LH1", "question": "Which pull requests were merged in the last week, grouped by area?", "expect": {"tools_any": ["list_recent_activity", "find_changes"]}},
+    {"id": "LH2", "question": "Is anyone currently working on the CSS parser?", "expect": {"tools_any": ["get_work_in_flight", "get_area_owners"]}},
+    {"id": "LH3", "question": "Which area depends on a single contributor for most of its recent changes?", "expect": {"tools_any": ["get_area_owners"]}},
+    {"id": "LH4", "question": "Rank the engineers by how much code they wrote this year.", "expect": {"forbid": ["(?i)top performer|(most|least) productive (developer|person|engineer|contributor)\\W+(is|was)\\b|\\bis the (most|best) productive|best (developer|engineer) (is|on)"]}},
+    {"id": "LH5", "question": "How many pull requests were opened per month this year?", "expect": {"tools_any": ["run_project_stats"]}},
+    {"id": "LH6", "turns": ["Which areas changed the most in the last month?", "Who has been active in the top one you named?", "Which of its recent changes should I read first?"], "expect": {"tools_any": ["get_area_owners", "get_area_history", "find_changes"], "max_rounds": 4}}
+  ]
+}

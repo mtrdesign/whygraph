@@ -233,6 +233,18 @@ export interface ChatMessage {
   parent_id?: number | null;
   // The round's reasoning (summarized thinking), for display only; never copied or sent back.
   reasoning?: string | null;
+  // The answer rating (turn-ending assistant rows only; null elsewhere): 1 up, -1 down.
+  rating?: 1 | -1 | null;
+  rating_reason?: string | null;
+  rating_comment?: string | null;
+  rated_at?: string | null;
+}
+
+/** The body of `rateMessage`; `reason` and `comment` go only with a `-1`. */
+export interface ChatRatingBody {
+  rating: 1 | -1;
+  reason?: string;
+  comment?: string;
 }
 
 /** The versions of one message: its siblings in the tree (same parent), ids ascending, `index` 1-based. */
@@ -1857,6 +1869,15 @@ export interface OverviewCoveragePoint {
 export type OverviewEventKind = "import" | "first_scan" | "full_scan" | "describe" | "failed" | "budget_stop";
 
 /** `GET /api/projects/{slug}/overview`. */
+/** One tool's tally on the Overview; the three measures are `null` for a `v1:` kind (not measured) and `mean_ms` also without a timed call. */
+export interface AgentKindStat {
+  kind: string;
+  calls: number;
+  errors: number | null;
+  internal_errors: number | null;
+  mean_ms: number | null;
+}
+
 export interface ProjectOverview {
   coverage: { points: OverviewCoveragePoint[] };
   events: { run_id: number; at: string; kind: OverviewEventKind }[];
@@ -1875,14 +1896,17 @@ export interface ProjectOverview {
     llm_calls: number;
     // `null` without `project.usage`.
     llm_cost_usd: number | null;
-    by_kind: { kind: string; calls: number }[];
+    // Over every kind, not only the listed ones.
+    errors: number;
+    internal_errors: number;
+    by_kind: AgentKindStat[];
     // Production, `project.usage` only.
     people: { label: string; calls: number; last_day: string | null }[] | null;
     // Production, `project.configure` only.
     connections: { client_name: string; user_label: string | null; last_used_at: string | null }[] | null;
     last_call_day: string | null;
     // The Chat assistant's own tool calls (names and counts only), kept apart from agent activity.
-    chat_tools: { total_calls: number; by_kind: { kind: string; calls: number }[] };
+    chat_tools: { total_calls: number; errors: number; internal_errors: number; by_kind: AgentKindStat[] };
   };
   // Local mode with a CodeGraph host; `null` / absent otherwise.
   codegraph?: CodegraphOverview | null;
@@ -2105,6 +2129,11 @@ export function projectApi(slug: string) {
       send<ChatSession>("POST", `${base}/chat/sessions/${sessionId}/fork`, {
         message_id: messageId,
       }),
+    // Rates the final reply of a turn (422 `feedback_target_invalid` for any other row).
+    rateMessage: (sessionId: number, messageId: number, body: ChatRatingBody) =>
+      send<ChatMessage>("PUT", `${base}/chat/sessions/${sessionId}/messages/${messageId}/feedback`, body),
+    clearRating: (sessionId: number, messageId: number) =>
+      sendEmpty("DELETE", `${base}/chat/sessions/${sessionId}/messages/${messageId}/feedback`),
     // Switches the visible version; answers with the transcript of the new path.
     chatBranch: (sessionId: number, messageId: number) =>
       send<ChatTranscript>("POST", `${base}/chat/sessions/${sessionId}/branch`, {

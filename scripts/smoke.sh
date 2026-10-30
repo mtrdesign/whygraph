@@ -39,8 +39,9 @@ PROD_BRAVO="http://bravo.whygraph.localhost:$PROD_PORT"
 # namespace, so the portal and the host-side curl both reach it on loopback. It
 # serves both apps, and its fixture repos (created in its own container, which
 # has git) over dumb HTTP; its control routes deliver webhooks to the portal's
-# in-container port with the base host as Host.
-FAKE_PORT=${SMOKE_GITHUB_PORT:-18767}
+# in-container port with the base host as Host. Not 18767: `make check` runs
+# this beside the e2e suite, whose fake GitHub defaults to that port.
+FAKE_PORT=${SMOKE_GITHUB_PORT:-18787}
 FAKE="http://127.0.0.1:$FAKE_PORT"
 FAKE_PY=$(cd -- "$(dirname -- "$0")/.." && pwd -P)/tests/github_fake.py
 

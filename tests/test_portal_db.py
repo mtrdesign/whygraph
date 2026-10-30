@@ -245,7 +245,8 @@ USAGE = "e46b50366a4c"
 UX = "a7c3e91f5b20"
 CHAT_TOOLS = "f2b8d4a60c13"
 FORGE_TRIGGER = "c9d4e2f7a815"
-HEAD = FORGE_TRIGGER
+TOOL_OUTCOME = "b5e1a7d93c42"
+HEAD = TOOL_OUTCOME
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -1160,7 +1161,15 @@ def test_ux_upgrade_creates_the_schema(empty_portal_database: str) -> None:
     assert default is None
 
 
-def _agent_call(conn, ids: dict[str, int], **kw) -> None:  # noqa: ANN001, ANN003
+def _agent_call(
+    conn,  # noqa: ANN001
+    ids: dict[str, int],
+    *,
+    legacy: bool = False,
+    **kw,  # noqa: ANN003
+) -> None:
+    """Insert a counter row (``legacy``: before the outcome columns exist)."""
+    outcomes = {} if legacy else {"errors": 0, "internal_errors": 0, "duration_ms": 0}
     row = {
         "org": ids["org"],
         "project": ids["project"],
@@ -1168,15 +1177,23 @@ def _agent_call(conn, ids: dict[str, int], **kw) -> None:  # noqa: ANN001, ANN00
         "source": "mcp",
         "kind": "evidence",
         "calls": 1,
+        **outcomes,
         **kw,
     }
-    conn.execute(
-        text(
-            "INSERT INTO agent_call_days (org_id, project_id, day, source, "
-            "kind, calls) VALUES (:org, :project, :day, :source, :kind, :calls)"
-        ),
-        row,
-    )
+    columns = {
+        "org": "org_id",
+        "project": "project_id",
+        "day": "day",
+        "source": "source",
+        "kind": "kind",
+        "calls": "calls",
+        "errors": "errors",
+        "internal_errors": "internal_errors",
+        "duration_ms": "duration_ms",
+    }
+    names = ", ".join(columns[k] for k in row)
+    values = ", ".join(f":{k}" for k in row)
+    conn.execute(text(f"INSERT INTO agent_call_days ({names}) VALUES ({values})"), row)
 
 
 def test_ux_constraints_hold(empty_portal_database: str) -> None:
@@ -1255,8 +1272,39 @@ def test_chat_tools_downgrade_narrows_the_source_check(
     with portal_db.get_engine().begin() as conn:
         ids = _seed_usage_org(conn)
     with pytest.raises(IntegrityError), portal_db.get_engine().begin() as conn:
-        _agent_call(conn, ids, source="chat")
+        _agent_call(conn, ids, source="chat", legacy=True)
     portal_db._reset_engine()
+    command.upgrade(portal_db.alembic_config(), "head")
+
+
+def test_tool_outcome_check_and_downgrade(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    ids = None
+    with portal_db.get_engine().begin() as conn:
+        ids = _seed_usage_org(conn)
+        _agent_call(conn, ids, errors=1, internal_errors=0, duration_ms=40)
+    for bad in (
+        {"kind": "a", "errors": 1, "internal_errors": 1},  # more than calls
+        {"kind": "b", "errors": -1},
+        {"kind": "c", "duration_ms": -1},
+    ):
+        with pytest.raises(IntegrityError, match="ck_agent_call_days_outcomes"):
+            with portal_db.get_engine().begin() as conn:
+                _agent_call(conn, ids, **bad)
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), FORGE_TRIGGER)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        columns = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'agent_call_days'"
+                )
+            )
+        }
+    assert not columns & {"errors", "internal_errors", "duration_ms"}
     command.upgrade(portal_db.alembic_config(), "head")
 
 

@@ -338,3 +338,50 @@ describe("MessageBubble: reasoning", () => {
     window.localStorage.removeItem("whygraph.chat.reasoningOpen");
   });
 });
+
+describe("MessageBubble: rating a reply", () => {
+  const rated = (overrides: Partial<AssistantTurn> = {}) =>
+    assistant({ id: 2, ratingId: 2, segments: ["Because history."], ...overrides });
+
+  it("shows the thumbs only when the turn has a rating target", () => {
+    const { rerender } = render(<MessageBubble turn={rated()} onRate={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Good answer" })).toBeInTheDocument();
+    rerender(<MessageBubble turn={rated({ ratingId: undefined })} onRate={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Good answer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Bad answer" })).toBeNull();
+  });
+
+  it("thumbs up saves a rating and the active thumb clears it", async () => {
+    const onRate = vi.fn().mockResolvedValue(undefined);
+    render(<MessageBubble turn={rated()} onRate={onRate} />);
+    fireEvent.click(screen.getByRole("button", { name: "Good answer" }));
+    await waitFor(() => expect(onRate).toHaveBeenLastCalledWith({ rating: 1 }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Good answer" })).toHaveAttribute("aria-pressed", "true"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Good answer" }));
+    await waitFor(() => expect(onRate).toHaveBeenLastCalledWith(null));
+  });
+
+  it("thumbs down opens the reason popover and sends the reason and comment as text", async () => {
+    const onRate = vi.fn().mockResolvedValue(undefined);
+    render(<MessageBubble turn={rated()} onRate={onRate} />);
+    fireEvent.click(screen.getByRole("button", { name: "Bad answer" }));
+    expect(screen.getByTestId("rating-popover")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Wrong" }));
+    fireEvent.change(screen.getByLabelText("What went wrong (optional)"), { target: { value: "<b>x</b>" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(onRate).toHaveBeenCalledWith({ rating: -1, reason: "wrong", comment: "<b>x</b>" }),
+    );
+    expect(screen.queryByTestId("rating-popover")).toBeNull();
+  });
+
+  it("clicking an active thumbs-down clears it", async () => {
+    const onRate = vi.fn().mockResolvedValue(undefined);
+    render(<MessageBubble turn={rated({ rating: -1, ratingReason: "wrong" })} onRate={onRate} />);
+    expect(screen.getByRole("button", { name: "Bad answer" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Bad answer" }));
+    await waitFor(() => expect(onRate).toHaveBeenCalledWith(null));
+  });
+});

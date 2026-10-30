@@ -97,6 +97,50 @@
           "get_work_in_flight"
         ]
       }
+    },
+    {
+      "id": "L11",
+      "turns": [
+        "Which PRs have been open the longest?",
+        "Who authored the oldest one you listed?"
+      ],
+      "expect": {
+        "max_rounds": 3
+      }
+    },
+    {
+      "id": "L12",
+      "turns": [
+        "What's in flight right now?",
+        "Drill into the first item you listed: what is it about?",
+        "Who has been working in that area lately?"
+      ],
+      "expect": {
+        "tools_any": [
+          "get_area_owners",
+          "get_area_history",
+          "find_changes",
+          "list_recent_activity"
+        ],
+        "max_rounds": 4
+      }
+    },
+    {
+      "id": "L13",
+      "turns": [
+        "What shipped in the last two weeks?",
+        "Which area saw the most of it?",
+        "Who owns that area?",
+        "And who reviewed the first change you listed in your first answer?"
+      ],
+      "expect": {
+        "tools_any": [
+          "get_pr",
+          "get_commit",
+          "get_evidence"
+        ],
+        "max_rounds": 4
+      }
     }
   ]
 }

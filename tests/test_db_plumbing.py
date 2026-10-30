@@ -394,11 +394,7 @@ def test_chat_mode_and_grounding_columns_round_trip(
     _isolate_config_and_engine: Path,
 ) -> None:
     """The mode and grounding columns land at the new head and downgrade cleanly."""
-    from alembic.script import ScriptDirectory
-
     db_path = _isolate_config_and_engine
-    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
-    assert head == "5e8a2c9d1f47"
 
     command.upgrade(alembic_config(), "head")
     assert "mode" in _column_names(db_path, "chat_session")
@@ -408,6 +404,47 @@ def test_chat_mode_and_grounding_columns_round_trip(
     command.downgrade(alembic_config(), "a3c7e91b4d25")
     assert "mode" not in _column_names(db_path, "chat_session")
     assert not {"mode", "grounding"} & _column_names(db_path, "chat_message")
+
+
+def test_chat_message_feedback_and_is_error_columns_round_trip(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The rating and ``is_error`` columns land at head and downgrade cleanly."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert head == "6f1b3d8a2c94"
+
+    columns = {"is_error", "rating", "rating_reason", "rating_comment", "rated_at"}
+    command.upgrade(alembic_config(), "5e8a2c9d1f47")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO chat_session (title, provider, model, created_at, "
+            "updated_at) VALUES ('t', 'deepseek', 'm', 'x', 'x')"
+        )
+        conn.execute(
+            "INSERT INTO chat_message (session_id, role, content, tool_calls, "
+            "created_at) VALUES (1, 'user', 'q', '[]', 'x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    assert not columns & _column_names(db_path, "chat_message")
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert columns <= _column_names(db_path, "chat_message")
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "5e8a2c9d1f47")
+    assert not columns & _column_names(db_path, "chat_message")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_forge_fields_milestone_tag_round_trip(

@@ -32,7 +32,7 @@ import sqlite3
 from collections import Counter
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func
@@ -317,16 +317,30 @@ def _usage(
     }
 
 
+class _AgentRow(NamedTuple):
+    """One counter row: flushed (``agent_call_days``) or pending in the book."""
+
+    day: str
+    source: str
+    user_id: int | None
+    connection_id: int | None
+    kind: str
+    calls: int
+    errors: int
+    internal_errors: int
+    duration_ms: int
+
+
 def _agent_rows(
     db: Session, state: PortalState, project_id: int, first_day: str
-) -> list[tuple[str, str, int | None, int | None, str, int]]:
-    """``(day, source, user_id, connection_id, kind, calls)`` since ``first_day``.
+) -> list[_AgentRow]:
+    """The counter rows since ``first_day``.
 
     The flushed rows plus the book's unflushed counts.
     """
     rows = [
-        (day, source, user_id, connection_id, kind, int(calls))
-        for day, source, user_id, connection_id, kind, calls in db.exec(
+        _AgentRow(day, source, user_id, connection_id, kind, *map(int, counts))
+        for day, source, user_id, connection_id, kind, *counts in db.exec(
             select(
                 AgentCallDay.day,
                 AgentCallDay.source,
@@ -334,18 +348,66 @@ def _agent_rows(
                 AgentCallDay.connection_id,
                 AgentCallDay.kind,
                 AgentCallDay.calls,
+                AgentCallDay.errors,
+                AgentCallDay.internal_errors,
+                AgentCallDay.duration_ms,
             ).where(
                 AgentCallDay.project_id == project_id,
                 col(AgentCallDay.day) >= first_day,
             )
         ).all()
     ]
-    for key, calls in state.agent_calls.pending(project_id):
+    for key, tally in state.agent_calls.pending(project_id):
         if key.day >= first_day:
             rows.append(
-                (key.day, key.source, key.user_id, key.connection_id, key.kind, calls)
+                _AgentRow(
+                    key.day,
+                    key.source,
+                    key.user_id,
+                    key.connection_id,
+                    key.kind,
+                    *tally,
+                )
             )
     return rows
+
+
+def _kind_entries(rows: list[_AgentRow]) -> tuple[list[dict[str, Any]], int, int]:
+    """The ``by_kind`` entries (top :data:`TOP_KINDS`) and the block's error totals.
+
+    ``errors`` / ``internal_errors`` / ``mean_ms`` are ``None`` for a ``v1:``
+    kind (not measured, never 0). ``mean_ms`` averages only the rows that
+    carry a duration, so rows from before the upgrade, and rows holding only
+    cancelled calls, cannot pull it down. The totals cover every kind, not
+    only the ones listed.
+    """
+    calls: Counter[str] = Counter()
+    errors: Counter[str] = Counter()
+    internal: Counter[str] = Counter()
+    timed_ms: Counter[str] = Counter()
+    timed_calls: Counter[str] = Counter()
+    for row in rows:
+        calls[row.kind] += row.calls
+        errors[row.kind] += row.errors
+        internal[row.kind] += row.internal_errors
+        if row.duration_ms > 0:
+            timed_ms[row.kind] += row.duration_ms
+            timed_calls[row.kind] += row.calls
+    entries = []
+    for kind, n in sorted(calls.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_KINDS]:
+        measured = not kind.startswith("v1:")
+        entries.append(
+            {
+                "kind": kind,
+                "calls": n,
+                "errors": errors[kind] if measured else None,
+                "internal_errors": internal[kind] if measured else None,
+                "mean_ms": round(timed_ms[kind] / timed_calls[kind])
+                if measured and timed_calls[kind]
+                else None,
+            }
+        )
+    return entries, sum(errors.values()), sum(internal.values())
 
 
 def _last_call_day(db: Session, state: PortalState, project_id: int) -> str | None:
@@ -367,11 +429,13 @@ def _last_call_day(db: Session, state: PortalState, project_id: int) -> str | No
 def _people(
     db: Session,
     org_id: int,
-    rows: list[tuple[str, str, int | None, int | None, str, int]],
+    rows: list[_AgentRow],
 ) -> list[dict[str, Any]]:
     """Calls per person (and machine), labelled from the live rows."""
-    user_ids = {user_id for _, _, user_id, _, _, _ in rows if user_id is not None}
-    connection_ids = {cid for _, _, _, cid, _, _ in rows if cid is not None}
+    user_ids = {row.user_id for row in rows if row.user_id is not None}
+    connection_ids = {
+        row.connection_id for row in rows if row.connection_id is not None
+    }
     users = (
         {
             user.id: user
@@ -396,7 +460,13 @@ def _people(
         else {}
     )
     groups: dict[tuple, dict[str, Any]] = {}
-    for day, _, user_id, connection_id, _, calls in rows:
+    for row in rows:
+        day, user_id, connection_id, calls = (
+            row.day,
+            row.user_id,
+            row.connection_id,
+            row.calls,
+        )
         user = users.get(user_id) if user_id is not None else None
         if user is None:
             key: tuple = ("removed",)
@@ -440,18 +510,15 @@ def _agents(
     first_day = days[0]
     all_rows = _agent_rows(db, state, project.id, first_day)
     rows = [row for row in all_rows if row[1] in AGENT_CALL_SOURCES]
-    chat_kinds: Counter[str] = Counter()
-    for _, source, _, _, kind, calls in all_rows:
-        if source == "chat":
-            chat_kinds[kind] += calls
+    chat_rows = [row for row in all_rows if row.source == "chat"]
     per_day = {day: {"day": day, "mcp": 0, "agent": 0} for day in days}
-    kinds: Counter[str] = Counter()
     total = 0
-    for day, source, _, _, kind, calls in rows:
-        if day in per_day:
-            per_day[day][source] += calls
-        kinds[kind] += calls
-        total += calls
+    for row in rows:
+        if row.day in per_day:
+            per_day[row.day][row.source] += row.calls
+        total += row.calls
+    by_kind, errors, internal_errors = _kind_entries(rows)
+    chat_by_kind, chat_errors, chat_internal = _kind_entries(chat_rows)
     llm_calls, llm_cost = db.exec(
         select(func.count(), func.sum(UsageEvent.cost_usd)).where(
             UsageEvent.org_id == project.org_id,
@@ -466,12 +533,9 @@ def _agents(
         "total_calls": total,
         "llm_calls": int(llm_calls or 0),
         "llm_cost_usd": usd(llm_cost) if can_usage else None,
-        "by_kind": [
-            {"kind": kind, "calls": calls}
-            for kind, calls in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))[
-                :TOP_KINDS
-            ]
-        ],
+        "errors": errors,
+        "internal_errors": internal_errors,
+        "by_kind": by_kind,
         "people": _people(db, project.org_id, rows)
         if production and can_usage
         else None,
@@ -480,13 +544,10 @@ def _agents(
         else None,
         "last_call_day": _last_call_day(db, state, project.id),
         "chat_tools": {
-            "total_calls": sum(chat_kinds.values()),
-            "by_kind": [
-                {"kind": kind, "calls": calls}
-                for kind, calls in sorted(
-                    chat_kinds.items(), key=lambda kv: (-kv[1], kv[0])
-                )[:TOP_KINDS]
-            ],
+            "total_calls": sum(row.calls for row in chat_rows),
+            "errors": chat_errors,
+            "internal_errors": chat_internal,
+            "by_kind": chat_by_kind,
         },
     }
 

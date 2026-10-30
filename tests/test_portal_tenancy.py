@@ -1210,6 +1210,20 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"message_id": o.message_id},
         shows=lambda o: [f"{o.session_title} (branch)"],
     ),
+    # The seeded message is the user's question, which is not a turn-ending
+    # assistant row: the route's own 422 after the cross-org checks.
+    (
+        "PUT",
+        "/api/projects/{slug}/chat/sessions/{session_id}/messages/{message_id}/feedback",
+    ): Call(
+        422,
+        body=lambda w, o: {"rating": 1},
+        shows=lambda o: ["feedback_target_invalid"],
+    ),
+    (
+        "DELETE",
+        "/api/projects/{slug}/chat/sessions/{session_id}/messages/{message_id}/feedback",
+    ): Call(422, shows=lambda o: ["feedback_target_invalid"]),
 }
 """How the sweep calls each route in its own org (plan section 5.2 item 2).
 
@@ -1515,10 +1529,19 @@ bearer-only ``V1_ROUTES`` are production-only too)."""
 
 
 def _routes_doing(actions: set[str]) -> list[tuple[str, str]]:
-    """Local routes whose action is in ``actions``, DELETE last."""
+    """Local routes whose action is in ``actions``, DELETE last (deepest path first).
+
+    A DELETE under a session (a message's rating) must run before the DELETE
+    that removes the session itself.
+    """
     return sorted(
         (route for route, action in _LOCAL_ROUTE_ACTIONS.items() if action in actions),
-        key=lambda route: (route[0] == "DELETE", route[1], route[0]),
+        key=lambda route: (
+            route[0] == "DELETE",
+            -route[1].count("/") if route[0] == "DELETE" else 0,
+            route[1],
+            route[0],
+        ),
     )
 
 

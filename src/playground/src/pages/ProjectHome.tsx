@@ -6,6 +6,7 @@ import {
   portalApi,
   projectApi,
   projectKey,
+  type AgentKindStat,
   type ProjectDetails,
   type ProjectOverview,
   type ScanRunRow,
@@ -50,6 +51,33 @@ import { cn } from "../lib/utils";
 const ChartBlock = lazy(() => import("../components/charts/ChartBlock").then((m) => ({ default: m.ChartBlock })));
 
 const CARD = "flex flex-col gap-3 rounded-xl bg-card p-5 shadow-card";
+
+/** A tool's call count, error rate and mean latency; a dash where it was not measured. */
+function KindStats({ stat }: { stat: AgentKindStat }) {
+  const rate = stat.errors === null ? "-" : `${Math.round((stat.errors / Math.max(stat.calls, 1)) * 100)}%`;
+  const mean = stat.mean_ms === null ? "-" : stat.mean_ms >= 1000 ? `${(stat.mean_ms / 1000).toFixed(1)} s` : `${stat.mean_ms} ms`;
+  return (
+    <span className="flex shrink-0 items-center gap-3 tabular-nums text-muted-foreground">
+      <span data-testid="kind-calls">{formatNumber(stat.calls)}</span>
+      <span data-testid="kind-error-rate" title="Share of calls where the tool reported an error">
+        {rate}
+      </span>
+      <span data-testid="kind-mean" title="Mean time per call">
+        {mean}
+      </span>
+    </span>
+  );
+}
+
+/** The red marker for calls that ended in an unexpected exception (a tool-reported error stays neutral). */
+function InternalErrors({ count, testId }: { count: number; testId: string }) {
+  if (count <= 0) return null;
+  return (
+    <p className="text-xs font-medium text-destructive" data-testid={testId}>
+      {plural(count, "internal error")} in 30 days
+    </p>
+  );
+}
 
 /** A number tile with a one-line definition, and a zero that says why. */
 function Tile({
@@ -331,11 +359,12 @@ function AgentActivity({
       {agents.by_kind.length > 0 && (
         <div className="flex flex-col gap-1">
           <h3 className="text-xs font-medium text-muted-foreground">What agents asked for</h3>
+          <InternalErrors count={agents.internal_errors} testId="agent-internal-errors" />
           <ul className="flex flex-col gap-1 text-xs" data-testid="agent-kinds">
             {agents.by_kind.map((k) => (
               <li key={k.kind} className="flex items-center justify-between gap-3">
                 <span>{agentKindLabel(k.kind)}</span>
-                <span className="tabular-nums text-muted-foreground">{formatNumber(k.calls)}</span>
+                <KindStats stat={k} />
               </li>
             ))}
           </ul>
@@ -344,11 +373,12 @@ function AgentActivity({
       {agents.chat_tools.by_kind.length > 0 && (
         <div className="flex flex-col gap-1">
           <h3 className="text-xs font-medium text-muted-foreground">Chat tool calls</h3>
+          <InternalErrors count={agents.chat_tools.internal_errors} testId="chat-internal-errors" />
           <ul className="flex flex-col gap-1 text-xs" data-testid="chat-tool-kinds">
             {agents.chat_tools.by_kind.map((k) => (
               <li key={k.kind} className="flex items-center justify-between gap-3">
                 <span>{k.kind}</span>
-                <span className="tabular-nums text-muted-foreground">{formatNumber(k.calls)}</span>
+                <KindStats stat={k} />
               </li>
             ))}
           </ul>

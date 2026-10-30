@@ -188,10 +188,14 @@ A call counts even when the answer came from the cache. Protocol chatter (listin
 prompts), the linked-project **status check** a local portal makes, a call refused by a rate limit,
 and the Explorer and Chat views are not agent activity and are not counted.
 
-The counter stores **counts only**: the project, the UTC day, the source (MCP or a connected machine),
-who made the call and through which connection, the call's name, and how many calls. Never a path, a
-symbol name, an argument or anything from the answer. The names are WhyGraph's own or one of the four
-CodeGraph tools. The Chat assistant's tool calls are counted the same way, by tool name per project, with source `chat`, no member and no connection, under **Chat tool calls**, and never their arguments; they are not agent calls and stay out of the agent totals. Counts are written to the portal database
+Counts only: per project, day and call name, how many calls, how many ended in a tool error or an internal error, and their total duration - never an argument, a result or an error message. Each row also carries the project, the UTC day, the source (MCP or a connected machine), who made
+the call and through which connection. Never a path, a symbol name, an argument or anything from the
+answer. The names are WhyGraph's own or one of the four
+CodeGraph tools. The Chat assistant's tool calls are counted the same way, by tool name per project, with source `chat`, no member and no connection, under **Chat tool calls**, and never their arguments; they are not agent calls and stay out of the agent totals. A call is counted when it ends, so a call still running when the portal shuts down is not counted.
+A **tool error** is a call whose tool reported a failure (for example a target it could not find or a
+refused argument); an **internal error** is a call where an exception escaped. A call's duration is
+measured from the start of the tool body to its end; `v1:` data calls of a connected machine are
+counted but not timed. Counts are written to the portal database
 every 30 seconds, so a crash can lose at most the last 30 seconds of counts, and they are kept 400
 days. A call that made an LLM request is also in the [usage ledger](usage.md), with its cost.
 

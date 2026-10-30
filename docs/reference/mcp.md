@@ -231,7 +231,7 @@ Read-only, JSON, addressed by URI.
 | URI | Name | Description |
 |---|---|---|
 | `whygraph://commit/{sha}` | `whygraph_commit` | A scanned commit and the pull requests that contain it (closing issues not inlined). |
-| `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles` and `comments`. |
+| `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles`, and the first 50 `comments` (the oldest, each body cut to 4,000 characters); when anything was cut, an `omitted` key says how many comments (`comments`) and characters (`comment_chars`). |
 | `whygraph://issue/{number}` | `whygraph_issue` | An issue and the pull requests that close it. |
 | `whygraph://repo/overview` | `whygraph_repo_overview` | Repo-level summary: row counts, commit date range, scan freshness, LLM-description coverage, top contributors, and a `freshness` block. |
 

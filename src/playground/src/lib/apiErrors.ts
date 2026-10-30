@@ -350,6 +350,7 @@ export const MESSAGES: Record<string, Resolver> = {
   bad_content: "Write a message first.",
   bad_effort: "Pick one of the listed effort levels.",
   bad_mode: "Pick one of the listed chat modes.",
+  feedback_target_invalid: "Only a finished answer can be rated, and a thumbs-up takes no reason or comment.",
   effort_unsupported: {
     message: "This model doesn't take an effort level. Set Effort to Default, or pick another model.",
   },

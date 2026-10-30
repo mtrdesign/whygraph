@@ -37,6 +37,9 @@ from whygraph.chat.harness import (
     ToolResultReady,
     TurnCancelled,
     build_system_prompt,
+    _specs_tokens,
+    _trim_turn,
+    begin_turn_messages,
     build_window,
     run_turn,
 )
@@ -119,6 +122,10 @@ class StubRegistry:
             return json.dumps({"commits": 3})
         self.dispatched.append((name, arguments))
         return self._results.get(name, json.dumps({"ok": name}))
+
+    def dispatch_outcome(self, name: str, arguments: dict) -> tuple[str, str]:
+        result = self.dispatch(name, arguments)
+        return result, "error" if harness.is_error_result(result) else "ok"
 
 
 class _SpecRegistry(StubRegistry):
@@ -281,12 +288,14 @@ class _CountSink:
 
     def __init__(self) -> None:
         self.counted: list[str] = []
+        self.extras: list[dict[str, object]] = []
 
     def record(self, rec) -> None:  # noqa: ANN001
         pass
 
-    def count_call(self, kind: str) -> None:
+    def count_call(self, kind: str, **kw: object) -> None:
         self.counted.append(kind)
+        self.extras.append(kw)
 
 
 class _NamedRegistry(StubRegistry):
@@ -323,6 +332,57 @@ def test_chat_tool_count_parallel_round_counts_each_call() -> None:
     assert _counted(rounds) == ["search_symbols", "read_file"]
 
 
+class _OutcomeRegistry(_NamedRegistry):
+    """A registry whose ``dispatch_outcome`` reports a fixed outcome per tool."""
+
+    OUTCOMES = {
+        "search_symbols": "ok",
+        "get_evidence": "error",
+        "read_file": "internal",
+    }
+
+    def dispatch_outcome(self, name: str, arguments: dict):
+        return super().dispatch(name, arguments), self.OUTCOMES.get(name, "error")
+
+
+def _outcomes(calls: list) -> list[tuple]:
+    sink = _CountSink()
+    rounds = [
+        [*(ToolCallMade(call=c) for c in calls), TurnDone("tool_calls")],
+        [TextDelta(text="ok"), TurnDone("stop")],
+    ]
+    with use_usage_sink(sink):
+        _run(ScriptedClient(rounds), _OutcomeRegistry())
+    return [
+        (
+            kind,
+            kw["outcome"],
+            isinstance(kw["duration_ms"], int) and kw["duration_ms"] >= 0,
+        )
+        for kind, kw in zip(sink.counted, sink.extras)
+    ]
+
+
+def test_tool_count_outcome_and_duration_serial() -> None:
+    calls = [_call("search_symbols", "c1"), _call("get_evidence", "c2")]
+    assert _outcomes(calls) == [
+        ("search_symbols", "ok", True),
+        ("get_evidence", "error", True),
+    ]
+
+
+def test_tool_count_outcome_and_duration_parallel() -> None:
+    calls = [_call("search_symbols", "c1"), _call("read_file", "c2")]
+    assert _outcomes(calls) == [
+        ("search_symbols", "ok", True),
+        ("read_file", "internal", True),
+    ]
+
+
+def test_tool_count_outcome_unknown_name_is_not_counted() -> None:
+    assert _outcomes([_call("made_up_tool", "c1")]) == []
+
+
 def test_chat_tool_count_skips_unknown_names_and_the_overview() -> None:
     calls = [_call("made_up_tool", "c1"), _call("get_repo_overview", "c2")]
     rounds = [
@@ -352,14 +412,15 @@ def test_max_tool_rounds_cuts_the_loop_off() -> None:
         ToolCallMade(call=_call("search_symbols", query="x")),
         TurnDone("tool_calls"),
     ]
-    client = ScriptedClient([list(forever) for _ in range(10)])
+    answer = [TextDelta(text="found"), TurnDone("stop")]
+    client = ScriptedClient([list(forever) for _ in range(3)] + [answer])
     registry = StubRegistry()
     events = _run(client, registry, max_tool_rounds=3)
 
     assert len(client.requests) == 4
     assert len(registry.dispatched) == 3
     # The answer round reports its usage like every other provider call.
-    assert events[-3] == RoundLimit(rounds=3)
+    assert events[-4] == RoundLimit(rounds=3)
     assert isinstance(events[-2], RoundUsage)
     assert isinstance(events[-1], TurnDone)
 
@@ -436,14 +497,16 @@ def test_a_tool_call_in_the_answer_round_is_dropped() -> None:
                 TurnDone("tool_calls"),
             ],
             [ToolCallMade(call=_call("search_symbols", query="y")), TurnDone("stop")],
+            [TextDelta(text="found"), TurnDone("stop")],
         ]
     )
     registry = StubRegistry()
     events = _run(client, registry, max_tool_rounds=1)
 
-    # Only the in-budget round dispatched; the stray call was ignored.
+    # Only the in-budget round dispatched; the stray call was ignored, and the
+    # textless answer round got its one nudge.
     assert len(registry.dispatched) == 1
-    assert len(client.requests) == 2
+    assert len(client.requests) == 3
     assert isinstance(events[-1], TurnDone)
 
 
@@ -511,7 +574,8 @@ def test_specs_and_bounds_come_from_config_by_default(
         ToolCallMade(call=_call("search_symbols", query="x")),
         TurnDone("tool_calls"),
     ]
-    client = ScriptedClient([list(forever) for _ in range(5)])
+    answer = [TextDelta(text="found"), TurnDone("stop")]
+    client = ScriptedClient([list(forever) for _ in range(2)] + [answer])
     events = list(
         run_turn(
             client=client,
@@ -521,7 +585,7 @@ def test_specs_and_bounds_come_from_config_by_default(
     )
     # Two tool rounds from config, plus the answer round.
     assert len(client.requests) == 3
-    assert events[-3] == RoundLimit(rounds=2)
+    assert events[-4] == RoundLimit(rounds=2)
 
 
 def test_registry_specs_are_offered_to_the_model() -> None:
@@ -918,6 +982,58 @@ def _assert_no_orphans(messages) -> None:
 def test_under_budget_history_is_unchanged() -> None:
     history = _history(3)
     assert build_window(history, token_budget=1_000_000) == tuple(history)
+
+
+def test_begin_turn_messages_is_the_window_plus_references_and_continue() -> None:
+    history = _history(3)
+    messages, start = begin_turn_messages(history, token_budget=1_000_000)
+    assert messages == list(build_window(history, token_budget=1_000_000))
+    assert start == len(messages)
+    messages, start = begin_turn_messages(
+        history,
+        token_budget=1_000_000,
+        references="refs",
+        continue_from_assistant=True,
+    )
+    assert start == len(history)
+    assert messages[start - 4].content == with_references("question 2", "refs")
+    assert messages[-1] == ChatMessage(role="user", content=CONTINUE_PROMPT)
+    # The caller's history is never mutated.
+    assert history == _history(3)
+
+
+def test_begin_turn_messages_matches_what_run_turn_sends() -> None:
+    history = [ChatMessage(role="user", content="question 0")]
+    client = ScriptedClient([[TextDelta("hi"), TurnDone("stop", 1, 1)]])
+    list(run_turn(client=client, history=history, registry=StubRegistry()))
+    expected, _ = begin_turn_messages(
+        history, token_budget=ChatConfig().context_token_budget
+    )
+    assert list(client.requests[0].messages[-len(expected) :]) == expected
+
+
+def test_trim_turn_is_callable_on_the_helper_output() -> None:
+    messages, start = begin_turn_messages(_history(1), token_budget=1_000_000)
+    messages += _turn(5, tool_body="y" * 4_000) + _turn(6, tool_body="z" * 4_000)
+    elided = _trim_turn(messages, start, len(messages) - 3, 2, 100)
+    assert elided >= 1
+    assert messages[start + 2].content == ELIDED_MARKER
+
+
+def test_specs_tokens_counts_name_description_and_parameters() -> None:
+    specs = (
+        ToolSpec(name="a", description="x" * 100, parameters={"type": "object"}),
+        ToolSpec(name="b", description="", parameters={}),
+    )
+    text = json.dumps(
+        [
+            {"name": s.name, "description": s.description, "parameters": s.parameters}
+            for s in specs
+        ]
+    )
+    assert _specs_tokens(specs) == len(text) // 4
+    assert _specs_tokens(()) == len("[]") // 4
+    assert _specs_tokens(ToolRegistry(max_rationale_generations=0).specs) > 1_000
 
 
 def test_system_prompt_is_pinned_at_the_front() -> None:
@@ -1702,3 +1818,56 @@ def test_a_stop_while_parallel_tools_run_cancels_the_turn() -> None:
         _run(client, registry, cancel=cancel)
     assert time.monotonic() - started < 1.2  # well before the calls finish
     assert len(client.requests) == 1
+
+
+def test_elide_keeps_is_error() -> None:
+    turn = [
+        ChatMessage(role="user", content="q"),
+        ChatMessage(
+            role="tool", content='{"error": "x"}', tool_call_id="c", is_error=True
+        ),
+        ChatMessage(role="tool", content='{"ok": 1}', tool_call_id="d"),
+    ]
+    elided = harness._elide(turn)
+    assert [m.is_error for m in elided[1:]] == [True, False]
+    assert all(m.content == ELIDED_MARKER for m in elided[1:])
+
+
+def test_final_round_empty_reply_nudged_once() -> None:
+    client = ScriptedClient(
+        [
+            _tool_round("c1", 10),
+            [_done("stop")],
+            [TextDelta(text="The answer."), _done("stop")],
+        ]
+    )
+    events = _run(client, StubRegistry(), max_tool_rounds=1)
+    assert [e for e in events if isinstance(e, EmptyReply)] == [EmptyReply()]
+    assert len(client.requests) == 3
+    assert [r.tool_choice for r in client.requests[1:]] == ["none", "none"]
+    assert client.requests[2].messages[-1].content == EMPTY_REPLY_PROMPT
+    assert "The answer." in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+def test_final_round_calls_despite_none_are_dropped_and_nudged() -> None:
+    client = ScriptedClient(
+        [
+            _tool_round("c1", 10),
+            _tool_round("c2", 10),
+            [TextDelta(text="Done."), _done("stop")],
+        ]
+    )
+    registry = StubRegistry()
+    events = _run(client, registry, max_tool_rounds=1)
+    assert len(registry.dispatched) == 1  # the final round's call never ran
+    assert _kinds(events).count("EmptyReply") == 1
+    last = client.requests[2].messages
+    assert (last[-1].role, last[-1].content) == ("user", EMPTY_REPLY_PROMPT)
+    assert [m.tool_call_id for m in last if m.role == "tool"] == ["c1"]
+
+
+def test_final_round_truncated_empty_is_not_nudged() -> None:
+    client = ScriptedClient([_tool_round("c1", 10), [_done("max_tokens")]])
+    events = _run(client, StubRegistry(), max_tool_rounds=1)
+    assert len(client.requests) == 2
+    assert "EmptyReply" not in _kinds(events)

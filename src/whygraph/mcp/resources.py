@@ -85,11 +85,20 @@ from whygraph.services.codegraph.paths import CODEGRAPH_DB_RELPATH
 from whygraph.services.git import GitError, Repository, git_env
 
 from .errors import WhyGraphError
-from .evidence import _json_list, _linked_prs, local_push_status
+from .evidence import (
+    PROSE_BODY_MAX_CHARS,
+    _clip,
+    _json_list,
+    _linked_prs,
+    local_push_status,
+)
 from .path_history import current_branch_scope, resolve_path_aliases
 from .targets import repo_root
 
 _log = logging.getLogger(__name__)
+
+# The scan stores GitHub's first 100 comments; the resource keeps the first 50.
+PR_COMMENTS_MAX = 50
 
 _DB_UNSCANNED_MESSAGE = (
     "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal first"
@@ -165,7 +174,24 @@ def _hydrate_pr(pr: PullRequest, *, nested: bool = False) -> dict:
     }
     if not nested:
         payload["commit_titles"] = _json_list(pr.commit_titles)
-        payload["comments"] = _json_list(pr.comments)
+        comments = _json_list(pr.comments)
+        kept = comments[:PR_COMMENTS_MAX]
+        clipped = 0
+        out = []
+        for c in kept:
+            if isinstance(c, dict):
+                body = c.get("body")
+                new = _clip(body, PROSE_BODY_MAX_CHARS)
+                if new != body:
+                    clipped += len(body) - PROSE_BODY_MAX_CHARS
+                c = {**c, "body": new}
+            out.append(c)
+        payload["comments"] = out
+        if len(comments) > len(kept) or clipped:
+            payload["omitted"] = {
+                "comments": len(comments) - len(kept),
+                "comment_chars": clipped,
+            }
     return payload
 
 

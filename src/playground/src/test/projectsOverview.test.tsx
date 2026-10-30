@@ -83,11 +83,13 @@ function overview(over: Partial<ProjectOverview> = {}): ProjectOverview {
       total_calls: 0,
       llm_calls: 0,
       llm_cost_usd: null,
+      errors: 0,
+      internal_errors: 0,
       by_kind: [],
       people: null,
       connections: null,
       last_call_day: null,
-      chat_tools: { total_calls: 0, by_kind: [] },
+      chat_tools: { total_calls: 0, errors: 0, internal_errors: 0, by_kind: [] },
     },
     ...over,
   };
@@ -671,12 +673,65 @@ describe("Overview", () => {
     fake.overview = overview({
       agents: {
         ...overview().agents,
-        chat_tools: { total_calls: 4, by_kind: [{ kind: "find_changes", calls: 4 }] },
+        chat_tools: {
+          total_calls: 4,
+          errors: 0,
+          internal_errors: 0,
+          by_kind: [{ kind: "find_changes", calls: 4, errors: 0, internal_errors: 0, mean_ms: null }],
+        },
       },
     });
     mount("/p/alpha");
     expect(await screen.findByTestId("chat-tool-kinds")).toHaveTextContent("find_changes");
     expect(screen.getByTestId("agent-summary")).toHaveTextContent("No agent called this project in the last 30 days.");
+  });
+
+  it("the Overview agent rows show the error rate and mean latency", async () => {
+    fake.details.alpha = details();
+    fake.overview = overview({
+      agents: {
+        ...overview().agents,
+        total_calls: 13,
+        errors: 3,
+        internal_errors: 0,
+        by_kind: [
+          { kind: "whygraph_commit", calls: 10, errors: 3, internal_errors: 0, mean_ms: 250 },
+          { kind: "v1:evidence", calls: 3, errors: null, internal_errors: null, mean_ms: null },
+        ],
+        chat_tools: {
+          total_calls: 2,
+          errors: 0,
+          internal_errors: 0,
+          by_kind: [{ kind: "find_changes", calls: 2, errors: 0, internal_errors: 0, mean_ms: 1500 }],
+        },
+      },
+    });
+    mount("/p/alpha");
+    const kinds = await screen.findByTestId("agent-kinds");
+    const [commit, v1] = within(kinds).getAllByRole("listitem");
+    expect(within(commit).getByTestId("kind-error-rate")).toHaveTextContent("30%");
+    expect(within(commit).getByTestId("kind-mean")).toHaveTextContent("250 ms");
+    // A `v1:` kind is not measured: dashes, never 0.
+    expect(within(v1).getByTestId("kind-error-rate")).toHaveTextContent(/^-$/);
+    expect(within(v1).getByTestId("kind-mean")).toHaveTextContent(/^-$/);
+    const chat = within(screen.getByTestId("chat-tool-kinds")).getByRole("listitem");
+    expect(within(chat).getByTestId("kind-error-rate")).toHaveTextContent("0%");
+    expect(within(chat).getByTestId("kind-mean")).toHaveTextContent("1.5 s");
+    expect(screen.queryByTestId("agent-internal-errors")).toBeNull();
+  });
+
+  it("shows internal errors from the block total even when the tool is outside the listed top kinds", async () => {
+    fake.details.alpha = details();
+    fake.overview = overview({
+      agents: {
+        ...overview().agents,
+        total_calls: 5,
+        internal_errors: 2,
+        by_kind: [{ kind: "whygraph_commit", calls: 5, errors: 0, internal_errors: 0, mean_ms: 10 }],
+      },
+    });
+    mount("/p/alpha");
+    expect(await screen.findByTestId("agent-internal-errors")).toHaveTextContent("2 internal errors");
   });
 
   it("shows the CodeGraph server line, the tallies, the log and a restart that names the shared server", async () => {
@@ -687,7 +742,7 @@ describe("Overview", () => {
       agents: {
         ...overview().agents,
         total_calls: 3,
-        by_kind: [{ kind: "codegraph_explore", calls: 3 }],
+        by_kind: [{ kind: "codegraph_explore", calls: 3, errors: 0, internal_errors: 0, mean_ms: null }],
         last_call_day: "2026-10-09",
       },
     });
@@ -744,11 +799,13 @@ describe("Overview", () => {
         total_calls: 5,
         llm_calls: 2,
         llm_cost_usd: 0.12,
-        by_kind: [{ kind: "v1:evidence", calls: 4 }],
+        errors: 0,
+        internal_errors: 0,
+        by_kind: [{ kind: "v1:evidence", calls: 4, errors: null, internal_errors: null, mean_ms: null }],
         people: [{ label: "Ada (@ada)", calls: 5, last_day: "2026-10-09" }],
         connections: [{ client_name: "ada-laptop", user_label: "Ada", last_used_at: "2026-10-09T10:00:00Z" }],
         last_call_day: "2026-10-09",
-        chat_tools: { total_calls: 0, by_kind: [] },
+        chat_tools: { total_calls: 0, errors: 0, internal_errors: 0, by_kind: [] },
       },
     });
     mount("/p/alpha");
@@ -784,11 +841,13 @@ describe("Overview", () => {
           total_calls: 2,
           llm_calls: 0,
           llm_cost_usd: null,
+          errors: 0,
+          internal_errors: 0,
           by_kind: [],
           people: null,
           connections: null,
           last_call_day: "2026-10-09",
-          chat_tools: { total_calls: 0, by_kind: [] },
+          chat_tools: { total_calls: 0, errors: 0, internal_errors: 0, by_kind: [] },
         },
       });
     const open = async (label: string) => {

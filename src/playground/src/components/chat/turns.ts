@@ -71,6 +71,19 @@ export function turnsFromMessages(
         if (replyVersions) current.versions = replyVersions;
       }
       current.lastId = message.id;
+      // Only a turn-ending row can be rated: no tool calls (or a failure that ended the turn), and
+      // nothing after it on the path. A later tool row or continuation takes the target away.
+      if (message.tool_calls.length === 0 || message.error) {
+        current.ratingId = message.id;
+        if (message.rating != null) current.rating = message.rating;
+        else delete current.rating;
+        if (message.rating_reason) current.ratingReason = message.rating_reason;
+        else delete current.ratingReason;
+        if (message.rating_comment) current.ratingComment = message.rating_comment;
+        else delete current.ratingComment;
+      } else {
+        clearRatingTarget(current);
+      }
       // The row a budget hard stop wrote (its content is the notice's line): a notice, not text.
       if (message.error === "budget_exceeded") {
         current.budgetStop = { message: message.content || undefined };
@@ -131,6 +144,7 @@ export function turnsFromMessages(
     // role === "tool": attach the result to its already-rendered card.
     if (current) {
       current.lastId = message.id;
+      clearRatingTarget(current);
       delete current.continuableId;
       for (const group of current.activityGroups) {
         const activity = group.find((a) => a.id === message.tool_call_id);
@@ -144,6 +158,13 @@ export function turnsFromMessages(
 
   flush();
   return turns;
+}
+
+function clearRatingTarget(turn: AssistantTurn): void {
+  delete turn.ratingId;
+  delete turn.rating;
+  delete turn.ratingReason;
+  delete turn.ratingComment;
 }
 
 /** Put `text` at segment `index` of a turn's reasoning (rounds that share a segment join). */

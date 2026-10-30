@@ -339,7 +339,13 @@ class PortalUsageSink:
         a = self.attribution
         return self._budgets.blocked_scope(a.org_id, a.project_id, a.user_id)
 
-    def count_call(self, kind: str) -> None:
+    def count_call(
+        self,
+        kind: str,
+        *,
+        outcome: str = "ok",
+        duration_ms: int | None = None,
+    ) -> None:
         """Count one agent call of ``kind`` (M2f-3 plan section 4.10).
 
         Only for the counted sources (``mcp``, ``agent``, ``chat``): an
@@ -351,6 +357,11 @@ class PortalUsageSink:
         ----------
         kind : str
             The registered MCP name or the ``v1:`` route name.
+        outcome : {"ok", "error", "internal"}, optional
+            How the call ended (``error``: the tool reported a failure;
+            ``internal``: an exception escaped).
+        duration_ms : int, optional
+            The call's duration in milliseconds, when it was timed.
         """
         a = self.attribution
         if (
@@ -367,6 +378,8 @@ class PortalUsageSink:
             user_id=None if chat else a.user_id,
             connection_id=None if chat else a.connection_id,
             kind=kind,
+            outcome=outcome,  # type: ignore[arg-type]
+            duration_ms=duration_ms,
         )
 
 

@@ -1,0 +1,11 @@
+{
+  "suite": "engineer-holdout",
+  "cases": [
+    {"id": "EH1", "question": "What does `InstanceLock` guard against, and where is it taken?", "expect": {"tools_any": ["search_symbols", "get_symbol"]}},
+    {"id": "EH2", "question": "Why does `sync_hooks` go through every hook name each time instead of only the requested ones?", "expect": {"tools_any": ["get_rationale", "get_evidence"]}},
+    {"id": "EH3", "question": "Which commits reworked how `split_by_push_status` classifies hunks?", "expect": {"tools_any": ["get_evidence", "find_changes", "get_area_history"]}},
+    {"id": "EH4", "question": "What would break if I changed the `ContextCache` invalidation rules?", "expect": {"tools_any": ["get_rationale", "get_evidence", "search_symbols"]}},
+    {"id": "EH5", "question": "Which source directories have the most files?", "expect": {"tools_any": ["run_project_stats", "run_graph_stats"]}},
+    {"id": "EH6", "turns": ["List the three most recent commits that touched `src/whygraph/portal/runner.py`.", "For the oldest of those three, what problem was it solving?"], "expect": {"cites": ["\\b[0-9a-f]{7,40}\\b"], "max_rounds": 3}}
+  ]
+}

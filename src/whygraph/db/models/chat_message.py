@@ -92,6 +92,20 @@ class ChatMessage(WhygraphTable, table=True):
         pre-pass appended to this question (never shown, never part of
         ``content``; replayed verbatim on later turns). ``None`` means the
         question had no grounding.
+    is_error : bool or None
+        On a tool row, whether the result was an error payload; sent back to
+        providers that support it. ``None`` reads as false.
+    rating : int or None
+        On a turn-ending assistant row, ``1`` (up) or ``-1`` (down);
+        ``None`` means unrated.
+    rating_reason : str or None
+        Why the answer was rated down, one of ``RATING_REASONS`` in
+        :mod:`whygraph.serve.chat`. Only with ``rating == -1``.
+    rating_comment : str or None
+        Free-text note on a down rating, at most 500 characters (enforced
+        by the route). Only with ``rating == -1``.
+    rated_at : str or None
+        ISO-8601 UTC timestamp of the rating, stored as text.
     created_at : str
         ISO-8601 UTC timestamp, stored as text.
 
@@ -125,4 +139,9 @@ class ChatMessage(WhygraphTable, table=True):
     reasoning: str | None = Field(default=None, sa_type=Text)
     mode: str | None = Field(default=None, sa_type=Text)
     grounding: str | None = Field(default=None, sa_type=Text)
+    is_error: bool | None = Field(default=None)
+    rating: int | None = Field(default=None)
+    rating_reason: str | None = Field(default=None, sa_type=Text)
+    rating_comment: str | None = Field(default=None, sa_type=Text)
+    rated_at: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(sa_type=Text)

@@ -200,9 +200,11 @@ describe("turnsFromMessages", () => {
       { ...base, id: 13, role: "assistant", content: "" },
     ];
     // Strict equality on the serialized form: `toEqual` would let a new `undefined` key through.
-    // `lastId` (branch in new chat) postdates the baseline, so it is dropped here and has its own test.
+    // `lastId` (branch in new chat) and the rating fields postdate the baseline, so they are dropped
+    // here and have their own tests.
+    const POSTDATED = ["lastId", "ratingId", "rating", "ratingReason", "ratingComment"];
     const plain = (value: unknown) =>
-      JSON.parse(JSON.stringify(value, (k, v) => (k === "lastId" ? undefined : v)));
+      JSON.parse(JSON.stringify(value, (k, v) => (POSTDATED.includes(k) ? undefined : v)));
     expect(plain(turnsFromMessages(fixture))).toEqual(baseline);
     expect(plain(turnsFromMessages(fixture, {}))).toEqual(baseline);
   });
@@ -244,5 +246,50 @@ describe("reasoning (plan 37 §7.1.1)", () => {
     ])[1] as AssistantTurn;
     expect(turn.reasoning).toEqual(["", "one more lookup"]);
     expect(turn.activityGroups.map((g) => g.map((a) => a.id))).toEqual([["c1"], ["c2"], []]);
+  });
+});
+
+describe("ratingId (plan 39 section 5.3)", () => {
+  const ratingOf = (rows: ChatMessage[]) => (turnsFromMessages(rows)[1] as AssistantTurn).ratingId;
+
+  it("is the turn's last assistant row, with its stored rating", () => {
+    const rows = [
+      row({ role: "user", content: "q" }),
+      row({ content: "Looking. ", tool_calls: [call("c1")] }),
+      row({ role: "tool", content: "{}", tool_call_id: "c1" }),
+      row({ content: "Found it.", rating: -1, rating_reason: "wrong", rating_comment: "no" }),
+    ];
+    const turn = turnsFromMessages(rows)[1] as AssistantTurn;
+    expect(turn.ratingId).toBe(rows[3].id);
+    expect([turn.rating, turn.ratingReason, turn.ratingComment]).toEqual([-1, "wrong", "no"]);
+  });
+
+  it("is absent when the turn's last row is a tool row", () => {
+    expect(
+      ratingOf([
+        row({ role: "user", content: "q" }),
+        row({ content: "x", tool_calls: [call("c1")] }),
+        row({ role: "tool", content: "{}", tool_call_id: "c1" }),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("moves to the continuation of a truncated row", () => {
+    const rows = [
+      row({ role: "user", content: "q" }),
+      row({ content: "cut", finish_reason: "max_tokens", rating: 1 }),
+      row({ content: " off" }),
+    ];
+    const turn = turnsFromMessages(rows)[1] as AssistantTurn;
+    expect(turn.ratingId).toBe(rows[2].id);
+    expect(turn.rating).toBeUndefined();
+  });
+
+  it("is a budget row", () => {
+    const rows = [
+      row({ role: "user", content: "q" }),
+      row({ content: "Over budget.", error: "budget_exceeded" }),
+    ];
+    expect(ratingOf(rows)).toBe(rows[1].id);
   });
 });

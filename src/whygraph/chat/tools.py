@@ -51,6 +51,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from whygraph.core import get_config
 from whygraph.core.config import AreaConfig
+from whygraph.core.usage import CallOutcome
 from whygraph.mcp.area_history import whygraph_area_history
 from whygraph.mcp.descriptions import DESCRIPTION_AUTHORITY, QUALIFIED_NAME_DESC
 from whygraph.mcp.errors import WhyGraphError
@@ -1347,10 +1348,33 @@ class ToolRegistry:
             JSON, truncated to :data:`MAX_RESULT_CHARS` with
             :data:`TRUNCATION_MARKER` appended when it was too long.
         """
+        return self.dispatch_outcome(name, arguments)[0]
+
+    def dispatch_outcome(self, name: str, arguments: dict) -> tuple[str, CallOutcome]:
+        """Run one tool call and report how it ended.
+
+        The body of :meth:`dispatch`, which returns only the first item.
+
+        Parameters
+        ----------
+        name : str
+            Tool name. Must be in the registry — it is a closed allow-list.
+        arguments : dict
+            Parsed arguments, as the port produced them.
+
+        Returns
+        -------
+        tuple of (str, CallOutcome)
+            The encoded result, and ``"internal"`` when an exception escaped
+            the handler, ``"error"`` for any other ``{"error": ...}`` payload
+            (an unknown name, bad arguments, a tool-level failure), else
+            ``"ok"``.
+        """
         handler = self._handlers.get(name)
         if handler is None:
-            return _encode({"error": f"unknown tool {name!r}"})
+            return _encode({"error": f"unknown tool {name!r}"}), "error"
 
+        outcome: CallOutcome = "ok"
         try:
             result = handler(**arguments)
         except TypeError as exc:
@@ -1365,8 +1389,11 @@ class ToolRegistry:
         except Exception as exc:  # noqa: BLE001 -- a tool must never kill the turn
             _log.exception("chat tool %s failed unexpectedly", name)
             result = {"error": f"{name} failed: {type(exc).__name__}: {exc}"}
+            outcome = "internal"
 
-        return _encode(result)
+        if outcome == "ok" and isinstance(result, dict) and "error" in result:
+            outcome = "error"
+        return _encode(result), outcome
 
 
 def _encode(result: object) -> str:

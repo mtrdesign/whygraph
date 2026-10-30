@@ -169,6 +169,8 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("POST", f"/api/projects/{SLUG}/chat/sessions/1/messages/1/continue", None),
     ("POST", f"/api/projects/{SLUG}/chat/sessions/1/branch", {"message_id": 1}),
     ("POST", f"/api/projects/{SLUG}/chat/sessions/1/fork", {"message_id": 1}),
+    ("PUT", f"/api/projects/{SLUG}/chat/sessions/1/messages/1/feedback", {"rating": 1}),
+    ("DELETE", f"/api/projects/{SLUG}/chat/sessions/1/messages/1/feedback", None),
     # Its keys are the platform's to test (M2f-3 section 4.13)
     ("POST", f"/api/projects/{SLUG}/keys/anthropic/test", None),
     ("POST", f"/api/projects/{SLUG}/github-token/test", None),

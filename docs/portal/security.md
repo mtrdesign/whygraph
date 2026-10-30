@@ -257,8 +257,8 @@ runs on a developer's laptop and a repository on it is untrusted.
 ## What agent activity records
 
 A project's Overview counts the calls agents make: every MCP tool, resource and prompt call, and
-every `/api/v1` data call of a connected machine. A counter row holds the project, a UTC day, the
-source, who made the call (a person or a connection), the tool's name and a number - **never** a
+every `/api/v1` data call of a connected machine. Counts only: per project, day and call name, how many calls, how many ended in a tool error or an internal error, and their total duration - never an argument, a result or an error message. A counter row holds the project, a UTC day, the
+source, who made the call (a person or a connection), the tool's name and those numbers - **never** a
 path, a symbol, an argument or anything a call returned. The names are WhyGraph's own or one of the four
 CodeGraph tools; any other name is never stored. Tool calls the Chat assistant makes are counted the same way (source `chat`, no person or connection, never arguments). A caller can only add to its own rows, and rows are kept 400 days. See [Agent
 activity](agents.md#agent-activity).

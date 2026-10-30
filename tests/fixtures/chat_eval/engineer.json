@@ -107,6 +107,48 @@
         },
         "max_rounds": 6
       }
+    },
+    {
+      "id": "E11",
+      "turns": [
+        "What does `build_window` do in the chat harness?",
+        "And which tool results does it elide first, and why?"
+      ],
+      "expect": {
+        "cites": [
+          "(?i)elid"
+        ],
+        "max_rounds": 3
+      }
+    },
+    {
+      "id": "E12",
+      "turns": [
+        "List the five most recent commits that touched `src/whygraph/chat/harness.py`.",
+        "Pick the second commit you listed and tell me why it was made.",
+        "Which other files did that same commit change?"
+      ],
+      "expect": {
+        "cites": [
+          "(?s)[\\w/-]+\\.(py|ts|tsx|md|json|toml|yml)\\b.*[\\w/-]+\\.(py|ts|tsx|md|json|toml|yml)\\b"
+        ],
+        "max_rounds": 4
+      }
+    },
+    {
+      "id": "E13",
+      "turns": [
+        "Who calls `run_turn`?",
+        "What does `ToolRegistry.dispatch` return for an unknown tool name?",
+        "What does `build_window` do with old tool results?",
+        "Going back to your first answer: which caller of `run_turn` did you list first, and in which file?"
+      ],
+      "expect": {
+        "cites": [
+          "(?i)run_turn|serve"
+        ],
+        "max_rounds": 2
+      }
     }
   ]
 }

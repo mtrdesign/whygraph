@@ -50,7 +50,12 @@ from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
 from whygraph.core import get_config
-from whygraph.core.usage import count_agent_call, record_usage, usage_blocked
+from whygraph.core.usage import (
+    CallOutcome,
+    count_agent_call,
+    record_usage,
+    usage_blocked,
+)
 from whygraph.mcp.targets import repo_root
 from whygraph.services.llm.chat import (
     REFUSAL_REASONS,
@@ -61,6 +66,7 @@ from whygraph.services.llm.chat import (
     TextDelta,
     ToolCall,
     ToolCallMade,
+    ToolSpec,
     TurnDone,
 )
 from whygraph.services.llm.exceptions import UNREACHABLE_CAUSES
@@ -411,6 +417,30 @@ def _estimate_tokens(message: ChatMessage) -> int:
     return size
 
 
+def _specs_tokens(specs: Sequence[ToolSpec]) -> int:
+    """Estimate the tokens the tool specs add to every request.
+
+    ``len(json.dumps(...)) // 4`` over each spec's name, description and
+    parameters, the same approximation as :func:`_estimate_tokens`. Pure and
+    uncached (``ToolSpec`` holds a ``dict``, so a spec tuple is unhashable).
+    """
+    return (
+        len(
+            json.dumps(
+                [
+                    {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": spec.parameters,
+                    }
+                    for spec in specs
+                ]
+            )
+        )
+        // 4
+    )
+
+
 def _split_turns(history: Sequence[ChatMessage]) -> list[list[ChatMessage]]:
     """Group ``history`` into turns, each starting at a ``user`` message.
 
@@ -447,6 +477,7 @@ def _elide(turn: Sequence[ChatMessage]) -> list[ChatMessage]:
             content=ELIDED_MARKER,
             tool_calls=m.tool_calls,
             tool_call_id=m.tool_call_id,
+            is_error=m.is_error,
         )
         if m.role == "tool" and m.content != ELIDED_MARKER
         else m
@@ -526,12 +557,27 @@ _PARALLEL_POLL_SEC = 0.1
 """How often a wait on a parallel tool call checks for a Stop."""
 
 
+def _timed_dispatch(
+    registry: ToolRegistry, call: ToolCall
+) -> tuple[str, CallOutcome, int]:
+    """Run one tool call; return its result, outcome and duration in ms.
+
+    Runs where the call runs (the worker thread of a parallel round), so a
+    pooled call is timed on its own and never by the wait for its siblings.
+    """
+    started = time.monotonic()
+    result, outcome = registry.dispatch_outcome(call.name, call.arguments)
+    return result, outcome, round((time.monotonic() - started) * 1000)
+
+
 def _dispatch_parallel(
     registry: ToolRegistry,
     calls: Sequence[ToolCall],
     cancel: threading.Event | None,
-) -> Iterator[str]:
+) -> Iterator[tuple[str, CallOutcome, int]]:
     """Run ``calls`` concurrently; yield their results in submission order.
+
+    Each item is :func:`_timed_dispatch`'s ``(result, outcome, duration_ms)``.
 
     Each call runs in its own copy of the current context, so the bound
     project, strict mode and the usage sink reach it. A Stop while waiting
@@ -545,9 +591,9 @@ def _dispatch_parallel(
         futures = [
             executor.submit(
                 contextvars.copy_context().run,
-                registry.dispatch,
-                call.name,
-                call.arguments,
+                _timed_dispatch,
+                registry,
+                call,
             )
             for call in calls
         ]
@@ -599,7 +645,7 @@ def _is_dropped_stream(exc: BaseException) -> bool:
     return False
 
 
-def _is_error_result(result: str) -> bool:
+def is_error_result(result: str) -> bool:
     """Whether a tool result is an error payload (a JSON object with ``error``)."""
     try:
         value = json.loads(result)
@@ -670,6 +716,57 @@ def _trim_turn(
         for message in messages[turn_start:latest_round]
         if message.role == "assistant" and message.tool_calls
     )
+
+
+def begin_turn_messages(
+    history: Sequence[ChatMessage],
+    *,
+    token_budget: int,
+    references: str | None = None,
+    continue_from_assistant: bool = False,
+) -> tuple[list[ChatMessage], int]:
+    """Build the working transcript a turn's first request starts from.
+
+    The pure part of :func:`run_turn` that decides what a request carries
+    besides the system prompt and tools: the windowed history
+    (:func:`build_window`), the question's References block, and the
+    continue prompt. A round's request is these messages (plus whatever the
+    turn appended, trimmed by :func:`_trim_turn`) behind the system
+    messages; the offline replay of ``scripts/eval_tool_choice.py`` calls
+    this and :func:`_trim_turn` so a change to either reaches it.
+
+    Parameters
+    ----------
+    history : Sequence[ChatMessage]
+        The conversation so far, ending with the user's question.
+    token_budget : int
+        The history token budget handed to :func:`build_window`.
+    references : str or None, optional
+        The question's References block, appended to the last user message.
+    continue_from_assistant : bool, optional
+        Whether the turn continues a truncated reply.
+
+    Returns
+    -------
+    tuple[list[ChatMessage], int]
+        The transcript (a new list) and ``turn_start``, the index where this
+        turn's own messages begin.
+    """
+    messages: list[ChatMessage] = list(build_window(history, token_budget=token_budget))
+    turn_start = len(messages)
+    if references:
+        last_user = next(
+            (i for i in range(turn_start - 1, -1, -1) if messages[i].role == "user"),
+            None,
+        )
+        if last_user is not None:
+            question = messages[last_user]
+            messages[last_user] = replace(
+                question, content=with_references(question.content, references)
+            )
+    if continue_from_assistant:
+        messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
+    return messages, turn_start
 
 
 def run_turn(
@@ -811,22 +908,12 @@ def run_turn(
     # appends. Windowing between turns happens once, up front; inside the
     # turn only stale tool results are elided (`_trim_turn`), never a
     # message, because the next round may depend on any of them.
-    messages: list[ChatMessage] = list(
-        build_window(history, token_budget=context_token_budget)
+    messages, turn_start = begin_turn_messages(
+        history,
+        token_budget=context_token_budget,
+        references=references,
+        continue_from_assistant=continue_from_assistant,
     )
-    turn_start = len(messages)
-    if references:
-        last_user = next(
-            (i for i in range(turn_start - 1, -1, -1) if messages[i].role == "user"),
-            None,
-        )
-        if last_user is not None:
-            question = messages[last_user]
-            messages[last_user] = replace(
-                question, content=with_references(question.content, references)
-            )
-    if continue_from_assistant:
-        messages.append(ChatMessage(role="user", content=CONTINUE_PROMPT))
 
     # One TurnDone per provider call, in order; the turn total is their sum.
     rounds: list[TurnDone] = []
@@ -950,12 +1037,14 @@ def run_turn(
                 if parallel is None:
                     _check(cancel)
                     yield ToolCallStarted(call=call)
-                    result = registry.dispatch(call.name, call.arguments)
+                    result, outcome, duration_ms = _timed_dispatch(registry, call)
                 else:
-                    result = next(parallel)
+                    result, outcome, duration_ms = next(parallel)
                 if call.name in tool_names:
                     # Names only; the harness's own overview call never gets here.
-                    count_agent_call(call.name)
+                    count_agent_call(
+                        call.name, outcome=outcome, duration_ms=duration_ms
+                    )
                 key = (
                     call.name,
                     json.dumps(call.arguments, sort_keys=True, separators=(",", ":")),
@@ -969,7 +1058,7 @@ def run_turn(
                         role="tool",
                         content=result,
                         tool_call_id=call.id,
-                        is_error=_is_error_result(result),
+                        is_error=is_error_result(result),
                     )
                 )
             _log.debug(
@@ -983,7 +1072,15 @@ def run_turn(
                 yield ContextTrimmed(rounds_elided=elided)
             continue
         if final:
-            # The answer round never continues or nudges; a call it made
+            if not text and tool_rounds and not nudged and not _truncated(done):
+                # The answer round came back empty (with or without calls it
+                # made despite tool_choice="none", which are dropped): one
+                # nudge, and the next round is still the final one.
+                nudged = True
+                messages.append(ChatMessage(role="user", content=EMPTY_REPLY_PROMPT))
+                yield EmptyReply()
+                continue
+            # Otherwise the answer round never continues; a call it made
             # anyway is dropped - there is no round left to run it.
             break
         if _truncated(done) and text and continuations < max_continuations:

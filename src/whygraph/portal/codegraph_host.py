@@ -128,7 +128,7 @@ from starlette.types import Receive, Scope, Send
 
 from whygraph.core.context import use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
-from whygraph.core.usage import count_agent_call, use_usage_sink
+from whygraph.core.usage import CallOutcome, count_agent_call, use_usage_sink
 from whygraph.services.codegraph.bootstrap import _codegraph_env, hosted_env
 from whygraph.services.codegraph.exceptions import CodeGraphBootstrapError
 from whygraph.services.codegraph.fingerprint import (
@@ -238,6 +238,7 @@ TIMED_OUT = (
     "[WhyGraph] The CodeGraph call took longer than {seconds} s and was "
     "cancelled. Retry with a narrower query."
 )
+NOT_RUNNING = "[WhyGraph] CodeGraph is not running."
 TRUNCATED = "[WhyGraph] Result truncated at 256 KiB."
 STILL_UPDATING = (
     "[WhyGraph] The code index is still updating: {changed} changed file(s), "
@@ -249,6 +250,12 @@ REFRESH_FAILED = (
     "[WhyGraph] The code index could not be refreshed. Run a scan from the "
     "project's Overview in the WhyGraph portal."
 )
+_FAULT_PREFIXES = tuple(
+    text.split("{", 1)[0]
+    for text in (RESTARTED, TIMED_OUT, PAUSED, REFRESH_FAILED, NO_BINARY, NOT_RUNNING)
+)
+"""The bridge's own fault messages (a format string up to its first field)."""
+
 GUARD_REFUSED = (
     "[WhyGraph] Indexing is refused: {paths} that {leave} the repository{more}. "
     "Remove the link, then run a scan."
@@ -583,6 +590,33 @@ def unknown_tool_error(name: str) -> McpError:
     else:
         message = f"Unknown tool: {name[:128]}"
     return McpError(types.ErrorData(code=types.INVALID_PARAMS, message=message))
+
+
+def bridge_outcome(result: types.CallToolResult) -> CallOutcome:
+    """How a bridged call ended, from its result (never logs the text).
+
+    Parameters
+    ----------
+    result : mcp.types.CallToolResult
+        What the bridge is about to return.
+
+    Returns
+    -------
+    {"ok", "error", "internal"}
+        ``internal`` when the first text item is one of the bridge's own
+        fault messages (restarted, timed out, paused, refresh failed, no
+        binary, not running); ``error`` for any other ``isError`` result
+        (CodeGraph's own, busy, turned off, not indexed, still updating);
+        ``ok`` otherwise.
+    """
+    if not result.isError:
+        return "ok"
+    first = next(
+        (i.text for i in result.content if isinstance(i, types.TextContent)), ""
+    )
+    if first.startswith(_FAULT_PREFIXES):
+        return "internal"
+    return "error"
 
 
 def _error(text: str) -> types.CallToolResult:
@@ -2155,24 +2189,39 @@ def build_codegraph_server(state: PortalState) -> Server:
         if name not in BRIDGED_TOOLS:
             raise unknown_tool_error(name)
         kind = BRIDGED_TOOLS[BRIDGED_TOOLS.index(name)]
-        count_agent_call(kind)
         target = _bridge_target.get()
         host = state.codegraph_host
-        if target is None or host is None:
-            return types.ServerResult(_error("[WhyGraph] CodeGraph is not running."))
+        # Counted once the call ends, with its outcome and duration; a
+        # cancellation counts as ``ok`` and untimed, as the count-first did.
+        outcome: CallOutcome = "ok"
+        duration_ms: int | None = None
+        started = time.monotonic()
         try:
-            result = await host.call_tool(
-                target,
-                kind,
-                req.params.arguments or {},
-                progress=_progress_sender(server, host.sync_wait),
-            )
-        except McpError:
-            raise
-        except Exception:  # noqa: BLE001 -- never a stack trace to the agent
-            _log.exception("CodeGraph: %s failed for %s", kind, target.slug)
-            result = _error(RESTARTED)
-        return types.ServerResult(result)
+            if target is None or host is None:
+                result = _error(NOT_RUNNING)
+                outcome = "internal"
+            else:
+                try:
+                    result = await host.call_tool(
+                        target,
+                        kind,
+                        req.params.arguments or {},
+                        progress=_progress_sender(server, host.sync_wait),
+                    )
+                except McpError:
+                    outcome = "error"
+                    duration_ms = round((time.monotonic() - started) * 1000)
+                    raise
+                except Exception:  # noqa: BLE001 -- never a stack trace to the agent
+                    _log.exception("CodeGraph: %s failed for %s", kind, target.slug)
+                    result = _error(RESTARTED)
+                    outcome = "internal"
+                else:
+                    outcome = bridge_outcome(result)
+            duration_ms = round((time.monotonic() - started) * 1000)
+            return types.ServerResult(result)
+        finally:
+            count_agent_call(kind, outcome=outcome, duration_ms=duration_ms)
 
     server.request_handlers[types.CallToolRequest] = _call_tool
     return server

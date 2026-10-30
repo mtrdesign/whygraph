@@ -457,6 +457,8 @@ export function MessageThread({
                   output: event.output_tokens,
                 },
                 finishReason: event.finish_reason ?? undefined,
+                // The reply the rating goes on; the server refuses a row that does not end the turn.
+                ...(event.message_id != null && { ratingId: event.message_id }),
               }));
               break;
           }
@@ -646,6 +648,18 @@ export function MessageThread({
     }
   };
 
+  // Rate the final reply of a turn: no key, budget or lease needed. The transcript refetch makes the
+  // stored rating the one on screen; a refusal rejects, and the control says it could not save.
+  const rate = async (
+    messageId: number,
+    next: { rating: 1 | -1; reason?: string; comment?: string } | null,
+  ) => {
+    if (currentId === null) return;
+    if (next) await api.rateMessage(currentId, messageId, next);
+    else await api.clearRating(currentId, messageId);
+    void queryClient.invalidateQueries({ queryKey: key("chat", "transcript", currentId) });
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
@@ -706,6 +720,11 @@ export function MessageThread({
             onRegenerate={regenerable(i) && !cannotSend ? () => regenerate(i) : undefined}
             onContinue={i === continuableIndex && !cannotSend ? continueReply : undefined}
             onFork={forkable(turn) ? () => void forkFrom(forkId(turn)) : undefined}
+            onRate={
+              turn.kind === "assistant" && turn.ratingId !== undefined && currentId !== null
+                ? (next) => rate(turn.ratingId as number, next)
+                : undefined
+            }
             onBranch={(id) => void branchTo(id)}
           />
         ))}

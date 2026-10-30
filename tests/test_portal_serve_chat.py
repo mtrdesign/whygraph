@@ -2707,3 +2707,207 @@ def test_the_pre_pass_keeps_its_deadline(chat_client, monkeypatch) -> None:
         "#3",
     ]
     assert elapsed < 2.0 + 1.0
+
+
+def test_is_error_survives_reload_and_a_fork_starts_unrated(
+    chat_client, monkeypatch
+) -> None:
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    call = ToolCall(id="c1", name="get_symbol", arguments={})
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(finish_reason="tool_use"),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result='{"error": "boom"}'),
+            TextDelta(text="sorry"),
+            RoundUsage(finish_reason="end_turn"),
+            TurnDone("end_turn"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q"})
+    rows = _rows(chat_client, sid)
+    tool = next(r for r in rows if r["role"] == "tool")
+    assert tool["is_error"] is True
+
+    # The flag round-trips into the history the next turn sends.
+    with use_project(chat_client.context()):
+        history = serve_chat._load_history(sid, rows[-1]["id"])
+    assert [m.is_error for m in history if m.role == "tool"] == [True]
+
+    # Rate the source reply directly, then fork: the copy keeps the flag only.
+    with use_project(chat_client.context()), project_session() as session:
+        last = session.get(ChatMessageRow, rows[-1]["id"])
+        last.rating, last.rating_reason, last.rated_at = -1, "wrong", "2026-10-30"
+        session.add(last)
+        session.commit()
+    _no_provider(monkeypatch)
+    forked = chat_client.post(
+        _url(sid, "/fork"), json={"message_id": rows[-1]["id"]}
+    ).json()
+    copies = _rows(chat_client, forked["id"])
+    assert [c["is_error"] for c in copies if c["role"] == "tool"] == [True]
+    assert all(c["rating"] is None and c["rated_at"] is None for c in copies)
+
+
+def test_every_message_column_is_copied_or_not_copied() -> None:
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    columns = set(ChatMessageRow.__table__.columns.keys())
+    copied = set(serve_chat._COPIED_COLUMNS)
+    assert not copied & serve_chat._NOT_COPIED
+    assert copied | serve_chat._NOT_COPIED == columns
+
+
+# ---------------------------------------------------------------------------
+# Answer ratings (plan 39 section 5.3)
+# ---------------------------------------------------------------------------
+
+
+def _fb(sid: int, mid: int) -> str:
+    return _url(sid, f"/messages/{mid}/feedback")
+
+
+def _tool_session(chat_client, monkeypatch) -> tuple[int, dict]:
+    """A session with one tool turn; returns its id and rows by position."""
+    call = ToolCall(id="c1", name="get_symbol", arguments={})
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(finish_reason="tool_use"),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result="{}"),
+            TextDelta(text="a1"),
+            RoundUsage(finish_reason="end_turn"),
+            TurnDone("end_turn"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q1"})
+    rows = _transcript(chat_client, sid)["messages"]
+    assert [m["role"] for m in rows] == ["user", "assistant", "tool", "assistant"]
+    return sid, {"user": rows[0], "round": rows[1], "tool": rows[2], "final": rows[3]}
+
+
+def test_rating_round_trips_and_does_not_touch_the_session_order(
+    chat_client, monkeypatch
+) -> None:
+    sid, rows = _tool_session(chat_client, monkeypatch)
+    updated = chat_client.get(_url(sid)).json()["updated_at"]
+    final = rows["final"]["id"]
+
+    up = chat_client.put(_fb(sid, final), json={"rating": 1})
+    assert up.status_code == 200, up.text
+    assert up.json()["rating"] == 1 and up.json()["rated_at"]
+
+    down = chat_client.put(
+        _fb(sid, final),
+        json={"rating": -1, "reason": "wrong", "comment": "<b>nope</b>"},
+    )
+    assert down.status_code == 200
+    reloaded = {m["id"]: m for m in _transcript(chat_client, sid)["messages"]}
+    stored = reloaded[final]
+    assert (stored["rating"], stored["rating_reason"], stored["rating_comment"]) == (
+        -1,
+        "wrong",
+        "<b>nope</b>",
+    )
+    assert reloaded[rows["user"]["id"]]["rating"] is None
+    assert chat_client.get(_url(sid)).json()["updated_at"] == updated
+
+    cleared = chat_client.delete(_fb(sid, final))
+    assert cleared.status_code == 204
+    after = {m["id"]: m for m in _transcript(chat_client, sid)["messages"]}[final]
+    assert (after["rating"], after["rating_reason"], after["rated_at"]) == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_rating_refuses_anything_but_a_turn_ending_reply(
+    chat_client, monkeypatch
+) -> None:
+    sid, rows = _tool_session(chat_client, monkeypatch)
+    for key in ("user", "round", "tool"):
+        for send in (
+            lambda m: chat_client.put(_fb(sid, m), json={"rating": 1}),
+            lambda m: chat_client.delete(_fb(sid, m)),
+        ):
+            response = send(rows[key]["id"])
+            assert response.status_code == 422, key
+            assert response.json()["code"] == "feedback_target_invalid"
+
+    final = rows["final"]["id"]
+    for body in (
+        {"rating": 1, "reason": "wrong"},
+        {"rating": 1, "comment": "x"},
+    ):
+        response = chat_client.put(_fb(sid, final), json=body)
+        assert response.status_code == 422
+        assert response.json()["code"] == "feedback_target_invalid"
+    for body in (
+        {"rating": 2},
+        {"rating": -1, "reason": "bogus"},
+        {"rating": -1, "comment": "x" * 501},
+    ):
+        response = chat_client.put(_fb(sid, final), json=body)
+        assert response.status_code == 422
+        assert response.json()["error"] == "invalid request"
+    assert chat_client.put(_fb(sid, 99999), json={"rating": 1}).status_code == 404
+
+
+def test_a_continued_truncated_row_is_not_rated_but_its_continuation_is(
+    chat_client, monkeypatch
+) -> None:
+    sid, q1, a1 = _truncated_session(chat_client, monkeypatch)
+    assert chat_client.put(_fb(sid, a1), json={"rating": 1}).status_code == 200
+    _stub_harness(monkeypatch, _reply(" and the rest"))
+    chat_client.post(_url(sid, f"/messages/{a1}/continue"))
+    tail = _transcript(chat_client, sid)["messages"][2]["id"]
+    refused = chat_client.put(_fb(sid, a1), json={"rating": 1})
+    assert refused.status_code == 422
+    assert chat_client.put(_fb(sid, tail), json={"rating": -1}).status_code == 200
+    # A rating stays on its row after a later continuation chains under it.
+    stored = {m["id"]: m for m in _transcript(chat_client, sid)["messages"]}
+    assert stored[a1]["rating"] == 1
+
+
+def test_rating_needs_no_budget_no_key_and_no_turn_lease(
+    chat_client, monkeypatch
+) -> None:
+    from dataclasses import replace as dc_replace
+
+    from whygraph.core.usage import BUDGET_EXCEEDED
+
+    sid, rows = _tool_session(chat_client, monkeypatch)
+    final = rows["final"]["id"]
+    ctx = use_project_config(
+        chat_client, monkeypatch, Config(llm=_llm(*CHAT_PROVIDER_TAGS))
+    )
+    blocked = dc_replace(ctx, llm_block=BUDGET_EXCEEDED, llm_block_scope="project")
+    contexts = chat_client.app.state.portal.contexts
+
+    async def _aget(project_id: int):
+        return blocked
+
+    monkeypatch.setattr(contexts, "get", lambda project_id: blocked)
+    monkeypatch.setattr(contexts, "aget", _aget)
+    # Exhausted budget, and no key for the session's provider.
+    provider = _transcript(chat_client, sid)["provider"]
+    others = [p for p in CHAT_PROVIDER_TAGS if p != provider]
+    use_project_config(chat_client, monkeypatch, Config(llm=_llm(*others)))
+    monkeypatch.setattr(contexts, "get", lambda project_id: blocked)
+    assert chat_client.put(_fb(sid, final), json={"rating": 1}).status_code == 200
+
+    # And while another turn holds the lease.
+    with use_project(chat_client.context()):
+        key = serve_chat._lease_key(sid)
+    holder = object()
+    serve_chat._acquire(key, holder)
+    try:
+        assert chat_client.put(_fb(sid, final), json={"rating": -1}).status_code == 200
+    finally:
+        serve_chat._release(key, holder)

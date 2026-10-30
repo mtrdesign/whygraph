@@ -30,10 +30,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import Counter
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from sqlalchemy import delete, text
 from sqlalchemy.exc import IntegrityError
@@ -88,6 +87,33 @@ class CallKey(NamedTuple):
     kind: str
 
 
+class CallTally(NamedTuple):
+    """What the book holds for one :class:`CallKey`.
+
+    Attributes
+    ----------
+    calls : int
+        How many calls.
+    errors : int
+        Calls whose tool reported a failure.
+    internal_errors : int
+        Calls where an exception escaped.
+    duration_ms : int
+        The summed duration of the timed calls, in milliseconds.
+    """
+
+    calls: int = 0
+    errors: int = 0
+    internal_errors: int = 0
+    duration_ms: int = 0
+
+    def __add__(self, other: object) -> CallTally:  # type: ignore[override]
+        """Add two tallies elementwise (not tuple concatenation)."""
+        if not isinstance(other, CallTally):
+            return NotImplemented
+        return CallTally(*(a + b for a, b in zip(self, other)))
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -95,9 +121,10 @@ def _utcnow() -> datetime:
 _UPSERT = text(
     """
     INSERT INTO agent_call_days
-        (org_id, project_id, day, source, user_id, connection_id, kind, calls)
+        (org_id, project_id, day, source, user_id, connection_id, kind, calls,
+         errors, internal_errors, duration_ms)
     SELECT v.org_id, v.project_id, v.day, v.source, v.user_id, v.connection_id,
-           v.kind, v.calls
+           v.kind, v.calls, v.errors, v.internal_errors, v.duration_ms
     FROM unnest(
         CAST(:org_ids AS integer[]),
         CAST(:project_ids AS integer[]),
@@ -106,18 +133,28 @@ _UPSERT = text(
         CAST(:user_ids AS integer[]),
         CAST(:connection_ids AS bigint[]),
         CAST(:kinds AS text[]),
-        CAST(:calls AS bigint[])
-    ) AS v(org_id, project_id, day, source, user_id, connection_id, kind, calls)
+        CAST(:calls AS bigint[]),
+        CAST(:errors AS integer[]),
+        CAST(:internal_errors AS integer[]),
+        CAST(:duration_ms AS bigint[])
+    ) AS v(
+        org_id, project_id, day, source, user_id, connection_id, kind, calls,
+        errors, internal_errors, duration_ms
+    )
     WHERE EXISTS (
         SELECT 1 FROM projects p WHERE p.id = v.project_id AND p.org_id = v.org_id
     )
     ON CONFLICT ON CONSTRAINT uq_agent_call_days_key
-    DO UPDATE SET calls = agent_call_days.calls + excluded.calls
+    DO UPDATE SET
+        calls = agent_call_days.calls + excluded.calls,
+        errors = agent_call_days.errors + excluded.errors,
+        internal_errors = agent_call_days.internal_errors + excluded.internal_errors,
+        duration_ms = agent_call_days.duration_ms + excluded.duration_ms
     """
 )
 
 
-def _upsert(batch: dict[CallKey, int]) -> None:
+def _upsert(batch: dict[CallKey, CallTally]) -> None:
     """Write ``batch`` in one statement (one transaction); raises on failure."""
     keys = list(batch)
     params = {
@@ -128,7 +165,10 @@ def _upsert(batch: dict[CallKey, int]) -> None:
         "user_ids": [k.user_id for k in keys],
         "connection_ids": [k.connection_id for k in keys],
         "kinds": [k.kind for k in keys],
-        "calls": [batch[k] for k in keys],
+        "calls": [batch[k].calls for k in keys],
+        "errors": [batch[k].errors for k in keys],
+        "internal_errors": [batch[k].internal_errors for k in keys],
+        "duration_ms": [batch[k].duration_ms for k in keys],
     }
     with get_session() as db:
         db.execute(_UPSERT, params)
@@ -175,7 +215,7 @@ class AgentCallBook:
         self.max_keys = max_keys
         self._clock = clock
         self._lock = threading.Lock()
-        self._counts: Counter[CallKey] = Counter()
+        self._counts: dict[CallKey, CallTally] = {}
         self._last_flush = time.monotonic()
 
     def __len__(self) -> int:
@@ -191,6 +231,8 @@ class AgentCallBook:
         user_id: int | None,
         connection_id: int | None,
         kind: str,
+        outcome: Literal["ok", "error", "internal"] = "ok",
+        duration_ms: int | None = None,
     ) -> None:
         """Count one call on today's (UTC) row of its key.
 
@@ -206,6 +248,11 @@ class AgentCallBook:
             The connection token of an ``/api/v1`` call.
         kind : str
             The call's kind (cut to 64 characters, the column's limit).
+        outcome : {"ok", "error", "internal"}, optional
+            ``error`` when the tool reported a failure, ``internal`` when an
+            exception escaped.
+        duration_ms : int, optional
+            The call's duration; left out of the sum when ``None``.
         """
         key = CallKey(
             org_id,
@@ -217,7 +264,12 @@ class AgentCallBook:
             kind[:64],
         )
         with self._lock:
-            self._counts[key] += 1
+            self._counts[key] = self._counts.get(key, CallTally()) + CallTally(
+                1,
+                int(outcome == "error"),
+                int(outcome == "internal"),
+                max(0, duration_ms or 0),
+            )
 
     def has_any(self, org_id: int, sources: Iterable[str] | None = None) -> bool:
         """Whether a call of ``org_id`` is waiting in the book (not yet flushed).
@@ -241,7 +293,7 @@ class AgentCallBook:
                 for key in self._counts
             )
 
-    def pending(self, project_id: int) -> list[tuple[CallKey, int]]:
+    def pending(self, project_id: int) -> list[tuple[CallKey, CallTally]]:
         """The unflushed counts of one project.
 
         Parameters
@@ -251,13 +303,13 @@ class AgentCallBook:
 
         Returns
         -------
-        list of (CallKey, int)
-            Each waiting key and its count.
+        list of (CallKey, CallTally)
+            Each waiting key and its tally.
         """
         with self._lock:
             return [
-                (key, calls)
-                for key, calls in self._counts.items()
+                (key, tally)
+                for key, tally in self._counts.items()
                 if key.project_id == project_id
             ]
 
@@ -278,15 +330,16 @@ class AgentCallBook:
             return False
         return size > self.max_keys or elapsed >= self.flush_every
 
-    def _take(self) -> Counter[CallKey]:
+    def _take(self) -> dict[CallKey, CallTally]:
         with self._lock:
-            batch, self._counts = self._counts, Counter()
+            batch, self._counts = self._counts, {}
             self._last_flush = time.monotonic()
         return batch
 
-    def _restore(self, batch: Counter[CallKey]) -> None:
+    def _restore(self, batch: dict[CallKey, CallTally]) -> None:
         with self._lock:
-            self._counts.update(batch)
+            for key, tally in batch.items():
+                self._counts[key] = self._counts.get(key, CallTally()) + tally
 
     def flush(self) -> int:
         """Write every waiting count to ``agent_call_days``; never raises.
@@ -317,7 +370,7 @@ class AgentCallBook:
             return 0
         try:
             live = _live_projects(batch)
-            kept = {k: n for k, n in batch.items() if (k.org_id, k.project_id) in live}
+            kept = {k: t for k, t in batch.items() if (k.org_id, k.project_id) in live}
             if kept:
                 _upsert(kept)
             return len(kept)

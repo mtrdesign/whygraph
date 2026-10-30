@@ -608,6 +608,44 @@ def test_non_serializable_result_still_encodes(
     assert "when" in json.loads(registry.dispatch("get_repo_overview", {}))
 
 
+def test_dispatch_outcome_classifies_each_ending(
+    chat_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.mcp.errors import WhyGraphError
+
+    def _typeerror() -> dict:
+        raise TypeError("nope")
+
+    def _whygraph() -> dict:
+        raise WhyGraphError("not found", code="not_found")
+
+    def _boom() -> dict:
+        raise RuntimeError("kaboom")
+
+    registry = ToolRegistry(max_rationale_generations=0)
+    handlers = registry._handlers
+    outcomes = {}
+    assert registry.dispatch_outcome("nope", {})[1] == "error"
+    for label, fn in (
+        ("type", _typeerror),
+        ("why", _whygraph),
+        ("boom", _boom),
+        ("dict", lambda: {"error": "soft"}),
+        ("fine", lambda: {"ok": 1}),
+    ):
+        monkeypatch.setitem(handlers, "get_repo_overview", fn)
+        text, outcome = registry.dispatch_outcome("get_repo_overview", {})
+        assert text == registry.dispatch("get_repo_overview", {})
+        outcomes[label] = outcome
+    assert outcomes == {
+        "type": "error",
+        "why": "error",
+        "boom": "internal",
+        "dict": "error",
+        "fine": "ok",
+    }
+
+
 # ---------------------------------------------------------------------------
 # get_rationale: cache read, budgeted generation (§0.1)
 # ---------------------------------------------------------------------------

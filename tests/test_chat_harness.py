@@ -284,12 +284,14 @@ class _CountSink:
 
     def __init__(self) -> None:
         self.counted: list[str] = []
+        self.extras: list[dict[str, object]] = []
 
     def record(self, rec) -> None:  # noqa: ANN001
         pass
 
-    def count_call(self, kind: str) -> None:
+    def count_call(self, kind: str, **kw: object) -> None:
         self.counted.append(kind)
+        self.extras.append(kw)
 
 
 class _NamedRegistry(StubRegistry):

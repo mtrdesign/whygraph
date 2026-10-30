@@ -340,10 +340,17 @@ def _agent_rows(
             )
         ).all()
     ]
-    for key, calls in state.agent_calls.pending(project_id):
+    for key, tally in state.agent_calls.pending(project_id):
         if key.day >= first_day:
             rows.append(
-                (key.day, key.source, key.user_id, key.connection_id, key.kind, calls)
+                (
+                    key.day,
+                    key.source,
+                    key.user_id,
+                    key.connection_id,
+                    key.kind,
+                    tally.calls,
+                )
             )
     return rows
 

@@ -1291,6 +1291,12 @@ class AgentCallDay(PortalBase, table=True):
         The tool or call name, 1 to 64 characters.
     calls : int
         How many calls (always positive).
+    errors : int
+        How many of them the tool reported as a failure.
+    internal_errors : int
+        How many of them ended in an escaped exception.
+    duration_ms : int
+        The summed duration of the timed calls, in milliseconds.
     """
 
     __tablename__ = "agent_call_days"
@@ -1305,6 +1311,11 @@ class AgentCallDay(PortalBase, table=True):
             "length(kind) BETWEEN 1 AND 64", name="ck_agent_call_days_kind"
         ),
         CheckConstraint("calls > 0", name="ck_agent_call_days_calls"),
+        CheckConstraint(
+            "errors >= 0 AND internal_errors >= 0 "
+            "AND errors + internal_errors <= calls AND duration_ms >= 0",
+            name="ck_agent_call_days_outcomes",
+        ),
         ForeignKeyConstraint(
             ["org_id"],
             ["organizations.id"],
@@ -1339,6 +1350,9 @@ class AgentCallDay(PortalBase, table=True):
     connection_id: int | None = Field(default=None, sa_type=BigInteger)
     kind: str = Field(sa_type=Text)
     calls: int = Field(sa_type=BigInteger)
+    errors: int = Field(default=0)
+    internal_errors: int = Field(default=0)
+    duration_ms: int = Field(default=0, sa_type=BigInteger)
 
 
 class Budget(PortalBase, table=True):

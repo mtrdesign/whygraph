@@ -52,7 +52,7 @@ import logging
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterator, Protocol
+from typing import TYPE_CHECKING, Iterator, Literal, Protocol
 
 if TYPE_CHECKING:  # typing only: core never imports services at run time here
     from whygraph.services.llm.chat import TurnDone
@@ -334,10 +334,18 @@ def usage_blocked() -> str | None:
         return None
 
 
-def count_agent_call(kind: str) -> None:
+CallOutcome = Literal["ok", "error", "internal"]
+"""How a counted call ended: ``error`` = the tool reported a failure;
+``internal`` = an exception escaped."""
+
+
+def count_agent_call(
+    kind: str, *, outcome: CallOutcome = "ok", duration_ms: int | None = None
+) -> None:
     """Count one agent call of ``kind`` on the bound sink, if it counts calls.
 
-    Calls the bound sink's ``count_call(kind)`` when it has one. A no-op when
+    Calls the bound sink's ``count_call(kind, outcome=..., duration_ms=...)``
+    when it has one. A no-op when
     no sink is bound or the sink has no such method; never raises (a sink
     error is logged and swallowed).
 
@@ -347,6 +355,10 @@ def count_agent_call(kind: str) -> None:
         A code-defined call name: an MCP tool, resource or prompt's
         registered name, or a fixed ``/api/v1`` route name such as
         ``"v1:evidence"``. Never a URI, an argument or a path.
+    outcome : {"ok", "error", "internal"}, optional
+        How the call ended.
+    duration_ms : int or None, optional
+        The call's duration in milliseconds, when it was timed.
     """
     sink = _sink.get()
     if sink is None:
@@ -355,7 +367,7 @@ def count_agent_call(kind: str) -> None:
     if count is None:
         return
     try:
-        count(kind)
+        count(kind, outcome=outcome, duration_ms=duration_ms)
     except Exception:  # noqa: BLE001 -- counting must never fail the call
         _log.exception("could not count an agent call of kind %s", kind)
 
@@ -396,6 +408,7 @@ __all__ = [
     "UsageScope",
     "UsageSink",
     "budget_message",
+    "CallOutcome",
     "count_agent_call",
     "current_usage_sink",
     "record_usage",

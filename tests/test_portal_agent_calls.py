@@ -45,7 +45,7 @@ from whygraph.mcp import server as mcp_server
 from whygraph.portal import agent_calls
 from whygraph.portal import app as portal_app
 from whygraph.portal import db as portal_db
-from whygraph.portal.agent_calls import AgentCallBook, CallKey
+from whygraph.portal.agent_calls import AgentCallBook, CallKey, CallTally
 from whygraph.portal.codegraph_host import BRIDGED_TOOLS, build_codegraph_server
 from whygraph.portal.models import AgentCallDay, ConnectionToken, Organization, Project
 from whygraph.portal.throttle import Throttle
@@ -101,6 +101,7 @@ class _CountingSink:
     def __init__(self) -> None:
         self.scope = UsageScope(source="mcp")
         self.kinds: list[str] = []
+        self.extras: list[dict[str, Any]] = []
 
     def record(self, rec: Any) -> None:  # pragma: no cover - not used
         pass
@@ -108,8 +109,9 @@ class _CountingSink:
     def blocked_scope(self) -> str | None:
         return None
 
-    def count_call(self, kind: str) -> None:
+    def count_call(self, kind: str, **kw: Any) -> None:
         self.kinds.append(kind)
+        self.extras.append(kw)
 
 
 class _PlainSink:
@@ -123,7 +125,7 @@ class _PlainSink:
 
 
 class _BrokenSink(_PlainSink):
-    def count_call(self, kind: str) -> None:
+    def count_call(self, kind: str, **kw: Any) -> None:
         raise RuntimeError("boom")
 
 
@@ -135,6 +137,17 @@ def test_count_agent_call_is_a_no_op_unbound_or_without_count_call() -> None:
     with use_usage_sink(counting):  # type: ignore[arg-type]
         count_agent_call("whygraph_issue")
     assert counting.kinds == ["whygraph_issue"]
+
+
+def test_count_agent_call_passes_outcome_and_duration_to_the_sink() -> None:
+    sink = _CountingSink()
+    with use_usage_sink(sink):  # type: ignore[arg-type]
+        count_agent_call("whygraph_issue")
+        count_agent_call("whygraph_issue", outcome="error", duration_ms=12)
+    assert sink.extras == [
+        {"outcome": "ok", "duration_ms": None},
+        {"outcome": "error", "duration_ms": 12},
+    ]
 
 
 def test_count_agent_call_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,9 +266,15 @@ def test_the_portal_sink_counts_agent_and_chat_sources() -> None:
     for source in ("explorer", "scan"):
         _sink(source, book).count_call("whygraph_evidence_for")
     assert sorted(book.pending(10)) == [
-        (CallKey(1, 10, "2026-10-09", "agent", 100, 7, "v1:evidence"), 1),
-        (CallKey(1, 10, "2026-10-09", "chat", None, None, "find_changes"), 1),
-        (CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_evidence_for"), 1),
+        (CallKey(1, 10, "2026-10-09", "agent", 100, 7, "v1:evidence"), CallTally(1)),
+        (
+            CallKey(1, 10, "2026-10-09", "chat", None, None, "find_changes"),
+            CallTally(1),
+        ),
+        (
+            CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_evidence_for"),
+            CallTally(1),
+        ),
     ]
 
 
@@ -276,15 +295,38 @@ def test_the_book_counts_per_key_and_rolls_over_at_utc_midnight() -> None:
     _add(book)
     assert len(book) == 5
     assert dict(book.pending(10)) == {
-        CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_evidence_for"): 2,
-        CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_issue"): 1,
-        CallKey(1, 10, "2026-10-09", "mcp", None, None, "whygraph_evidence_for"): 1,
-        CallKey(1, 10, "2026-10-10", "mcp", 100, None, "whygraph_evidence_for"): 1,
+        CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_evidence_for"): (
+            CallTally(2, 0, 0, 0)
+        ),
+        CallKey(1, 10, "2026-10-09", "mcp", 100, None, "whygraph_issue"): (
+            CallTally(1, 0, 0, 0)
+        ),
+        CallKey(1, 10, "2026-10-09", "mcp", None, None, "whygraph_evidence_for"): (
+            CallTally(1, 0, 0, 0)
+        ),
+        CallKey(1, 10, "2026-10-10", "mcp", 100, None, "whygraph_evidence_for"): (
+            CallTally(1, 0, 0, 0)
+        ),
     }
     # A local-time clock still files the call under its UTC day.
     clock.moment = datetime(2026, 10, 11, 1, 0, tzinfo=timezone(timedelta(hours=3)))
     _add(book, project_id=12)
     assert [key.day for key, _ in book.pending(12)] == ["2026-10-10"]
+
+
+def test_the_book_tallies_outcomes_and_durations_and_restores_elementwise() -> None:
+    book = AgentCallBook()
+    _add(book, outcome="ok", duration_ms=10)
+    _add(book, outcome="error", duration_ms=5)
+    _add(book, outcome="internal")
+    _add(book, outcome="ok", duration_ms=None)
+    [(key, tally)] = book.pending(10)
+    assert tally == CallTally(4, 1, 1, 15)
+    assert tally + CallTally(1, 0, 0, 1) == CallTally(5, 1, 1, 16)
+    batch = book._take()
+    _add(book, outcome="error", duration_ms=2)
+    book._restore(batch)
+    assert dict(book.pending(10)) == {key: CallTally(5, 2, 1, 17)}
 
 
 def test_has_any_names_only_its_own_org() -> None:
@@ -471,6 +513,21 @@ def test_a_failed_flush_keeps_the_counts(
     assert len(book) == 1
     assert book.flush() == 1
     assert [row[-1] for row in _rows()] == [2]
+
+
+def test_the_upsert_sums_the_outcome_counters(pg: SimpleNamespace) -> None:
+    book = AgentCallBook()
+    for outcome, ms in (("ok", 10), ("error", 5), ("internal", None)):
+        _add(
+            book, org_id=pg.org_id, project_id=pg.demo, outcome=outcome, duration_ms=ms
+        )
+    assert book.flush() == 1
+    _add(book, org_id=pg.org_id, project_id=pg.demo, outcome="error", duration_ms=7)
+    assert book.flush() == 1
+    with portal_db.get_session() as session:
+        [row] = session.exec(select(AgentCallDay)).all()
+        got = (row.calls, row.errors, row.internal_errors, row.duration_ms)
+    assert got == (4, 2, 1, 22)
 
 
 def test_prune_deletes_rows_past_the_retention(pg: SimpleNamespace) -> None:

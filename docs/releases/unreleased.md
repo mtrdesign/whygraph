@@ -12,7 +12,9 @@
   `find_notes` and `propose_note` (23 tools now) and cites `note #N`; rationale cards carry the
   confirmed notes under `notes`; MCP agents get `whygraph_propose_note` and `whygraph://note/{id}`; and
   `/whygraph-note` proposes one from your editor. Agents only propose - a proposal does nothing until a
-  member confirms it. See [Project notes](../guide/notes.md).
+  member confirms it. For Claude Code, two hooks installed with the agent files deliver the project-wide
+  notes when a session starts and a file's confirmed notes when it is read, edited or written. See
+  [Project notes](../guide/notes.md) and [Claude Code hooks](../portal/agents.md#claude-code-hooks).
 - **Rate a Chat reply.** A finished reply has a thumbs up and a thumbs down; thumbs down takes a reason
   and an optional note. See [Rating a reply](../guide/chat.md#rating-a-reply).
 - **Tool outcomes and timings in Agent activity.** The Overview now shows, per kind of call, the

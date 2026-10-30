@@ -126,6 +126,60 @@ broken; disable one of each pair.
 **Codex** loads `.codex/config.toml` only for projects you have marked as trusted. Trust the project
 in Codex for both servers to load.
 
+## Claude Code hooks { #claude-code-hooks }
+
+For Claude Code the portal also installs two [hooks](https://docs.claude.com/en/docs/claude-code/hooks)
+that put your team's confirmed [project notes](../guide/notes.md) in front of the agent without it
+having to ask:
+
+- **SessionStart** delivers the project-wide notes and one line on how fresh the index is (up to date,
+  or how many commits behind HEAD).
+- **PostToolUse**, for `Read`, `Edit` and `Write`, delivers the confirmed notes that apply to that
+  file, once per session and agent.
+
+Every note is labelled as written and confirmed by project members, data and not instructions. A
+proposed note is never delivered; see [Project notes](../guide/notes.md).
+
+**Where they live.** **Initialize** and **Update agent files** add them to `.claude/settings.json`,
+next to the other Claude Code files, and write a small helper, `whygraph-agent-hook`, in the git
+directory beside the auto-rescan helper (`.git/whygraph/`), not in the working tree. The portal never
+writes `.claude/settings.local.json`; the permission note under [Agent-specific
+notes](#agent-specific-notes) is still yours to add there. The preview lists `.claude/settings.json`
+like any other file.
+
+- If git tracks `.claude/settings.json`, the portal shows a diff and writes only after you confirm.
+  Declining leaves the hooks uninstalled; Initialize still completes, and everything else is written.
+- Only an entry of exactly the shape the portal writes is its own. Any other entry in the file, yours
+  or a teammate's, is never edited or removed, and one that merely looks like ours (it runs
+  `whygraph-agent-hook` but differs) is reported to you and left alone.
+- A file with comments, or one that does not parse, is refused with the snippet to paste yourself.
+- Removing Claude Code from the project strips exactly the entries the portal wrote.
+
+**Commit-safe.** The entries hold no slug and no port. Each is a short shell command that finds the
+helper from `CLAUDE_PROJECT_DIR`, runs it if it is there, and always exits 0 with a 3 second limit. A
+teammate who clones the repository without WhyGraph sees nothing and no error; with it, the helper
+reads the project's slug and port from the untracked `.whygraph/portal.env` and asks your local portal
+on `127.0.0.1`. If the portal is down, the helper prints nothing.
+
+**Local mode only.** Production has no hooks, and a project [linked to a platform](platform-projects.md)
+gets none.
+
+**Limits.**
+
+- A session whose `CLAUDE_PROJECT_DIR` is a linked git worktree or a subdirectory of the repository
+  gets no notes.
+- A hook input over 4 MiB gets none. Claude Code sends the whole file with an edit and the content
+  twice with a write, so an `Edit` of a file over about 4 MiB or a `Write` over about 2 MiB gets no
+  notes.
+- A subagent receives a file's notes but not the session-start notes or the freshness line.
+- `NotebookEdit` is not matched.
+- The record of what was already delivered is in memory: restarting the portal delivers a file's notes
+  again, and so does a `/compact`. After `/clear` the session starts over.
+- A local process that can bind the portal's loopback port while the portal is down could answer the
+  hook and inject context into a session. That is the same residual risk as the URL in `.mcp.json`;
+  the helper still refuses any answer that is not the fixed shape (see
+  [Claude Code hook output](security.md#hook-output)).
+
 ## Writing a decision down { #whygraph-note }
 
 `/whygraph-note <what to remember>` proposes a [project note](../guide/notes.md) from your editor. It

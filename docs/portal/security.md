@@ -409,6 +409,14 @@ a guard against injected text, not against a local program that already acts as 
 portal every member signs in, and a project note is visible to every member who can open the project
 (proposals included).
 
+### Claude Code hook output { #hook-output }
+
+The helper that Claude Code's [notes hooks](agents.md#claude-code-hooks) run prints only one of two
+shapes: `{}` or a fixed two-key envelope for its own event, with `additionalContext` as the only
+payload. The portal writes every `"` inside that text as `\u0022`, and the helper refuses any answer
+that holds a literal `"` there, so nothing can follow the text to add a key such as `continue` or
+`decision`. A note reaches the model labelled as member-written data, not instructions.
+
 ## What the portal writes to your repository
 
 Only when you initialize a project, only what the preview listed, and only after you confirm:

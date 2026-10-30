@@ -16,3 +16,6 @@ tests
 docs
 docker-compose*.yml
 .env
+# The image runs its own `npm ci`; a host install (possibly mid-reinstall by a
+# parallel `make check`) must not be copied over it.
+src/playground/node_modules

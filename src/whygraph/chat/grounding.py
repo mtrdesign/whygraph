@@ -95,7 +95,8 @@ _PATH = re.compile(
     + "|".join(_INDEXED_EXTENSIONS)
     + r"))(?![\w/])"
 )
-_NUMBER = re.compile(r"(?<![\d_&#/])#(\d{1,9})\b")
+# A "note #12" is a team note, not pull request or issue 12.
+_NUMBER = re.compile(r"(?<![\d_&#/])(?<![nN][oO][tT][eE] )#(\d{1,9})\b")
 _HEX = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 # A dotted or ``::`` name, a call ``name()``, snake_case (two or more
 # segments, any case) or camel / Pascal case (a case change inside).
@@ -135,6 +136,9 @@ class ReferenceLookups(Protocol):
 
     def rationale_cached(self, symbol: Symbol) -> bool:
         """Whether a rationale card is cached for exactly this symbol's range."""
+
+    def note_count(self, symbol: Symbol) -> int:
+        """How many confirmed team notes apply to this symbol (a count only)."""
 
     def has_file(self, path: str) -> bool:
         """Whether CodeGraph indexed the repository-relative ``path``."""
@@ -260,16 +264,20 @@ def _symbol_entries(
         symbols = [s for s in named if s.kind != "import"]
     if not symbols:
         return None
-    return [
-        {
+    entries = []
+    for symbol in symbols[: min(room, MAX_SYMBOLS_PER_REFERENCE)]:
+        entry = {
             "text": token,
             "kind": symbol.kind,
             "qualified_name": symbol.qualified_name,
             "file": symbol.file_path,
             "rationale_cached": bool(lookups.rationale_cached(symbol)),
         }
-        for symbol in symbols[: min(room, MAX_SYMBOLS_PER_REFERENCE)]
-    ]
+        # A count, never a body: note text stays out of the question.
+        if (notes := lookups.note_count(symbol)) > 0:
+            entry["notes"] = notes
+        entries.append(entry)
+    return entries
 
 
 def _number_entries(token: str, number: int, lookups: ReferenceLookups) -> list[dict]:

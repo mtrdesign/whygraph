@@ -1520,7 +1520,7 @@ def test_public_brief_never_carries_notes(
 
 def test_only_the_registered_tool_imports_notes() -> None:
     root = Path(__file__).resolve().parents[1] / "src" / "whygraph"
-    for rel in ("serve/routes.py", "portal/v1_routes.py", "chat/tools.py"):
+    for rel in ("serve/routes.py", "portal/v1_routes.py"):
         assert "notes_for_target" not in (root / rel).read_text(), rel
     text = (root / "mcp" / "rationale.py").read_text()
     for name in ("_format_response", "_cached_only_card", "def rationale_card"):

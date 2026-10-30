@@ -589,7 +589,7 @@ def test_specs_and_bounds_come_from_config_by_default(
 
 
 def test_registry_specs_are_offered_to_the_model() -> None:
-    """A real registry's 21 specs reach the request."""
+    """A real registry's 23 specs reach the request."""
     client = ScriptedClient([[TextDelta(text="hi"), TurnDone("stop")]])
     registry = ToolRegistry(max_rationale_generations=0)
     list(
@@ -600,7 +600,7 @@ def test_registry_specs_are_offered_to_the_model() -> None:
             max_tool_rounds=1,
         )
     )
-    assert len(client.requests[0].tools) == 21
+    assert len(client.requests[0].tools) == 23
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +926,7 @@ def test_run_turn_sends_the_mode_block_and_the_same_tools_in_every_mode() -> Non
             )
         )
         request = client.requests[0]
-        assert len(request.tools) == 21
+        assert len(request.tools) == 23
         sent[mode_id] = (request.messages[0].content, request.tools)
     tools = {mode_id: value[1] for mode_id, value in sent.items()}
     assert all(value == tools["engineer"] for value in tools.values())

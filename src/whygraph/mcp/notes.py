@@ -1927,6 +1927,39 @@ def _mcp_anchor(
     return {"kind": "project"}
 
 
+def proposal_result(view: NoteView, actor: str | None) -> ProposeNoteResult:
+    """Shape a :func:`propose` view as the tool result, trimming dedupe hits.
+
+    Shared by the MCP tool and the Chat ``propose_note`` tool.
+
+    Parameters
+    ----------
+    view : NoteView
+        What :func:`propose` returned.
+    actor : str or None
+        The proposer's uid. A dedupe hit on another member's pending
+        proposal omits ``note``, so it never reaches a model.
+
+    Returns
+    -------
+    ProposeNoteResult
+        ``note_id`` first, then ``status``, ``duplicate``, ``review`` and
+        (unless trimmed) ``note``.
+    """
+    note_id = int(view["id"])
+    result: ProposeNoteResult = {
+        "note_id": note_id,
+        "status": view["status"],
+        "duplicate": bool(view.get("duplicate", False)),
+        "review": f"/p/{current_project().slug}/notes?id={note_id}",  # type: ignore[union-attr]
+    }
+    if not result["duplicate"] or (
+        view["status"] == "confirmed" or view.get("proposed_by") == actor
+    ):
+        result["note"] = view
+    return result
+
+
 def whygraph_propose_note(
     body: str,
     kind: str,
@@ -1964,18 +1997,7 @@ def whygraph_propose_note(
         origin="mcp",
         refs=refs or (),
     )
-    note_id = int(view["id"])
-    result: ProposeNoteResult = {
-        "note_id": note_id,
-        "status": view["status"],
-        "duplicate": bool(view.get("duplicate", False)),
-        "review": f"/p/{current_project().slug}/notes?id={note_id}",  # type: ignore[union-attr]
-    }
-    if not result["duplicate"] or (
-        view["status"] == "confirmed" or view.get("proposed_by") == actor
-    ):
-        result["note"] = view
-    return result
+    return proposal_result(view, actor)
 
 
 def _note_resource(id: int) -> dict:

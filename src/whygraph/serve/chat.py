@@ -46,6 +46,7 @@ from pathlib import Path
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import and_, or_
 from sqlmodel import col, delete, func, select
 
 from whygraph.chat.harness import (
@@ -76,7 +77,7 @@ from whygraph.core.usage import (
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
-from whygraph.db.models import Commit, Issue, PullRequest
+from whygraph.db.models import Commit, Issue, ProjectNote, PullRequest
 from whygraph.mcp.rationale_cache import lookup_exact
 from whygraph.mcp.targets import indexed_symbol_target, repo_root
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, Symbol
@@ -977,6 +978,31 @@ class _ReferenceLookups:
         identity = get_config().cache_identity("rationale")
         return lookup_exact(target, *identity) is not None
 
+    def note_count(self, symbol: Symbol) -> int:
+        project = current_project()
+        if project is not None and project.remote is not None:
+            return 0
+        applies = or_(
+            col(ProjectNote.qualified_name) == symbol.qualified_name,
+            and_(
+                col(ProjectNote.anchor_path) == symbol.file_path,
+                col(ProjectNote.line_start) <= symbol.end_line,
+                col(ProjectNote.line_end) >= symbol.start_line,
+            ),
+        )
+        with get_session() as session:
+            return int(
+                session.exec(
+                    select(func.count())
+                    .select_from(ProjectNote)
+                    .where(
+                        col(ProjectNote.status) == "confirmed",
+                        col(ProjectNote.anchor_kind).in_(("symbol", "range")),
+                        applies,
+                    )
+                ).one()
+            )
+
     def pull_request_state(self, number: int) -> str | None:
         with get_session() as session:
             row = session.get(PullRequest, number)
@@ -1499,7 +1525,7 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
         return
     job.client = client
 
-    registry = ToolRegistry()
+    registry = ToolRegistry(note_origin=f"chat:{session_id}")
     history = _load_history(session_id, job.start_id)
     # After the history load, while the new question's `grounding` is still
     # NULL; a turn the budget already stops sends nothing to ground.

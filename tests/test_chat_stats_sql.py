@@ -163,6 +163,7 @@ def test_authorizer_refuses_every_non_read_action(stats_db: Path, sql: str) -> N
         ("chat_message", "content"),
         ("chat_session", "provider"),
         ("rationale_cache", "purpose"),
+        ("project_note", "body"),
         ("sqlite_master", "sql"),
     ],
 )
@@ -195,6 +196,7 @@ def test_transcripts_are_unreachable_through_a_subquery(stats_db: Path) -> None:
     [
         ("SELECT count(*) FROM chat_message", "table chat_message"),
         ("SELECT count(*) FROM rationale_cache", "table rationale_cache"),
+        ("SELECT count(*) FROM project_note", "table project_note"),
     ],
 )
 def test_a_refusal_names_what_it_refused(stats_db: Path, sql: str, named: str) -> None:
@@ -224,6 +226,7 @@ def test_the_allowlist_is_a_literal_not_derived() -> None:
     # The two that must never be readable, named explicitly.
     assert "chat_message" not in _ALLOWED_TABLES
     assert "rationale_cache" not in _ALLOWED_TABLES
+    assert "project_note" not in _ALLOWED_TABLES
 
 
 def test_the_database_is_byte_identical_after_every_hostile_query(

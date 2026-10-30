@@ -2593,6 +2593,9 @@ class _Lookups:
         self._fail = fail
         self.closed = False
 
+    def note_count(self, symbol):
+        return 0
+
     def pull_request_state(self, number):
         if self._fail:
             raise RuntimeError("the forge table is gone")

@@ -712,6 +712,10 @@ class ChatConfig:
         The mode new chats start in, one of :data:`MODE_IDS`, or ``None``
         (default) for the built-in default. Project layer only; an unknown
         stored value loads as ``None`` with a warning.
+    server_context_editing : bool
+        Anthropic only (default ``False``): let the API clear old tool
+        results server-side once a request passes 80% of
+        ``context_token_budget``. Other providers ignore it.
     """
 
     provider: str | None = None
@@ -724,6 +728,7 @@ class ChatConfig:
     max_continuations: int = 1
     effort: str | None = None
     mode: str | None = None
+    server_context_editing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1460,6 +1465,11 @@ class Config:
             raise ConfigError(
                 f"chat.max_continuations must be an integer from 0 to 3, "
                 f"got {continuations!r}"
+            )
+        if not isinstance(self.chat.server_context_editing, bool):
+            raise ConfigError(
+                "chat.server_context_editing must be true or false, "
+                f"got {self.chat.server_context_editing!r}"
             )
         effort = self.chat.effort
         if effort is not None and (

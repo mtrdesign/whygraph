@@ -903,6 +903,13 @@ def run_turn(
     if max_continuations is None:
         max_continuations = config.max_continuations
 
+    # Server-side clearing of old tool results (Anthropic only), below the
+    # client-side window, which stays the hard cap.
+    context_trigger = (
+        int(0.8 * context_token_budget)
+        if config.server_context_editing and client.provider == "anthropic"
+        else None
+    )
     system = build_system_prompt(registry, get_mode(mode))
     # The working transcript: the windowed history plus whatever this turn
     # appends. Windowing between turns happens once, up front; inside the
@@ -943,6 +950,7 @@ def run_turn(
             max_tokens=max_tokens,
             timeout_sec=stream_timeout_sec,
             effort=effort,
+            context_trigger_tokens=context_trigger,
         )
         for attempt in range(2):
             text_parts: list[str] = []
@@ -1007,6 +1015,10 @@ def run_turn(
             started=started,
         )
         yield _round_usage(done)
+        if done.context_cleared_tokens and not trimmed:
+            # The API cleared tool results: the UI's notice, no client rounds.
+            trimmed = True
+            yield ContextTrimmed(rounds_elided=0)
 
         text = "".join(text_parts)
         if done.finish_reason in REFUSAL_REASONS:

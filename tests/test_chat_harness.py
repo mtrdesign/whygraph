@@ -1390,6 +1390,51 @@ def test_tool_rounds_trim_older_results_once_over_budget() -> None:
     assert [t.content == ELIDED_MARKER for t in tools] == [True, True, False]
 
 
+def test_server_context_editing_sets_the_trigger_and_yields_the_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = StubRegistry({"get_symbol": "{}"})
+    client = _Client(
+        [
+            [
+                ToolCallMade(call=_call("get_symbol", "c1", qualified_name="a")),
+                _done("tool_calls"),
+            ],
+            [
+                TextDelta(text="Done."),
+                TurnDone(finish_reason="end_turn", context_cleared_tokens=6000),
+            ],
+        ]
+    )
+    client.provider = "anthropic"
+    monkeypatch.setattr(
+        core, "_config", Config(chat=ChatConfig(server_context_editing=True))
+    )
+    events = _run(client, registry, context_token_budget=10_000)
+
+    assert [r.context_trigger_tokens for r in client.requests] == [8000, 8000]
+    assert [e for e in events if isinstance(e, ContextTrimmed)] == [
+        ContextTrimmed(rounds_elided=0)
+    ]
+
+
+def test_server_context_editing_is_off_by_default_and_anthropic_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = StubRegistry({})
+    client = _Client([[TextDelta(text="Hi."), _done("end_turn")]])
+    client.provider = "anthropic"
+    _run(client, registry)
+    assert client.requests[0].context_trigger_tokens is None
+
+    other = _Client([[TextDelta(text="Hi."), _done("end_turn")]])
+    monkeypatch.setattr(
+        core, "_config", Config(chat=ChatConfig(server_context_editing=True))
+    )
+    _run(other, registry)
+    assert other.requests[0].context_trigger_tokens is None
+
+
 def test_a_tool_error_result_is_flagged() -> None:
     registry = StubRegistry({"get_symbol": json.dumps({"error": "not found"})})
     client = _Client(

@@ -979,9 +979,112 @@ def _assert_no_orphans(messages) -> None:
     assert announced <= answered, "dangling assistant tool_call"
 
 
-def test_under_budget_history_is_unchanged() -> None:
-    history = _history(3)
+_BATCH_BODY = "x" * 12_000  # one 3,000-estimated-token tool result
+
+
+def _tool_bodies(window) -> list[str]:
+    return [m.content for m in window if m.role == "tool"]
+
+
+def test_under_budget_history_elides_only_stale_batches() -> None:
+    # Two stale turns of 3,000 tokens: no batch of 8,000 yet, nothing changes.
+    history = _history(4, tool_body=_BATCH_BODY)
     assert build_window(history, token_budget=1_000_000) == tuple(history)
+    assert build_window(_history(3), token_budget=1_000_000) == tuple(_history(3))
+
+    # Four stale turns: turns 0-2 (9,000) are a batch and lose their bodies;
+    # stale turn 3 waits for its batch, the last two turns keep theirs.
+    history = _history(6, tool_body=_BATCH_BODY)
+    window = build_window(history, token_budget=1_000_000)
+    assert _tool_bodies(window) == [ELIDED_MARKER] * 3 + [_BATCH_BODY] * 3
+    users = [m.content for m in window if m.role == "user"]
+    assert users == [f"question {i}" for i in range(6)]  # nothing dropped
+    assert len(window) == len(history)
+    _assert_no_orphans(window)
+
+
+def test_stale_results_elided_only_in_batches() -> None:
+    """The window at turn t extends the window at turn t-1 except at a batch move.
+
+    Turns are 1-indexed: at the start of turn t, turns 1..t-1 are complete
+    and turn t is only its question.
+    """
+
+    def at_start_of(t: int) -> tuple[ChatMessage, ...]:
+        history = _history(t - 1, tool_body=_BATCH_BODY) + _turn(t - 1)[:1]
+        return build_window(history, token_budget=1_000_000)
+
+    moved = []
+    for t in range(2, 13):
+        before, now = at_start_of(t - 1), at_start_of(t)
+        if now[: len(before)] != before:
+            moved.append(t)
+        _assert_no_orphans(now)
+    assert moved == [5, 8, 11]
+    # At turn 12, turns 1-9 (three batches) are elided; 10 waits; 11 is kept.
+    assert _tool_bodies(at_start_of(12)) == [ELIDED_MARKER] * 9 + [_BATCH_BODY] * 2
+
+
+def test_batch_elision_keeps_is_error() -> None:
+    history = _history(6, tool_body=_BATCH_BODY)
+    history[2] = ChatMessage(
+        role="tool", content=_BATCH_BODY, tool_call_id="t0", is_error=True
+    )
+    window = build_window(history, token_budget=1_000_000)
+    assert window[2].content == ELIDED_MARKER
+    assert window[2].is_error is True
+
+
+def test_over_budget_elides_every_stale_turn_regardless_of_the_boundary() -> None:
+    history = _history(6, tool_body=_BATCH_BODY)
+    # Over budget even after the batch: every stale turn (0-3) is elided.
+    window = build_window(history, token_budget=8_000)
+    assert _tool_bodies(window) == [ELIDED_MARKER] * 4 + [_BATCH_BODY] * 2
+    assert len(window) == len(history)
+
+
+def test_window_counts_system_and_specs() -> None:
+    history = _history(5)
+    total = sum(harness._estimate_tokens(m) for m in history)
+    # A budget just above the history alone leaves it whole ...
+    assert build_window(history, token_budget=total + 10) == tuple(history)
+    # ... but the fixed overhead now counts: the stale results are elided.
+    window = build_window(history, token_budget=total + 10, overhead_tokens=100)
+    assert _tool_bodies(window)[:3] == [ELIDED_MARKER] * 3
+    assert [m.content for m in window if m.role == "user"] == [
+        f"question {i}" for i in range(5)
+    ]
+    # An overhead above the budget still leaves the history a quarter of it.
+    window = build_window(history, token_budget=4 * total, overhead_tokens=10**6)
+    assert window == tuple(history)
+
+
+def test_window_never_orphans() -> None:
+    """Across budgets and overheads, with parallel calls and batch elision."""
+
+    def turn(index: int) -> list[ChatMessage]:
+        calls = tuple(
+            ToolCall(id=f"t{index}-{n}", name="get_evidence", arguments={"q": n})
+            for n in range(3)
+        )
+        return [
+            ChatMessage(role="user", content=f"question {index}"),
+            ChatMessage(role="assistant", content="", tool_calls=calls),
+            *(
+                ChatMessage(role="tool", content="y" * 6_000, tool_call_id=c.id)
+                for c in calls
+            ),
+            ChatMessage(role="assistant", content=f"answer {index}"),
+        ]
+
+    history = [m for i in range(7) for m in turn(i)]
+    for budget in (1_000_000, 30_000, 10_000, 3_000, 1_000, 100, 1):
+        for overhead in (0, 500, 20_000):
+            window = build_window(
+                history, token_budget=budget, overhead_tokens=overhead
+            )
+            assert window, "window must not be empty"
+            _assert_no_orphans(window)
 
 
 def test_begin_turn_messages_is_the_window_plus_references_and_continue() -> None:
@@ -1018,6 +1121,113 @@ def test_trim_turn_is_callable_on_the_helper_output() -> None:
     elided = _trim_turn(messages, start, len(messages) - 3, 2, 100)
     assert elided >= 1
     assert messages[start + 2].content == ELIDED_MARKER
+
+
+def test_trim_turn_uses_measured_input() -> None:
+    def transcript() -> tuple[list[ChatMessage], int, int]:
+        # Two big earlier rounds (~2,000 estimated tokens), then a small one.
+        messages = _turn(0, tool_body="y" * 4_000) + _turn(1, tool_body="z" * 4_000)
+        latest = len(messages)
+        messages += _turn(2, tool_body="w" * 40)
+        return messages, 0, latest
+
+    # Measured: the previous request plus only what was added since it.
+    messages, start, latest = transcript()
+    assert _trim_turn(messages, start, latest, 2, 10_000, 9_000) == 0
+    assert all(m.content != ELIDED_MARKER for m in messages)
+    messages, start, latest = transcript()
+    assert _trim_turn(messages, start, latest, 2, 10_000, 9_990) >= 1
+    assert [m.content == ELIDED_MARKER for m in messages if m.role == "tool"] == [
+        True,
+        True,
+        False,
+    ]
+    # The earlier messages are not counted again on top of the measured value.
+    messages, start, latest = transcript()
+    assert _trim_turn(messages, start, latest, 2, 1_500, 100) == 0
+    # No measured value: the estimate of every message ...
+    messages, start, latest = transcript()
+    assert _trim_turn(messages, start, latest, 2, 10_000, None) == 0
+    assert _trim_turn(messages, start, latest, 2, 1_500, None) >= 1
+    # ... plus the fixed overhead, compared with the full budget.
+    messages, start, latest = transcript()
+    assert _trim_turn(messages, start, latest, 2, 10_000, None, overhead_tokens=9_000)
+    messages, start, latest = transcript()
+    assert _trim_turn(messages, start, latest, 2, 10_000, 0, overhead_tokens=0) == 0
+
+
+def test_run_turn_trims_on_the_measured_input() -> None:
+    """A round reporting a near-full request trims, however small the estimate."""
+    client = _Client(
+        [
+            [
+                ToolCallMade(call=_call("search_symbols", "c1", query="a")),
+                _done("tool_calls", 1_000),
+            ],
+            [
+                ToolCallMade(call=_call("search_symbols", "c2", query="b")),
+                _done("tool_calls", 99_990),
+            ],
+            [TextDelta(text="Done."), _done("end_turn", 1_000)],
+        ]
+    )
+    events = _run(client, StubRegistry(), context_token_budget=100_000)
+    assert [e for e in events if isinstance(e, ContextTrimmed)] == [
+        ContextTrimmed(rounds_elided=1)
+    ]
+    tools = [m for m in client.requests[2].messages if m.role == "tool"]
+    assert [t.content == ELIDED_MARKER for t in tools] == [True, False]
+    # The same rounds with no measured input stay well under the budget.
+    client = _Client(
+        [
+            [
+                ToolCallMade(call=_call("search_symbols", "c1", query="a")),
+                _done("tool_calls"),
+            ],
+            [
+                ToolCallMade(call=_call("search_symbols", "c2", query="b")),
+                _done("tool_calls"),
+            ],
+            [TextDelta(text="Done."), _done("end_turn")],
+        ]
+    )
+    events = _run(client, StubRegistry(), context_token_budget=100_000)
+    assert not [e for e in events if isinstance(e, ContextTrimmed)]
+
+
+def test_run_turn_counts_system_and_specs_against_the_budget() -> None:
+    class _BigSpecs(StubRegistry):
+        @property
+        def specs(self):
+            return (
+                ToolSpec(name="search_symbols", description="d" * 8_000, parameters={}),
+            )
+
+    registry = _BigSpecs()
+    history = _history(4, tool_body="x" * 4_000) + [
+        ChatMessage(role="user", content="question 4")
+    ]
+    overhead = sum(
+        harness._estimate_tokens(m)
+        for m in build_system_prompt(registry, harness.get_mode(None))
+    ) + _specs_tokens(registry.specs)
+    history_tokens = sum(harness._estimate_tokens(m) for m in history)
+    client = ScriptedClient([[TextDelta("hi"), TurnDone("stop", 1, 1)]])
+    list(
+        run_turn(
+            client=client,
+            history=history,
+            registry=registry,
+            # The history alone fits; with the system prompt and specs it does not.
+            context_token_budget=overhead + history_tokens - 1,
+        )
+    )
+    sent = [m for m in client.requests[0].messages if m.role != "system"]
+    assert [m.content for m in sent if m.role == "user"] == [
+        f"question {i}" for i in range(5)
+    ]
+    assert _tool_bodies(sent) == [ELIDED_MARKER] * 3 + ["x" * 4_000]
+    _assert_no_orphans(sent)
 
 
 def test_specs_tokens_counts_name_description_and_parameters() -> None:

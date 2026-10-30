@@ -31,6 +31,7 @@ from .descriptions import (
     RATIONALE_BRIEF_ANNOTATIONS,
     RATIONALE_BRIEF_DESCRIPTION,
 )
+from .notes import NoteView, notes_for_target
 from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
@@ -89,6 +90,13 @@ class RationaleCard(_RationaleCardRequired, total=False):
     overlap, ``card_range``; a project linked to a platform gets the
     platform's card (no ``evidence`` / ``generated``) plus ``platform``.
     Everything but ``target`` is therefore optional.
+
+    ``status`` is therefore absent on a card, ``"not_cached"`` on a
+    ``cached_only`` miss, or ``"no_evidence"`` on the MCP tool's answer for
+    code with no commits but with confirmed notes. ``notes`` (confirmed
+    project notes, member-written data) is attached by the registered MCP
+    tool only, on every non-linked outcome; the Explorer, Chat and the
+    ``/api/v1`` response never carry it.
     """
 
     status: str
@@ -107,6 +115,7 @@ class RationaleCard(_RationaleCardRequired, total=False):
     stale: bool
     card_range: dict[str, int]
     platform: dict[str, Any]
+    notes: list[NoteView]
 
 
 def card_evidence_refs(evidence: list[CommitEvidence]) -> list[dict]:
@@ -617,6 +626,44 @@ def whygraph_rationale_brief(
     ctx = current_project()
     if ctx is not None and ctx.remote is not None:
         return linked_rationale(ctx.remote, target)
+    return _brief(
+        target,
+        force_refresh=force_refresh,
+        cached_only=cached_only,
+        progress=progress,
+        note=note,
+    )
+
+
+def _brief(
+    target: Target,
+    *,
+    force_refresh: bool,
+    cached_only: bool,
+    progress: Callable[[int, str], None] | None,
+    note: Callable[[str], None] | None,
+) -> RationaleCard:
+    """The non-linked half of :func:`whygraph_rationale_brief`.
+
+    Parameters
+    ----------
+    target : Target
+        The resolved target.
+    force_refresh, cached_only : bool
+        As for :func:`whygraph_rationale_brief`.
+    progress, note : callable or None
+        The client channel from :func:`_client_channel`.
+
+    Returns
+    -------
+    RationaleCard
+        The card, the ``cached_only`` card or the ``not_cached`` miss.
+
+    Raises
+    ------
+    NoEvidenceError
+        The target has no commits.
+    """
     evidence = collect_evidence(target, limit=20)
     if progress is not None:
         progress(1, f"evidence collected ({len(evidence)} commits)")
@@ -631,6 +678,52 @@ def whygraph_rationale_brief(
     )
 
 
+def _rationale_brief_tool(
+    path: str | None = None,
+    line_start: int | None = None,
+    line_end: int | None = None,
+    qualified_name: str | None = None,
+    force_refresh: bool = False,
+    cached_only: bool = False,
+    ctx: Context | None = None,
+) -> RationaleCard:
+    """The registered ``whygraph_rationale_brief``: the card plus ``notes``.
+
+    Same signature and behaviour as :func:`whygraph_rationale_brief`, then
+    every non-linked outcome gains the target's confirmed notes (data the
+    members wrote, never fed into the card). A linked project gets the
+    platform's card unchanged. Code with no commits raises
+    ``no_evidence`` as before, unless confirmed notes exist, in which case
+    ``{"status": "no_evidence", "target", "notes"}`` is returned.
+    """
+    progress, note = _client_channel(ctx)
+    target = resolve_target(
+        path=path,
+        line_start=line_start,
+        line_end=line_end,
+        qualified_name=qualified_name,
+    )
+    project = current_project()
+    if project is not None and project.remote is not None:
+        return linked_rationale(project.remote, target)
+    notes = notes_for_target(target)
+    try:
+        card = _brief(
+            target,
+            force_refresh=force_refresh,
+            cached_only=cached_only,
+            progress=progress,
+            note=note,
+        )
+    except NoEvidenceError:
+        if not notes:
+            raise
+        return {"status": "no_evidence", "target": target_dict(target), "notes": notes}
+    if notes:
+        card["notes"] = notes
+    return card
+
+
 def register(mcp: FastMCP) -> None:
     """Attach the rationale tool to an MCP server."""
     mcp.tool(
@@ -638,4 +731,4 @@ def register(mcp: FastMCP) -> None:
         title=RATIONALE_BRIEF_ANNOTATIONS.title,
         description=RATIONALE_BRIEF_DESCRIPTION,
         annotations=RATIONALE_BRIEF_ANNOTATIONS,
-    )(log_tool_errors(structured(RationaleCard)(whygraph_rationale_brief)))
+    )(log_tool_errors(structured(RationaleCard)(_rationale_brief_tool)))

@@ -1389,6 +1389,12 @@ MCP_TOOL_ARGS: dict[str, Callable[[OrgWorld], dict]] = {
     "whygraph_evidence_for": lambda o: {"qualified_name": o.qualified_name},
     "whygraph_area_history": lambda o: {"path": f"{o.mark}.py"},
     "whygraph_rationale_brief": lambda o: {"qualified_name": o.qualified_name},
+    "whygraph_propose_note": lambda o: {
+        "body": f"{o.mark} marker note",
+        "kind": "decision",
+        "project_wide": True,
+        "refs": [o.marker_sha],
+    },
 }
 """Minimal valid arguments per MCP tool; a tool without an entry fails item 3."""
 

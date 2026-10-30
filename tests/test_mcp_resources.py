@@ -133,6 +133,7 @@ def test_resources_registered() -> None:
         "whygraph://commit/{sha}",
         "whygraph://pr/{number}",
         "whygraph://issue/{number}",
+        "whygraph://note/{id}",
     }
 
 

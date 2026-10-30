@@ -38,7 +38,7 @@ from test_portal_app import (  # noqa: F401 -- `env` is a fixture
 from whygraph.core.context import use_project
 from whygraph.db import get_session
 from whygraph.db.models import Commit
-from whygraph.mcp import area_history, evidence, prompts, rationale, resources
+from whygraph.mcp import area_history, evidence, notes, prompts, rationale, resources
 from whygraph.mcp import server as mcp_server
 from whygraph.mcp.evidence import whygraph_evidence_for
 from whygraph.services.git import Repository
@@ -167,7 +167,7 @@ def _schema_view(tools) -> list[tuple]:
 
 def test_list_tools_schemas_are_unchanged_by_the_adapter() -> None:
     baseline = FastMCP("baseline")
-    for module in (evidence, rationale, area_history, resources, prompts):
+    for module in (evidence, rationale, area_history, notes, resources, prompts):
         module.register(baseline)
 
     wrapped = asyncio.run(mcp_server.mcp.list_tools())
@@ -486,11 +486,13 @@ def test_tools_declare_an_output_schema() -> None:
         "whygraph_rationale_brief": {"target"},
         "whygraph_evidence_for": {"target", "evidence", "describing"},
         "whygraph_area_history": {"path", "include_renames", "evidence", "describing"},
+        "whygraph_propose_note": {"note_id", "status", "duplicate", "review"},
     }.items():
         schema = tools[name].outputSchema
         assert schema is not None and set(schema["required"]) == required
     props = tools["whygraph_rationale_brief"].outputSchema["properties"]
-    assert {"status", "evidence", "generated", "platform"} <= set(props)
+    assert {"status", "evidence", "generated", "platform", "notes"} <= set(props)
+    assert "note" in tools["whygraph_propose_note"].outputSchema["properties"]
     assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
 
 
@@ -502,6 +504,7 @@ def test_tools_carry_titles_annotations_and_server_instructions() -> None:
         "whygraph_rationale_brief": ("Rationale card", False, True),
         "whygraph_evidence_for": ("Evidence for a target", False, False),
         "whygraph_area_history": ("Area history", True, False),
+        "whygraph_propose_note": ("Propose a note", False, False),
     }
     for name, (title, read_only, open_world) in expected.items():
         ann = tools[name].annotations

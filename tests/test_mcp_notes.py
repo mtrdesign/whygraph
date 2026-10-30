@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -1298,3 +1299,230 @@ def test_codegraph_symbol_in_file_and_count(tmp_path: Path) -> None:
         assert graph.symbol_count("pkg.dup") == 2
         assert graph.symbol_count("pkg.over") == 1
         assert graph.symbol_count("pkg.none") == 0
+
+
+# ---------------------------------------------------------------------------
+# The MCP surface (plan 40 step 5)
+# ---------------------------------------------------------------------------
+
+
+def _as(actor: str, **kw: Any) -> dict:
+    from whygraph.core.context import use_actor
+
+    args: dict[str, Any] = {"body": "Keep it simple.", "kind": "decision"}
+    args.update(kw)
+    with use_actor(actor):
+        return notes.whygraph_propose_note(**args)
+
+
+def test_propose_tool_maps_arguments_to_anchors(project: SimpleNamespace) -> None:
+    cases = [
+        ({"project_wide": True}, {"kind": "project"}),
+        ({"area": "chat"}, {"kind": "area", "area": "chat"}),
+        ({"path": "src/chat"}, {"kind": "path", "path": "src/chat"}),
+        (
+            {"path": "src/chat/x.py", "line_start": 2, "line_end": 4},
+            {"kind": "range", "path": "src/chat/x.py", "line_start": 2, "line_end": 4},
+        ),
+        (
+            {"qualified_name": "pkg.a"},
+            {"kind": "symbol", "qualified_name": "pkg.a"},
+        ),
+    ]
+    for n, (args, anchor) in enumerate(cases):
+        result = _as("u-mcp", body=f"Fact {n}.", **args)
+        assert list(result)[0] == "note_id"
+        assert result["status"] == "proposed" and result["duplicate"] is False
+        assert result["review"] == f"/p/demo/notes?id={result['note_id']}"
+        view = result["note"]
+        assert (view["source"], view["origin"], view["proposed_by"]) == (
+            "mcp",
+            "mcp",
+            "u-mcp",
+        )
+        assert {k: view["anchor"][k] for k in anchor} == anchor
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"project_wide": True, "area": "chat"},
+        {"path": "src/chat", "qualified_name": "pkg.a"},
+        {"line_start": 1, "line_end": 2},
+        {"project_wide": False},
+    ],
+)
+def test_propose_tool_needs_exactly_one_anchor(
+    project: SimpleNamespace, args: dict
+) -> None:
+    assert _code(lambda: _as("u-mcp", **args)) == "note_invalid"
+
+
+def test_propose_tool_binds_the_actor_and_refuses_linked(
+    project: SimpleNamespace,
+) -> None:
+    assert _code(
+        lambda: notes.whygraph_propose_note("x", "decision", project_wide=True)
+    ) == ("note_no_actor")
+    linked = _context(project.root, project.db, remote=object())
+    with use_project(linked):
+        assert _code(lambda: _as("u-mcp", project_wide=True)) == "note_linked"
+    with get_session() as session:
+        assert session.exec(select(ProjectNote)).first() is None
+
+
+def test_propose_tool_dedupe_trims_another_members_proposal(
+    project: SimpleNamespace,
+) -> None:
+    first = _as("u-a", project_wide=True)
+    assert "note" in first
+    own = _as("u-a", project_wide=True)
+    assert own["duplicate"] is True and own["note_id"] == first["note_id"]
+    assert own["note"]["id"] == first["note_id"]
+    other = _as("u-b", project_wide=True)
+    assert other["duplicate"] is True and other["note_id"] == first["note_id"]
+    assert other["status"] == "proposed" and "note" not in other
+    assert set(other) == {"note_id", "status", "duplicate", "review"}
+    _confirm(first["note_id"], actor="u-c")
+    confirmed = _as("u-b", project_wide=True)
+    assert confirmed["duplicate"] is True and confirmed["status"] == "confirmed"
+    assert confirmed["note"]["body"] == "Keep it simple."
+
+
+def test_note_resource_serves_confirmed_notes_only(project: SimpleNamespace) -> None:
+    proposed = _propose("Pending.")["id"]
+    retired = _confirmed(body="Gone.")
+    notes.retire(retired, actor_uid="u1", reason="outdated")
+    live = _confirmed(body="Live.")
+    missing = {"error": "not_found", "id": 4242}
+    assert notes._note_resource(4242) == missing
+    assert notes._note_resource(proposed) == {"error": "not_found", "id": proposed}
+    assert notes._note_resource(retired) == {"error": "not_found", "id": retired}
+    served = notes._note_resource(live)
+    assert served["id"] == live and served["body"] == "Live."
+    assert served["resource"] == f"whygraph://note/{live}"
+    linked = _context(project.root, project.db, remote=object())
+    with use_project(linked):
+        assert notes._note_resource(live) == {"error": "not_found", "id": live}
+
+
+def test_confirmed_project_note_stays_out_of_the_repo_overview(
+    project: SimpleNamespace,
+) -> None:
+    from whygraph.mcp import resources
+
+    _confirmed(body="Unique-overview-marker.")
+    text = json.dumps(resources._repo_overview_resource())
+    assert "Unique-overview-marker" not in text and "team_notes" not in text
+
+
+# -- whygraph_rationale_brief ------------------------------------------------
+
+
+def _fake_brief(monkeypatch: pytest.MonkeyPatch, outcome: Any) -> None:
+    from whygraph.mcp import rationale
+
+    def _brief(target: Target, **kw: Any) -> Any:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return dict(outcome)
+
+    monkeypatch.setattr(rationale, "_brief", _brief)
+
+
+def _brief_args() -> dict:
+    return {"path": "src/chat/x.py", "line_start": 2, "line_end": 4}
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        {"purpose": "p", "target": {}},
+        {"purpose": "p", "target": {}, "match": "overlap", "stale": True},
+        {"status": "not_cached", "target": {}},
+    ],
+)
+def test_brief_tool_attaches_notes_to_every_outcome(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, outcome: dict
+) -> None:
+    from whygraph.mcp import rationale
+
+    live = _confirmed({"kind": "path", "path": "src/chat"}, body="Live note.")
+    _propose("Pending note.", {"kind": "path", "path": "src/chat"})
+    _fake_brief(monkeypatch, outcome)
+    card = rationale._rationale_brief_tool(**_brief_args())
+    assert [n["id"] for n in card["notes"]] == [live]
+    assert card["notes"][0]["body"] == "Live note."
+    assert {k: v for k, v in card.items() if k != "notes"} == outcome
+
+
+def test_brief_tool_without_notes_adds_nothing(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.mcp import rationale
+
+    _fake_brief(monkeypatch, {"purpose": "p", "target": {}})
+    assert "notes" not in rationale._rationale_brief_tool(**_brief_args())
+
+
+def test_brief_tool_no_evidence(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.mcp import rationale
+
+    _fake_brief(monkeypatch, rationale.NoEvidenceError("none", code="no_evidence"))
+    assert _code(lambda: rationale._rationale_brief_tool(**_brief_args())) == (
+        "no_evidence"
+    )
+    _propose("Pending only.", {"kind": "path", "path": "src/chat"})
+    assert _code(lambda: rationale._rationale_brief_tool(**_brief_args())) == (
+        "no_evidence"
+    )
+    live = _confirmed({"kind": "path", "path": "src/chat"})
+    result = rationale._rationale_brief_tool(**_brief_args())
+    assert result["status"] == "no_evidence"
+    assert [n["id"] for n in result["notes"]] == [live]
+    assert result["target"]["path"] == "src/chat/x.py"
+
+
+def test_brief_tool_linked_project_gets_no_notes(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.mcp import rationale
+
+    _confirmed({"kind": "path", "path": "src/chat"})
+    remote = object()
+    monkeypatch.setattr(
+        rationale,
+        "linked_rationale",
+        lambda r, t: {"purpose": "platform", "target": {}},
+    )
+    with use_project(_context(project.root, project.db, remote=remote)):
+        card = rationale._rationale_brief_tool(**_brief_args())
+    assert card == {"purpose": "platform", "target": {}}
+
+
+def test_public_brief_never_carries_notes(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Explorer's Generate route and Chat call this function verbatim."""
+    from whygraph.mcp import rationale
+
+    _confirmed({"kind": "path", "path": "src/chat"})
+    monkeypatch.setattr(rationale, "collect_evidence", lambda t, limit=20: [])
+    monkeypatch.setattr(
+        rationale, "rationale_card", lambda *a, **k: {"purpose": "p", "target": {}}
+    )
+    card = rationale.whygraph_rationale_brief(**_brief_args())
+    assert card == {"purpose": "p", "target": {}}
+
+
+def test_only_the_registered_tool_imports_notes() -> None:
+    root = Path(__file__).resolve().parents[1] / "src" / "whygraph"
+    for rel in ("serve/routes.py", "portal/v1_routes.py", "chat/tools.py"):
+        assert "notes_for_target" not in (root / rel).read_text(), rel
+    text = (root / "mcp" / "rationale.py").read_text()
+    for name in ("_format_response", "_cached_only_card", "def rationale_card"):
+        start = text.index(name)
+        assert "notes" not in text[start : start + 2500].split("\ndef ")[0], name

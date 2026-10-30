@@ -125,7 +125,7 @@ class StubRegistry:
 
     def dispatch_outcome(self, name: str, arguments: dict) -> tuple[str, str]:
         result = self.dispatch(name, arguments)
-        return result, "error" if harness._is_error_result(result) else "ok"
+        return result, "error" if harness.is_error_result(result) else "ok"
 
 
 class _SpecRegistry(StubRegistry):
@@ -412,14 +412,15 @@ def test_max_tool_rounds_cuts_the_loop_off() -> None:
         ToolCallMade(call=_call("search_symbols", query="x")),
         TurnDone("tool_calls"),
     ]
-    client = ScriptedClient([list(forever) for _ in range(10)])
+    answer = [TextDelta(text="found"), TurnDone("stop")]
+    client = ScriptedClient([list(forever) for _ in range(3)] + [answer])
     registry = StubRegistry()
     events = _run(client, registry, max_tool_rounds=3)
 
     assert len(client.requests) == 4
     assert len(registry.dispatched) == 3
     # The answer round reports its usage like every other provider call.
-    assert events[-3] == RoundLimit(rounds=3)
+    assert events[-4] == RoundLimit(rounds=3)
     assert isinstance(events[-2], RoundUsage)
     assert isinstance(events[-1], TurnDone)
 
@@ -496,14 +497,16 @@ def test_a_tool_call_in_the_answer_round_is_dropped() -> None:
                 TurnDone("tool_calls"),
             ],
             [ToolCallMade(call=_call("search_symbols", query="y")), TurnDone("stop")],
+            [TextDelta(text="found"), TurnDone("stop")],
         ]
     )
     registry = StubRegistry()
     events = _run(client, registry, max_tool_rounds=1)
 
-    # Only the in-budget round dispatched; the stray call was ignored.
+    # Only the in-budget round dispatched; the stray call was ignored, and the
+    # textless answer round got its one nudge.
     assert len(registry.dispatched) == 1
-    assert len(client.requests) == 2
+    assert len(client.requests) == 3
     assert isinstance(events[-1], TurnDone)
 
 
@@ -571,7 +574,8 @@ def test_specs_and_bounds_come_from_config_by_default(
         ToolCallMade(call=_call("search_symbols", query="x")),
         TurnDone("tool_calls"),
     ]
-    client = ScriptedClient([list(forever) for _ in range(5)])
+    answer = [TextDelta(text="found"), TurnDone("stop")]
+    client = ScriptedClient([list(forever) for _ in range(2)] + [answer])
     events = list(
         run_turn(
             client=client,
@@ -581,7 +585,7 @@ def test_specs_and_bounds_come_from_config_by_default(
     )
     # Two tool rounds from config, plus the answer round.
     assert len(client.requests) == 3
-    assert events[-3] == RoundLimit(rounds=2)
+    assert events[-4] == RoundLimit(rounds=2)
 
 
 def test_registry_specs_are_offered_to_the_model() -> None:
@@ -1814,3 +1818,56 @@ def test_a_stop_while_parallel_tools_run_cancels_the_turn() -> None:
         _run(client, registry, cancel=cancel)
     assert time.monotonic() - started < 1.2  # well before the calls finish
     assert len(client.requests) == 1
+
+
+def test_elide_keeps_is_error() -> None:
+    turn = [
+        ChatMessage(role="user", content="q"),
+        ChatMessage(
+            role="tool", content='{"error": "x"}', tool_call_id="c", is_error=True
+        ),
+        ChatMessage(role="tool", content='{"ok": 1}', tool_call_id="d"),
+    ]
+    elided = harness._elide(turn)
+    assert [m.is_error for m in elided[1:]] == [True, False]
+    assert all(m.content == ELIDED_MARKER for m in elided[1:])
+
+
+def test_final_round_empty_reply_nudged_once() -> None:
+    client = ScriptedClient(
+        [
+            _tool_round("c1", 10),
+            [_done("stop")],
+            [TextDelta(text="The answer."), _done("stop")],
+        ]
+    )
+    events = _run(client, StubRegistry(), max_tool_rounds=1)
+    assert [e for e in events if isinstance(e, EmptyReply)] == [EmptyReply()]
+    assert len(client.requests) == 3
+    assert [r.tool_choice for r in client.requests[1:]] == ["none", "none"]
+    assert client.requests[2].messages[-1].content == EMPTY_REPLY_PROMPT
+    assert "The answer." in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+def test_final_round_calls_despite_none_are_dropped_and_nudged() -> None:
+    client = ScriptedClient(
+        [
+            _tool_round("c1", 10),
+            _tool_round("c2", 10),
+            [TextDelta(text="Done."), _done("stop")],
+        ]
+    )
+    registry = StubRegistry()
+    events = _run(client, registry, max_tool_rounds=1)
+    assert len(registry.dispatched) == 1  # the final round's call never ran
+    assert _kinds(events).count("EmptyReply") == 1
+    last = client.requests[2].messages
+    assert (last[-1].role, last[-1].content) == ("user", EMPTY_REPLY_PROMPT)
+    assert [m.tool_call_id for m in last if m.role == "tool"] == ["c1"]
+
+
+def test_final_round_truncated_empty_is_not_nudged() -> None:
+    client = ScriptedClient([_tool_round("c1", 10), [_done("max_tokens")]])
+    events = _run(client, StubRegistry(), max_tool_rounds=1)
+    assert len(client.requests) == 2
+    assert "EmptyReply" not in _kinds(events)

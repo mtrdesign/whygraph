@@ -477,6 +477,7 @@ def _elide(turn: Sequence[ChatMessage]) -> list[ChatMessage]:
             content=ELIDED_MARKER,
             tool_calls=m.tool_calls,
             tool_call_id=m.tool_call_id,
+            is_error=m.is_error,
         )
         if m.role == "tool" and m.content != ELIDED_MARKER
         else m
@@ -644,7 +645,7 @@ def _is_dropped_stream(exc: BaseException) -> bool:
     return False
 
 
-def _is_error_result(result: str) -> bool:
+def is_error_result(result: str) -> bool:
     """Whether a tool result is an error payload (a JSON object with ``error``)."""
     try:
         value = json.loads(result)
@@ -1057,7 +1058,7 @@ def run_turn(
                         role="tool",
                         content=result,
                         tool_call_id=call.id,
-                        is_error=_is_error_result(result),
+                        is_error=is_error_result(result),
                     )
                 )
             _log.debug(
@@ -1071,7 +1072,15 @@ def run_turn(
                 yield ContextTrimmed(rounds_elided=elided)
             continue
         if final:
-            # The answer round never continues or nudges; a call it made
+            if not text and tool_rounds and not nudged and not _truncated(done):
+                # The answer round came back empty (with or without calls it
+                # made despite tool_choice="none", which are dropped): one
+                # nudge, and the next round is still the final one.
+                nudged = True
+                messages.append(ChatMessage(role="user", content=EMPTY_REPLY_PROMPT))
+                yield EmptyReply()
+                continue
+            # Otherwise the answer round never continues; a call it made
             # anyway is dropped - there is no round left to run it.
             break
         if _truncated(done) and text and continuations < max_continuations:

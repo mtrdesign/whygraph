@@ -2707,3 +2707,55 @@ def test_the_pre_pass_keeps_its_deadline(chat_client, monkeypatch) -> None:
         "#3",
     ]
     assert elapsed < 2.0 + 1.0
+
+
+def test_is_error_survives_reload_and_a_fork_starts_unrated(
+    chat_client, monkeypatch
+) -> None:
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    call = ToolCall(id="c1", name="get_symbol", arguments={})
+    _stub_harness(
+        monkeypatch,
+        [
+            RoundUsage(finish_reason="tool_use"),
+            ToolCallStarted(call=call),
+            ToolResultReady(call=call, result='{"error": "boom"}'),
+            TextDelta(text="sorry"),
+            RoundUsage(finish_reason="end_turn"),
+            TurnDone("end_turn"),
+        ],
+    )
+    sid = _new_session(chat_client)["id"]
+    chat_client.post(_url(sid, "/messages"), json={"content": "q"})
+    rows = _rows(chat_client, sid)
+    tool = next(r for r in rows if r["role"] == "tool")
+    assert tool["is_error"] is True
+
+    # The flag round-trips into the history the next turn sends.
+    with use_project(chat_client.context()):
+        history = serve_chat._load_history(sid, rows[-1]["id"])
+    assert [m.is_error for m in history if m.role == "tool"] == [True]
+
+    # Rate the source reply directly, then fork: the copy keeps the flag only.
+    with use_project(chat_client.context()), project_session() as session:
+        last = session.get(ChatMessageRow, rows[-1]["id"])
+        last.rating, last.rating_reason, last.rated_at = -1, "wrong", "2026-10-30"
+        session.add(last)
+        session.commit()
+    _no_provider(monkeypatch)
+    forked = chat_client.post(
+        _url(sid, "/fork"), json={"message_id": rows[-1]["id"]}
+    ).json()
+    copies = _rows(chat_client, forked["id"])
+    assert [c["is_error"] for c in copies if c["role"] == "tool"] == [True]
+    assert all(c["rating"] is None and c["rated_at"] is None for c in copies)
+
+
+def test_every_message_column_is_copied_or_not_copied() -> None:
+    from whygraph.db.models import ChatMessage as ChatMessageRow
+
+    columns = set(ChatMessageRow.__table__.columns.keys())
+    copied = set(serve_chat._COPIED_COLUMNS)
+    assert not copied & serve_chat._NOT_COPIED
+    assert copied | serve_chat._NOT_COPIED == columns

@@ -57,6 +57,7 @@ from whygraph.chat.harness import (
     ToolCallStarted,
     ToolResultReady,
     TurnCancelled,
+    is_error_result,
     run_turn,
 )
 from whygraph.chat.areas import configured_areas
@@ -890,6 +891,7 @@ def _load_history(session_id: int, start_id: int) -> list[ChatMessage]:
                         content=content,
                         tool_calls=calls,
                         tool_call_id=row.tool_call_id,
+                        is_error=bool(row.is_error),
                         replay=json.loads(row.replay) if row.replay else None,
                     ),
                     row.error,
@@ -1127,7 +1129,12 @@ def _persist_assistant_turn(
 
 
 def _persist_tool_result(
-    session_id: int, call: ToolCall, result: str, *, parent_id: int | None
+    session_id: int,
+    call: ToolCall,
+    result: str,
+    *,
+    parent_id: int | None,
+    is_error: bool = False,
 ) -> int:
     """Write one tool-result row as the session's leaf and return its id."""
     now = _now_iso()
@@ -1139,6 +1146,7 @@ def _persist_tool_result(
             role="tool",
             content=result,
             tool_call_id=call.id,
+            is_error=is_error,
             created_at=now,
         ),
         now=now,
@@ -1503,7 +1511,11 @@ def _turn_frames(job: TurnJob) -> Iterator[str]:
         )
         for call, result in round_results:
             job.parent_id = _persist_tool_result(
-                session_id, call, result, parent_id=job.parent_id
+                session_id,
+                call,
+                result,
+                parent_id=job.parent_id,
+                is_error=is_error_result(result),
             )
         text_parts = []
         reasoning_parts = []
@@ -1888,6 +1900,7 @@ _COPIED_COLUMNS = (
     "content",
     "tool_calls",
     "tool_call_id",
+    "is_error",
     "input_tokens",
     "output_tokens",
     "provider",
@@ -1902,6 +1915,17 @@ _COPIED_COLUMNS = (
     "created_at",
 )
 """Every message column a fork copies verbatim (ids and the tree are rebuilt)."""
+
+_NOT_COPIED = {
+    "id",
+    "session_id",
+    "parent_id",
+    "rating",
+    "rating_reason",
+    "rating_comment",
+    "rated_at",
+}
+"""Columns a fork rebuilds or leaves empty: ids, the tree, and the ratings."""
 
 
 @router.post("/sessions/{session_id}/fork", status_code=201)

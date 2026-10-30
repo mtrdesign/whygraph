@@ -7,6 +7,8 @@ import {
   GitBranchIcon,
   PencilIcon,
   RefreshCwIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
 } from "lucide-react";
 import type { ChatVersions } from "../../api";
 import { BudgetNotice } from "../portal/BudgetNotice";
@@ -51,6 +53,15 @@ export interface AssistantTurn {
    * here" copies up to so the whole reply comes along.
    */
   lastId?: number;
+  /**
+   * The id of the row a rating goes on: the turn's last assistant row, when that row ends the turn
+   * (no tool calls, or a failure; a later tool row or continuation clears it). Absent: no rating control.
+   */
+  ratingId?: number;
+  /** The stored rating of `ratingId`: 1 (up) or -1 (down); absent when unrated. */
+  rating?: 1 | -1;
+  ratingReason?: string;
+  ratingComment?: string;
   /** Text segments in order, interleaved with `activities` of the same index. */
   segments: string[];
   activityGroups: ToolActivity[][];
@@ -119,11 +130,16 @@ export interface TurnActions {
   onContinue?: () => void;
   /** Persisted turns: start a new chat with the conversation up to and including this turn. */
   onFork?: () => void;
+  /**
+   * Persisted turns with a `ratingId`: save a rating (`1` / `-1` with an optional reason and comment),
+   * or clear it (`null`). Rejects when the server refuses.
+   */
+  onRate?: (rating: { rating: 1 | -1; reason?: string; comment?: string } | null) => Promise<void> | void;
   /** Version arrows: switch to the sibling with this message id. */
   onBranch?: (messageId: number) => void;
 }
 
-const ACTION_ROW = "mt-0.5 flex h-6 items-center gap-0.5";
+const ACTION_ROW = "relative mt-0.5 flex h-6 items-center gap-0.5";
 // Hover-revealed, but never hidden from a keyboard (focus-within) or a touch screen (no hover).
 const REVEAL =
   "flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100";
@@ -163,6 +179,119 @@ function ForkAction({ onFork }: { onFork: () => void }) {
     >
       <GitBranchIcon />
     </Button>
+  );
+}
+
+const RATING_REASONS: { id: string; label: string }[] = [
+  { id: "wrong", label: "Wrong" },
+  { id: "incomplete", label: "Incomplete" },
+  { id: "not_grounded", label: "Not grounded" },
+  { id: "too_slow", label: "Too slow" },
+  { id: "other", label: "Other" },
+];
+
+/**
+ * Thumbs up / down on a finished reply. Down opens a small panel (a reason and an optional comment);
+ * clicking the active thumb clears the rating. The comment is typed into a textarea and shown nowhere
+ * else here, so it is only ever text.
+ */
+function RateActions({
+  rating,
+  reason,
+  onRate,
+}: {
+  rating?: 1 | -1;
+  reason?: string;
+  onRate: NonNullable<TurnActions["onRate"]>;
+}) {
+  const [current, setCurrent] = useState<1 | -1 | undefined>(rating);
+  const [open, setOpen] = useState(false);
+  const [chosen, setChosen] = useState<string | undefined>(reason);
+  const [comment, setComment] = useState("");
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setCurrent(rating), [rating]);
+
+  const save = async (next: { rating: 1 | -1; reason?: string; comment?: string } | null) => {
+    setFailed(false);
+    try {
+      await onRate(next);
+      setCurrent(next?.rating);
+      setOpen(false);
+    } catch {
+      setFailed(true);
+    }
+  };
+
+  return (
+    <>
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        aria-label="Good answer"
+        aria-pressed={current === 1}
+        title="Good answer"
+        className={current === 1 ? "text-foreground" : undefined}
+        onClick={() => void save(current === 1 ? null : { rating: 1 })}
+      >
+        <ThumbsUpIcon />
+      </Button>
+      <Button
+        type="button"
+        size="icon-xs"
+        variant="ghost"
+        aria-label="Bad answer"
+        aria-pressed={current === -1}
+        title="Bad answer"
+        className={current === -1 ? "text-foreground" : undefined}
+        onClick={() => (current === -1 ? void save(null) : setOpen((v) => !v))}
+      >
+        <ThumbsDownIcon />
+      </Button>
+      {open && (
+        <div
+          className="absolute left-0 top-7 z-10 flex w-64 flex-col gap-2 rounded-md border border-border bg-popover p-2 text-xs shadow-md"
+          data-testid="rating-popover"
+        >
+          <div className="flex flex-wrap gap-1">
+            {RATING_REASONS.map((r) => (
+              <Button
+                key={r.id}
+                type="button"
+                size="xs"
+                variant={chosen === r.id ? "secondary" : "outline"}
+                aria-pressed={chosen === r.id}
+                onClick={() => setChosen(chosen === r.id ? undefined : r.id)}
+              >
+                {r.label}
+              </Button>
+            ))}
+          </div>
+          <Textarea
+            aria-label="What went wrong (optional)"
+            placeholder="What went wrong? (optional)"
+            maxLength={500}
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+          />
+          {failed && <span className="text-destructive">Couldn't save the rating.</span>}
+          <div className="flex justify-end gap-1">
+            <Button type="button" size="xs" variant="ghost" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              onClick={() =>
+                void save({ rating: -1, reason: chosen, comment: comment.trim() ? comment.trim() : undefined })
+              }
+            >
+              Send
+            </Button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -330,6 +459,7 @@ function AssistantBubble({
   onRegenerate,
   onContinue,
   onFork,
+  onRate,
   onBranch,
 }: { turn: AssistantTurn } & TurnActions) {
   const rows = Math.max(turn.segments.length, turn.activityGroups.length);
@@ -353,7 +483,8 @@ function AssistantBubble({
   // The no-reply line carries its own Regenerate, so the hover one would be a twin.
   const regenerate = !!onRegenerate && !noReply;
   // A turn still thinking or running a tool has nothing to act on yet; `busy` covers the rest.
-  const actions = !busy && settled && (!!copyText || regenerate || !!onFork);
+  const rate = turn.ratingId !== undefined && !!onRate;
+  const actions = !busy && settled && (!!copyText || regenerate || !!onFork || rate);
 
   return (
     <div className="group flex min-w-0 max-w-[92%] flex-col items-start">
@@ -506,6 +637,7 @@ function AssistantBubble({
                 </Button>
               )}
               {onFork && <ForkAction onFork={onFork} />}
+              {rate && <RateActions rating={turn.rating} reason={turn.ratingReason} onRate={onRate!} />}
             </div>
           )}
         </div>

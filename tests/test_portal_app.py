@@ -1488,6 +1488,14 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}/branch", "POST"): _CHAT,
     (f"{_P}/chat/sessions/{{session_id}}/fork", "POST"): _CHAT,
+    (
+        f"{_P}/chat/sessions/{{session_id}}/messages/{{message_id}}/feedback",
+        "PUT",
+    ): _CHAT,
+    (
+        f"{_P}/chat/sessions/{{session_id}}/messages/{{message_id}}/feedback",
+        "DELETE",
+    ): _CHAT,
     # Production's account and org creation: user_access(...) (M2c section 4.7)
     ("/api/account", "GET"): "user.self",
     ("/api/account", "PATCH"): "user.self",

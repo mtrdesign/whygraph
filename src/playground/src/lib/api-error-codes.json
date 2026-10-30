@@ -48,6 +48,7 @@
   "duplicate_grant",
   "effort_unsupported",
   "email_taken",
+  "feedback_target_invalid",
   "forbidden",
   "generation_disabled",
   "generation_limited",

@@ -40,11 +40,12 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from typing import Literal
 from pathlib import Path
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlmodel import col, delete, func, select
 
 from whygraph.chat.harness import (
@@ -167,6 +168,20 @@ class ForkBody(BaseModel):
     message_id: int
 
 
+RATING_REASONS = ("wrong", "incomplete", "not_grounded", "too_slow", "other")
+"""Why an answer was rated down (the ``reason`` values of a ``-1`` rating)."""
+
+
+class FeedbackBody(BaseModel):
+    """Body for ``PUT .../messages/{message_id}/feedback``."""
+
+    rating: Literal[1, -1]
+    reason: (
+        Literal["wrong", "incomplete", "not_grounded", "too_slow", "other"] | None
+    ) = None
+    comment: str | None = Field(default=None, max_length=500)
+
+
 def _check_effort(effort: str | None) -> None:
     """400 ``bad_effort`` unless ``effort`` is unset or one of the levels."""
     if effort is not None and effort not in EFFORT_LEVELS:
@@ -244,6 +259,10 @@ def _message_dict(row: ChatMessageRow) -> dict:
         "mode": row.mode,
         "reasoning": row.reasoning,
         "parent_id": row.parent_id,
+        "rating": row.rating,
+        "rating_reason": row.rating_reason,
+        "rating_comment": row.rating_comment,
+        "rated_at": row.rated_at,
         "created_at": row.created_at,
     }
 
@@ -1989,6 +2008,101 @@ def fork_session(session_id: int, body: ForkBody, request: Request) -> dict:
             return _session_dict(branch, message_count=len(copied))
     finally:
         _release(key, holder)
+
+
+def _rating_target(session_id: int, message_id: int) -> ChatMessageRow:
+    """Return the turn-ending assistant row ``message_id``, or 422.
+
+    A row qualifies when it is an assistant row of the session whose
+    ``tool_calls`` is ``'[]'`` or whose ``error`` is set, and no assistant
+    or tool row has it as ``parent_id`` (a continued truncated row and a
+    row stopped mid-tools have such children). ``finish_reason`` cannot mark
+    the end of a turn: every round row stores its own.
+    """
+    invalid = ServeError(
+        422,
+        "only the final reply of a turn can be rated",
+        code="feedback_target_invalid",
+    )
+    with get_session() as session:
+        row = session.get(ChatMessageRow, message_id)
+        if (
+            row is None
+            or row.session_id != session_id
+            or row.role != "assistant"
+            or (row.tool_calls != "[]" and not row.error)
+        ):
+            raise invalid
+        child = session.exec(
+            select(ChatMessageRow.id)
+            .where(ChatMessageRow.parent_id == message_id)
+            .where(col(ChatMessageRow.role).in_(("assistant", "tool")))
+            .limit(1)
+        ).first()
+        if child is not None:
+            raise invalid
+        session.expunge(row)
+    return row
+
+
+@router.put("/sessions/{session_id}/messages/{message_id}/feedback")
+def rate_message(
+    session_id: int, message_id: int, body: FeedbackBody, request: Request
+) -> dict:
+    """Rate the final reply of a turn (thumbs up or down, with a reason).
+
+    Takes no turn lease and needs no budget or provider key: a rating is
+    allowed while another turn streams. Rating is not activity, so the
+    session's ``updated_at`` does not move.
+
+    Returns
+    -------
+    dict
+        The stored ``rating``, ``rating_reason``, ``rating_comment`` and
+        ``rated_at``.
+
+    Raises
+    ------
+    ServeError
+        404 ``not_found``; 422 ``feedback_target_invalid`` for a row that is
+        not a turn-ending assistant row, or a reason / comment with ``1``.
+    """
+    _preflight(request, session_id, message_id, turn=False)
+    _rating_target(session_id, message_id)
+    if body.rating == 1 and (body.reason is not None or body.comment is not None):
+        raise ServeError(
+            422,
+            "a reason or comment goes only with a thumbs-down",
+            code="feedback_target_invalid",
+        )
+    with get_session() as session:
+        row = session.get(ChatMessageRow, message_id)
+        row.rating = body.rating
+        row.rating_reason = body.reason
+        row.rating_comment = body.comment
+        row.rated_at = _now_iso()
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return {
+            "rating": row.rating,
+            "rating_reason": row.rating_reason,
+            "rating_comment": row.rating_comment,
+            "rated_at": row.rated_at,
+        }
+
+
+@router.delete("/sessions/{session_id}/messages/{message_id}/feedback", status_code=204)
+def clear_rating(session_id: int, message_id: int, request: Request) -> Response:
+    """Clear the rating of a turn-ending assistant row (idempotent)."""
+    _preflight(request, session_id, message_id, turn=False)
+    _rating_target(session_id, message_id)
+    with get_session() as session:
+        row = session.get(ChatMessageRow, message_id)
+        row.rating = row.rating_reason = row.rating_comment = row.rated_at = None
+        session.add(row)
+        session.commit()
+    return Response(status_code=204)
 
 
 __all__ = ["router", "stop_all_turns"]

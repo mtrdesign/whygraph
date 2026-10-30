@@ -214,6 +214,25 @@ def test_pr_resource_includes_full_blobs(
     assert result["closing_issues"] == []
 
 
+def test_pr_resource_caps_comments(whygraph_db_initialized: Path) -> None:
+    """80 comments come back as the first 50, long bodies clipped, with ``omitted``."""
+    comments = [{"author": "a", "body": f"c{i}"} for i in range(80)]
+    comments[0]["body"] = "x" * 4100
+    with get_session() as session:
+        session.add(_db_pr(number=43, comments=json.dumps(comments)))
+
+    pr = _pr_resource(43)["pull_request"]
+    assert [c["body"] for c in pr["comments"][1:]] == [f"c{i}" for i in range(1, 50)]
+    assert pr["comments"][0]["body"] == "x" * 4000 + "..."
+    assert pr["omitted"] == {"comments": 30, "comment_chars": 100}
+
+
+def test_pr_resource_no_omitted_when_small(whygraph_db_initialized: Path) -> None:
+    with get_session() as session:
+        session.add(_db_pr(number=44, comments=json.dumps([{"body": "ok"}])))
+    assert "omitted" not in _pr_resource(44)["pull_request"]
+
+
 def test_pr_resource_closing_issues(whygraph_db_initialized: Path) -> None:
     with get_session() as session:
         session.add(_db_pr(number=11))

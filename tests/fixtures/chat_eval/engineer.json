@@ -129,10 +129,8 @@
         "Which other files did that same commit change?"
       ],
       "expect": {
-        "tools_any": [
-          "get_commit",
-          "get_evidence",
-          "get_rationale"
+        "cites": [
+          "(?s)[\\w/-]+\\.(py|ts|tsx|md|json|toml|yml)\\b.*[\\w/-]+\\.(py|ts|tsx|md|json|toml|yml)\\b"
         ],
         "max_rounds": 4
       }

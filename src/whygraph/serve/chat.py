@@ -750,7 +750,20 @@ PERSISTED_REPLAY_KEYS = frozenset({"reasoning_content"})
 DeepSeek's ``reasoning_content`` must be passed back on later turns, so it
 is stored. Anthropic content blocks never are: the per-turn system prompt
 re-render would invalidate their signatures. OpenRouter's
-``reasoning_details`` are echoed within a turn only."""
+``reasoning_details`` are echoed within a turn only.
+
+Closed by the documentation (plan 39 D8, read 2026-10-30), with no live
+check: the preserved-thinking docs
+(https://platform.claude.com/docs/en/build-with-claude/preserved-thinking,
+"What counts as an edit" and the prefix-check table) say that changing the
+top-level ``system`` string or blocks, clearing or shortening an earlier
+``tool_result``, and editing or deleting earlier messages each invalidate
+every later thinking block. All three happen here: the per-turn overview
+block lives in ``system`` and changes after a scan, ``build_window`` elision
+shortens earlier tool results, and ``_sanitize_history`` drops unanswered
+calls. Accounts created on or after 2026-08-31 get a 400 for an invalid
+block and older accounts get no error, so a probe would answer by account,
+not by API. Replaying Anthropic blocks across turns therefore stays off."""
 
 
 def _persisted_replay(replay) -> str | None:

@@ -281,8 +281,14 @@ for people who see usage), which kinds of call they were ("Evidence lookups", "R
 machine. With no call in 30 days the section shows the setup card instead (**Connect local WhyGraph** on a platform, **Connect your agent** locally); see
 [Agent activity](agents.md#agent-activity).
 
-A **Chat tool calls** list shows how often the Chat assistant used each tool: counted by tool name, per
-project, with no member, never arguments. It is not part of the agent totals.
+Each kind of call shows its calls, its tool-error rate and its mean time per call. A `v1:` kind
+(a connected machine's data call) shows a dash for both, because those calls are not timed. The mean
+covers timed calls only, so days from before the upgrade do not pull it down. A red "internal errors in
+30 days" line appears when any call ended in an unexpected exception; a tool-reported error stays
+neutral. Counts only: per project, day and call name, how many calls, how many ended in a tool error or an internal error, and their total duration - never an argument, a result or an error message.
+
+A **Chat tool calls** list shows how often the Chat assistant used each tool, with the same cells:
+counted by tool name, per project, with no member. It is not part of the agent totals.
 
 ## After setup
 

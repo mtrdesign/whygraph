@@ -317,10 +317,6 @@ _SPECS: tuple[ToolSpec, ...] = (
                 },
             },
         },
-        examples=(
-            {"query": "session refresh", "since_days": 90},
-            {"path": "src/whygraph/chat", "query": "budget", "limit": 10},
-        ),
     ),
     ToolSpec(
         name="get_commit",
@@ -499,10 +495,6 @@ _SPECS: tuple[ToolSpec, ...] = (
                 },
             },
         },
-        examples=(
-            {"path": "src/whygraph/chat"},
-            {"area": "chat", "since_days": 180, "limit": 5},
-        ),
     ),
     ToolSpec(
         name="compare_refs",
@@ -548,11 +540,6 @@ _SPECS: tuple[ToolSpec, ...] = (
             },
             "required": ["from_ref"],
         },
-        examples=(
-            {"from_ref": "v1.3.0", "to_ref": "v1.4.0"},
-            {"from_ref": "a1b2c3d", "to_ref": "e4f5a6b"},
-            {"from_ref": "2026-09-01"},
-        ),
     ),
     ToolSpec(
         name="get_milestones",
@@ -608,19 +595,6 @@ _SPECS: tuple[ToolSpec, ...] = (
             },
             "required": ["sql"],
         },
-        examples=(
-            {
-                "sql": (
-                    "SELECT COALESCE(a.primary_login, a.primary_name, "
-                    "a.primary_email) AS developer, COUNT(*) AS commits "
-                    'FROM "commit" c JOIN author a ON instr(a.emails, \'"\' '
-                    "|| c.author_email || '\"') > 0 "
-                    "WHERE c.on_default_branch = 1 "
-                    "AND c.authored_at >= date('now', '-90 days') "
-                    "GROUP BY a.id ORDER BY commits DESC"
-                )
-            },
-        ),
     ),
     ToolSpec(
         name="run_graph_stats",
@@ -702,23 +676,6 @@ _SPECS: tuple[ToolSpec, ...] = (
             },
             "required": ["chart_ref", "kind", "title", "x", "y"],
         },
-        examples=(
-            {
-                "chart_ref": "cr_1a2b3c4d",
-                "kind": "line",
-                "title": "Commits per month",
-                "x": "month",
-                "y": "commits",
-            },
-            {
-                "chart_ref": "cr_5e6f7a8b",
-                "kind": "bar_stacked",
-                "title": "Changes per month by type",
-                "x": "month",
-                "y": "changes",
-                "series": "change_type",
-            },
-        ),
     ),
     ToolSpec(
         name="read_file",

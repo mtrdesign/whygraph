@@ -157,33 +157,6 @@ def test_twenty_one_tools_with_unique_names_and_object_schemas() -> None:
         assert spec.description  # the model's only guidance
 
 
-def test_every_tool_example_validates_against_its_schema() -> None:
-    """An example that fails its ``input_schema`` is a 400 on every Anthropic turn."""
-    from jsonschema import Draft202012Validator
-
-    with_examples = {spec.name for spec in TOOL_SPECS if spec.examples}
-    assert with_examples == {
-        "compare_refs",
-        "find_changes",
-        "render_chart",
-        "get_area_owners",
-        "run_project_stats",
-    }
-    for spec in TOOL_SPECS:
-        Draft202012Validator.check_schema(spec.parameters)
-        assert len(spec.examples) <= 3
-        for example in spec.examples:
-            Draft202012Validator(spec.parameters).validate(dict(example))
-
-
-def test_the_stats_example_follows_the_identity_rule() -> None:
-    spec = next(s for s in TOOL_SPECS if s.name == "run_project_stats")
-    sql = spec.examples[0]["sql"]
-    assert "on_default_branch = 1" in sql
-    assert "instr(a.emails, '\"' || c.author_email || '\"') > 0" in sql
-    assert "json_each" not in sql and "LIKE" not in sql
-
-
 def test_symbol_tools_document_the_real_qualified_name_shapes() -> None:
     """Regression guard on a costly documentation bug.
 

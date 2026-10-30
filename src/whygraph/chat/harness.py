@@ -432,7 +432,6 @@ def _specs_tokens(specs: Sequence[ToolSpec]) -> int:
                         "name": spec.name,
                         "description": spec.description,
                         "parameters": spec.parameters,
-                        **({"examples": spec.examples} if spec.examples else {}),
                     }
                     for spec in specs
                 ]

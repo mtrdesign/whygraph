@@ -148,11 +148,6 @@ def _tool_payload(tools: tuple[ToolSpec, ...]) -> list[dict]:
             "name": spec.name,
             "description": spec.description,
             "input_schema": spec.parameters,
-            **(
-                {"input_examples": [dict(e) for e in spec.examples]}
-                if spec.examples
-                else {}
-            ),
         }
         for spec in tools
     ]

@@ -121,16 +121,11 @@ class ToolSpec:
     parameters : dict
         JSON Schema for the tool's arguments object. Passed verbatim as
         OpenAI's ``parameters`` / Anthropic's ``input_schema``.
-    examples : tuple of mapping, optional
-        Example argument objects (values only). Anthropic gets them as
-        ``input_examples``; OpenAI-compatible providers get them appended to the
-        description. Each must validate against ``parameters``.
     """
 
     name: str
     description: str
     parameters: dict
-    examples: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

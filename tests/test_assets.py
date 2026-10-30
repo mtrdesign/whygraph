@@ -34,6 +34,7 @@ def test_packaged_claude_assets_present() -> None:
         "skills/whygraph-plan/SKILL.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-review/SKILL.md",
+        "skills/whygraph-note/SKILL.md",
         "skills/rationale/SKILL.md",
         "skills/pre-edit/SKILL.md",
     )
@@ -60,6 +61,7 @@ def test_packaged_cursor_assets_present() -> None:
         "skills/rationale/SKILL.md",
         "skills/whygraph-plan/SKILL.md",
         "skills/whygraph-implement/SKILL.md",
+        "skills/whygraph-note/SKILL.md",
         "rules/whygraph-codegraph.mdc",
         "agents/planner.md",
         "agents/researcher.md",
@@ -117,6 +119,7 @@ def test_packaged_vscode_assets_present() -> None:
         "prompts/rationale.prompt.md",
         "prompts/whygraph-plan.prompt.md",
         "prompts/whygraph-implement.prompt.md",
+        "prompts/whygraph-note.prompt.md",
         "agents/planner.agent.md",
         "agents/researcher.agent.md",
         "agents/synthesizer.agent.md",
@@ -271,8 +274,8 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "agents" / "planner.md").is_file()
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    # 5 agents + 5 skills + CLAUDE.md (merge file, written fresh) = 11 files.
-    assert len(result.written) == 11
+    # 5 agents + 6 skills + CLAUDE.md (merge file, written fresh) = 12 files.
+    assert len(result.written) == 12
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -688,10 +691,10 @@ def test_harness_frontmatter_wiring() -> None:
     )
     assert "Write" not in _frontmatter(cc / "agents/planner.md")["disallowedTools"]
     assert _frontmatter(cc / "skills/whygraph-implement/SKILL.md")["allowed-tools"] == (
-        "Agent, Read"
+        "Agent, Read, mcp__whygraph__whygraph_propose_note"
     )
     assert _frontmatter(_ASSET_ROOT / "cursor/agents/planner.md")["readonly"] == "false"
-    for name in ("rationale", "whygraph-plan", "whygraph-implement"):
+    for name in ("rationale", "whygraph-plan", "whygraph-implement", "whygraph-note"):
         fm = _frontmatter(_ASSET_ROOT / f"cursor/skills/{name}/SKILL.md")
         assert fm["name"] == name and fm["disable-model-invocation"] == "true"
     assert not (_ASSET_ROOT / "cursor/commands").exists()
@@ -848,6 +851,7 @@ def test_pipeline_streamlining_texts_in_every_tree() -> None:
         assert "(unavailable:" in "\n".join(_agent_body(tree, "synthesizer")), tree
         implementor = "\n".join(_agent_body(tree, "implementor"))
         assert "FIX_ATTEMPTS" in implementor and "git add -A" not in implementor, tree
+        assert "Decisions worth a note" in implementor, tree
     for rel in (
         "claude-code/skills/pre-edit/SKILL.md",
         "cursor/rules/whygraph-pre-edit.mdc",

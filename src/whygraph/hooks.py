@@ -34,6 +34,13 @@ portal (Initialize, a ``[scan].hooks`` change, project removal) - see
 :func:`sync_hooks`. Managed content lives between sentinel comments, so a
 pre-existing foreign hook is appended to, not overwritten.
 
+A second helper, ``<git-common-dir>/whygraph/whygraph-agent-hook``
+(:data:`AGENT_HOOK_HELPER`, :func:`sync_agent_hook_helper`), serves Claude
+Code's ``SessionStart`` / ``PostToolUse`` hooks: it forwards the hook input
+to the portal and prints only an answer of the allowed shape. Both
+helpers share the ``portal.env`` checks (:data:`_PORTAL_ENV_PRELUDE`); the
+agent helper fails silently and never writes a file.
+
 This is a top-level module (like ``agents.py`` and ``assets.py``) rather
 than part of the portal package: it is Click- and FastAPI-free.
 """
@@ -65,7 +72,37 @@ four cover every git event that can change the worktree or add commits:
 ``post-rewrite`` (rebase), ``post-checkout`` (branch switch).
 """
 
-_HELPER_SCRIPT = """\
+AGENT_HOOK_GIT_RELPATH = Path("whygraph") / "whygraph-agent-hook"
+"""Location of the agent hook helper, relative to ``git rev-parse --git-common-dir``."""
+
+_PORTAL_ENV_PRELUDE = """\
+[ -L "$wg" ] && exit 0
+env_file="$wg/portal.env"
+[ -L "$env_file" ] && fail ".whygraph/portal.env is a symbolic link; ignored"
+[ -f "$env_file" ] || fail "no .whygraph/portal.env; initialize this repo in the WhyGraph portal"
+if git -C "$root" ls-files --error-unmatch .whygraph/portal.env >/dev/null 2>&1; then
+  fail ".whygraph/portal.env is tracked by git; ignored"
+fi
+# Parsed, never sourced: only these two values are read, then validated.
+slug=$(sed -n 's/^slug=//p' "$env_file" | head -n 1)
+port=$(sed -n 's/^port=//p' "$env_file" | head -n 1)
+case "$slug" in
+  ""|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) fail "invalid slug in .whygraph/portal.env" ;;
+esac
+case "$port" in
+  ""|*[!0123456789]*) fail "invalid port in .whygraph/portal.env" ;;
+esac
+"""
+"""The ``portal.env`` checks both helpers share (never copied into either).
+
+It reads ``$root`` and ``$wg`` and calls ``fail <message>``, which each
+script defines before it: ``whygraph-scan`` logs the message to
+``hooks.log`` and exits 0, ``whygraph-agent-hook`` exits 0 silently. On
+success ``$slug`` and ``$port`` hold validated values.
+"""
+
+_HELPER_SCRIPT = (
+    """\
 #!/bin/sh
 # whygraph auto-rescan helper (managed by the WhyGraph portal).
 # After a commit/merge/rebase/checkout, asks the running portal to queue an
@@ -91,22 +128,10 @@ note() {
   fi
   exit 0
 }
-[ -L "$wg" ] && exit 0
-env_file="$wg/portal.env"
-[ -L "$env_file" ] && note ".whygraph/portal.env is a symbolic link; ignored"
-[ -f "$env_file" ] || note "no .whygraph/portal.env; initialize this repo in the WhyGraph portal"
-if git -C "$root" ls-files --error-unmatch .whygraph/portal.env >/dev/null 2>&1; then
-  note ".whygraph/portal.env is tracked by git; ignored"
-fi
-# Parsed, never sourced: only these two values are read, then validated.
-slug=$(sed -n 's/^slug=//p' "$env_file" | head -n 1)
-port=$(sed -n 's/^port=//p' "$env_file" | head -n 1)
-case "$slug" in
-  ""|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) note "invalid slug in .whygraph/portal.env" ;;
-esac
-case "$port" in
-  ""|*[!0123456789]*) note "invalid port in .whygraph/portal.env" ;;
-esac
+fail() { note "$1"; }
+"""
+    + _PORTAL_ENV_PRELUDE
+    + """\
 [ -L "$wg/scan.pending" ] || : > "$wg/scan.pending"
 (
   command -v curl >/dev/null 2>&1 || note "curl not found; scan not requested"
@@ -117,6 +142,62 @@ esac
     || note "portal not reachable on port $port; it scans this commit when it starts"
 ) </dev/null >/dev/null 2>&1 &
 exit 0
+"""
+)
+
+AGENT_HOOK_HELPER = (
+    """\
+#!/bin/sh
+# whygraph agent hook helper (managed by the WhyGraph portal).
+# Claude Code runs it through .claude/settings.json at session start
+# (`session-start`) and after a Read, Edit or Write (`post-tool`). It forwards
+# the hook input on stdin to the running portal and prints only an answer of
+# the allowed shape: `{}` or one hookSpecificOutput.additionalContext for this
+# event. Anything else - no CLAUDE_PROJECT_DIR, a wrong argument,
+# .whygraph/portal.env missing / tracked / invalid, no curl, portal down, a
+# timeout, an answer of another shape - prints nothing and exits 0. It never
+# writes a file. Re-created whenever the portal initializes this repo; edits
+# are lost.
+exec 2>/dev/null
+case "$#:${1:-}" in
+  1:session-start|1:post-tool) event=$1 ;;
+  *) exit 0 ;;
+esac
+# The project root where the session started; never the current directory,
+# which follows `cd`.
+[ -n "${CLAUDE_PROJECT_DIR:-}" ] || exit 0
+root=$CLAUDE_PROJECT_DIR
+wg="$root/.whygraph"
+fail() { exit 0; }
+"""
+    + _PORTAL_ENV_PRELUDE
+    + """\
+command -v curl >/dev/null 2>&1 || exit 0
+# --noproxy: a loopback request must never go through an HTTP(S)_PROXY.
+out=$(curl -fsS -m 2 --noproxy '*' -X POST -H 'X-WhyGraph-Client: 1' \\
+  -H 'Content-Type: application/json' --data-binary @- \\
+  "http://127.0.0.1:$port/api/projects/$slug/agent-hooks/$event" 2>/dev/null) || exit 0
+case "$event" in session-start) en=SessionStart ;; *) en=PostToolUse ;; esac
+pre='{"hookSpecificOutput":{"hookEventName":"'$en'","additionalContext":"'
+suf='"}}'
+[ "$out" = '{}' ] && { printf '{}'; exit 0; }
+# Exactly the fixed prefix (which pins the event) and suffix, and no `"` in
+# between: a JSON string cannot close without one, so no other key can follow.
+mid=${out#"$pre"}; mid=${mid%"$suf"}
+if [ "$pre$mid$suf" = "$out" ]; then
+  case "$mid" in *'"'*) ;; *) printf '%s' "$out" ;; esac
+fi
+exit 0
+"""
+)
+"""The Claude Code hook helper, written to ``<git-common-dir>/whygraph/whygraph-agent-hook``.
+
+It shares :data:`_PORTAL_ENV_PRELUDE` with ``whygraph-scan`` under a
+silent ``fail``, so it never writes ``hooks.log`` or ``scan.pending``.
+It prints an answer only when it is exactly ``{}`` or exactly the
+two-key ``hookSpecificOutput`` envelope for its own event with no
+literal ``"`` inside ``additionalContext`` (the portal writes every
+``"`` there as ``\\u0022``).
 """
 
 _HOOK_BLOCK = (
@@ -260,13 +341,7 @@ def sync_hooks(project_root: Path, names: Sequence[str]) -> HooksResult:
         _remove_legacy_helper(project_root)
         if wanted:
             hooks_dir.mkdir(parents=True, exist_ok=True)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Written beside, then renamed over: never through a symlink.
-            tmp = target.with_name(target.name + ".tmp")
-            tmp.unlink(missing_ok=True)
-            tmp.write_text(_HELPER_SCRIPT)
-            tmp.chmod(0o755)
-            tmp.replace(target)
+            _write_helper(target, _HELPER_SCRIPT)
             helper = target
 
         actions: dict[str, str] = {}
@@ -311,6 +386,102 @@ def helper_path(project_root: Path) -> Path:
         If ``git`` reports the directory is not a work tree.
     """
     return _git_path(project_root, "--git-common-dir") / HELPER_GIT_RELPATH
+
+
+def agent_hook_helper_path(project_root: Path) -> Path:
+    """Return where the Claude Code hook helper lives for this repository.
+
+    ``<git-common-dir>/whygraph/whygraph-agent-hook``, beside
+    ``whygraph-scan`` and for the same reason: checkout and merge never
+    write into the git directory. The committed ``.claude/settings.json``
+    entries resolve it the same way, from ``$CLAUDE_PROJECT_DIR``.
+
+    Parameters
+    ----------
+    project_root : Path
+        The repository working tree.
+
+    Returns
+    -------
+    Path
+        Absolute path of the helper (it may not exist).
+
+    Raises
+    ------
+    HooksError
+        If ``git`` reports the directory is not a work tree.
+    """
+    return _git_path(project_root, "--git-common-dir") / AGENT_HOOK_GIT_RELPATH
+
+
+def sync_agent_hook_helper(project_root: Path) -> Path:
+    """Write (or refresh) the Claude Code hook helper :data:`AGENT_HOOK_HELPER`.
+
+    Written beside its destination and renamed over it, so an existing
+    symbolic link there is replaced, never written through. Independent of
+    ``[scan].hooks``: the portal writes it when Claude Code is configured
+    with hooks and deletes it with :func:`remove_agent_hook_helper`.
+
+    Parameters
+    ----------
+    project_root : Path
+        The repository working tree.
+
+    Returns
+    -------
+    Path
+        Where the helper was written.
+
+    Raises
+    ------
+    HooksError
+        If the directory is not a git work tree or the helper cannot be
+        written.
+    """
+    target = agent_hook_helper_path(project_root)
+    try:
+        _write_helper(target, AGENT_HOOK_HELPER)
+    except OSError as exc:
+        raise HooksError(f"cannot write the agent hook helper {target}: {exc}") from exc
+    return target
+
+
+def remove_agent_hook_helper(project_root: Path) -> bool:
+    """Delete the Claude Code hook helper, and its directory when that empties.
+
+    Call it **before** ``sync_hooks(root, ())`` when both go: that call
+    removes the directory only when nothing else is left in it.
+
+    Parameters
+    ----------
+    project_root : Path
+        The repository working tree.
+
+    Returns
+    -------
+    bool
+        ``True`` when a helper (or a link in its place) was deleted.
+
+    Raises
+    ------
+    HooksError
+        If the directory is not a git work tree or the helper cannot be
+        deleted.
+    """
+    target = agent_hook_helper_path(project_root)
+    try:
+        existed = target.is_symlink() or target.exists()
+        target.unlink(missing_ok=True)
+        target.with_name(target.name + ".tmp").unlink(missing_ok=True)
+    except OSError as exc:
+        raise HooksError(
+            f"cannot delete the agent hook helper {target}: {exc}"
+        ) from exc
+    try:
+        target.parent.rmdir()
+    except OSError:
+        pass  # whygraph-scan is still there, or already gone
+    return existed
 
 
 def managed_hook_names(project_root: Path) -> tuple[str, ...]:
@@ -378,6 +549,16 @@ def _git_path(project_root: Path, *args: str) -> Path:
     return p if p.is_absolute() else (project_root / p)
 
 
+def _write_helper(target: Path, text: str) -> None:
+    """Write an executable helper beside ``target``, then rename it over: never through a symlink."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    tmp.write_text(text)
+    tmp.chmod(0o755)
+    tmp.replace(target)
+
+
 def _remove_legacy_helper(project_root: Path) -> None:
     """Delete the work-tree helper of earlier builds, never through a symlinked dir."""
     wg = project_root / ".whygraph"
@@ -433,6 +614,8 @@ def _uninstall_hook(hook_path: Path) -> bool:
 
 
 __all__ = [
+    "AGENT_HOOK_GIT_RELPATH",
+    "AGENT_HOOK_HELPER",
     "HELPER_GIT_RELPATH",
     "HOOK_NAMES",
     "LEGACY_HELPER_RELPATH",
@@ -440,8 +623,11 @@ __all__ = [
     "SENTINEL_END",
     "HooksError",
     "HooksResult",
+    "agent_hook_helper_path",
     "helper_path",
     "managed_hook_names",
+    "remove_agent_hook_helper",
     "resolve_hook_names",
+    "sync_agent_hook_helper",
     "sync_hooks",
 ]

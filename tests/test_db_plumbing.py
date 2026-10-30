@@ -30,6 +30,7 @@ SQLMODEL_TABLES = {
     "milestone",
     "pr_issue_link",
     "pr_origin_skip",
+    "project_note",
     "pull_request",
     "rationale_cache",
     "tag",
@@ -413,8 +414,8 @@ def test_chat_message_feedback_and_is_error_columns_round_trip(
     from alembic.script import ScriptDirectory
 
     db_path = _isolate_config_and_engine
-    head = ScriptDirectory.from_config(alembic_config()).get_current_head()
-    assert head == "6f1b3d8a2c94"
+    script = ScriptDirectory.from_config(alembic_config())
+    assert script.get_revision("6f1b3d8a2c94").nextrev
 
     columns = {"is_error", "rating", "rating_reason", "rating_comment", "rated_at"}
     command.upgrade(alembic_config(), "5e8a2c9d1f47")
@@ -443,6 +444,62 @@ def test_chat_message_feedback_and_is_error_columns_round_trip(
     conn = sqlite3.connect(db_path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM chat_message").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_project_note_table_round_trip(_isolate_config_and_engine: Path) -> None:
+    """``project_note`` lands at head and downgrades cleanly, keeping other data."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    script = ScriptDirectory.from_config(alembic_config())
+    assert len(script.get_heads()) == 1
+    assert script.get_revision(script.get_current_head()).down_revision == (
+        "6f1b3d8a2c94"
+    )
+
+    command.upgrade(alembic_config(), "6f1b3d8a2c94")
+    assert "project_note" not in _table_names(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO chat_session (title, provider, model, created_at, "
+            "updated_at) VALUES ('t', 'deepseek', 'm', 'x', 'x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert "project_note" in _table_names(db_path)
+    insert = (
+        "INSERT INTO project_note (kind, body, status, anchor_kind, anchor_path, "
+        "source, proposed_by, proposed_at, supersedes_id) "
+        "VALUES ('decision', ?, 'confirmed', 'file', 'a.py', 'human', 'u', 'x', ?)"
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(insert, ("one", None))
+        conn.execute(insert, ("two", 1))
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM project_note").fetchone()[0] == 2
+        indexes = {r[1] for r in conn.execute("PRAGMA index_list(project_note)")}
+    finally:
+        conn.close()
+    assert {
+        "ix_project_note_status",
+        "ix_project_note_anchor_path",
+        "ix_project_note_qualified_name",
+    } <= indexes
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "6f1b3d8a2c94")
+    assert "project_note" not in _table_names(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 1
     finally:
         conn.close()
 

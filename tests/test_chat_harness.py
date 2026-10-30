@@ -123,6 +123,10 @@ class StubRegistry:
         self.dispatched.append((name, arguments))
         return self._results.get(name, json.dumps({"ok": name}))
 
+    def dispatch_outcome(self, name: str, arguments: dict) -> tuple[str, str]:
+        result = self.dispatch(name, arguments)
+        return result, "error" if harness._is_error_result(result) else "ok"
+
 
 class _SpecRegistry(StubRegistry):
     """A stub registry that offers one tool, for asserting what a request carries."""
@@ -326,6 +330,57 @@ def test_chat_tool_count_parallel_round_counts_each_call() -> None:
         [TextDelta(text="ok"), TurnDone("stop")],
     ]
     assert _counted(rounds) == ["search_symbols", "read_file"]
+
+
+class _OutcomeRegistry(_NamedRegistry):
+    """A registry whose ``dispatch_outcome`` reports a fixed outcome per tool."""
+
+    OUTCOMES = {
+        "search_symbols": "ok",
+        "get_evidence": "error",
+        "read_file": "internal",
+    }
+
+    def dispatch_outcome(self, name: str, arguments: dict):
+        return super().dispatch(name, arguments), self.OUTCOMES.get(name, "error")
+
+
+def _outcomes(calls: list) -> list[tuple]:
+    sink = _CountSink()
+    rounds = [
+        [*(ToolCallMade(call=c) for c in calls), TurnDone("tool_calls")],
+        [TextDelta(text="ok"), TurnDone("stop")],
+    ]
+    with use_usage_sink(sink):
+        _run(ScriptedClient(rounds), _OutcomeRegistry())
+    return [
+        (
+            kind,
+            kw["outcome"],
+            isinstance(kw["duration_ms"], int) and kw["duration_ms"] >= 0,
+        )
+        for kind, kw in zip(sink.counted, sink.extras)
+    ]
+
+
+def test_tool_count_outcome_and_duration_serial() -> None:
+    calls = [_call("search_symbols", "c1"), _call("get_evidence", "c2")]
+    assert _outcomes(calls) == [
+        ("search_symbols", "ok", True),
+        ("get_evidence", "error", True),
+    ]
+
+
+def test_tool_count_outcome_and_duration_parallel() -> None:
+    calls = [_call("search_symbols", "c1"), _call("read_file", "c2")]
+    assert _outcomes(calls) == [
+        ("search_symbols", "ok", True),
+        ("read_file", "internal", True),
+    ]
+
+
+def test_tool_count_outcome_unknown_name_is_not_counted() -> None:
+    assert _outcomes([_call("made_up_tool", "c1")]) == []
 
 
 def test_chat_tool_count_skips_unknown_names_and_the_overview() -> None:

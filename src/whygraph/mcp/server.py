@@ -24,15 +24,18 @@ from __future__ import annotations
 
 import functools
 import inspect
+import time
 from typing import Any, Callable
 
 import anyio.to_thread
 from anyio import CapacityLimiter
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
-from whygraph.core.usage import count_agent_call
+from whygraph.core.usage import CallOutcome, count_agent_call
 
 from .descriptions import WHYGRAPH_INSTRUCTIONS
+from .errors import WhyGraphError
 from . import area_history, evidence, prompts, rationale, resources
 
 MCP_THREAD_TOKENS = 8
@@ -43,13 +46,62 @@ MCP_THREAD_TOKENS = 8
 _MCP_LIMITER = CapacityLimiter(MCP_THREAD_TOKENS)
 
 
+class _Outcome:
+    """What a counted body did: filled in by :func:`_timed`, read in ``finally``."""
+
+    __slots__ = ("outcome", "duration_ms")
+
+    def __init__(self) -> None:
+        self.outcome: CallOutcome = "ok"
+        self.duration_ms: int | None = None
+
+
+def _failure(exc: Exception) -> CallOutcome:
+    """``error`` for a failure the tool reports, ``internal`` for any other."""
+    return "error" if isinstance(exc, (ToolError, WhyGraphError)) else "internal"
+
+
+def _reports_error(result: object) -> bool:
+    """Whether a body returned an error payload (a dict with an ``error`` key)."""
+    return isinstance(result, dict) and "error" in result
+
+
+def _timed(fn: Callable[..., Any], box: _Outcome) -> Callable[..., Any]:
+    """Wrap sync ``fn`` to time itself and classify its ending into ``box``.
+
+    ``ToolError`` and ``WhyGraphError`` are the tool-reported failures
+    (``error``), any other ``Exception`` escaped (``internal``), and a body
+    that returns a dict with an ``error`` key (the resources do) is ``error``.
+    The exception is re-raised unchanged.
+    """
+
+    @functools.wraps(fn)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        started = time.monotonic()
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            box.outcome = _failure(exc)
+            raise
+        else:
+            if _reports_error(result):
+                box.outcome = "error"
+            return result
+        finally:
+            box.duration_ms = round((time.monotonic() - started) * 1000)
+
+    return run
+
+
 def offload(fn: Callable[..., Any], *, kind: str) -> Callable[..., Any]:
     """Wrap a sync callable as an ``async def`` that runs it on a worker thread.
 
-    Every call through the wrapper is first counted as agent activity
-    (:func:`~whygraph.core.usage.count_agent_call`): the portal's MCP
-    dispatcher binds a usage sink around the session manager, so the count
-    lands on the calling project and member (M2f-3).
+    Every call through the wrapper is counted as agent activity
+    (:func:`~whygraph.core.usage.count_agent_call`) once the body ends, with
+    its outcome and the body's own duration (the wait for a worker thread is
+    not included): the portal's MCP dispatcher binds a usage sink around the
+    session manager, so the count lands on the calling project and member
+    (M2f-3). A cancelled call is counted ``ok`` with no duration.
 
     Parameters
     ----------
@@ -74,18 +126,40 @@ def offload(fn: Callable[..., Any], *, kind: str) -> Callable[..., Any]:
 
         @functools.wraps(fn)
         async def counted(*args: Any, **kwargs: Any) -> Any:
-            count_agent_call(kind)
-            return await fn(*args, **kwargs)
+            box = _Outcome()
+            started = time.monotonic()
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception as exc:
+                box.outcome = _failure(exc)
+                box.duration_ms = round((time.monotonic() - started) * 1000)
+                raise
+            else:
+                if _reports_error(result):
+                    box.outcome = "error"
+                box.duration_ms = round((time.monotonic() - started) * 1000)
+                return result
+            finally:
+                count_agent_call(kind, outcome=box.outcome, duration_ms=box.duration_ms)
 
         return counted
 
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        count_agent_call(kind)
-        # run_sync takes positional args only, hence the partial.
-        return await anyio.to_thread.run_sync(
-            functools.partial(fn, *args, **kwargs), limiter=_MCP_LIMITER
-        )
+        box = _Outcome()
+        try:
+            # run_sync takes positional args only, hence the partial.
+            return await anyio.to_thread.run_sync(
+                functools.partial(_timed(fn, box), *args, **kwargs),
+                limiter=_MCP_LIMITER,
+            )
+        except BaseException as exc:
+            if not isinstance(exc, Exception):
+                # A cancellation: counted as it always was, untimed.
+                box.outcome, box.duration_ms = "ok", None
+            raise
+        finally:
+            count_agent_call(kind, outcome=box.outcome, duration_ms=box.duration_ms)
 
     return wrapper
 

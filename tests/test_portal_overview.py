@@ -57,6 +57,8 @@ _AGENT_KEYS = {
     "total_calls",
     "llm_calls",
     "llm_cost_usd",
+    "errors",
+    "internal_errors",
     "by_kind",
     "people",
     "connections",
@@ -150,7 +152,16 @@ def _usage_event(w: Any, *, source: str, cost: str, days_ago: float = 0) -> None
         )
 
 
-def _calls(w: Any, day: str, kind: str, calls: int, source: str = "mcp") -> None:
+def _calls(
+    w: Any,
+    day: str,
+    kind: str,
+    calls: int,
+    source: str = "mcp",
+    errors: int = 0,
+    internal_errors: int = 0,
+    duration_ms: int = 0,
+) -> None:
     with portal_db.get_session() as session:
         session.add(
             AgentCallDay(
@@ -161,6 +172,9 @@ def _calls(w: Any, day: str, kind: str, calls: int, source: str = "mcp") -> None
                 user_id=w.user_id,
                 kind=kind,
                 calls=calls,
+                errors=errors,
+                internal_errors=internal_errors,
+                duration_ms=duration_ms,
             )
         )
 
@@ -350,16 +364,80 @@ def test_usage_and_agent_activity(local: SimpleNamespace) -> None:
     assert by_day[TODAY.isoformat()] == {"day": TODAY.isoformat(), "mcp": 1, "agent": 0}
     assert sum(d["mcp"] + d["agent"] for d in agents["days"]) == 7
     assert agents["total_calls"] == 7
+    none = {"errors": 0, "internal_errors": 0, "mean_ms": None}
     assert agents["by_kind"] == [
-        {"kind": "whygraph_evidence_for", "calls": 5},
-        {"kind": "whygraph_commit", "calls": 2},
+        {"kind": "whygraph_evidence_for", "calls": 5, **none},
+        {"kind": "whygraph_commit", "calls": 2, **none},
     ]
+    assert (agents["errors"], agents["internal_errors"]) == (0, 0)
     assert agents["last_call_day"] == TODAY.isoformat()
     assert (agents["llm_calls"], agents["llm_cost_usd"]) == (1, 0.25)
     usage = body["usage"]
     assert usage["month"] == TODAY.strftime("%Y-%m")
     # This month's ledger, every source (the 40-day-old row is last month's).
     assert usage["by_task"] == [{"task": "analyze", "calls": 2, "cost_usd": 1.25}]
+
+
+def test_agent_rows_carry_errors_and_mean_latency(local: SimpleNamespace) -> None:
+    w = local
+    day = (TODAY - timedelta(days=1)).isoformat()
+    # An old row (no duration), a timed row, and a flushed-plus-pending mix.
+    _calls(w, (TODAY - timedelta(days=2)).isoformat(), "whygraph_commit", 10)
+    _calls(w, day, "whygraph_commit", 4, errors=1, internal_errors=1, duration_ms=400)
+    _calls(w, day, "v1:evidence", 3)
+    _calls(w, day, "find_changes", 2, source="chat", errors=2, duration_ms=50)
+    w.state.agent_calls.add(
+        org_id=w.org_id,
+        project_id=w.project_id,
+        source="mcp",
+        user_id=w.user_id,
+        connection_id=None,
+        kind="whygraph_commit",
+        outcome="error",
+        duration_ms=100,
+    )
+    agents = _overview(w.client)["agents"]
+    by_kind = {e["kind"]: e for e in agents["by_kind"]}
+    # 10 old + 4 flushed + 1 pending calls; the mean covers only timed rows.
+    assert by_kind["whygraph_commit"] == {
+        "kind": "whygraph_commit",
+        "calls": 15,
+        "errors": 2,
+        "internal_errors": 1,
+        "mean_ms": 100,  # (400 + 100) / (4 + 1)
+    }
+    assert by_kind["v1:evidence"] == {
+        "kind": "v1:evidence",
+        "calls": 3,
+        "errors": None,
+        "internal_errors": None,
+        "mean_ms": None,
+    }
+    assert (agents["errors"], agents["internal_errors"]) == (2, 1)
+    assert agents["chat_tools"]["by_kind"] == [
+        {
+            "kind": "find_changes",
+            "calls": 2,
+            "errors": 2,
+            "internal_errors": 0,
+            "mean_ms": 25,
+        }
+    ]
+    assert agents["chat_tools"]["errors"] == 2
+
+
+def test_block_error_totals_cover_kinds_beyond_the_top_eight(
+    local: SimpleNamespace,
+) -> None:
+    w = local
+    day = (TODAY - timedelta(days=1)).isoformat()
+    for n in range(9):
+        _calls(w, day, f"tool_{n}", 10 - n)
+    _calls(w, day, "rare_tool", 1, internal_errors=1)
+    agents = _overview(w.client)["agents"]
+    assert "rare_tool" not in {e["kind"] for e in agents["by_kind"]}
+    assert len(agents["by_kind"]) == 8
+    assert agents["internal_errors"] == 1
 
 
 def test_chat_tool_rows_appear_only_in_chat_tools(local: SimpleNamespace) -> None:
@@ -377,15 +455,18 @@ def test_chat_tool_rows_appear_only_in_chat_tools(local: SimpleNamespace) -> Non
         kind="find_changes",
     )
     agents = _overview(w.client)["agents"]
+    none = {"errors": 0, "internal_errors": 0, "mean_ms": None}
     assert agents["chat_tools"] == {
         "total_calls": 7,
+        "errors": 0,
+        "internal_errors": 0,
         "by_kind": [
-            {"kind": "find_changes", "calls": 5},
-            {"kind": "get_commit", "calls": 2},
+            {"kind": "find_changes", "calls": 5, **none},
+            {"kind": "get_commit", "calls": 2, **none},
         ],
     }
     assert agents["total_calls"] == 1
-    assert agents["by_kind"] == [{"kind": "whygraph_commit", "calls": 1}]
+    assert agents["by_kind"] == [{"kind": "whygraph_commit", "calls": 1, **none}]
     assert agents["last_call_day"] == day
     assert sum(d["mcp"] + d["agent"] for d in agents["days"]) == 1
     assert agents["people"] is None

@@ -50,7 +50,12 @@ from importlib import resources
 
 from whygraph.analyze.prompt import render as render_prompt
 from whygraph.core import get_config
-from whygraph.core.usage import count_agent_call, record_usage, usage_blocked
+from whygraph.core.usage import (
+    CallOutcome,
+    count_agent_call,
+    record_usage,
+    usage_blocked,
+)
 from whygraph.mcp.targets import repo_root
 from whygraph.services.llm.chat import (
     REFUSAL_REASONS,
@@ -551,12 +556,27 @@ _PARALLEL_POLL_SEC = 0.1
 """How often a wait on a parallel tool call checks for a Stop."""
 
 
+def _timed_dispatch(
+    registry: ToolRegistry, call: ToolCall
+) -> tuple[str, CallOutcome, int]:
+    """Run one tool call; return its result, outcome and duration in ms.
+
+    Runs where the call runs (the worker thread of a parallel round), so a
+    pooled call is timed on its own and never by the wait for its siblings.
+    """
+    started = time.monotonic()
+    result, outcome = registry.dispatch_outcome(call.name, call.arguments)
+    return result, outcome, round((time.monotonic() - started) * 1000)
+
+
 def _dispatch_parallel(
     registry: ToolRegistry,
     calls: Sequence[ToolCall],
     cancel: threading.Event | None,
-) -> Iterator[str]:
+) -> Iterator[tuple[str, CallOutcome, int]]:
     """Run ``calls`` concurrently; yield their results in submission order.
+
+    Each item is :func:`_timed_dispatch`'s ``(result, outcome, duration_ms)``.
 
     Each call runs in its own copy of the current context, so the bound
     project, strict mode and the usage sink reach it. A Stop while waiting
@@ -570,9 +590,9 @@ def _dispatch_parallel(
         futures = [
             executor.submit(
                 contextvars.copy_context().run,
-                registry.dispatch,
-                call.name,
-                call.arguments,
+                _timed_dispatch,
+                registry,
+                call,
             )
             for call in calls
         ]
@@ -1016,12 +1036,14 @@ def run_turn(
                 if parallel is None:
                     _check(cancel)
                     yield ToolCallStarted(call=call)
-                    result = registry.dispatch(call.name, call.arguments)
+                    result, outcome, duration_ms = _timed_dispatch(registry, call)
                 else:
-                    result = next(parallel)
+                    result, outcome, duration_ms = next(parallel)
                 if call.name in tool_names:
                     # Names only; the harness's own overview call never gets here.
-                    count_agent_call(call.name)
+                    count_agent_call(
+                        call.name, outcome=outcome, duration_ms=duration_ms
+                    )
                 key = (
                     call.name,
                     json.dumps(call.arguments, sort_keys=True, separators=(",", ":")),

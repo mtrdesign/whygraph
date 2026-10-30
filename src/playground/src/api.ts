@@ -1857,6 +1857,15 @@ export interface OverviewCoveragePoint {
 export type OverviewEventKind = "import" | "first_scan" | "full_scan" | "describe" | "failed" | "budget_stop";
 
 /** `GET /api/projects/{slug}/overview`. */
+/** One tool's tally on the Overview; the three measures are `null` for a `v1:` kind (not measured) and `mean_ms` also without a timed call. */
+export interface AgentKindStat {
+  kind: string;
+  calls: number;
+  errors: number | null;
+  internal_errors: number | null;
+  mean_ms: number | null;
+}
+
 export interface ProjectOverview {
   coverage: { points: OverviewCoveragePoint[] };
   events: { run_id: number; at: string; kind: OverviewEventKind }[];
@@ -1875,14 +1884,17 @@ export interface ProjectOverview {
     llm_calls: number;
     // `null` without `project.usage`.
     llm_cost_usd: number | null;
-    by_kind: { kind: string; calls: number }[];
+    // Over every kind, not only the listed ones.
+    errors: number;
+    internal_errors: number;
+    by_kind: AgentKindStat[];
     // Production, `project.usage` only.
     people: { label: string; calls: number; last_day: string | null }[] | null;
     // Production, `project.configure` only.
     connections: { client_name: string; user_label: string | null; last_used_at: string | null }[] | null;
     last_call_day: string | null;
     // The Chat assistant's own tool calls (names and counts only), kept apart from agent activity.
-    chat_tools: { total_calls: number; by_kind: { kind: string; calls: number }[] };
+    chat_tools: { total_calls: number; errors: number; internal_errors: number; by_kind: AgentKindStat[] };
   };
   // Local mode with a CodeGraph host; `null` / absent otherwise.
   codegraph?: CodegraphOverview | null;

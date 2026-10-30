@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Iterator
@@ -23,6 +24,7 @@ import anyio
 import mcp.types as mcp_types
 import pytest
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlmodel import select
@@ -42,8 +44,10 @@ from whygraph.core import usage as core_usage
 from whygraph.core.usage import UsageScope, count_agent_call, use_usage_sink
 from whygraph.mcp import area_history, evidence, prompts, rationale, resources
 from whygraph.mcp import server as mcp_server
+from whygraph.mcp.errors import WhyGraphError
 from whygraph.portal import agent_calls
 from whygraph.portal import app as portal_app
+from whygraph.portal import codegraph_host
 from whygraph.portal import db as portal_db
 from whygraph.portal.agent_calls import AgentCallBook, CallKey, CallTally
 from whygraph.portal.codegraph_host import BRIDGED_TOOLS, build_codegraph_server
@@ -203,12 +207,12 @@ def test_codegraph_kinds_are_code_defined() -> None:
     assert sink.kinds[0] is BRIDGED_TOOLS[BRIDGED_TOOLS.index("codegraph_search")]
 
 
-def test_offload_counts_before_the_body_runs() -> None:
+def test_offload_counts_after_the_body_with_its_outcome() -> None:
     order: list[str] = []
     sink = _CountingSink()
 
     def body() -> str:
-        order.append(f"body after {sink.kinds}")
+        order.append(f"body before {sink.kinds}")
         return "done"
 
     async def async_body() -> str:
@@ -222,8 +226,154 @@ def test_offload_counts_before_the_body_runs() -> None:
             return await wrapped(), await wrapped_async()
 
     assert asyncio.run(run()) == ("done", "async done")
-    assert order == ["body after ['whygraph_commit']"]
+    assert order == ["body before []"]
     assert sink.kinds == ["whygraph_commit", "whygraph_issue"]
+    assert [kw["outcome"] for kw in sink.extras] == ["ok", "ok"]
+    assert all(isinstance(kw["duration_ms"], int) for kw in sink.extras)
+
+
+def _raises(exc: BaseException) -> Any:
+    def body() -> str:
+        raise exc
+
+    return body
+
+
+def _araises(exc: BaseException) -> Any:
+    async def body() -> str:
+        raise exc
+
+    return body
+
+
+@pytest.mark.parametrize("make", [_raises, _araises])
+@pytest.mark.parametrize(
+    ("exc", "outcome"),
+    [
+        (WhyGraphError("nope", code="not_found"), "error"),
+        (ToolError("nope"), "error"),
+        (RuntimeError("boom"), "internal"),
+    ],
+)
+def test_offload_counts_the_failure_kind_and_reraises(
+    make: Any, exc: Exception, outcome: str
+) -> None:
+    sink = _CountingSink()
+    wrapped = mcp_server.offload(make(exc), kind="whygraph_commit")
+
+    async def run() -> None:
+        with use_usage_sink(sink):  # type: ignore[arg-type]
+            await wrapped()
+
+    with pytest.raises(type(exc)) as raised:
+        asyncio.run(run())
+    assert raised.value is exc
+    assert sink.kinds == ["whygraph_commit"]
+    assert sink.extras[0]["outcome"] == outcome
+    assert isinstance(sink.extras[0]["duration_ms"], int)
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_offload_counts_a_returned_error_payload_as_an_error(is_async: bool) -> None:
+    sink = _CountingSink()
+
+    def body() -> dict:
+        return {"error": "no such commit"}
+
+    async def abody() -> dict:
+        return {"error": "no such commit"}
+
+    wrapped = mcp_server.offload(abody if is_async else body, kind="whygraph_commit")
+
+    async def run() -> dict:
+        with use_usage_sink(sink):  # type: ignore[arg-type]
+            return await wrapped()
+
+    assert asyncio.run(run()) == {"error": "no such commit"}
+    assert sink.extras[0]["outcome"] == "error"
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_offload_counts_a_cancellation_as_ok_without_a_duration(
+    is_async: bool,
+) -> None:
+    sink = _CountingSink()
+
+    def body() -> str:
+        time.sleep(0.2)
+        return "late"
+
+    async def abody() -> str:
+        await asyncio.sleep(5)
+        return "late"
+
+    wrapped = mcp_server.offload(abody if is_async else body, kind="whygraph_commit")
+
+    async def run() -> None:
+        with use_usage_sink(sink):  # type: ignore[arg-type]
+            task = asyncio.ensure_future(wrapped())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+    assert sink.kinds == ["whygraph_commit"]
+    assert sink.extras == [{"outcome": "ok", "duration_ms": None}]
+
+
+def test_the_bridge_outcome_per_fault_constant() -> None:
+    def result(text: str, *, error: bool = True) -> mcp_types.CallToolResult:
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text=text)], isError=error
+        )
+
+    own_faults = [
+        codegraph_host.RESTARTED,
+        codegraph_host.TIMED_OUT.format(seconds="30"),
+        codegraph_host.PAUSED.format(seconds="12"),
+        codegraph_host.REFRESH_FAILED,
+        codegraph_host.NO_BINARY,
+        codegraph_host.NOT_RUNNING,
+    ]
+    for text in own_faults:
+        assert codegraph_host.bridge_outcome(result(text)) == "internal", text
+    errors = [
+        codegraph_host.BUSY,
+        codegraph_host.TURNED_OFF,
+        codegraph_host.NOT_INDEXED,
+        codegraph_host.STILL_UPDATING.format(changed=3, so_far=2, eta=9),
+        "symbol not found",
+    ]
+    for text in errors:
+        assert codegraph_host.bridge_outcome(result(text)) == "error", text
+    assert codegraph_host.bridge_outcome(result("fine", error=False)) == "ok"
+    # Even a fault text is "ok" on a result that is not an error.
+    assert codegraph_host.bridge_outcome(result(own_faults[0], error=False)) == "ok"
+    empty = mcp_types.CallToolResult(content=[], isError=True)
+    assert codegraph_host.bridge_outcome(empty) == "error"
+
+
+def test_the_bridge_counts_after_the_call_with_its_outcome() -> None:
+    sink = _CountingSink()
+    handler = build_codegraph_server(SimpleNamespace(codegraph_host=None))  # type: ignore[arg-type]
+    call = handler.request_handlers[mcp_types.CallToolRequest]
+
+    async def _run() -> None:
+        with use_usage_sink(sink):  # type: ignore[arg-type]
+            await call(
+                mcp_types.CallToolRequest(
+                    params=mcp_types.CallToolRequestParams(
+                        name="codegraph_search", arguments={}
+                    )
+                )
+            )
+
+    asyncio.run(_run())
+    # No bound target: the "not running" fault, an internal error.
+    assert sink.kinds == ["codegraph_search"]
+    assert sink.extras[0]["outcome"] == "internal"
+    assert isinstance(sink.extras[0]["duration_ms"], int)
 
 
 # ---------------------------------------------------------------------------

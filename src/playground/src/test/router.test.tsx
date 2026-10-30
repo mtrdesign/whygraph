@@ -248,6 +248,7 @@ describe("breadcrumbs", () => {
     expect(labels("/")).toEqual(["Projects"]);
     expect(labels("/p/alpha", { projectName: "Alpha" })).toEqual(["Projects", "Alpha"]);
     expect(labels("/p/alpha/explorer", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Explorer"]);
+    expect(labels("/p/alpha/notes", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Notes"]);
     expect(labels("/projects/new")).toEqual(["Projects", "Add project"]);
   });
 
@@ -663,6 +664,22 @@ describe("an importing project", () => {
     github_full_name: "acme/alpha",
     running_scan: { id: 5, status: "running", trigger: "initial" },
   };
+
+  it("routes /p/<slug>/notes to the Notes page, with a nav item after Explorer", async () => {
+    mount("/p/alpha/notes?filter=confirmed");
+    expect(await screen.findByRole("heading", { name: "Notes" })).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Main" });
+    const links = within(nav).getAllByRole("link").map((l) => l.textContent?.replace(/\d+$/, ""));
+    expect(links.indexOf("Notes")).toBe(links.indexOf("Explorer") + 1);
+    expect(within(nav).getByRole("link", { name: "Notes" })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("holds the Notes page back for a project that is importing", async () => {
+    fake.over = { alpha: { initialized: false, importing: true, root_status: "missing", running_scan: null } };
+    mount("/p/alpha/notes");
+    expect(await screen.findByTestId("importing-notice")).toBeInTheDocument();
+    expect(calls.some((c) => c.url.includes("/notes"))).toBe(false);
+  });
 
   it.each(["explorer", "chat"])("shows the importing notice on %s instead of the page", async (page) => {
     fake.over = { alpha: importing };

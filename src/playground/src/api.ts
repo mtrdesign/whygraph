@@ -1973,6 +1973,76 @@ export const onboardingApi = {
   slugCheck: (slug: string) => get<SlugCheck>(`/orgs/slug-check?slug=${encodeURIComponent(slug)}`),
 };
 
+// ---- project notes ----------------------------------------------------------
+
+export type NoteKind = "decision" | "constraint" | "gotcha" | "convention";
+export type NoteStatus = "proposed" | "confirmed" | "retired";
+export type NoteAnchorKind = "project" | "area" | "path" | "symbol" | "range";
+export type NoteAnchorState = "current" | "changed" | "missing" | "unknown" | "n/a";
+export type NoteSource = "human" | "chat" | "mcp";
+export type NoteRetireReason = "rejected" | "outdated" | "wrong";
+
+export interface NoteAnchor {
+  kind: NoteAnchorKind;
+  path?: string;
+  line_start?: number;
+  line_end?: number;
+  qualified_name?: string;
+  area?: string;
+}
+
+/** One note as `/notes` serves it (`mcp.notes.NoteView` plus the proposer's and confirmer's names). */
+export interface Note {
+  id: number;
+  kind: NoteKind;
+  body: string;
+  status: NoteStatus;
+  anchor: NoteAnchor;
+  anchor_state: NoteAnchorState;
+  commits_since?: number | null;
+  source: NoteSource;
+  origin: string;
+  proposed_by: string;
+  proposed_by_name?: string | null;
+  proposed_at: string;
+  confirmed_by?: string | null;
+  confirmed_by_name?: string | null;
+  confirmed_at?: string | null;
+  reconfirmed_by?: string | null;
+  reconfirmed_at?: string | null;
+  retired_by?: string | null;
+  retired_at?: string | null;
+  retire_reason?: string | null;
+  edited_on_confirm?: boolean;
+  refs?: string[];
+  supersedes_id?: number | null;
+  resource?: string;
+  duplicate?: boolean;
+  /** `GET /notes/{id}` only. */
+  superseded_by_ids?: number[];
+}
+
+export interface NotesSummary {
+  proposed: number;
+  proposed_by_agents: number;
+  confirmed: number;
+}
+
+export interface NoteFilters {
+  status?: NoteStatus;
+  attention?: boolean;
+  limit?: number;
+  before_id?: number;
+}
+
+export interface NoteProposal {
+  body: string;
+  kind: NoteKind;
+  anchor: NoteAnchor;
+  refs?: string[];
+  supersedes_id?: number;
+}
+
 // ---- project-scoped calls ---------------------------------------------------
 
 /**
@@ -2028,6 +2098,30 @@ export function projectApi(slug: string) {
       onEvent: (event: ScanEvent, id: string | null) => void,
       opts: { signal?: AbortSignal; lastEventId?: string | null } = {},
     ) => streamScanEvents(`${base}/scans/${runId}/events`, onEvent, opts),
+
+    // ---- project notes (portal/notes_routes.py) ------------------------------
+    notes: (f: NoteFilters = {}) => {
+      const params = new URLSearchParams();
+      if (f.status) params.set("status", f.status);
+      if (f.attention) params.set("attention", "true");
+      if (f.limit !== undefined) params.set("limit", String(f.limit));
+      if (f.before_id !== undefined) params.set("before_id", String(f.before_id));
+      const qs = params.toString();
+      return get<Note[]>(`${base}/notes${qs ? `?${qs}` : ""}`);
+    },
+    notesSummary: () => get<NotesSummary>(`${base}/notes/summary`),
+    notesForTarget: (qualified_name: string) =>
+      get<Note[]>(`${base}/notes/for-target?qualified_name=${q(qualified_name)}`),
+    note: (id: number) => get<Note>(`${base}/notes/${id}`),
+    proposeNote: (body: NoteProposal) => send<Note>("POST", `${base}/notes`, body),
+    confirmNote: (id: number, body: { body?: string; kind?: NoteKind } = {}) =>
+      send<Note>("POST", `${base}/notes/${id}/confirm`, body),
+    reconfirmNote: (id: number, body: { line_start?: number; line_end?: number } = {}) =>
+      send<Note>("POST", `${base}/notes/${id}/reconfirm`, body),
+    retireNote: (id: number, reason: NoteRetireReason) =>
+      send<Note>("POST", `${base}/notes/${id}/retire`, { reason }),
+    rejectAgentProposals: (proposed_by: string, origin: string) =>
+      send<{ rejected: number }>("POST", `${base}/notes/reject-agent-proposals`, { proposed_by, origin }),
 
     search: (query: string, limit = 20) =>
       get<{ query: string; results: SearchResult[] }>(

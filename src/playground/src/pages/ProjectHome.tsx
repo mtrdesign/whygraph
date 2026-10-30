@@ -231,6 +231,38 @@ function CoverageCard({ overview }: { overview: ProjectOverview }) {
   );
 }
 
+/** Notes waiting for review and confirmed, from `GET /notes/summary` (counts only). */
+function NotesCard({ slug }: { slug: string }) {
+  const summary = useQuery({
+    queryKey: projectKey(slug, "notes", "summary"),
+    queryFn: () => projectApi(slug).notesSummary(),
+    retry: false,
+  });
+  if (!summary.data) return null;
+  const { proposed, proposed_by_agents, confirmed } = summary.data;
+  return (
+    <section className={CARD} data-testid="notes-card" aria-labelledby="notes-title">
+      <div>
+        <h2 id="notes-title" className="text-sm font-semibold">
+          Notes
+        </h2>
+        <p className="text-xs text-muted-foreground">Short facts the team confirmed about this project.</p>
+      </div>
+      <p className="text-sm" data-testid="notes-counts">
+        {plural(proposed, "note")} waiting for review
+        {proposed_by_agents > 0 ? ` (${proposed_by_agents} from agents)` : ""}, {confirmed} confirmed.
+      </p>
+      <Link
+        to="/p/$slug/notes"
+        params={{ slug }}
+        className="text-sm text-primary-text underline-offset-4 hover:underline"
+      >
+        {proposed > 0 ? "Review notes" : "Open notes"}
+      </Link>
+    </section>
+  );
+}
+
 /** This month's spend on the project against its budget, by task. */
 function UsageCard({ usage, slug }: { usage: NonNullable<ProjectOverview["usage"]>; slug: string }) {
   const pct = usage.pct;
@@ -742,6 +774,7 @@ export function ProjectHome() {
       )}
 
       {ready && !linked && overview.isSuccess && <CoverageCard overview={overview.data} />}
+      {ready && !linked && <NotesCard slug={slug} />}
       {overview.data?.usage && <UsageCard usage={overview.data.usage} slug={slug} />}
 
       {overview.isSuccess ? (

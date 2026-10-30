@@ -10,6 +10,7 @@ import {
   LayoutDashboardIcon,
   LayoutGridIcon,
   NetworkIcon,
+  NotebookPenIcon,
   PlusIcon,
   SearchIcon,
   SlidersHorizontalIcon,
@@ -52,6 +53,8 @@ interface NavItem {
   to: string;
   params?: Record<string, string>;
   exact?: boolean;
+  /** A count shown beside the label (hidden at zero). */
+  badge?: number;
 }
 
 const ITEM =
@@ -68,7 +71,16 @@ function NavLink({ item }: { item: NavItem }) {
       onClick={() => setNavOpen(false)}
     >
       <item.icon className="size-4" />
-      {item.label}
+      <span className="flex-1">{item.label}</span>
+      {item.badge ? (
+        <span
+          className="rounded-full bg-primary-soft px-1.5 text-[11px] font-medium text-primary-text"
+          data-testid="nav-badge"
+          aria-label={`${item.badge} waiting for review`}
+        >
+          {item.badge}
+        </span>
+      ) : null}
     </Link>
   );
 }
@@ -93,7 +105,12 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  */
 function projectItems(
   slug: string,
-  { linked, initialized, importing }: { linked: boolean; initialized: boolean; importing: boolean },
+  {
+    linked,
+    initialized,
+    importing,
+    notesWaiting = 0,
+  }: { linked: boolean; initialized: boolean; importing: boolean; notesWaiting?: number },
 ): NavItem[] {
   const params = { slug };
   const overview: NavItem = { label: "Overview", icon: LayoutDashboardIcon, to: "/p/$slug", params, exact: true };
@@ -106,6 +123,9 @@ function projectItems(
   return [
     overview,
     ...(linked ? [] : [{ label: "Explorer", icon: NetworkIcon, to: "/p/$slug/explorer", params } as NavItem]),
+    ...(linked
+      ? []
+      : [{ label: "Notes", icon: NotebookPenIcon, to: "/p/$slug/notes", params, badge: notesWaiting } as NavItem]),
     scans,
     settings,
   ];
@@ -252,6 +272,14 @@ export function Sidebar({
     queryFn: () => projectApi(slug ?? "").scanEstimate(),
     enabled: false,
   });
+  // The Notes item's badge: proposals waiting. Only an initialized, non-linked, not-importing project has notes.
+  const hasNotes = !!slug && initialized && !importing && !linked && current?.root_status === "ok";
+  const notesSummary = useQuery({
+    queryKey: projectKey(slug ?? "", "notes", "summary"),
+    queryFn: () => projectApi(slug ?? "").notesSummary(),
+    enabled: hasNotes,
+    retry: false,
+  });
   const unsafe = probe.isError && probe.error instanceof ApiError && probe.error.code === "unsafe_path";
   // Only a project whose data can be opened gets a Chats block (and so a sessions
   // request), as for one that is not set up: not with the folder missing or not a
@@ -286,7 +314,7 @@ export function Sidebar({
         {slug ? (
           <>
             <Section title="Project">
-              {projectItems(slug, { linked, initialized, importing }).map((item) => (
+              {projectItems(slug, { linked, initialized, importing, notesWaiting: notesSummary.data?.proposed ?? 0 }).map((item) => (
                 <NavLink key={item.label} item={item} />
               ))}
             </Section>

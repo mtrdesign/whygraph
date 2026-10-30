@@ -40,6 +40,7 @@ import { useGlobalShortcuts } from "./components/shell/shortcuts";
 import { CommandPalette } from "./components/CommandPalette";
 import { ChatView } from "./components/chat/ChatView";
 import { ExplorerPage } from "./pages/ExplorerPage";
+import { NotesPage } from "./pages/NotesPage";
 import { ProjectHome } from "./pages/ProjectHome";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AddProjectPage, type NewProjectSearch } from "./pages/AddProjectPage";
@@ -86,6 +87,7 @@ import {
   validateOrgSettingsSearch,
   validateProjectSettingsSearch,
   validateProjectsSearch,
+  validateNotesSearch,
   validateScansSearch,
 } from "./lib/routeSearch";
 
@@ -615,7 +617,7 @@ const memberUsageRoute = createRoute({
 
 // Pages that read project data; on an unusable project they are replaced by an
 // edge-state notice (screen 12) instead of firing requests that can only fail.
-const DATA_PAGES = new Set(["explorer", "chat", "scans"]);
+const DATA_PAGES = new Set(["explorer", "chat", "scans", "notes"]);
 
 // The width of each project page's `PageContainer`, so the layout's loading and
 // error states sit where the page will (PH-11, ER-5). The Overview, the wizard and
@@ -623,6 +625,7 @@ const DATA_PAGES = new Set(["explorer", "chat", "scans"]);
 const PAGE_WIDTH: Record<string, React.ComponentProps<typeof PageContainer>["width"]> = {
   explorer: "full",
   chat: "full",
+  notes: "narrow",
   settings: "default",
   scans: "default",
 };
@@ -743,6 +746,12 @@ const explorerRoute = createRoute({
   validateSearch: validateExplorerSearch,
   component: ExplorerPage,
 });
+const notesRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "notes",
+  validateSearch: validateNotesSearch,
+  component: NotesPage,
+});
 const chatRoute = createRoute({
   getParentRoute: () => projectRoute,
   path: "chat/{-$id}",
@@ -840,6 +849,7 @@ const routeTree = rootRoute.addChildren([
   projectRoute.addChildren([
     projectHomeRoute,
     explorerRoute,
+    notesRoute,
     chatRoute,
     scansRoute,
     projectSettingsRoute,

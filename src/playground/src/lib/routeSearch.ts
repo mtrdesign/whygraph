@@ -112,6 +112,22 @@ export function validateScansSearch(search: Record<string, unknown>): ScansSearc
   };
 }
 
+// ---- /p/$slug/notes ---------------------------------------------------------------------
+
+export const NOTE_FILTERS = ["review", "confirmed", "attention", "retired"] as const;
+/** The Notes page lists: Waiting for review, Confirmed, Needs attention, Retired. */
+export type NoteFilter = (typeof NOTE_FILTERS)[number];
+
+/** `/p/$slug/notes?filter=&id=`: the list shown and a deep-linked note. */
+export interface NotesSearch {
+  filter?: NoteFilter;
+  id?: number;
+}
+
+export function validateNotesSearch(search: Record<string, unknown>): NotesSearch {
+  return { filter: oneOf(NOTE_FILTERS, search.filter), id: positiveInt(search.id) };
+}
+
 // ---- settings sections (§0.3 #22) -------------------------------------------------------
 // Every id a settings page's section list renders, so each one deep-links (SET-1).
 

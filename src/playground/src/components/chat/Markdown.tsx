@@ -1,6 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { AnchorHTMLAttributes } from "react";
+import type { AnchorHTMLAttributes, ImgHTMLAttributes } from "react";
 import { useOpenNode } from "../../lib/nav";
 
 // Renders assistant markdown. react-markdown builds React elements rather than
@@ -51,6 +51,21 @@ function Anchor({ href, children, ...rest }: AnchorHTMLAttributes<HTMLAnchorElem
   );
 }
 
+/**
+ * A model-supplied image is never loaded: fetching its URL would hand whatever the
+ * model read (notes included) to whoever runs that server. The alt text shows, with a
+ * plain link the reader can choose to open.
+ */
+function NoImage({ src, alt }: ImgHTMLAttributes<HTMLImageElement>) {
+  const label = alt?.trim() || "image";
+  if (typeof src !== "string" || !/^https?:\/\//i.test(src)) return <span>{label}</span>;
+  return (
+    <a href={src} target="_blank" rel="noreferrer noopener">
+      {label}
+    </a>
+  );
+}
+
 export function Markdown({ children }: { children: string }) {
   return (
     <div
@@ -71,7 +86,7 @@ export function Markdown({ children }: { children: string }) {
         "prose-table:text-xs prose-th:text-foreground"
       }
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: Anchor }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: Anchor, img: NoImage }}>
         {children}
       </ReactMarkdown>
     </div>

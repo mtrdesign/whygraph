@@ -361,6 +361,15 @@ export const MESSAGES: Record<string, Resolver> = {
   symbol_not_found: "That symbol isn't in the code index any more. Search for it again.",
   blame_failed: "Couldn't read this file's history. It may have moved since the last scan.",
 
+  // Project notes (plan 40)
+  note_not_found: "That note no longer exists.",
+  note_state: { tone: "warn", message: "This note changed in the meantime. Reload to see its current state." },
+  note_invalid: "WhyGraph couldn't save that note. Check its text and what it is attached to; the details are below.",
+  note_limit: { tone: "warn", message: "Too many notes are waiting for review, or the daily limit for agent proposals was reached. Review some first." },
+  note_needs_second_confirmer: "This note applies to most of the project, so another member or a project admin must confirm it.",
+  note_no_actor: "WhyGraph couldn't tell who made this request. Reload the page and try again.",
+  note_linked: "Notes for this project are kept on the platform.",
+
   // Usage & cost: budgets and prices (M2f-2)
   invalid_amount: "Enter a monthly budget greater than $0 and at most $1,000,000.",
   budget_above_org: (err) => {

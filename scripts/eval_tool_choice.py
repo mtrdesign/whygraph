@@ -88,6 +88,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from whygraph.chat.grounding import _NUMBER_TOKEN, _SHA_TOKEN, _is_sha
+from whygraph.core.config import LlmConfig
+from whygraph.portal.prices import NO_OVERRIDES, price_for
+from whygraph.services.llm import LlmClientFactory
+from whygraph.services.llm.types import CompletionRequest
 
 # Each case is (class, question, tools that count as the RIGHT first reach).
 # "Right" is about the *first* tool: a good investigation interleaves several,
@@ -1452,6 +1456,8 @@ def _tally_votes(out_dir: str) -> str:
     """
     out = Path(out_dir)
     key = json.loads((out / "key.json").read_text())
+    if any(info.get("kind") == "compare" for info in key.values()):
+        return _tally_compare(out, key)
     pooled: dict[tuple[str, str, str], Counter] = {}
     for path in sorted((out / "votes").glob("*.json")):
         data = json.loads(path.read_text())
@@ -1493,6 +1499,256 @@ def _tally_votes(out_dir: str) -> str:
         )
         lines.append(f"| {mode} | {won} | {len(cases)} | {pairs} |")
     return "\n".join(lines)
+
+
+def _flat_answers(report: dict) -> dict[tuple[str, str], dict]:
+    """``{(suite, case): {question, answer, tool_calls}}``, one answer each.
+
+    A run with several modes yields the answer of the mode named like the
+    suite, else the first mode.
+    """
+    flat: dict[tuple[str, str], dict] = {}
+    for (suite, case), by_mode in _answers_by_mode(report).items():
+        flat[(suite, case)] = by_mode.get(suite) or next(iter(by_mode.values()))
+    return flat
+
+
+def _write_compare_packets(
+    baseline_path: str, candidate_path: str, out_dir: str
+) -> int:
+    """Write baseline-versus-candidate packets and ``key.json``.
+
+    One packet per (case, order) for every (suite, case) with a usable answer
+    in both reports. ``key.json`` maps ``A`` / ``B`` to ``baseline`` /
+    ``candidate`` and is the only file that names them.
+    """
+    import random
+
+    base = _flat_answers(json.loads(Path(baseline_path).read_text()))
+    cand = _flat_answers(json.loads(Path(candidate_path).read_text()))
+    rubric = RUBRIC_PATH.read_text()
+    work: list[tuple[str, str, str, str]] = []
+    for suite, case in sorted(set(base) & set(cand)):
+        work.append((suite, case, "baseline", "candidate"))
+        work.append((suite, case, "candidate", "baseline"))
+    for suite, case in sorted(set(base) ^ set(cand)):
+        print(f"! {case}: answer in only one report, skipped", file=sys.stderr)
+    random.Random(39).shuffle(work)
+    out = Path(out_dir)
+    (out / "votes").mkdir(parents=True, exist_ok=True)
+    sides = {"baseline": base, "candidate": cand}
+    key: dict[str, dict] = {}
+    for number, (suite, case, side_a, side_b) in enumerate(work, 1):
+        packet_id = f"p{number:03d}"
+        a, b = sides[side_a][(suite, case)], sides[side_b][(suite, case)]
+        packet = {
+            "packet": packet_id,
+            "question": a["question"],
+            "A": {"answer": a["answer"], "tool_calls": a["tool_calls"]},
+            "B": {"answer": b["answer"], "tool_calls": b["tool_calls"]},
+            "rubric": rubric,
+        }
+        (out / f"{packet_id}.json").write_text(json.dumps(packet, indent=2))
+        key[packet_id] = {
+            "A": side_a,
+            "B": side_b,
+            "question_id": case,
+            "suite": suite,
+            "kind": "compare",
+        }
+    (out / "key.json").write_text(json.dumps(key, indent=2))
+    print(f"wrote {len(key)} packets to {out} (key.json kept beside them)")
+    return len(key)
+
+
+def _majority(wins: Counter) -> str:
+    """``candidate`` / ``baseline`` when one strictly leads, else ``tie``."""
+    if wins["candidate"] > wins["baseline"]:
+        return "candidate"
+    if wins["baseline"] > wins["candidate"]:
+        return "baseline"
+    return "tie"
+
+
+def _tally_compare(out: Path, key: dict) -> str:
+    """Candidate wins / ties / losses per suite, per family and pooled.
+
+    Within a family the votes on both orders of a case are pooled and the
+    majority decides (a split is a tie). The agreement rate is the share of
+    packets voted by two or more families where every family's majority
+    winner is the same.
+    """
+    by_packet: dict[str, dict[str, Counter]] = {}
+    for path in sorted((out / "votes").glob("*.json")):
+        data = json.loads(path.read_text())
+        for vote in data if isinstance(data, list) else [data]:
+            info = key.get(vote.get("packet"))
+            if info is None or vote.get("winner") not in ("A", "B", "tie"):
+                continue
+            family = vote.get("judge_family") or "unknown"
+            who = "tie" if vote["winner"] == "tie" else info[vote["winner"]]
+            by_packet.setdefault(vote["packet"], {}).setdefault(family, Counter())[
+                who
+            ] += 1
+    # (suite, case) -> family -> Counter of baseline / candidate / tie votes
+    cases: dict[tuple[str, str], dict[str, Counter]] = {}
+    for packet_id, families in by_packet.items():
+        info = key[packet_id]
+        slot = cases.setdefault((info["suite"], info["question_id"]), {})
+        for family, votes in families.items():
+            slot.setdefault(family, Counter()).update(votes)
+    rows: dict[tuple[str, str], Counter] = {}
+    for (suite, _), families in cases.items():
+        pooled = Counter()
+        for family, votes in families.items():
+            rows.setdefault((suite, family), Counter())[_majority(votes)] += 1
+            pooled.update(votes)
+        rows.setdefault((suite, "pooled"), Counter())[_majority(pooled)] += 1
+    lines = [
+        "| suite | family | candidate wins | ties | candidate losses |",
+        "|---|---|---|---|---|",
+    ]
+    for (suite, family), tally in sorted(
+        rows.items(), key=lambda kv: (kv[0][0], kv[0][1] == "pooled", kv[0][1])
+    ):
+        lines.append(
+            f"| {suite} | {family} | {tally['candidate']} | {tally['tie']} "
+            f"| {tally['baseline']} |"
+        )
+    shared = [f for f in by_packet.values() if len(f) >= 2]
+    agree = sum(1 for f in shared if len({_majority(v) for v in f.values()}) == 1)
+    rate = f"{agree}/{len(shared)} ({agree / len(shared):.0%})" if shared else "n/a"
+    lines.append("")
+    lines.append(f"agreement (packets judged by 2+ families): {rate}")
+    return "\n".join(lines)
+
+
+def _judge_family(provider: str, model: str) -> str:
+    """The model's vendor: the ``vendor/`` prefix of a routed id, else the provider."""
+    return model.split("/", 1)[0] if "/" in model else provider
+
+
+def _parse_vote(text: str, packet_id: str, family: str) -> dict | None:
+    """Parse a judge reply into a vote ``_tally_votes`` reads, or ``None``."""
+    match = re.search(r"\{.*\}", text or "", re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return None
+    winner = data.get("winner") if isinstance(data, dict) else None
+    if winner not in ("A", "B", "tie"):
+        return None
+    return {
+        "packet": packet_id,
+        "winner": winner,
+        "reason": str(data.get("reason", ""))[:500],
+        "judge_family": family,
+    }
+
+
+def _judge_inputs(packet: dict) -> tuple[str, str]:
+    """``(system, prompt)`` for one packet: the rubric, then the packet body."""
+    rubric = packet.get("rubric") or RUBRIC_PATH.read_text()
+    body = {k: v for k, v in packet.items() if k != "rubric"}
+    return rubric, json.dumps(body, indent=2)
+
+
+def _judge_run(
+    spec: str,
+    out_dir: str,
+    max_usd: float,
+    price_in: float | None = None,
+    price_out: float | None = None,
+    max_tokens: int = 1000,
+) -> int:
+    """Judge every packet in ``out_dir`` with ``PROVIDER:MODEL``; write votes.
+
+    The model is priced, the whole run is estimated and checked against
+    ``max_usd`` before any client exists; a refusal returns 2 with nothing
+    sent. The client comes from environment keys only.
+    """
+    provider, _, model = spec.partition(":")
+    if not provider or not model:
+        print("! --judge-run needs PROVIDER:MODEL", file=sys.stderr)
+        return 2
+    priced = price_for(provider, model, NO_OVERRIDES, custom_endpoint=False)
+    if priced is not None:
+        rate_in, rate_out = float(priced[0].input), float(priced[0].output)
+        source = priced[1]
+    elif price_in is None or price_out is None:
+        print(
+            f"! {spec} is not in prices.json: pass --judge-price-in and "
+            "--judge-price-out (USD per million tokens, from the provider's page)",
+            file=sys.stderr,
+        )
+        return 2
+    else:
+        rate_in, rate_out, source = price_in, price_out, "operator"
+    out = Path(out_dir)
+    packets = [
+        json.loads(p.read_text())
+        for p in sorted(out.glob("p*.json"))
+        if p.name != "key.json"
+    ]
+    inputs = [_judge_inputs(p) for p in packets]
+    per_packet = [
+        (len(system) + len(prompt)) / 4 * rate_in / 1e6 + max_tokens * rate_out / 1e6
+        for system, prompt in inputs
+    ]
+    estimate = sum(per_packet)
+    if estimate > max_usd:
+        print(
+            f"! estimated ${estimate:.4f} for {len(packets)} packets exceeds "
+            f"--judge-max-usd ${max_usd:.4f}; nothing sent",
+            file=sys.stderr,
+        )
+        return 2
+    client = LlmClientFactory(LlmConfig()).make(provider, model=model)
+    family = _judge_family(provider, model)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", spec)
+    (out / "votes").mkdir(exist_ok=True)
+    spent, written, unparsed = 0.0, 0, []
+    for packet, (system, prompt), reserve in zip(packets, inputs, per_packet):
+        if spent + reserve > max_usd:
+            print(f"! cap reached after {written} votes", file=sys.stderr)
+            break
+        resp = client.complete(
+            CompletionRequest.of(prompt, system=system, max_tokens=max_tokens)
+        )
+        spent += (
+            float(resp.cost_usd)
+            if resp.cost_usd is not None
+            else (resp.input_tokens or 0) / 1e6 * rate_in
+            + (resp.output_tokens or 0) / 1e6 * rate_out
+        )
+        vote = _parse_vote(resp.text, packet["packet"], family)
+        if vote is None:
+            unparsed.append(packet["packet"])
+            continue
+        (out / "votes" / f"{packet['packet']}-{safe}.json").write_text(
+            json.dumps(vote, indent=2)
+        )
+        written += 1
+    (out / f"judge-{safe}.json").write_text(
+        json.dumps(
+            {
+                "model": spec,
+                "judge_family": family,
+                "price_source": source,
+                "price_in": rate_in,
+                "price_out": rate_out,
+                "estimate_usd": round(estimate, 6),
+                "spent_usd": round(spent, 6),
+                "votes": written,
+                "unparsed": unparsed,
+            },
+            indent=2,
+        )
+    )
+    print(f"{written} votes, est ${estimate:.4f}, spent ${spent:.4f}")
+    return 0
 
 
 def _self_test_refs() -> bool:
@@ -1750,6 +2006,156 @@ def _self_test_replay() -> bool:
     )
 
 
+def _self_test_judge() -> bool:
+    """Vote parser, ``--compare`` packets, per-family tally, both refusals."""
+    import tempfile
+    from types import SimpleNamespace
+
+    global LlmClientFactory
+    ok = True
+    vote = _parse_vote(
+        'noise {"packet": "x", "winner": "B", "reason": "r"} ', "p001", "openai"
+    )
+    ok &= vote == {
+        "packet": "p001",
+        "winner": "B",
+        "reason": "r",
+        "judge_family": "openai",
+    }
+    ok &= _parse_vote("no json", "p001", "openai") is None
+    ok &= _parse_vote('{"winner": "C"}', "p001", "openai") is None
+    ok &= _judge_family("openrouter", "openai/gpt-x") == "openai"
+    ok &= _judge_family("openai", "gpt-x") == "openai"
+
+    def report(tag):
+        return {
+            "runs": [
+                {
+                    "suite": "s",
+                    "mode": "s",
+                    "trials": [
+                        {
+                            "case": c,
+                            "question": f"q {c}",
+                            "answer": f"{tag} answer {c}",
+                            "tool_calls": [],
+                            "error": "",
+                        }
+                        for c in ("C1", "C2", "C3")
+                    ],
+                }
+            ]
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        base, cand, out = (Path(tmp) / n for n in ("b.json", "c.json", "out"))
+        base.write_text(json.dumps(report("old")))
+        cand.write_text(json.dumps(report("new")))
+        count = _write_compare_packets(str(base), str(cand), str(out))
+        key = json.loads((out / "key.json").read_text())
+        ok &= count == 6 and len(key) == 6
+        ok &= all(
+            word not in p.read_text()
+            for p in out.glob("p*.json")
+            for word in ("baseline", "candidate")
+        )
+        # Anthropic: candidate wins C1 and C2 (both orders), loses C3.
+        # OpenAI: candidate wins C1, ties C2 (split), loses C3.
+        want = {
+            "anthropic": {"C1": "candidate", "C2": "candidate", "C3": "baseline"},
+            "openai": {"C1": "candidate", "C2": "split", "C3": "baseline"},
+        }
+        seen: Counter = Counter()
+        for packet_id, info in key.items():
+            for family, plan in want.items():
+                target = plan[info["question_id"]]
+                if target == "split":
+                    seen[(family, info["question_id"])] += 1
+                    target = (
+                        "candidate"
+                        if seen[(family, info["question_id"])] == 1
+                        else "baseline"
+                    )
+                winner = "A" if info["A"] == target else "B"
+                (out / "votes" / f"{packet_id}-{family}.json").write_text(
+                    json.dumps(
+                        {
+                            "packet": packet_id,
+                            "winner": winner,
+                            "reason": "t",
+                            "judge_family": family,
+                        }
+                    )
+                )
+        table = _tally_votes(str(out))
+        rows = {
+            tuple(c.strip() for c in line.split("|")[1:-1])
+            for line in table.splitlines()
+            if line.startswith("| s ")
+        }
+        ok &= ("s", "anthropic", "2", "0", "1") in rows
+        ok &= ("s", "openai", "1", "1", "1") in rows
+        ok &= ("s", "pooled", "2", "0", "1") in rows
+        # Both families agree on C1 and C3 (4 packets of 6); C2 differs on one order.
+        ok &= "agreement (packets judged by 2+ families): 5/6" in table
+
+        class _Forbidden:
+            def __init__(self, *a, **k):
+                raise AssertionError("LlmClientFactory was constructed")
+
+        real, LlmClientFactory = LlmClientFactory, _Forbidden
+        try:
+            # Unpriced model, no operator prices: refused before any client.
+            ok &= _judge_run("openai:not-a-priced-model", str(out), 5.0) == 2
+            # Priced by the operator but the estimate is over the cap.
+            ok &= (
+                _judge_run(
+                    "openai:not-a-priced-model",
+                    str(out),
+                    0.0001,
+                    price_in=10.0,
+                    price_out=40.0,
+                )
+                == 2
+            )
+        finally:
+            LlmClientFactory = real
+        # An in-cap run with a stand-in client writes votes and a report.
+        calls = []
+
+        class _Client:
+            def complete(self, request):
+                calls.append(request)
+                return SimpleNamespace(
+                    text='{"packet": "z", "winner": "A", "reason": "ok"}',
+                    cost_usd=None,
+                    input_tokens=1000,
+                    output_tokens=50,
+                )
+
+        class _Factory:
+            def __init__(self, config):
+                pass
+
+            def make(self, provider, *, model=None):
+                return _Client()
+
+        LlmClientFactory = _Factory
+        try:
+            for stale in (out / "votes").glob("*.json"):
+                stale.unlink()
+            code = _judge_run(
+                "openai:not-a-priced-model", str(out), 5.0, price_in=1.0, price_out=2.0
+            )
+        finally:
+            LlmClientFactory = real
+        ok &= code == 0 and len(calls) == 6
+        votes = list((out / "votes").glob("*.json"))
+        ok &= len(votes) == 6
+        ok &= all(json.loads(v.read_text())["judge_family"] == "openai" for v in votes)
+    return bool(ok)
+
+
 def _self_test() -> int:
     """Run both judge halves on an inline fake report; exit 0 on the expected table."""
     import tempfile
@@ -1823,6 +2229,7 @@ def _self_test() -> int:
         ("multi-turn", _self_test_multi_turn),
         ("window elision", _self_test_window),
         ("replay", _self_test_replay),
+        ("judge", _self_test_judge),
     ):
         passed = part()
         print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
@@ -1896,6 +2303,28 @@ def main() -> int:
         help="Write blind judge packets and key.json from a transcript JSON.",
     )
     parser.add_argument(
+        "--compare",
+        nargs=3,
+        metavar=("BASELINE_JSON", "CANDIDATE_JSON", "DIR"),
+        help="Write blind baseline-versus-candidate packets and key.json.",
+    )
+    parser.add_argument(
+        "--judge-run",
+        nargs=2,
+        metavar=("PROVIDER:MODEL", "DIR"),
+        help="Judge DIR's packets with a model (keys from the environment); "
+        "writes DIR/votes. Needs --judge-max-usd.",
+    )
+    parser.add_argument("--judge-max-usd", type=float, default=None, metavar="USD")
+    parser.add_argument(
+        "--judge-price-in",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="USD per million input tokens, required when the model is unpriced.",
+    )
+    parser.add_argument("--judge-price-out", type=float, default=None, metavar="USD")
+    parser.add_argument(
         "--judge-tally",
         metavar="DIR",
         help="Tally DIR/votes/*.json against DIR/key.json into a Markdown table.",
@@ -1936,6 +2365,18 @@ def main() -> int:
     if args.judge_packets:
         _write_packets(*args.judge_packets)
         return 0
+    if args.compare:
+        _write_compare_packets(*args.compare)
+        return 0
+    if args.judge_run:
+        if args.judge_max_usd is None:
+            parser.error("--judge-run needs --judge-max-usd")
+        return _judge_run(
+            *args.judge_run,
+            args.judge_max_usd,
+            args.judge_price_in,
+            args.judge_price_out,
+        )
     if args.judge_tally:
         table = _tally_votes(args.judge_tally)
         Path(args.judge_tally, "tally.md").write_text(table + "\n")

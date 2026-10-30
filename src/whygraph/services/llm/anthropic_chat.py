@@ -47,7 +47,6 @@ import os
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any
 
 import anthropic
@@ -80,15 +79,6 @@ DEFAULT_MAX_TOKENS = 32_000
 
 _CACHE = {"type": "ephemeral"}
 """The ``cache_control`` value every breakpoint carries."""
-
-CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27"
-"""The beta header of server-side context editing."""
-
-CONTEXT_EDIT_KEEP_TOOL_USES = 8
-"""Most recent tool use / result pairs the API keeps (at least the last round's)."""
-
-CONTEXT_EDIT_CLEAR_AT_LEAST = 5_000
-"""Smallest clear worth the prompt cache it breaks, in input tokens."""
 
 _NO_THINKING: set[str] = set()
 """Models that refused adaptive thinking in this process (sent without it)."""
@@ -335,26 +325,6 @@ def _finished_calls(
         yield ToolCallMade(call=call)
 
 
-def _last_assistant_tool_uses(messages: tuple[ChatMessage, ...]) -> int:
-    """Count the tool calls in the last assistant message (0 if none)."""
-    for message in reversed(messages):
-        if message.role == "assistant":
-            return len(message.tool_calls)
-    return 0
-
-
-def _cleared_input_tokens(management: Any) -> int | None:
-    """Sum ``cleared_input_tokens`` over a ``message_delta``'s applied edits."""
-    edits = getattr(management, "applied_edits", None)
-    if edits is None:
-        return None
-    total = 0
-    for edit in edits:
-        _log.debug("anthropic: context edit applied: %r", edit)
-        total += getattr(edit, "cleared_input_tokens", 0) or 0
-    return total
-
-
 def _thinking_unsupported(exc: Exception) -> bool:
     """Whether a 400 says this model takes no adaptive ``thinking`` parameter.
 
@@ -530,7 +500,6 @@ class AnthropicChatAdapter(ChatClient):
         # message. The latest non-null value of each field wins.
         raw_usage: dict[str, int | None] = dict.fromkeys(ANTHROPIC_USAGE_KEYS)
         served_model: str | None = None
-        cleared_tokens: int | None = None
 
         def _absorb(usage: Any) -> None:
             if usage is None:
@@ -548,38 +517,10 @@ class AnthropicChatAdapter(ChatClient):
                 served_model = model
             _absorb(getattr(message, "usage", None))
 
-        if request.context_trigger_tokens:
-            keep = max(
-                CONTEXT_EDIT_KEEP_TOOL_USES, _last_assistant_tool_uses(request.messages)
-            )
-            open_stream = partial(
-                self._client.beta.messages.stream,
-                betas=[CONTEXT_MANAGEMENT_BETA],
-                context_management={
-                    "edits": [
-                        {
-                            "type": "clear_tool_uses_20250919",
-                            "trigger": {
-                                "type": "input_tokens",
-                                "value": request.context_trigger_tokens,
-                            },
-                            "keep": {"type": "tool_uses", "value": keep},
-                            # A clear must pay for the cache it breaks.
-                            "clear_at_least": {
-                                "type": "input_tokens",
-                                "value": CONTEXT_EDIT_CLEAR_AT_LEAST,
-                            },
-                        }
-                    ]
-                },
-            )
-        else:
-            open_stream = self._client.messages.stream
-
         started = False
         while True:
             try:
-                with open_stream(**kwargs) as stream:
+                with self._client.messages.stream(**kwargs) as stream:
                     self._active = stream
                     for event in stream:
                         started = True
@@ -640,11 +581,6 @@ class AnthropicChatAdapter(ChatClient):
                             if reason is not None:
                                 finish_reason = reason
                             _absorb(getattr(event, "usage", None))
-                            cleared = _cleared_input_tokens(
-                                getattr(event, "context_management", None)
-                            )
-                            if cleared is not None:
-                                cleared_tokens = cleared
                             continue
 
                         if event_type in ("message_start", "message_stop"):
@@ -695,7 +631,6 @@ class AnthropicChatAdapter(ChatClient):
             finish_reason=finish_reason,
             model=served_model,
             replay=replay,
-            context_cleared_tokens=cleared_tokens,
             **anthropic_usage_fields(raw_usage),
         )
 

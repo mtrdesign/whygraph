@@ -339,15 +339,6 @@ def test_chat_effort_levels(tmp_path: Path) -> None:
         assert _from(f'[chat]\neffort = "{level}"\n', tmp_path).chat.effort == level
 
 
-def test_chat_server_context_editing_switch(tmp_path: Path) -> None:
-    assert _from("", tmp_path).chat.server_context_editing is False
-    cfg = _from("[chat]\nserver_context_editing = true\n", tmp_path)
-    assert cfg.chat.server_context_editing is True
-    for value in ('"yes"', "1"):
-        with pytest.raises(ConfigError, match="server_context_editing"):
-            _from(f"[chat]\nserver_context_editing = {value}\n", tmp_path)
-
-
 def test_chat_refuses_an_explicit_non_chat_provider(tmp_path: Path) -> None:
     for body in ('[chat]\nprovider = "ollama"\n', '[chat]\nmodel = "ollama/x"\n'):
         cfg = _from(body, tmp_path)

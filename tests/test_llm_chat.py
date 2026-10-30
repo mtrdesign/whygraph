@@ -389,98 +389,12 @@ class _FakeAnthropic:
         self._raise = raise_on_stream
         self.last_kwargs: dict | None = None
         self.messages = SimpleNamespace(stream=self._stream)
-        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self._beta_stream))
 
     def _stream(self, **kwargs):
         self.last_kwargs = kwargs
-        self.last_beta = False
         if self._raise is not None:
             raise self._raise
         return _FakeAnthropicStream(self._events)
-
-    def _beta_stream(self, **kwargs):
-        stream = self._stream(**kwargs)
-        self.last_beta = True
-        return stream
-
-
-def _an_message_delta_edited(cleared: list[int]):
-    event = _an_message_delta()
-    event.context_management = SimpleNamespace(
-        applied_edits=[
-            SimpleNamespace(
-                type="clear_tool_uses_20250919",
-                cleared_tool_uses=1,
-                cleared_input_tokens=n,
-            )
-            for n in cleared
-        ]
-    )
-    return event
-
-
-def test_context_editing_off_uses_the_stable_stream() -> None:
-    adapter, fake = _anthropic_adapter(
-        [
-            _an_message_start(),
-            _an_text_block_start(),
-            _an_block_stop(0),
-            _an_message_delta(),
-        ]
-    )
-    events = list(adapter.stream_turn(_request()))
-    assert fake.last_beta is False
-    assert "context_management" not in fake.last_kwargs
-    assert events[-1].context_cleared_tokens is None
-
-
-def test_context_editing_sends_the_beta_edit_and_reports_cleared_tokens() -> None:
-    adapter, fake = _anthropic_adapter(
-        [
-            _an_message_start(),
-            _an_text_block_start(),
-            _an_block_stop(0),
-            _an_message_delta_edited([4000, 1500]),
-        ]
-    )
-    calls = tuple(
-        ToolCall(id=f"t{i}", name="search_symbols", arguments={}) for i in range(10)
-    )
-    request = ChatRequest(
-        messages=(
-            user("hi"),
-            ChatMessage(role="assistant", content="", tool_calls=calls),
-        ),
-        tools=(SEARCH_TOOL,),
-        context_trigger_tokens=48_000,
-    )
-    events = list(adapter.stream_turn(request))
-
-    assert fake.last_beta is True
-    assert fake.last_kwargs["betas"] == ["context-management-2025-06-27"]
-    (edit,) = fake.last_kwargs["context_management"]["edits"]
-    assert edit["type"] == "clear_tool_uses_20250919"
-    assert edit["trigger"] == {"type": "input_tokens", "value": 48_000}
-    # The current round's results are never cleared: 10 calls beat the floor of 8.
-    assert edit["keep"] == {"type": "tool_uses", "value": 10}
-    assert edit["clear_at_least"] == {"type": "input_tokens", "value": 5_000}
-    assert events[-1].context_cleared_tokens == 5500
-
-
-def test_context_editing_keep_floor_is_eight() -> None:
-    adapter, fake = _anthropic_adapter(
-        [
-            _an_message_start(),
-            _an_text_block_start(),
-            _an_block_stop(0),
-            _an_message_delta(),
-        ]
-    )
-    request = ChatRequest(messages=(user("hi"),), context_trigger_tokens=100)
-    events = list(adapter.stream_turn(request))
-    assert fake.last_kwargs["context_management"]["edits"][0]["keep"]["value"] == 8
-    # Nothing applied: a clean zero is not a number the API reported.
-    assert events[-1].context_cleared_tokens is None
 
 
 def _anthropic_adapter(events, **kwargs) -> tuple[AnthropicChatAdapter, _FakeAnthropic]:

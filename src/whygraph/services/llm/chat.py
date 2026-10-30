@@ -221,11 +221,6 @@ class ChatRequest:
     effort : str or None
         Effort level for this call, one of :data:`EFFORT_LEVELS`. ``None``
         (default) sends no effort parameter.
-    context_trigger_tokens : int or None
-        Anthropic only: when set, the adapter asks the API to clear old tool
-        results once the prompt passes this many input tokens (server-side
-        context editing). ``None`` (default) sends no such request; the other
-        providers ignore it.
     """
 
     messages: tuple[ChatMessage, ...]
@@ -235,7 +230,6 @@ class ChatRequest:
     timeout_sec: int | None = None
     tool_choice: ToolChoice = "auto"
     effort: str | None = None
-    context_trigger_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,9 +317,6 @@ class TurnDone:
         The round's provider reasoning payload to send back on the
         assistant message (see :attr:`ChatMessage.replay`). ``None``, never
         ``{}``, when nothing was captured.
-    context_cleared_tokens : int or None
-        Input tokens the API cleared server-side this round (Anthropic
-        context editing); ``None`` when no edit was requested or applied.
     """
 
     finish_reason: str | None = None
@@ -337,7 +328,6 @@ class TurnDone:
     cost_usd: float | None = None
     model: str | None = None
     replay: Mapping[str, Any] | None = None
-    context_cleared_tokens: int | None = None
 
 
 ChatStreamEvent = TextDelta | ReasoningDelta | ToolCallMade | TurnDone

@@ -105,6 +105,7 @@ from whygraph.services.codegraph.writer_lock import portal_lock_dir
 from . import agent_calls, audit_store, budgets, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
+from .agent_hook_routes import agent_hooks_router
 from .audit import clear_writer, set_writer
 from .auth_routes import auth_router
 from .budget_routes import budget_member_router, budget_router
@@ -117,6 +118,7 @@ from .deps import (
     TokenIdentity,
     current_user,
     project_db_access,
+    require_local,
 )
 from .github_app import GitHubApp, load_github_app_config
 from .github_app_routes import github_app_router
@@ -361,6 +363,20 @@ def create_portal_app(
                 )
             ],
         )
+    # Claude Code hooks (plan 40 section 5.9): local mode only. FastAPI runs
+    # these mount-level dependencies in list order, before any of the router's
+    # own, so production answers 404 before any identity or project check.
+    app.include_router(
+        agent_hooks_router,
+        dependencies=[
+            Depends(require_local),
+            Depends(
+                project_db_access(
+                    Action.PROJECT_READ, guard=linked_guard("Agent hooks")
+                )
+            ),
+        ],
+    )
     app.include_router(
         chat_router,
         prefix="/api/projects/{slug}/chat",

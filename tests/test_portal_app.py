@@ -1477,6 +1477,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/notes/{{note_id}}/reconfirm", "POST"): _CHAT,
     (f"{_P}/notes/{{note_id}}/retire", "POST"): _CHAT,
     (f"{_P}/notes/reject-agent-proposals", "POST"): _CHAT,
+    # Claude Code hooks (plan 40 section 5.9): local only, project.read
+    (f"{_P}/agent-hooks/session-start", "POST"): _READ,
+    (f"{_P}/agent-hooks/post-tool", "POST"): _READ,
     (f"{_P}/areas/suggest", "GET"): _CONFIGURE,
     (f"{_P}/chat/providers", "GET"): _CHAT,
     (f"{_P}/chat/modes", "GET"): _CHAT,
@@ -1550,6 +1553,9 @@ LOCAL_ONLY_ROUTES = {
     ("/api/platform/pending/{link_id}", "DELETE"),
     # The GitHub token test (M2f-3 section 4.13): production has no PATs
     ("/api/projects/{slug}/github-token/test", "POST"),
+    # Claude Code hooks (plan 40 section 5.9): the helper only runs locally
+    ("/api/projects/{slug}/agent-hooks/session-start", "POST"),
+    ("/api/projects/{slug}/agent-hooks/post-tool", "POST"),
 }
 """Local mode's own routes (M2e plan section 4.8): org-scoped, but gated by
 :func:`~whygraph.portal.deps.require_local`, so production answers ``404`` on

@@ -166,6 +166,9 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("POST", f"/api/projects/{SLUG}/notes/1/reconfirm", None),
     ("POST", f"/api/projects/{SLUG}/notes/1/retire", {"reason": "wrong"}),
     ("POST", f"/api/projects/{SLUG}/notes/reject-agent-proposals", {}),
+    # Claude Code hooks: linked projects get none (plan 40 section 5.9).
+    ("POST", f"/api/projects/{SLUG}/agent-hooks/session-start", {}),
+    ("POST", f"/api/projects/{SLUG}/agent-hooks/post-tool", {}),
     # The chat router: Chat opens on the platform too.
     ("GET", f"/api/projects/{SLUG}/chat/providers", None),
     ("GET", f"/api/projects/{SLUG}/chat/modes", None),

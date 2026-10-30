@@ -1212,6 +1212,14 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"proposed_by": o.owner_uid or "someone", "origin": "mcp"},
         shows=lambda o: ["rejected"],
     ),
+    # Claude Code hooks (plan 40): local only, left out of the production
+    # sweeps; the answer is the same {} for everyone (no path in the body).
+    ("POST", "/api/projects/{slug}/agent-hooks/session-start"): Call(
+        200, body=lambda w, o: {"session_id": "s1", "source": "startup"}
+    ),
+    ("POST", "/api/projects/{slug}/agent-hooks/post-tool"): Call(
+        200, body=lambda w, o: {"session_id": "s1", "tool_input": {}}
+    ),
     # Each org's seed has one nested canary path; the sweep fails if the
     # other org's mark shows in the answer.
     ("GET", "/api/projects/{slug}/areas/suggest"): Call(

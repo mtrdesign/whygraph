@@ -724,6 +724,7 @@ def _ref_failures(
     answer: str,
     resolve_sha: Callable[[str], str],
     resolve_number: Callable[[int], bool],
+    pr_sha: Callable[[str, list[int]], bool] | None = None,
 ) -> tuple[list[str], list[str]]:
     """``(failures, notes)`` of one answer's cited refs.
 
@@ -732,14 +733,18 @@ def _ref_failures(
     PR or an issue. A miss is ``invented_ref:<ref>``; an ambiguous prefix, an
     unverifiable one (no checkout to ask git) and a hex token that is not a
     commit but appears in the repository's files (an Alembic revision id, a
-    hash constant) are notes, not failures.
+    hash constant) are notes, not failures. So is a SHA git cannot resolve
+    that is the head or merge commit of a ``#N`` the same answer cites
+    (``pr_sha``): a squash-merged PR's branch commit is never in the clone.
     """
     shas, numbers = _extract_refs(answer)
     failures: list[str] = []
     notes: list[str] = []
     for sha in shas:
         verdict = resolve_sha(sha)
-        if verdict == "missing":
+        if verdict == "missing" and pr_sha is not None and pr_sha(sha, numbers):
+            notes.append(f"pr_sha_ref:{sha}")
+        elif verdict == "missing":
             failures.append(f"invented_ref:{sha}")
         elif verdict in ("ambiguous", "unverified", "identifier"):
             notes.append(f"{verdict}_ref:{sha}")
@@ -790,7 +795,11 @@ def _git(root: str, *argv: str) -> subprocess.CompletedProcess:
     )
 
 
-def _live_resolvers(args) -> tuple[Callable[[str], str], Callable[[int], bool]]:
+def _live_resolvers(
+    args,
+) -> tuple[
+    Callable[[str], str], Callable[[int], bool], Callable[[str, list[int]], bool]
+]:
     """The portal-backed resolvers :func:`_ref_failures` takes."""
     api = _project_api(args)
 
@@ -819,7 +828,20 @@ def _live_resolvers(args) -> tuple[Callable[[str], str], Callable[[int], bool]]:
             f"{api}/issue/{number}"
         )
 
-    return resolve_sha, resolve_number
+    def pr_sha(sha: str, numbers: list[int]) -> bool:
+        for number in numbers:
+            try:
+                pr = _get_json(f"{api}/pr/{number}").get("pull_request") or {}
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            if any(
+                str(pr.get(key) or "").startswith(sha)
+                for key in ("head_sha", "merge_commit_sha")
+            ):
+                return True
+        return False
+
+    return resolve_sha, resolve_number, pr_sha
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +881,7 @@ def _run_case_turns(
     args,
     session_id: int,
     case: dict,
-    resolvers: tuple[Callable[[str], str], Callable[[int], bool]] | None = None,
+    resolvers: tuple[Callable, ...] | None = None,
 ) -> tuple[dict, list[str], list[str]]:
     """Send a case's turns in one session; return ``(merged, failures, notes)``.
 
@@ -1778,6 +1800,13 @@ def _self_test_refs() -> bool:
         "revision 6f1b3d8a2c94", lambda sha: "identifier", bool
     )
     ok &= failures == [] and notes == ["identifier_ref:6f1b3d8a2c94"]
+    failures, notes = _ref_failures(
+        "#12597 has one commit, `0f2c5bd`; `abc1234` is made up",
+        lambda sha: "missing",
+        lambda number: True,
+        lambda sha, numbers: sha == "0f2c5bd" and numbers == [12597],
+    )
+    ok &= failures == ["invented_ref:abc1234"] and notes == ["pr_sha_ref:0f2c5bd"]
     real = globals()["_get_json"]
     try:
         globals()["_get_json"] = lambda url: {"error": "not_found"}

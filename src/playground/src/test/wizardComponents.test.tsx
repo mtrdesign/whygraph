@@ -2,7 +2,7 @@ import { useState } from "react";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { RouterProvider, createMemoryHistory, createRootRoute, createRouter } from "@tanstack/react-router";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DetectedAgent, Detected, FileOutcome, InitResult } from "../api";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AgentPicker } from "../components/portal/AgentPicker";
@@ -12,8 +12,34 @@ import { InitializeStep } from "../components/portal/InitializeStep";
 import { NotSharedAlert } from "../components/portal/NotSharedAlert";
 import { EstimateBody } from "../components/portal/ScanEstimateCard";
 import { ScanProgress } from "../components/portal/ScanProgress";
+import { WizardConfigure } from "../components/portal/WizardConfigure";
 import { WizardSteps } from "../components/portal/WizardSteps";
 import { initialScanRunState, reduceScanRun } from "../lib/scanRun";
+
+// The wizard follows a run through `useScanRun`; the tests drive its state by hand.
+const runStore = vi.hoisted(() => ({
+  state: null as unknown,
+  listeners: new Set<(s: unknown) => void>(),
+  set(next: unknown) {
+    this.state = next;
+    this.listeners.forEach((l) => l(next));
+  },
+}));
+vi.mock("../lib/scanRun", async (orig) => {
+  const actual = await orig<typeof import("../lib/scanRun")>();
+  const { useEffect, useState } = await import("react");
+  return {
+    ...actual,
+    useScanRun: () => {
+      const [s, set] = useState(runStore.state ?? actual.initialScanRunState);
+      useEffect(() => {
+        runStore.listeners.add(set as (s: unknown) => void);
+        return () => void runStore.listeners.delete(set as (s: unknown) => void);
+      }, []);
+      return s;
+    },
+  };
+});
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -727,5 +753,172 @@ describe("ScanProgress", () => {
     await renderWithRouter(<ScanProgress slug="a" runId={7} state={state} />);
     expect(screen.getByTestId("scan-status")).toHaveTextContent("Cloning acme/api");
     expect(within(screen.getByTestId("scan-steps")).getByText("Clone the repository")).toBeInTheDocument();
+  });
+});
+
+
+// ---- the purpose option in the wizard (plan 41, AC 9) -------------------------------
+
+describe("WizardConfigure purpose option", () => {
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  let posts: number;
+  let missingKey: string | null;
+  let permissions: string[];
+
+  const purposeBody = () => ({
+    confirmed: null,
+    proposed: null,
+    running: false,
+    last_run: null,
+    stale: null,
+    can_generate: true,
+    estimate: {
+      model: { provider: "anthropic", model: "claude-haiku-4-5" },
+      tokens: null,
+      cost: { usd: 0.01, low: 0.005, high: 0.02, currency: "USD", prices_as_of: "2026-10-01" },
+      cost_hidden: false,
+      missing_key: missingKey,
+    },
+  });
+
+  function project() {
+    return {
+      slug: "alpha",
+      name: "Alpha",
+      source: "local",
+      root: "/repos/alpha",
+      remote_url: null,
+      initialized: true,
+      last_scan_at: null,
+      root_status: "ok",
+      running_scan: null,
+      permissions,
+      my_role: "admin",
+      agents: [],
+      stats: null,
+    };
+  }
+
+  function stubFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), "http://127.0.0.1:8765");
+        const path = url.pathname;
+        const method = init?.method ?? "GET";
+        if (path === "/api/portal/state")
+          return Promise.resolve(json({ mode: "local", setup_complete: true, user: { uid: "u1", role: "owner" } }));
+        if (path === "/api/projects/alpha/purpose") {
+          if (method === "POST") posts += 1;
+          return Promise.resolve(json(purposeBody()));
+        }
+        if (path === "/api/projects/alpha/scans/5")
+          return Promise.resolve(json({ id: 5, trigger: "manual", analyze: false, status: "running" }));
+        if (path === "/api/projects/alpha") return Promise.resolve(json(project()));
+        return Promise.resolve(json({ error: "unhandled" }, 404));
+      }),
+    );
+  }
+
+  async function mountWizard() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await renderWithRouter(
+      <QueryClientProvider client={client}>
+        <WizardConfigure
+          slug="alpha"
+          project={project() as unknown as Parameters<typeof WizardConfigure>[0]["project"]}
+          runId={5}
+          onRun={() => {}}
+        />
+      </QueryClientProvider>,
+    );
+  }
+
+  const running = { ...initialScanRunState };
+  const ended = (finished: "ok" | "failed") => ({ ...initialScanRunState, finished });
+
+  beforeEach(() => {
+    posts = 0;
+    missingKey = null;
+    permissions = ["project.read", "project.scan", "project.scan_full", "project.configure"];
+    runStore.listeners.clear();
+    runStore.state = running;
+    stubFetch();
+  });
+
+  it("is unticked by default, shows the cost, and posts once after the run is ok", async () => {
+    const user = userEvent.setup();
+    await mountWizard();
+    const box = await screen.findByRole("checkbox", { name: /Describe the project's purpose/ });
+    expect(box).not.toBeChecked();
+    expect(await screen.findByText(/about \$0\.01 on Anthropic, claude-haiku-4-5/)).toBeInTheDocument();
+    await user.click(box);
+    expect(box).toBeChecked();
+    expect(posts).toBe(0);
+    await act(async () => runStore.set(ended("ok")));
+    await waitFor(() => expect(posts).toBe(1));
+    expect(await screen.findByTestId("purpose-card")).toBeInTheDocument();
+    expect(screen.queryByTestId("purpose-option")).toBeNull();
+    await act(async () => runStore.set({ ...ended("ok") }));
+    expect(posts).toBe(1);
+  });
+
+  it("posts nothing when the box stays unticked", async () => {
+    await mountWizard();
+    await screen.findByRole("checkbox", { name: /Describe the project's purpose/ });
+    await act(async () => runStore.set(ended("ok")));
+    await screen.findByTestId("purpose-card");
+    expect(posts).toBe(0);
+  });
+
+  it("posts nothing when the run does not end ok", async () => {
+    const user = userEvent.setup();
+    await mountWizard();
+    await user.click(await screen.findByRole("checkbox", { name: /Describe the project's purpose/ }));
+    await act(async () => runStore.set(ended("failed")));
+    await waitFor(() => expect(screen.getByTestId("scan-failed")).toBeInTheDocument());
+    expect(posts).toBe(0);
+  });
+
+  it("posts nothing when it unmounts before the run is ok", async () => {
+    const user = userEvent.setup();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const root = createRootRoute({
+      component: () => (
+        <QueryClientProvider client={client}>
+          <WizardConfigure
+            slug="alpha"
+            project={project() as unknown as Parameters<typeof WizardConfigure>[0]["project"]}
+            runId={5}
+            onRun={() => {}}
+          />
+        </QueryClientProvider>
+      ),
+    });
+    const router = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) });
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(<RouterProvider router={router} />);
+    });
+    await user.click(await screen.findByRole("checkbox", { name: /Describe the project's purpose/ }));
+    view.unmount();
+    await act(async () => runStore.set(ended("ok")));
+    expect(posts).toBe(0);
+  });
+
+  it("disables the box with a reason when the key is missing, and hides it without project.scan_full", async () => {
+    missingKey = "anthropic";
+    await mountWizard();
+    const box = await screen.findByRole("checkbox", { name: /Describe the project's purpose/ });
+    await waitFor(() => expect(box).toBeDisabled());
+    expect(screen.getByTestId("purpose-option-reason")).toBeInTheDocument();
+  });
+
+  it("is not offered to a caller without project.scan_full", async () => {
+    permissions = ["project.read", "project.scan"];
+    await mountWizard();
+    await screen.findByTestId("wizard-estimate");
+    expect(screen.queryByTestId("purpose-option")).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2Icon, InfoIcon } from "lucide-react";
@@ -30,6 +30,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Skeleton } from "../ui/skeleton";
 import { Field } from "./Field";
+import { ProjectPurposeCard, purposeCostText, purposeKey } from "./ProjectPurposeCard";
 import { ScanEstimateCard } from "./ScanEstimateCard";
 import { ScanProgress } from "./ScanProgress";
 
@@ -528,6 +529,30 @@ export function WizardConfigure({
     onSuccess: ({ run_id }) => onRun(run_id),
   });
 
+  // The purpose option (plan 41): off by default, local to this mount, fired at most once.
+  const queryClient = useQueryClient();
+  const canPurpose = can(project, "project.scan_full") && !linked && project.initialized;
+  const [purposeTick, setPurposeTick] = useState(false);
+  const purposeFired = useRef(false);
+  const purposeInfo = useQuery({
+    queryKey: purposeKey(slug),
+    queryFn: () => projectApi(slug).getPurpose(),
+    enabled: canPurpose,
+    retry: false,
+  });
+  const generatePurpose = useMutation({
+    mutationFn: () => projectApi(slug).generatePurpose(),
+    onSuccess: (data) => queryClient.setQueryData(purposeKey(slug), data),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: purposeKey(slug) }),
+  });
+  const { mutate: startPurpose } = generatePurpose;
+  useEffect(() => {
+    if (!finished || run.kind !== "initial" || !purposeTick || purposeFired.current) return;
+    purposeFired.current = true;
+    startPurpose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finished, run.kind]);
+
   useEffect(() => onFinished?.(scanned), [scanned, onFinished]);
 
   const fullName = project.github_full_name ?? undefined;
@@ -597,6 +622,22 @@ export function WizardConfigure({
         </Link>
       </p>
 
+      {canPurpose &&
+        (finished ? (
+          <ProjectPurposeCard slug={slug} />
+        ) : (
+          run.kind === "initial" &&
+          runId != null && (
+            <PurposeOption
+              checked={purposeTick}
+              onChange={setPurposeTick}
+              missingKey={purposeInfo.data?.estimate.missing_key ?? null}
+              costText={purposeCostText(purposeInfo.data?.estimate)}
+              model={purposeInfo.data?.estimate.model.model ?? null}
+            />
+          )
+        ))}
+
       <section className={CARD} data-testid="wizard-estimate">
         <h2 className="text-sm font-semibold">Commit descriptions</h2>
         {finished ? (
@@ -624,6 +665,46 @@ export function WizardConfigure({
         <Button onClick={() => void navigate({ to: "/p/$slug", params: { slug } })}>Open project</Button>
       </div>
     </div>
+  );
+}
+
+/** The wizard's opt-in for a purpose statement once the first scan is done (unticked, never persisted). */
+function PurposeOption({
+  checked,
+  onChange,
+  missingKey,
+  costText,
+  model,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  missingKey: string | null;
+  costText: string;
+  model: string | null;
+}) {
+  const detail = costText ? ` (${costText})` : model ? ` (on ${model})` : "";
+  return (
+    <section className={CARD} data-testid="purpose-option">
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={checked && !missingKey}
+          disabled={!!missingKey}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span>Describe the project's purpose{detail}</span>
+      </label>
+      {missingKey ? (
+        <p className="text-xs text-muted-foreground" data-testid="purpose-option-reason">
+          The {missingKey} key is not set. Add it in the project's model settings to enable this.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Runs once when the first scan finishes. You review the result before it is used.
+        </p>
+      )}
+    </section>
   );
 }
 

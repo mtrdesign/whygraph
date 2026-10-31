@@ -436,6 +436,48 @@ def test_session_start_lists_project_notes_and_freshness(
     assert "file only" not in inner["additionalContext"]
 
 
+def test_session_start_keeps_the_purpose_ahead_of_newer_project_notes(
+    hooked: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 41 R11: the purpose is first, even when newer notes fill the budget."""
+    monkeypatch.setattr(hooks, "_freshness", lambda: {"commits_behind": 0})
+    purpose = (
+        "What it is: Réservations für das Café in Zürich - 日本語 too.\n"
+        "Who it is for: Rezeption.\n"
+        "Main parts: api, worker.\n"
+        "Stack: Python"
+    )
+    purpose_fields = {"kind": "purpose", "source": "analysis", "origin": "ui"}
+    hooked.note(
+        body=purpose, confirmed_at="2026-10-01T00:00:00+00:00", **purpose_fields
+    )
+    for n in range(4):  # newer, and each about half the budget
+        hooked.note(body=f"{n} " + "w" * 900, confirmed_at=f"2026-10-2{n}T00:00:00")
+    hooked.note(
+        body="a pending purpose",
+        status="proposed",
+        confirmed_by=None,
+        confirmed_at=None,
+        **purpose_fields,
+    )
+    hooked.note(
+        body="a retired purpose",
+        status="retired",
+        retire_reason="superseded",
+        **purpose_fields,
+    )
+    raw = post(hooked, SESSION, {"session_id": SID, "source": "startup"}).text
+    assert _helper_check(raw, "SessionStart") == raw
+    context = json.loads(raw)["hookSpecificOutput"]["additionalContext"]
+    lines = context.split("\n")
+    assert lines[1] == "Index: up to date"
+    assert lines[2].startswith("- note #1 [purpose] (project, n/a): ")
+    assert json.dumps(" ".join(purpose.split())) in lines[2]
+    assert len(context) <= hooks.TEXT_BUDGET_CHARS
+    assert lines[3].startswith("- note #5 [constraint]")
+    assert "pending purpose" not in context and "retired purpose" not in context
+
+
 @pytest.mark.parametrize(
     ("behind", "notes", "expect"),
     [

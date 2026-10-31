@@ -17,7 +17,8 @@ This module is the trust boundary of the feature:
 - **Atomic transitions.** Every transition is a conditional
   ``UPDATE ... WHERE status = :expected``; a row count other than 1 raises
   ``note_state`` and rolls back. The cap checks and the insert of
-  :func:`propose` run under ``BEGIN IMMEDIATE``.
+  :func:`propose` run under ``BEGIN IMMEDIATE``, as does all of
+  :func:`propose_purpose`, the one writer of the project ``purpose`` note.
 - **Staleness on read.** A symbol or range anchor stores the sha256 of its
   lines; reads hash them again (``current`` / ``changed`` / ``missing`` /
   ``unknown``). Computing a state never starts a ``codegraph sync``; only the
@@ -46,7 +47,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
 
 from mcp.server.fastmcp import FastMCP
-from sqlalchemy import and_, false, func, or_, update
+from sqlalchemy import and_, case, false, func, or_, update
 from sqlmodel import Session, col, select
 
 from whygraph.core import get_config
@@ -74,17 +75,38 @@ from .errors import WhyGraphError, log_tool_errors
 from .structured import structured
 from .targets import Target
 
-NOTE_KINDS = ("decision", "constraint", "gotcha", "convention")
-"""What a note records."""
+NOTE_KINDS = ("decision", "constraint", "gotcha", "convention", "purpose")
+"""What a note records. ``purpose`` is written only by :func:`propose_purpose`."""
 
 ANCHOR_KINDS = ("project", "area", "path", "symbol", "range")
 """What a note can be tied to; exactly one per note."""
 
-SOURCES = ("human", "chat", "mcp")
-"""Who proposed a note: a person in the UI, the Chat assistant, an MCP client."""
+SOURCES = ("human", "chat", "mcp", "analysis")
+"""Who proposed a note: a person in the UI, the Chat assistant, an MCP client,
+or the project purpose action (``analysis``, only through :func:`propose_purpose`)."""
 
 RETIRE_REASONS = ("rejected", "outdated", "wrong", "superseded")
-"""Why a note was retired (``superseded`` only by confirming a revision)."""
+"""Why a note was retired.
+
+``superseded`` is set only by confirming a revision, and for a proposed
+purpose replaced by a newer one (:func:`propose_purpose`). Retiring a
+confirmed purpose also retires its pending revision as ``rejected``.
+"""
+
+PURPOSE_KIND = "purpose"
+"""The kind of the project purpose note (at most one proposed, one confirmed)."""
+
+PURPOSE_SOURCE = "analysis"
+"""The source of a project purpose note; :func:`propose` refuses it."""
+
+PURPOSE_BODY_MAX_CHARS = 600
+"""Longest body :func:`propose_purpose` accepts, in characters."""
+
+_PROPOSE_KINDS = tuple(k for k in NOTE_KINDS if k != PURPOSE_KIND)
+"""The kinds :func:`propose` (and a kind edit on confirm) accepts."""
+
+_PROPOSE_SOURCES = tuple(s for s in SOURCES if s != PURPOSE_SOURCE)
+"""The sources :func:`propose` accepts."""
 
 STATUSES = ("proposed", "confirmed", "retired")
 """A note's lifecycle states."""
@@ -304,9 +326,9 @@ def _is_control(ch: str) -> bool:
 
 
 def _check_kind(kind: object) -> str:
-    """Validate a note kind."""
-    if kind not in NOTE_KINDS:
-        raise _invalid(f"kind must be one of {', '.join(NOTE_KINDS)}")
+    """Validate a note kind a caller may choose (never ``purpose``)."""
+    if kind not in _PROPOSE_KINDS:
+        raise _invalid(f"kind must be one of {', '.join(_PROPOSE_KINDS)}")
     return str(kind)
 
 
@@ -1175,14 +1197,16 @@ def propose(
         At most :data:`BODY_MAX_CHARS` characters; no control characters
         other than ``\\n``. Stored trimmed.
     kind : str
-        One of :data:`NOTE_KINDS`.
+        One of :data:`NOTE_KINDS` except ``purpose`` (only
+        :func:`propose_purpose` writes one).
     anchor : Mapping
         ``{"kind": <ANCHOR_KINDS>, ...}`` with exactly the fields of that
         kind: ``project`` none; ``area`` ``area``; ``path`` ``path``;
         ``symbol`` ``qualified_name``; ``range`` ``path``, ``line_start``,
         ``line_end``. ``None`` values count as absent.
     source : str
-        One of :data:`SOURCES`. The caps apply to ``chat`` and ``mcp`` only.
+        ``human``, ``chat`` or ``mcp`` (``analysis`` is refused, whoever
+        calls). The caps apply to ``chat`` and ``mcp`` only.
     actor_uid : str or None
         The proposer.
     origin : str, optional
@@ -1192,7 +1216,8 @@ def propose(
         full) and ``#N`` pull requests or issues, each existing in the
         project DB; at most :data:`MAX_REFS`.
     supersedes_id : int, optional
-        Makes this proposal a revision of that note, which must be confirmed.
+        Makes this proposal a revision of that note, which must be confirmed
+        and not a ``purpose`` note.
 
     Returns
     -------
@@ -1212,8 +1237,8 @@ def propose(
     """
     _refuse_linked()
     actor = _require_actor(actor_uid)
-    if source not in SOURCES:
-        raise _invalid(f"source must be one of {', '.join(SOURCES)}")
+    if source not in _PROPOSE_SOURCES:
+        raise _invalid(f"source must be one of {', '.join(_PROPOSE_SOURCES)}")
     origin = _check_origin(origin)
     clean = _clean_body(body)
     kind = _check_kind(kind)
@@ -1227,6 +1252,8 @@ def propose(
             prior = _load(session, supersedes_id)
             if prior.status != "confirmed":
                 raise _state("a revision can only revise a confirmed note")
+            if prior.kind == PURPOSE_KIND:
+                raise _invalid("the project purpose is revised only by generating it")
         duplicate = _find_duplicate(session, clean, fields)
         if duplicate is not None:
             note_id, is_duplicate = int(duplicate.id or 0), True
@@ -1250,6 +1277,136 @@ def propose(
             note_id, is_duplicate = int(row.id or 0), False
         session.commit()
     return _view_by_id(note_id, duplicate=is_duplicate)
+
+
+def _purpose_rows(session: Session, *statuses: str) -> list[ProjectNote]:
+    """Purpose notes in ``statuses``, oldest first."""
+    return list(
+        session.exec(
+            select(ProjectNote)
+            .where(
+                col(ProjectNote.kind) == PURPOSE_KIND,
+                col(ProjectNote.status).in_(statuses),
+            )
+            .order_by(col(ProjectNote.id))
+        ).all()
+    )
+
+
+def propose_purpose(
+    body: str, *, actor_uid: str | None, run_id: int | None = None
+) -> tuple[NoteView, list[int]]:
+    """Propose the project purpose: the one writer of ``kind="purpose"``.
+
+    One ``BEGIN IMMEDIATE`` transaction, in this order: (1) dedupe - a
+    non-retired purpose with the same whitespace-normalised body is returned
+    as it is, and nothing else changes; (2) when a purpose is ``confirmed``
+    the new note revises it (``supersedes_id``); (3) every other ``proposed``
+    purpose is retired as ``superseded`` by a conditional ``UPDATE``; (4) the
+    new note is inserted: ``kind="purpose"``, a ``project`` anchor,
+    ``source="analysis"``, ``origin="ui"``. So at most one purpose is
+    proposed and (through :func:`confirm`) at most one is confirmed.
+
+    Parameters
+    ----------
+    body : str
+        The rebuilt purpose text: the :func:`propose` body rules, and at most
+        :data:`PURPOSE_BODY_MAX_CHARS` characters. Stored trimmed.
+    actor_uid : str or None
+        The member who asked for it (``proposed_by``).
+    run_id : int, optional
+        The ``project_purpose_run`` that produced the body, when the caller
+        already has one. It is not stored on the note: the run row carries
+        the note id.
+
+    Returns
+    -------
+    tuple of (NoteView, list of int)
+        The new proposal (``duplicate: False``) or the existing purpose it
+        matched (``duplicate: True``), and the ids of the proposals this call
+        retired as ``superseded`` (empty on a duplicate). The caller audits
+        those as ``note_retired``; this function emits nothing.
+
+    Raises
+    ------
+    WhyGraphError
+        ``note_invalid`` (the body, or a ``run_id`` that is not an id),
+        ``note_state`` (a proposal changed under the lock), ``note_no_actor``,
+        ``note_linked``.
+
+    Notes
+    -----
+    None of the agent proposal caps apply: the source is not an agent's.
+    """
+    _refuse_linked()
+    actor = _require_actor(actor_uid)
+    clean = _clean_body(body)
+    if len(clean) > PURPOSE_BODY_MAX_CHARS:
+        raise _invalid(f"body must be at most {PURPOSE_BODY_MAX_CHARS} characters")
+    if run_id is not None and not _is_int(run_id):
+        raise _invalid("run_id must be a run id")
+    retired: list[int] = []
+    with get_session() as session:
+        _begin_immediate(session)
+        live = _purpose_rows(session, "proposed", "confirmed")
+        wanted = _normalise(clean)
+        duplicate = next((r for r in live if _normalise(r.body) == wanted), None)
+        if duplicate is not None:
+            note_id, is_duplicate = int(duplicate.id or 0), True
+        else:
+            confirmed = [r for r in live if r.status == "confirmed"]
+            now = _iso(_utcnow())
+            for row in live:
+                if row.status != "proposed":
+                    continue
+                values = {
+                    "status": "retired",
+                    "retire_reason": "superseded",
+                    "retired_by": actor,
+                    "retired_at": now,
+                }
+                if _transition(session, int(row.id or 0), "proposed", values) != 1:
+                    raise _state("a purpose proposal changed; generate again")
+                retired.append(int(row.id or 0))
+            note = ProjectNote(
+                kind=PURPOSE_KIND,
+                body=clean,
+                status="proposed",
+                source=PURPOSE_SOURCE,
+                origin="ui",
+                supersedes_id=confirmed[-1].id if confirmed else None,
+                proposed_by=actor,
+                proposed_at=now,
+                anchor_kind="project",
+            )
+            session.add(note)
+            session.flush()
+            note_id, is_duplicate = int(note.id or 0), False
+        session.commit()
+    return _view_by_id(note_id, duplicate=is_duplicate), retired
+
+
+def purpose_notes() -> dict[str, NoteView | None]:
+    """The live project purpose: the confirmed note and the pending proposal.
+
+    Returns
+    -------
+    dict
+        ``{"confirmed": NoteView or None, "proposed": NoteView or None}``.
+        A retired purpose is never returned. Should more than one exist in a
+        status, the newest is returned.
+
+    Raises
+    ------
+    WhyGraphError
+        ``note_linked`` on a linked project, before any DB access.
+    """
+    _refuse_linked()
+    out: dict[str, NoteView | None] = {"confirmed": None, "proposed": None}
+    with get_session() as session:
+        for row in _purpose_rows(session, "confirmed", "proposed"):
+            out[row.status] = _view(row, "n/a", None)
+    return out
 
 
 def _edits(row: ProjectNote, body: object, kind: object) -> bool:
@@ -1280,7 +1437,9 @@ def confirm(
         Whether the member holds ``project.configure`` (a project admin).
     body, kind : str, optional
         Edits, re-validated. An edited body keeps the proposed text in
-        ``proposed_body`` (shown as ``edited_on_confirm``).
+        ``proposed_body`` (shown as ``edited_on_confirm``). The kind never
+        changes to or from ``purpose``; naming the note's own kind is not an
+        edit.
 
     Returns
     -------
@@ -1294,8 +1453,9 @@ def confirm(
         (:func:`is_wide_anchor`) confirmed by its proposer, or edited by
         anyone, without ``actor_can_configure``. Then ``note_state`` (not
         proposed, or the note it revises is no longer confirmed),
-        ``note_invalid`` (an edit, or the anchor no longer resolves; a stale
-        code index refuses a symbol note), ``note_not_found``,
+        ``note_invalid`` (an edit, including a kind edit to or from
+        ``purpose``, or the anchor no longer resolves; a stale code index
+        refuses a symbol note), ``note_not_found``,
         ``note_no_actor``, ``note_linked``.
 
     Notes
@@ -1314,7 +1474,12 @@ def confirm(
         if row.status != "proposed":
             raise _state("only a proposed note can be confirmed")
         new_body = row.body if body is None else _clean_body(body)
-        new_kind = row.kind if kind is None else _check_kind(kind)
+        if kind is None or kind == row.kind:
+            new_kind = row.kind
+        elif PURPOSE_KIND in (kind, row.kind):
+            raise _invalid("a note's kind cannot change to or from purpose")
+        else:
+            new_kind = _check_kind(kind)
         values = _rehash_for_write(row)
         now = _iso(_utcnow())
         values.update(
@@ -1428,12 +1593,14 @@ def retire(note_id: int, *, actor_uid: str | None, reason: str) -> NoteView:
         The member.
     reason : str
         ``rejected`` (from ``proposed``), ``outdated`` or ``wrong`` (from
-        ``confirmed``). ``superseded`` is set only by confirming a revision.
+        ``confirmed``). ``superseded`` is set only by confirming a revision
+        or by :func:`propose_purpose`.
 
     Returns
     -------
     NoteView
-        The retired note.
+        The retired note. Retiring a confirmed purpose also retires its
+        pending revision as ``rejected``, in the same transaction.
 
     Raises
     ------
@@ -1448,18 +1615,30 @@ def retire(note_id: int, *, actor_uid: str | None, reason: str) -> NoteView:
     if expected is None:
         raise _invalid("reason must be rejected, outdated or wrong")
     with get_session() as session:
-        _load(session, note_id)
+        row = _load(session, note_id)
         _begin_immediate(session)
+        now = _iso(_utcnow())
         values = {
             "status": "retired",
             "retire_reason": reason,
             "retired_by": actor,
-            "retired_at": _iso(_utcnow()),
+            "retired_at": now,
         }
         if _transition(session, note_id, expected, values) != 1:
             raise _state(
                 "a proposed note is retired as rejected, a confirmed one as "
                 "outdated or wrong"
+            )
+        if row.kind == PURPOSE_KIND and expected == "confirmed":
+            # A revision of a retired note could never be confirmed.
+            session.exec(  # type: ignore[call-overload]
+                update(ProjectNote)
+                .where(
+                    col(ProjectNote.supersedes_id) == note_id,
+                    col(ProjectNote.status) == "proposed",
+                )
+                .values(**{**values, "retire_reason": "rejected"})
+                .execution_options(synchronize_session=False)
             )
         session.commit()
     return _view_by_id(note_id)
@@ -1787,14 +1966,17 @@ def notes_for_target(
 
 
 def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
-    """Confirmed project-anchored notes, newest first, within a character budget.
+    """Confirmed project-anchored notes within a character budget.
+
+    The confirmed ``purpose`` note comes first, then the others, newest
+    confirmed first.
 
     Parameters
     ----------
     budget : int, optional
         Characters of :func:`render_note_line` output (plus one newline per
-        note) the result may take; the first note that does not fit ends the
-        list, so a note is never cut.
+        note) the result may take. A note that does not fit is skipped and
+        the next ones are still tried, so a note is never cut.
 
     Returns
     -------
@@ -1810,13 +1992,17 @@ def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
                 col(ProjectNote.status) == "confirmed",
                 col(ProjectNote.anchor_kind) == "project",
             )
-            .order_by(col(ProjectNote.confirmed_at).desc(), col(ProjectNote.id).desc())
+            .order_by(
+                case((col(ProjectNote.kind) == PURPOSE_KIND, 0), else_=1),
+                col(ProjectNote.confirmed_at).desc(),
+                col(ProjectNote.id).desc(),
+            )
         ).all()
         for row in rows:
             view = _view(row, "n/a", None)
             cost = len(render_note_line(view)) + 1
             if used + cost > budget:
-                break
+                continue
             used += cost
             out.append(view)
     return out
@@ -2053,6 +2239,9 @@ __all__ = [
     "NoteView",
     "ProposeNoteResult",
     "PROJECT_NOTES_BUDGET_CHARS",
+    "PURPOSE_BODY_MAX_CHARS",
+    "PURPOSE_KIND",
+    "PURPOSE_SOURCE",
     "RETIRE_REASONS",
     "SOURCES",
     "STATUSES",
@@ -2063,6 +2252,8 @@ __all__ = [
     "notes_for_target",
     "project_notes",
     "propose",
+    "propose_purpose",
+    "purpose_notes",
     "reconfirm",
     "reject_agent_proposals",
     "render_note_line",

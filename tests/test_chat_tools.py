@@ -2901,3 +2901,60 @@ def test_overview_counts_project_wide_notes_and_never_shows_a_body(
         assert _SECRET not in message.content
         assert "Another project-wide fact" not in message.content
     assert "project_wide" in build_system_prompt(notes_registry)[1].content
+
+
+# ---------------------------------------------------------------------------
+# Plan 41: the purpose is a project-wide note, not an overview line (D6)
+# ---------------------------------------------------------------------------
+
+_PURPOSE = (
+    "What it is: A booking tool.\nWho it is for: Reception.\n"
+    "Main parts: api, worker.\nStack: Python"
+)
+
+
+def _confirmed_purpose(body: str = _PURPOSE) -> int:
+    from whygraph.mcp import notes as mcp_notes
+
+    note, _ = mcp_notes.propose_purpose(body, actor_uid="u1", run_id=None)
+    mcp_notes.confirm(note["id"], actor_uid="u2", actor_can_configure=True)
+    return note["id"]
+
+
+def test_overview_never_carries_a_purpose_key(
+    note_project,
+    notes_registry,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        chat_tools, "_repo_overview_resource", lambda: {"repository": "demo"}
+    )
+    _confirmed_purpose()
+    overview = _result(notes_registry, "get_repo_overview")
+    assert "purpose" not in overview
+    assert "booking tool" not in json.dumps(overview)
+
+
+def test_the_confirmed_purpose_counts_in_team_notes(
+    note_project,
+    notes_registry,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        chat_tools, "_repo_overview_resource", lambda: {"repository": "demo"}
+    )
+    _confirmed_purpose()
+    assert _result(notes_registry, "get_repo_overview")["team_notes"] == {
+        "project_wide": 1,
+        "hint": "call find_notes(project_wide=true)",
+    }
+
+
+def test_find_notes_project_wide_returns_the_confirmed_purpose(
+    note_project,
+    notes_registry,
+) -> None:
+    note_id = _confirmed_purpose()
+    notes = _result(notes_registry, "find_notes", project_wide=True)["notes"]
+    assert [n["id"] for n in notes] == [note_id]
+    assert notes[0]["kind"] == "purpose"

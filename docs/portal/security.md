@@ -417,6 +417,38 @@ payload. The portal writes every `"` inside that text as `\u0022`, and the helpe
 that holds a literal `"` there, so nothing can follow the text to add a key such as `continue` or
 `decision`. A note reaches the model labelled as member-written data, not instructions.
 
+## Project purpose { #project-purpose }
+
+Generating a [project purpose](../guide/notes.md#project-purpose) sends repository text to the model
+behind the project's `[analyze]` setting - the provider, or the custom `base_url` you configured, such
+as a gateway or Ollama on your machine. Check that destination before you generate. One call sends, at
+most 24 KB in all:
+
+- the README (up to 12 KB) and a few documents (`docs/index.md`, `docs/README.md`, `CONTRIBUTING.md`,
+  4 KB each);
+- the package manifests **reduced**: the package name and description, script names and dependency
+  names only - never versions, URLs or the whole file;
+- the top-level file and folder names, the configured area names, and history counts (commit count,
+  date range, the share of changes per top-level folder).
+
+Never read or sent: the working tree (everything comes from the git object store at `HEAD`, so
+untracked files, symbolic links and submodules are skipped), `.env` and credential files, commit
+subjects, pull request titles, and author names or emails. Token patterns are redacted from every text
+before it is sent.
+
+The repository is untrusted input here too: its text goes inside a random, per-call fence that the
+prompt calls data, never instructions. The model's answer is **parsed and rebuilt** from four labelled
+values with fixed length caps, and refused (no retry, so no second spend) if it contains a link, a
+command-like character or a missing label; only the rebuilt text is stored. The result is a proposal
+that no model reads until it is confirmed.
+
+**Accepted residual risk.** The admin who generates a purpose may confirm it without anyone else
+reading it, so a hostile README could steer the draft and an admin who confirms without reading would
+put it in front of Chat sessions. The controls are the ones above (rebuilt and bounded text, shown
+beside its sources, one explicit click, admin-only edits) and the audit event `purpose_generated`
+(counts only, never the text). The call is metered like any other, and cannot be made on a linked
+project.
+
 ## What the portal writes to your repository
 
 Only when you initialize a project, only what the preview listed, and only after you confirm:

@@ -40,7 +40,7 @@ class ProjectNote(WhygraphTable, table=True):
         sha256 of the anchored lines at (re)confirmation; symbol and range
         anchors only.
     source : str
-        ``human``, ``chat`` or ``mcp``.
+        ``human``, ``chat``, ``mcp`` or ``analysis`` (the project purpose).
     origin : str | None
         ``chat:<session_id>``, ``mcp`` or ``ui``.
     refs : str | None

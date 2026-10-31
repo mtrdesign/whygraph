@@ -738,6 +738,35 @@ def _list_notes(args, **params) -> list[dict]:
         before = min(note["id"] for note in page)
 
 
+def _propose_purpose_local(args, body: str) -> dict:
+    """Create a ``purpose`` proposal in-process (``--data-dir`` names the portal's data).
+
+    The notes routes refuse ``kind="purpose"`` (plan 41 D8): ``propose_purpose``
+    is its only writer, so the script calls it under the project's context,
+    as ``--replay`` does. The portal then confirms it over HTTP like any note.
+    """
+    from dataclasses import replace
+
+    from whygraph.core import Config
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.mcp import notes
+    from whygraph.portal.paths import project_db_path
+
+    if not args.data_dir:
+        raise SystemExit(
+            "! a purpose setup note needs --data-dir (the portal's data dir)"
+        )
+    root = _get_json(f"{args.base.rstrip('/')}/api/projects/{args.slug}")["root"]
+    config = replace(
+        Config.defaults(),
+        whygraph_db=project_db_path(Path(args.data_dir).resolve(), "local", args.slug),
+        codegraph_db=Path(root) / ".codegraph" / "codegraph.db",
+    )
+    with use_project(ProjectContext(slug=args.slug, root=Path(root), config=config)):
+        view, _retired = notes.propose_purpose(body, actor_uid="eval-script")
+    return dict(view)
+
+
 def _setup_notes(args, suite: dict) -> dict[str, int]:
     """Create and confirm a suite's ``setup.notes``; return ``{name: note id}``.
 
@@ -746,19 +775,39 @@ def _setup_notes(args, suite: dict) -> dict[str, int]:
     proposal is confirmed unless ``"confirm": false``. A note that exists in the
     wrong state (confirmed where a proposal was wanted) stops the run, because
     the case would not test what it says. Only ``as``-named notes are returned.
+
+    An entry with ``"kind": "purpose"`` is created by :func:`_propose_purpose_local`
+    (the routes refuse that kind) and confirmed over HTTP. The slug must hold no
+    live purpose that is not an ``[eval] `` one: setup refuses rather than
+    superseding a real project purpose.
     """
     entries = (suite.get("setup") or {}).get("notes") or []
     ids: dict[str, int] = {}
     if not entries:
         return ids
     existing = [n for n in _list_notes(args) if n.get("status") != "retired"]
+    if any(e.get("kind") == "purpose" for e in entries):
+        foreign = [
+            n
+            for n in existing
+            if n.get("kind") == "purpose" and not n["body"].startswith(EVAL_PREFIX)
+        ]
+        if foreign:
+            raise SystemExit(
+                f"! {args.slug} holds a non-eval project purpose (note "
+                f"#{foreign[0]['id']}): use a scratch slug; the eval never "
+                "supersedes a real purpose"
+            )
     for entry in entries:
         body = entry["body"]
         if not body.startswith(EVAL_PREFIX):
             raise SystemExit(f"! setup note body must start with {EVAL_PREFIX!r}")
         wanted = "confirmed" if entry.get("confirm", True) else "proposed"
         note = next((n for n in existing if n["body"] == body), None)
-        if note is None:
+        if note is None and entry.get("kind") == "purpose":
+            note = _propose_purpose_local(args, body)
+            existing.append(note)
+        elif note is None:
             payload = {k: entry[k] for k in ("body", "kind", "anchor") if k in entry}
             try:
                 note = _post(_notes_api(args), payload)
@@ -1110,6 +1159,32 @@ def _run_case_turns(
     return _merge_turns(per_turn), list(dict.fromkeys(failures)), notes
 
 
+def _cases_from(suite: dict, from_case: str | None) -> list[dict]:
+    """The suite's cases, skipping those before ``from_case`` (if it is in the suite)."""
+    cases = suite["cases"]
+    ids = [c["id"] for c in cases]
+    if from_case and from_case in ids:
+        return cases[ids.index(from_case) :]
+    return cases
+
+
+def _stop_message(
+    args, suite: dict, case: dict, trial: int, n_turns: int, spent: float
+) -> str:
+    """The plain-language ``--stop-above`` stop line, with how to resume."""
+    reserve = TURN_COST_MARGIN * n_turns
+    return (
+        f"! --stop-above stopped the run before {case['id']} t{trial} "
+        f"(suite {suite['suite']}): that case has {n_turns} turn(s), so the "
+        f"guard reserves {n_turns} x ${TURN_COST_MARGIN:.2f} = ${reserve:.2f}; "
+        f"org spend ${spent:.2f} + ${reserve:.2f} = ${spent + reserve:.2f} is "
+        f"above the ceiling ${args.stop_above:.2f}. Raise --stop-above (it is a "
+        "ceiling on the org's month spend, not an allowance) or resume the "
+        f"remaining cases with: --suite <{suite['suite']} file> "
+        f"--from-case {case['id']}"
+    )
+
+
 def _run_suite_pass(
     args, provider: str | None, model: str | None, suite: dict, k: int
 ) -> list[dict]:
@@ -1123,17 +1198,17 @@ def _run_suite_pass(
         session_body["mode"] = args.mode
     trials: list[dict] = []
     note_ids = suite.get("_note_ids") or {}
-    for case in suite["cases"]:
+    for case in _cases_from(suite, getattr(args, "from_case", None)):
         turns = _case_turns(case)
         if note_ids:
             case = {**case, "expect": _substitute(case.get("expect") or {}, note_ids)}
         for trial in range(1, k + 1):
+            spent = _spent(args) if args.stop_above is not None else 0.0
             if args.stop_above is not None and (
-                _spent(args) + TURN_COST_MARGIN * len(turns) > args.stop_above
+                spent + TURN_COST_MARGIN * len(turns) > args.stop_above
             ):
                 print(
-                    f"! org spend would cross {args.stop_above}: stopping before "
-                    f"{case['id']} t{trial}",
+                    _stop_message(args, suite, case, trial, len(turns), spent),
                     file=sys.stderr,
                 )
                 return trials
@@ -2165,6 +2240,36 @@ def _self_test_notes() -> bool:
         pass
     finally:
         globals().update(saved)
+    # A purpose entry goes through propose_purpose, then the confirm route.
+    purpose = "[eval] What it is: x\nWho it is for: Tidewrack Guild"
+    made: list[str] = []
+
+    def fake_purpose(a, body):
+        made.append(body)
+        note = {"id": 40, "kind": "purpose", "body": body, "status": "proposed"}
+        store.append(note)
+        return note
+
+    store[:] = [{"id": 20, "body": "[eval] have", "status": "proposed"}]
+    pure = {"setup": {"notes": [{"as": "purpose", "kind": "purpose", "body": purpose}]}}
+    patched["_propose_purpose_local"] = fake_purpose
+    saved["_propose_purpose_local"] = globals()["_propose_purpose_local"]
+    try:
+        globals().update(patched)
+        ids = _setup_notes(args, pure)
+        again = _setup_notes(args, pure)
+        ok &= ids == again == {"purpose": 40} and made == [purpose]
+        ok &= store[-1]["status"] == "confirmed"
+        store.append(
+            {"id": 41, "kind": "purpose", "body": "real one", "status": "confirmed"}
+        )
+        try:
+            _setup_notes(args, pure)  # a non-eval live purpose: refused
+            ok = False
+        except SystemExit:
+            pass
+    finally:
+        globals().update(saved)
     # note_limit refusals are recognised in a propose_note result.
     ok &= bool(
         NOTE_LIMIT_RE.search(
@@ -2281,6 +2386,22 @@ def _self_test_multi_turn() -> bool:
     finally:
         globals().update(saved)
     ok &= stopped == [] and TURN_COST_MARGIN * 3 > 0.5
+    # The stop line names the case, turns, reserve, spend, ceiling, resume.
+    msg = _stop_message(args, suite, suite["cases"][0], 1, 3, 0.0)
+    ok &= all(
+        part in msg
+        for part in (
+            "M1 t1",
+            "3 turn(s)",
+            "3 x $0.30 = $0.90",
+            "$0.50",
+            "--from-case M1",
+        )
+    )
+    # --from-case skips earlier cases, only in a suite that has the ID.
+    two = {"suite": "t", "cases": [{"id": "A"}, {"id": "B"}, {"id": "C"}]}
+    ok &= [c["id"] for c in _cases_from(two, "B")] == ["B", "C"]
+    ok &= len(_cases_from(two, "Z")) == 3 and len(_cases_from(two, None)) == 3
     return bool(ok)
 
 
@@ -2675,7 +2796,18 @@ def main() -> int:
         default=None,
         metavar="USD",
         help="Stop before any trial that could push the org's month spend above "
-        "this (checked against GET /api/budgets).",
+        "this (checked against GET /api/budgets). The check reserves about "
+        "$0.30 per turn of the NEXT case, so the ceiling (spend just before "
+        "the run + allowance) must cover the expected spend plus about $0.30 "
+        "per turn of the longest remaining case, or the run stops early. "
+        "Resume with --from-case.",
+    )
+    parser.add_argument(
+        "--from-case",
+        default=None,
+        metavar="ID",
+        help="In each --suite that has a case with this ID, skip the cases "
+        "before it (to resume after a --stop-above stop).",
     )
     parser.add_argument(
         "--warmup",
@@ -2726,7 +2858,11 @@ def main() -> int:
         help="Rebuild every request of a report's sessions in-process (no model "
         "calls) and write per-request estimated tokens and modelled cost.",
     )
-    parser.add_argument("--data-dir", metavar="DIR", help="--replay: portal data dir.")
+    parser.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        help="Portal data dir (--replay; a purpose setup note).",
+    )
     parser.add_argument("--out", metavar="REPLAY_JSON", help="--replay: output file.")
     parser.add_argument(
         "--context-budget",
@@ -2744,7 +2880,8 @@ def main() -> int:
         "--cleanup-notes",
         action="store_true",
         help="Retire every '[eval] ' note of --slug (what a suite's setup.notes "
-        "created) and exit. Uses the portal's notes routes; no provider key.",
+        "created, a purpose included) and exit. Uses the portal's notes routes; "
+        "no provider key.",
     )
     parser.add_argument(
         "--self-test",

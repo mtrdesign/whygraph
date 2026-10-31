@@ -31,6 +31,7 @@ SQLMODEL_TABLES = {
     "pr_issue_link",
     "pr_origin_skip",
     "project_note",
+    "project_purpose_run",
     "pull_request",
     "rationale_cache",
     "tag",
@@ -455,9 +456,7 @@ def test_project_note_table_round_trip(_isolate_config_and_engine: Path) -> None
     db_path = _isolate_config_and_engine
     script = ScriptDirectory.from_config(alembic_config())
     assert len(script.get_heads()) == 1
-    assert script.get_revision(script.get_current_head()).down_revision == (
-        "6f1b3d8a2c94"
-    )
+    assert script.get_revision("b7e4c2a91d36").down_revision == "6f1b3d8a2c94"
 
     command.upgrade(alembic_config(), "6f1b3d8a2c94")
     assert "project_note" not in _table_names(db_path)
@@ -497,6 +496,61 @@ def test_project_note_table_round_trip(_isolate_config_and_engine: Path) -> None
     db_engine._reset_engine()
     command.downgrade(alembic_config(), "6f1b3d8a2c94")
     assert "project_note" not in _table_names(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_project_purpose_run_table_round_trip(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """``project_purpose_run`` lands at head and downgrades cleanly, keeping other data."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    script = ScriptDirectory.from_config(alembic_config())
+    assert len(script.get_heads()) == 1
+    assert script.get_revision(script.get_current_head()).down_revision == (
+        "b7e4c2a91d36"
+    )
+
+    command.upgrade(alembic_config(), "b7e4c2a91d36")
+    assert "project_purpose_run" not in _table_names(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO chat_session (title, provider, model, created_at, "
+            "updated_at) VALUES ('t', 'deepseek', 'm', 'x', 'x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert "project_purpose_run" in _table_names(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO project_purpose_run (requested_by, started_at, "
+            "finished_at, status, input_hash, input_bytes, sources, provider, "
+            "model, tokens_in, tokens_out, note_id, error_code) "
+            "VALUES ('u', 'x', 'x', 'ok', 'h', 10, '[]', 'deepseek', 'm', 1, 2, "
+            "7, NULL)"
+        )
+        conn.commit()
+        assert (
+            conn.execute("SELECT COUNT(*) FROM project_purpose_run").fetchone()[0] == 1
+        )
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "b7e4c2a91d36")
+    assert "project_purpose_run" not in _table_names(db_path)
+    assert "project_note" in _table_names(db_path)
     conn = sqlite3.connect(db_path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 1

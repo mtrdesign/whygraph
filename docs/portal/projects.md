@@ -94,6 +94,16 @@ The last step is one screen you can read while the first scan runs:
   only. Someone without access to the project's spend sees the number of commits without a price.
   An empty history says "No commits yet".
 
+### The first scan and the purpose { #the-first-scan-and-the-purpose }
+
+While the first scan runs, a project admin sees an optional checkbox, **Draft a project purpose when
+the scan finishes**. It is **off by default**, shows the estimated cost of the one model call, and is
+disabled with a reason when the `[analyze]` provider has no key. When the first scan finishes `ok` with
+the box ticked, the portal generates the [purpose](../guide/notes.md#project-purpose) once and the
+wizard shows it in a card to confirm. The tick is **not remembered**: if you close the wizard, or the
+first scan does not finish `ok`, nothing is generated. The Overview's purpose card does the same on
+demand. Local and production projects only; a [linked project](platform-projects.md) has no purpose.
+
 **Open project** leaves the wizard at any time - the scan carries on. **Describe N commits (~$X)**
 starts the full scan that writes the descriptions, once the first scan has finished and you may spend
 on this project; otherwise it says why it is disabled. Spend is tracked on [Usage & cost](usage.md);

@@ -15,6 +15,7 @@ export const KIND_LABEL: Record<NoteKind, string> = {
   constraint: "Constraint",
   gotcha: "Gotcha",
   convention: "Convention",
+  purpose: "Project purpose",
 };
 
 export const STATUS_LABEL: Record<NoteStatus, string> = {
@@ -75,6 +76,7 @@ export const SOURCE_LABEL: Record<Note["source"], string> = {
   human: "A member",
   chat: "Chat assistant",
   mcp: "Agent over MCP",
+  analysis: "Drafted by analysis",
 };
 
 /** The anchor to send when revising `anchor`: only the fields that identify it. */

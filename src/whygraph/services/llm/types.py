@@ -53,12 +53,18 @@ class CompletionRequest:
     timeout_sec : int or None
         Per-call timeout override. ``None`` uses the adapter's bound
         default timeout.
+    max_retries : int or None
+        SDK-level retries for this call. ``None`` keeps the SDK default;
+        the Anthropic and OpenAI adapters apply a set value with
+        ``client.with_options(max_retries=n)``, the others ignore it.
+        ``0`` means one attempt only, so one call is one spend.
     """
 
     messages: tuple[Message, ...]
     max_tokens: int | None = None
     temperature: float | None = None
     timeout_sec: int | None = None
+    max_retries: int | None = None
 
     @classmethod
     def of(
@@ -69,6 +75,7 @@ class CompletionRequest:
         max_tokens: int | None = None,
         temperature: float | None = None,
         timeout_sec: int | None = None,
+        max_retries: int | None = None,
     ) -> "CompletionRequest":
         """Build a request for the common "one user message" shape.
 
@@ -78,7 +85,7 @@ class CompletionRequest:
             The user's message content.
         system : str, optional
             Prepended as a ``"system"`` :class:`Message`.
-        max_tokens, temperature, timeout_sec :
+        max_tokens, temperature, timeout_sec, max_retries :
             Forwarded to the :class:`CompletionRequest` constructor.
 
         Returns
@@ -95,6 +102,7 @@ class CompletionRequest:
             max_tokens=max_tokens,
             temperature=temperature,
             timeout_sec=timeout_sec,
+            max_retries=max_retries,
         )
 
 

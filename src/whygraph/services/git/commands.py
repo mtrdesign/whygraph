@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -182,6 +183,99 @@ class GitLsTreeNamesCmd(ShellCommand[tuple[str, ...]]):
 
     def parse(self, result: CompletedProcess[str]) -> tuple[str, ...]:
         return tuple(line for line in result.stdout.splitlines() if line)
+
+
+@dataclass(frozen=True)
+class TreeEntry:
+    """One entry of ``git ls-tree -l`` output.
+
+    Attributes
+    ----------
+    mode : str
+        The octal mode, e.g. ``"100644"``, ``"120000"`` (a symbolic link) or
+        ``"160000"`` (a submodule).
+    type : str
+        ``"blob"``, ``"tree"`` or ``"commit"``.
+    sha : str
+        The object id.
+    size : int or None
+        The blob's size in bytes; ``None`` for a tree or a submodule.
+    name : str
+        The path as git prints it (``-z``, so never quoted), decoded as UTF-8
+        with replacement characters for anything that is not.
+    """
+
+    mode: str
+    type: str
+    sha: str
+    size: int | None
+    name: str
+
+
+class GitLsTreeLongCmd:
+    """``git --literal-pathspecs ls-tree -z -l <ref> [-- <path>...]`` - tree entries with sizes.
+
+    Run for its **bytes** (a file name need not be UTF-8), so it pairs its
+    argv with :meth:`parse_bytes` instead of a :class:`ShellCommand` parser.
+    ``--literal-pathspecs`` keeps a path with glob characters from matching
+    other entries. Without paths it lists the top level of ``ref``'s tree.
+
+    Parameters
+    ----------
+    ref : str
+        The commit-ish to read (never starting with ``-``; the caller checks).
+    paths : Sequence[str]
+        Exact paths to list; empty lists the top level.
+    """
+
+    def __init__(self, ref: str, paths: Sequence[str] = ()) -> None:
+        self.ref = ref
+        self.paths = tuple(paths)
+
+    def argv(self) -> list[str]:
+        args = ["git", "--literal-pathspecs", "ls-tree", "-z", "-l", self.ref]
+        if self.paths:
+            args.extend(["--", *self.paths])
+        return args
+
+    def parse_bytes(self, stdout: bytes) -> tuple[TreeEntry, ...]:
+        """Parse ``<mode> <type> <sha> <size>\\t<name>`` records separated by NUL."""
+        entries: list[TreeEntry] = []
+        for record in stdout.split(b"\0"):
+            meta, tab, raw_name = record.partition(b"\t")
+            fields = meta.split()
+            if not tab or len(fields) != 4:
+                continue
+            mode, kind, sha, size = (f.decode("ascii", "replace") for f in fields)
+            entries.append(
+                TreeEntry(
+                    mode=mode,
+                    type=kind,
+                    sha=sha,
+                    size=int(size) if size.isdigit() else None,
+                    name=raw_name.decode("utf-8", "replace"),
+                )
+            )
+        return tuple(entries)
+
+
+class GitCatBlobCmd:
+    """``git cat-file blob <sha>`` - a blob's raw bytes, straight from the object store.
+
+    No filters or textconv apply. Streamed by
+    :meth:`Repository.blob_prefix`, which reads only a prefix.
+
+    Parameters
+    ----------
+    sha : str
+        A blob id (never starting with ``-``; the caller checks).
+    """
+
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+
+    def argv(self) -> list[str]:
+        return ["git", "cat-file", "blob", self.sha]
 
 
 class GitRevListShasCmd(ShellCommand[frozenset[str]]):

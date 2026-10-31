@@ -44,6 +44,7 @@ from whygraph.db.models.milestone import Milestone
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pr_origin_skip import PROriginSkip
 from whygraph.db.models.project_note import ProjectNote
+from whygraph.db.models.project_purpose_run import ProjectPurposeRun
 from whygraph.db.models.pull_request import PullRequest
 from whygraph.db.models.rationale_cache import RationaleCache
 from whygraph.db.models.tag import Tag
@@ -60,6 +61,7 @@ __all__ = [
     "PRIssueLink",
     "PROriginSkip",
     "ProjectNote",
+    "ProjectPurposeRun",
     "PullRequest",
     "RationaleCache",
     "Tag",

@@ -33,6 +33,7 @@ import { ConnectAgent } from "../components/portal/ConnectAgent";
 import { HealthPanel } from "../components/portal/HealthPanel";
 import { PlatformButtons } from "../components/portal/LinkedActions";
 import { LinkNotice } from "../components/portal/LinkNotice";
+import { ProjectPurposeCard } from "../components/portal/ProjectPurposeCard";
 import { ProjectPortChangeNotice } from "../components/portal/PortChangeNotice";
 import { ProjectStatusBadge } from "../components/portal/ProjectStatusBadge";
 import { RunStatusBadge } from "../components/portal/RunStatusBadge";
@@ -774,6 +775,7 @@ export function ProjectHome() {
       )}
 
       {ready && !linked && overview.isSuccess && <CoverageCard overview={overview.data} />}
+      {ready && !linked && <ProjectPurposeCard slug={slug} />}
       {ready && !linked && <NotesCard slug={slug} />}
       {overview.data?.usage && <UsageCard usage={overview.data.usage} slug={slug} />}
 

@@ -1,7 +1,8 @@
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { projectApi, projectKey, type Note } from "../api";
+import { portalApi, projectApi, projectKey, type Note } from "../api";
 import { NoteCard } from "../components/notes/NoteCard";
+import { ProjectPurposeCard } from "../components/portal/ProjectPurposeCard";
 import { PageContainer } from "../components/layout/PageContainer";
 import { ErrorState } from "../components/state/ErrorState";
 import { TableSkeleton } from "../components/state/Skeletons";
@@ -45,6 +46,10 @@ export function NotesPage() {
   const canAct = useProjectCan("project.chat");
   const canConfigure = useProjectCan("project.configure");
 
+  const project = useQuery({ queryKey: projectKey(slug, "project"), queryFn: () => portalApi.project(slug) });
+  // A linked project's purpose route is refused: never mount (or fetch) the card there.
+  const showPurpose = !!project.data && project.data.source !== "platform" && project.data.initialized;
+
   const list = useInfiniteQuery({
     queryKey: [...projectKey(slug, "notes", "list"), filter],
     queryFn: ({ pageParam }) => projectApi(slug).notes(listCall(filter, pageParam)),
@@ -80,6 +85,8 @@ export function NotesPage() {
           Short facts the team confirmed. Everyone who can open this project can see them.
         </p>
       </div>
+
+      {showPurpose && <ProjectPurposeCard slug={slug} />}
 
       {search.id !== undefined && (
         <section className="flex flex-col gap-2" data-testid="linked-note" aria-label="Linked note">

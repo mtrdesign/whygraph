@@ -15,6 +15,11 @@
   member confirms it. For Claude Code, two hooks installed with the agent files deliver the project-wide
   notes when a session starts and a file's confirmed notes when it is read, edited or written. See
   [Project notes](../guide/notes.md) and [Claude Code hooks](../portal/agents.md#claude-code-hooks).
+- **Project purpose.** A project admin can have the portal draft a four-line statement of what the
+  project is for - from the README, a few docs, reduced manifests and top-level names, read from git
+  and sent to the `[analyze]` model with one call - then confirm it as a project note. It is optional
+  (a card on the Overview and an unticked wizard checkbox) and is read like any project-wide note. See [Project purpose](../guide/notes.md#project-purpose) and
+  [Security](../portal/security.md#project-purpose).
 - **Rate a Chat reply.** A finished reply has a thumbs up and a thumbs down; thumbs down takes a reason
   and an optional note. See [Rating a reply](../guide/chat.md#rating-a-reply).
 - **Tool outcomes and timings in Agent activity.** The Overview now shows, per kind of call, the

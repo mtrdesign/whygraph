@@ -264,6 +264,60 @@ def scan_estimate(config: Config, *, overrides: PriceOverrides = NO_OVERRIDES) -
     )
 
 
+PURPOSE_INPUT_TOKENS = 8_000
+"""A project-purpose generation's input: the 24 KB of gathered text plus the prompt."""
+
+PURPOSE_OUTPUT_TOKENS = 400
+"""A project-purpose generation's output: four short labelled lines."""
+
+
+def purpose_estimate(
+    config: Config, *, overrides: PriceOverrides = NO_OVERRIDES
+) -> dict:
+    """What one project-purpose generation would cost (plan 41 section 5.3).
+
+    A fixed :data:`PURPOSE_INPUT_TOKENS` in and :data:`PURPOSE_OUTPUT_TOKENS`
+    out on the ``[analyze]`` model, priced through :func:`render_estimate`
+    (so the same ``model`` / ``tokens`` / ``cost`` shape and +/-50 % range
+    as ``scan-estimate``), without the commit counts that only a scan has.
+
+    Parameters
+    ----------
+    config : Config
+        The project's resolved config (the analyze model).
+    overrides : PriceOverrides, optional
+        The project's org price overrides.
+
+    Returns
+    -------
+    dict
+        ``model``, ``tokens`` and ``cost`` as :func:`render_estimate`;
+        ``missing_key`` and ``cost_hidden`` are added by the caller.
+    """
+    try:
+        choice = config.model_for("analyze")
+        provider, model = choice.provider, choice.model
+    except ConfigError:
+        provider = model = None
+    tokens = TokenEstimate(
+        commits=0,
+        large_commits=0,
+        synthesis_calls=0,
+        input_tokens=PURPOSE_INPUT_TOKENS,
+        output_tokens=PURPOSE_OUTPUT_TOKENS,
+    )
+    body = render_estimate(
+        tokens,
+        provider=provider,
+        model=model,
+        overrides=overrides,
+        custom_endpoint=has_custom_endpoint(config, provider),
+    )
+    for key in ("commits", "upper_bound", "large_commits"):
+        body.pop(key, None)
+    return body
+
+
 def compact_estimate(body: dict, missing_key: str | None) -> dict:
     """The compact estimate a full run stores in ``summary.estimate``.
 
@@ -300,12 +354,15 @@ __all__ = [
     "CHARS_PER_TOKEN",
     "ORG_PRICES_LABEL",
     "OUTPUT_TOKENS_PER_COMMIT",
+    "PURPOSE_INPUT_TOKENS",
+    "PURPOSE_OUTPUT_TOKENS",
     "RANGE_FACTOR",
     "SYNTHESIS_INPUT_TOKENS",
     "CommitSize",
     "TokenEstimate",
     "compact_estimate",
     "estimate_tokens",
+    "purpose_estimate",
     "render_estimate",
     "scan_estimate",
     "waiting_commit_sizes",

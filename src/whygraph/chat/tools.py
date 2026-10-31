@@ -568,9 +568,7 @@ _SPECS: tuple[ToolSpec, ...] = (
                 },
                 "kind": {
                     "type": "string",
-                    "description": (
-                        "decision, constraint, gotcha, convention or context."
-                    ),
+                    "description": ("decision, constraint, gotcha or convention."),
                 },
                 "anchor": {
                     "type": "object",

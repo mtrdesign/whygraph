@@ -291,7 +291,12 @@ def _relative(root: Path, file_path: str) -> str | None:
 def session_start(
     data: dict[str, Any] = Depends(_hook_input(SESSION_START_MAX_BYTES)),
 ) -> Response:
-    """Project-wide notes and the index freshness for a new Claude session."""
+    """Project-wide notes and the index freshness for a new Claude session.
+
+    The confirmed purpose is the first note line and, bounded by its body
+    (:func:`whygraph.mcp.notes.render_note_line`), always fits
+    :data:`TEXT_BUDGET_CHARS` after the header and the freshness line.
+    """
     session = data.get("session_id")
     if data.get("source") == "compact" and session and ID_RE.fullmatch(session):
         DEDUPE.reset(_digest(session))

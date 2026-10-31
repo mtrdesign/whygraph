@@ -10,6 +10,7 @@ Covers :class:`Message` / :class:`CompletionRequest` /
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,70 @@ def test_completion_request_of_forwards_overrides() -> None:
     assert req.max_tokens == 128
     assert req.temperature == 0.2
     assert req.timeout_sec == 15
+
+
+def test_completion_request_max_retries_defaults_to_none() -> None:
+    assert CompletionRequest.of("x").max_retries is None
+    assert CompletionRequest(messages=()).max_retries is None
+    assert CompletionRequest.of("x", max_retries=0).max_retries == 0
+
+
+class _RetrySdk:
+    """SDK stand-in: records ``with_options`` and which client ``create`` ran on."""
+
+    def __init__(self, result, *, parent: "_RetrySdk | None" = None) -> None:
+        self.result = result
+        self.parent = parent
+        self.options: list[dict] = []
+        self.created_on: list[_RetrySdk] = []
+        root = self
+
+        def create(**kwargs):
+            (parent or root).created_on.append(root)
+            return result
+
+        self.messages = SimpleNamespace(create=create)
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+    def with_options(self, **kwargs) -> "_RetrySdk":
+        self.options.append(kwargs)
+        return _RetrySdk(self.result, parent=self)
+
+
+_ANTHROPIC_RESULT = SimpleNamespace(
+    content=[SimpleNamespace(type="text", text="ok")],
+    model="m",
+    stop_reason="end_turn",
+    usage=None,
+)
+_OPENAI_RESULT = SimpleNamespace(
+    choices=[
+        SimpleNamespace(message=SimpleNamespace(content="ok"), finish_reason="stop")
+    ],
+    model="m",
+    usage=None,
+)
+
+
+@pytest.mark.parametrize(
+    ("make", "result"),
+    [
+        (lambda sdk: AnthropicAdapter(model="m", client=sdk), _ANTHROPIC_RESULT),
+        (lambda sdk: OpenAIAdapter(model="m", client=sdk), _OPENAI_RESULT),
+    ],
+    ids=["anthropic", "openai"],
+)
+def test_adapter_applies_max_retries_via_with_options(make, result) -> None:
+    sdk = _RetrySdk(result)
+    response = make(sdk).complete(CompletionRequest.of("hi", max_retries=0))
+    assert response.text == "ok"
+    assert sdk.options == [{"max_retries": 0}]
+    assert len(sdk.created_on) == 1 and sdk.created_on[0] is not sdk  # derived client
+
+    plain = _RetrySdk(result)
+    make(plain).complete(CompletionRequest.of("hi"))
+    assert plain.options == []
+    assert plain.created_on == [plain]
 
 
 def test_message_is_frozen() -> None:

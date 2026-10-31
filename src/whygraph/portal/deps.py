@@ -620,6 +620,8 @@ class PortalState:
         self.agent_calls = AgentCallBook()
         self.repo_cache = RepoListCache()
         self.key_test = Throttle(60, 60 * 60)
+        # Project-purpose generations (plan 41): per member and per project.
+        self.purpose_generate = Throttle(30, 60 * 60)
         self.model_list = Throttle(120, 60 * 60)
         self.slug_check = Throttle(60, 60)
         self.github_listing: dict[int, tuple[float, bool]] = {}

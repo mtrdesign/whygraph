@@ -81,6 +81,13 @@ the index.
 Blame is *not* recorded at scan time. It's computed on demand when an evidence lookup needs it, which
 is why a scan doesn't have to re-blame the repo every run.
 
+### After the first scan: the project purpose { #project-purpose }
+
+The first scan stays structure-only: git history and the CodeGraph index, offline, no model and no
+token. It never writes a [project purpose](notes.md#project-purpose). The optional purpose card on the
+Overview (or the checkbox in the setup wizard) runs one separate model call right after the first scan
+has finished `ok`; it is a separate action, so a scan never spends on it.
+
 ### The results summary
 
 A scan closes with a summary: one row per phase with a status, a one-line summary, and its timing. A

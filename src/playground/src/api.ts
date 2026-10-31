@@ -1977,11 +1977,11 @@ export const onboardingApi = {
 
 // ---- project notes ----------------------------------------------------------
 
-export type NoteKind = "decision" | "constraint" | "gotcha" | "convention";
+export type NoteKind = "decision" | "constraint" | "gotcha" | "convention" | "purpose";
 export type NoteStatus = "proposed" | "confirmed" | "retired";
 export type NoteAnchorKind = "project" | "area" | "path" | "symbol" | "range";
 export type NoteAnchorState = "current" | "changed" | "missing" | "unknown" | "n/a";
-export type NoteSource = "human" | "chat" | "mcp";
+export type NoteSource = "human" | "chat" | "mcp" | "analysis";
 export type NoteRetireReason = "rejected" | "outdated" | "wrong";
 
 export interface NoteAnchor {
@@ -2043,6 +2043,33 @@ export interface NoteProposal {
   anchor: NoteAnchor;
   refs?: string[];
   supersedes_id?: number;
+}
+
+/** One recorded purpose run (`GET .../purpose` `last_run`); `cost_usd` is `null` without `project.usage`. */
+export interface PurposeRun {
+  status: string;
+  model: string | null;
+  provider: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+  cost_usd: number | null;
+  finished_at: string | null;
+  sources: string[];
+  error_code: string | null;
+}
+
+/** `GET .../purpose` and the `POST` answer (`portal/purpose_routes.py`). */
+export interface PurposeState {
+  confirmed: Note | null;
+  proposed: Note | null;
+  running: boolean;
+  last_run: PurposeRun | null;
+  /** `null` when the live note has no producing run. */
+  stale: boolean | null;
+  can_generate: boolean;
+  estimate: Pick<ScanEstimate, "model" | "tokens" | "cost" | "missing_key"> & { cost_hidden?: boolean };
+  /** POST only: the inputs had not changed, nothing was run. */
+  unchanged?: boolean;
 }
 
 // ---- project-scoped calls ---------------------------------------------------
@@ -2111,6 +2138,8 @@ export function projectApi(slug: string) {
       const qs = params.toString();
       return get<Note[]>(`${base}/notes${qs ? `?${qs}` : ""}`);
     },
+    getPurpose: () => get<PurposeState>(`${base}/purpose`),
+    generatePurpose: () => send<PurposeState>("POST", `${base}/purpose`),
     notesSummary: () => get<NotesSummary>(`${base}/notes/summary`),
     notesForTarget: (qualified_name: string) =>
       get<Note[]>(`${base}/notes/for-target?qualified_name=${q(qualified_name)}`),

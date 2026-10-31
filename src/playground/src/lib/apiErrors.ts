@@ -370,6 +370,20 @@ export const MESSAGES: Record<string, Resolver> = {
   note_no_actor: "WhyGraph couldn't tell who made this request. Reload the page and try again.",
   note_linked: "Notes for this project are kept on the platform.",
 
+  // Project purpose (plan 41)
+  purpose_in_progress: {
+    tone: "warn",
+    message: "A project purpose is already being generated for this project. Wait for it to finish.",
+  },
+  purpose_no_input: {
+    tone: "warn",
+    message: "There isn't enough to describe yet: add a README or a manifest (package.json, pyproject.toml, ...) and commit it.",
+  },
+  purpose_invalid: {
+    message: "The model's answer couldn't be used as a project purpose, so nothing was saved. Try again, or pick another model for descriptions.",
+    action: RETRY,
+  },
+
   // Usage & cost: budgets and prices (M2f-2)
   invalid_amount: "Enter a monthly budget greater than $0 and at most $1,000,000.",
   budget_above_org: (err) => {

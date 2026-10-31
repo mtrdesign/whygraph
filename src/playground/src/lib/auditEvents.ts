@@ -38,6 +38,10 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   project_restricted_changed: { label: "Restricted setting changed", group: "Projects" },
   project_access_lost: { label: "GitHub access lost", group: "Projects" },
   project_access_restored: { label: "GitHub access restored", group: "Projects" },
+  note_confirmed: { label: "Note confirmed", group: "Projects" },
+  note_reconfirmed: { label: "Note marked still true", group: "Projects" },
+  note_retired: { label: "Note retired", group: "Projects" },
+  note_bulk_rejected: { label: "Agent proposals rejected", group: "Projects" },
   // Budgets
   budget_threshold_crossed: { label: "Budget threshold crossed", group: "Budgets" },
   budget_hard_stop_engaged: { label: "Budget hard stop engaged", group: "Budgets" },

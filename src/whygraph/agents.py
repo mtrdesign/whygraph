@@ -360,6 +360,11 @@ class FileOutcome:
         A one-line description of a ``codegraph`` entry that is not
         WhyGraph's and was left byte-identical (never its ``command`` or
         ``args``). ``None`` when there is none, or it was replaced.
+    foreign_hooks : str or None
+        For ``.claude/settings.json``: a one-line description of hook
+        entries that run ``whygraph-agent-hook`` but are not the exact
+        canonical ones, left byte-identical (never their command).
+        ``None`` when there are none.
     """
 
     file: str
@@ -369,6 +374,7 @@ class FileOutcome:
     snippet: str | None = None
     diff: str | None = None
     foreign_codegraph: str | None = None
+    foreign_hooks: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -880,6 +886,309 @@ def remove_entry(
     )
 
 
+# ---------------------------------------------------------------------------
+# Claude Code hooks (.claude/settings.json)
+# ---------------------------------------------------------------------------
+
+_CLAUDE_SETTINGS = replace(
+    _CLAUDE, name="claude-settings", relative_path=(".claude", "settings.json")
+)
+"""``.claude/settings.json`` as a target of the JSON machinery (never ``settings.local.json``)."""
+
+_CLAUDE_SETTINGS_REL = "/".join(_CLAUDE_SETTINGS.relative_path)
+
+_AGENT_HOOK_NAME = "whygraph-agent-hook"
+
+
+def _claude_hook_command(event: str) -> str:
+    """The committed hook command for one helper event (``session-start`` / ``post-tool``)."""
+    return (
+        '[ -n "$CLAUDE_PROJECT_DIR" ] && '
+        'd=$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --path-format=absolute '
+        "--git-common-dir 2>/dev/null) && "
+        f'h="$d/whygraph/{_AGENT_HOOK_NAME}" && [ -x "$h" ] && "$h" {event}; exit 0'
+    )
+
+
+CLAUDE_HOOK_SESSION_START = _claude_hook_command("session-start")
+"""The ``SessionStart`` hook command.
+
+It resolves the helper from ``$CLAUDE_PROJECT_DIR`` (never the current
+directory), does nothing when that is unset or the helper is absent, and
+always exits 0, so a clone without WhyGraph sees nothing. It holds no slug
+or port, so it is commit-safe.
+"""
+
+CLAUDE_HOOK_POST_TOOL = _claude_hook_command("post-tool")
+"""The ``PostToolUse`` hook command (matcher :data:`CLAUDE_HOOK_MATCHER`)."""
+
+CLAUDE_HOOK_MATCHER = "Read|Edit|Write"
+"""The ``PostToolUse`` matcher of the canonical group."""
+
+CLAUDE_HOOK_TIMEOUT = 3
+"""Seconds Claude Code waits for a hook (the helper's ``curl`` gives up after 2)."""
+
+# (event, canonical matcher or None for "no matcher key", command)
+_CLAUDE_HOOK_SPECS: tuple[tuple[str, str | None, str], ...] = (
+    ("SessionStart", None, CLAUDE_HOOK_SESSION_START),
+    ("PostToolUse", CLAUDE_HOOK_MATCHER, CLAUDE_HOOK_POST_TOOL),
+)
+
+
+def _claude_hook(command: str) -> dict:
+    """The canonical hook object; ours is exactly this, compared by equality."""
+    return {"type": "command", "timeout": CLAUDE_HOOK_TIMEOUT, "command": command}
+
+
+def _claude_hook_group(matcher: str | None, command: str) -> dict:
+    """The canonical group holding one canonical hook object."""
+    group: dict = {} if matcher is None else {"matcher": matcher}
+    group["hooks"] = [_claude_hook(command)]
+    return group
+
+
+def render_claude_hooks_snippet() -> str:
+    """Render the ``hooks`` block to paste into ``.claude/settings.json`` by hand.
+
+    Returns
+    -------
+    str
+        A JSON object holding the two canonical groups.
+    """
+    hooks = {
+        event: [_claude_hook_group(matcher, command)]
+        for event, matcher, command in _CLAUDE_HOOK_SPECS
+    }
+    return json.dumps({"hooks": hooks}, indent=2) + "\n"
+
+
+def _canonical_group(group: object, matcher: str | None) -> bool:
+    """Whether ``group`` is a group with the canonical matcher (no key for ``None``)."""
+    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+        return False
+    if matcher is None:
+        return "matcher" not in group
+    return group.get("matcher") == matcher
+
+
+def _hooks_table(data: dict) -> dict:
+    """Return ``data["hooks"]`` (empty when absent); refuse a non-object or non-list event."""
+    table = data.get("hooks")
+    if table is None:
+        return {}
+    if not isinstance(table, dict):
+        raise _Unmergeable("`hooks` is not an object")
+    for event, _matcher, _command in _CLAUDE_HOOK_SPECS:
+        if event in table and not isinstance(table[event], list):
+            raise _Unmergeable(f"`hooks.{event}` is not a list")
+    return table
+
+
+def _has_ours(table: dict, event: str, matcher: str | None, command: str) -> bool:
+    """Whether the exact canonical hook sits in a canonical group of ``event``."""
+    ours = _claude_hook(command)
+    return any(
+        _canonical_group(group, matcher) and ours in group["hooks"]
+        for group in table.get(event, ())
+    )
+
+
+def _foreign_agent_hooks(table: dict) -> str | None:
+    """Describe hook entries that run the helper but are not ours (never their command)."""
+    canonical = {
+        event: (matcher, command) for event, matcher, command in _CLAUDE_HOOK_SPECS
+    }
+    events: list[str] = []
+    for event, groups in table.items():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for hook in group["hooks"]:
+                command = hook.get("command") if isinstance(hook, dict) else None
+                if not isinstance(command, str) or _AGENT_HOOK_NAME not in command:
+                    continue
+                spec = canonical.get(event)
+                if (
+                    spec is not None
+                    and _canonical_group(group, spec[0])
+                    and hook == _claude_hook(spec[1])
+                ):
+                    continue
+                if event not in events:
+                    events.append(event)
+    if not events:
+        return None
+    return (
+        f"{', '.join(str(e) for e in events)} hook entries that run "
+        f"{_AGENT_HOOK_NAME} but are not WhyGraph's; left as they are"
+    )
+
+
+def _check_settings_path(project_root: Path) -> Path:
+    """``check_inside`` the settings file; raises before anything is read."""
+    return check_inside(project_root, _CLAUDE_SETTINGS_REL)
+
+
+def apply_claude_hooks(
+    project_root: Path,
+    *,
+    confirm_tracked: Iterable[str | Path] = (),
+    dry_run: bool = False,
+) -> FileOutcome:
+    """Merge WhyGraph's Claude Code hooks into ``.claude/settings.json``.
+
+    Adds a ``SessionStart`` group and a ``PostToolUse`` group (matcher
+    :data:`CLAUDE_HOOK_MATCHER`), each holding exactly
+    ``{"type": "command", "timeout": 3, "command": <constant>}``, unless
+    the exact canonical hook is already there. Entries are ours only by
+    that exact shape: any other entry that runs ``whygraph-agent-hook`` is
+    foreign, never edited, reported on ``foreign_hooks``, and the
+    canonical entry is added beside it. Every other key and hook is
+    preserved. The parse, backup, idempotence (``skip``) and git-tracked
+    confirmation rules are those of :func:`apply_http_entry`; JSON with
+    comments is refused with the snippet to paste. Never touches
+    ``.claude/settings.local.json``.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+    confirm_tracked : Iterable[str or Path]
+        Relative paths of git-tracked files the caller has confirmed may
+        be rewritten.
+    dry_run : bool, default False
+        Report the outcome without writing (or backing up) anything.
+
+    Returns
+    -------
+    FileOutcome
+        The outcome for ``.claude/settings.json`` (agent
+        ``"claude-settings"``). A ``needs_confirmation`` outcome says the
+        hooks are not installed until the tracked file is confirmed.
+
+    Raises
+    ------
+    whygraph.core.safe_paths.UnsafePathError
+        When ``.claude`` or ``.claude/settings.json`` is a symbolic link
+        or resolves outside ``project_root`` (dry run included). Nothing
+        has been read or written.
+    """
+    path = _check_settings_path(project_root)
+    try:
+        existing = _load_config(_CLAUDE_SETTINGS, path, strict_toml=True)
+        data = copy.deepcopy(existing or {})
+        table = _hooks_table(data)
+        foreign = _foreign_agent_hooks(table)
+        for event, matcher, command in _CLAUDE_HOOK_SPECS:
+            if not _has_ours(table, event, matcher, command):
+                table.setdefault(event, []).append(_claude_hook_group(matcher, command))
+        data["hooks"] = table
+    except _Unmergeable as exc:
+        return FileOutcome(
+            _CLAUDE_SETTINGS_REL,
+            "refused",
+            _CLAUDE_SETTINGS.name,
+            reason=str(exc),
+            snippet=render_claude_hooks_snippet(),
+        )
+    outcome = _commit_change(
+        _CLAUDE_SETTINGS,
+        project_root,
+        data,
+        existing,
+        confirm_tracked=confirm_tracked,
+        dry_run=dry_run,
+    )
+    if outcome.status == "needs_confirmation":
+        outcome = replace(
+            outcome,
+            reason="hooks not installed: confirm to add them to the tracked "
+            ".claude/settings.json",
+        )
+    return replace(outcome, foreign_hooks=foreign) if foreign else outcome
+
+
+def remove_claude_hooks(
+    project_root: Path,
+    *,
+    confirm_tracked: Iterable[str | Path] = (),
+    dry_run: bool = False,
+) -> FileOutcome:
+    """Strip WhyGraph's exact Claude Code hooks from ``.claude/settings.json``.
+
+    Removes only the exact canonical hook objects from groups with the
+    canonical matcher; a group, event list or ``hooks`` object that this
+    empties goes too. Foreign entries (including look-alikes that run
+    ``whygraph-agent-hook``) and every unrelated key stay. Same parse,
+    backup and git-tracked rules as :func:`apply_claude_hooks`.
+
+    Parameters
+    ----------
+    project_root : Path
+        Repository root.
+    confirm_tracked : Iterable[str or Path]
+        Relative paths of tracked files that may be rewritten.
+    dry_run : bool, default False
+        Report without writing.
+
+    Returns
+    -------
+    FileOutcome
+        ``skip`` when there was nothing to remove.
+
+    Raises
+    ------
+    whygraph.core.safe_paths.UnsafePathError
+        When ``.claude`` or ``.claude/settings.json`` is a symbolic link
+        or resolves outside ``project_root`` (dry run included).
+    """
+    path = _check_settings_path(project_root)
+    rel, name = _CLAUDE_SETTINGS_REL, _CLAUDE_SETTINGS.name
+    try:
+        existing = _load_config(_CLAUDE_SETTINGS, path, strict_toml=True)
+        if existing is None:
+            return FileOutcome(rel, "skip", name, reason="file does not exist")
+        data = copy.deepcopy(existing)
+        table = _hooks_table(data)
+    except _Unmergeable as exc:
+        return FileOutcome(rel, "refused", name, reason=str(exc))
+    foreign = _foreign_agent_hooks(table)
+    removed = False
+    for event, matcher, command in _CLAUDE_HOOK_SPECS:
+        groups = table.get(event)
+        if not groups:
+            continue
+        ours = _claude_hook(command)
+        kept: list = []
+        for group in groups:
+            if _canonical_group(group, matcher) and ours in group["hooks"]:
+                group["hooks"] = [h for h in group["hooks"] if h != ours]
+                removed = True
+                if not group["hooks"] and set(group) <= {"matcher", "hooks"}:
+                    continue
+            kept.append(group)
+        if kept:
+            table[event] = kept
+        else:
+            del table[event]
+    if not removed:
+        outcome = FileOutcome(rel, "skip", name, reason="no whygraph hooks")
+    else:
+        if not table:
+            data.pop("hooks", None)
+        outcome = _commit_change(
+            _CLAUDE_SETTINGS,
+            project_root,
+            data,
+            existing,
+            confirm_tracked=confirm_tracked,
+            dry_run=dry_run,
+        )
+    return replace(outcome, foreign_hooks=foreign) if foreign else outcome
+
+
 def detect_entries(project_root: Path) -> list[DetectedEntry]:
     """Find every existing ``whygraph`` entry across the four agent files.
 
@@ -1073,6 +1382,10 @@ __all__ = [
     "AGENTS",
     "AgentAction",
     "AgentTarget",
+    "CLAUDE_HOOK_MATCHER",
+    "CLAUDE_HOOK_POST_TOOL",
+    "CLAUDE_HOOK_SESSION_START",
+    "CLAUDE_HOOK_TIMEOUT",
     "CODEGRAPH_SERVER_NAME",
     "CODEX_TOOL_TIMEOUT_SEC",
     "CodegraphEntry",
@@ -1084,6 +1397,7 @@ __all__ = [
     "HttpMcp",
     "MCP_SERVER_NAME",
     "UnknownAgentError",
+    "apply_claude_hooks",
     "apply_http_entry",
     "config_path_for",
     "detect_codegraph_entries",
@@ -1092,7 +1406,9 @@ __all__ = [
     "detect_entries",
     "is_git_tracked",
     "known_agent_names",
+    "remove_claude_hooks",
     "remove_entry",
+    "render_claude_hooks_snippet",
     "render_http_snippet",
     "resolve_agent",
 ]

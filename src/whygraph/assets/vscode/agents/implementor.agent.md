@@ -178,7 +178,13 @@ Output exactly this markdown structure (no extra preamble):
 *(only if COMMIT_EACH_STEP was true; omit the section otherwise)*
 - <sha-short> — <step name>
 - <sha-short> — <step name>
+
+## Decisions worth a note
+*(omit the section when there are none)*
+- <kind> | <anchor> | <one-paragraph body>
 ```
+
+`## Decisions worth a note` lists at most 3 entries, each `kind | anchor | body`: `kind` is one of `decision`, `constraint`, `gotcha`, `convention`; `anchor` is a `qualified_name` or `path[:lines]`; `body` is one paragraph. List an entry only for a deviation from the plan or a decision a future reader needs and the code does not show, never for routine steps. You only report it - you have no way to record it, and the command that spawned you does.
 
 `Files changed` lists the union of files actually edited across all attempted steps (both successful and the failed one if the change was applied before verify ran). Use `git diff --name-only` against the implementation start (or the most recent commit if `COMMIT_EACH_STEP=true`) to compute it.
 

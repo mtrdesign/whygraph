@@ -119,7 +119,7 @@ a change costs a little more.
 ## Modes
 
 The **Mode** select beside the model pickers sets how the assistant approaches a question. A mode is a
-preset, not a restriction: every mode can use all twenty-one tools, and a mode only changes which ones the
+preset, not a restriction: every mode can use all twenty-three tools, and a mode only changes which ones the
 assistant reaches for first and how it words the answer. Each mode also has its own starter questions
 for an empty chat.
 
@@ -226,7 +226,7 @@ message as soon as the stopped reply has ended. A chat runs one reply at a time.
 
 ## What it can look at
 
-Nineteen tools across five sources. You never call these directly; they are listed so you know what
+Twenty-three tools across six sources. You never call these directly; they are listed so you know what
 the assistant can and cannot reach.
 
 <div class="grid cards" markdown>
@@ -263,7 +263,41 @@ the assistant can and cannot reach.
 
     `read_file`, `list_dir`
 
+-   __Team notes__
+
+    ---
+
+    `find_notes`, `propose_note`
+
 </div>
+
+### Team notes { #team-notes }
+
+[Project notes](notes.md) are short facts the team confirmed: decisions, constraints, gotchas,
+conventions. Two tools reach them:
+
+- `find_notes` reads **confirmed** notes only, by path, area, symbol, a text query, or
+  `project_wide`, at most ten per call. A note whose code changed since it was confirmed says so, and
+  the assistant tells you. `get_rationale` carries the notes that apply to its target too.
+- `propose_note` proposes one when you state a decision or ask the assistant to remember something -
+  never on its own from commit messages, pull request or issue text - and at most twice in a turn
+  (a third is declined, not an error).
+
+The assistant cites a note as `note #12`. Note text is data about the project: it never changes how
+the assistant behaves. The assistant's starting overview carries only a **count** of project-wide
+notes; it fetches their text with `find_notes` when your question is about conventions or constraints.
+
+A proposal appears in the chat as a **note card**, built from the saved note rather than from the
+assistant's words. It shows the full text, the kind and the anchor, says that the assistant wrote it
+and that everyone who can open the project can see it, and offers **Confirm** (which confirms exactly
+what the card shows) and **Discard**. A project-wide proposal, or one on a top-level folder, shows
+**Review** instead, which opens the Notes page, because a [wide note](notes.md#notes-that-reach-every-session)
+needs another member to confirm it. If an identical proposal already exists, the card says so and
+links to it. Reload the chat and the card shows the note's current status. The project's
+[Overview](../portal/projects.md#notes-card) counts what is waiting for review.
+
+Unlike a chat, which is private to you, a note - proposals included - is visible to everyone who can
+open the project.
 
 ### Areas, open work and owners
 

@@ -105,6 +105,7 @@ from whygraph.services.codegraph.writer_lock import portal_lock_dir
 from . import agent_calls, audit_store, budgets, connections, usage_store
 from . import db as portal_db
 from .access_routes import access_router
+from .agent_hook_routes import agent_hooks_router
 from .audit import clear_writer, set_writer
 from .auth_routes import auth_router
 from .budget_routes import budget_member_router, budget_router
@@ -117,6 +118,7 @@ from .deps import (
     TokenIdentity,
     current_user,
     project_db_access,
+    require_local,
 )
 from .github_app import GitHubApp, load_github_app_config
 from .github_app_routes import github_app_router
@@ -139,6 +141,7 @@ from .org_routes import org_router
 from .orgs import ensure_builtin_org
 from .onboarding_routes import onboarding_router, welcome_router
 from .overview_routes import overview_router
+from .notes_routes import notes_read_router, notes_write_router
 from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
@@ -339,6 +342,39 @@ def create_portal_app(
                     usage_source="explorer",
                 )
             )
+        ],
+    )
+    # Project notes (plan 40): reads need project.read, writes project.chat (a
+    # viewer reads only); a linked project's notes live on its platform.
+    for notes_router, notes_action in (
+        (notes_read_router, Action.PROJECT_READ),
+        (notes_write_router, Action.PROJECT_CHAT),
+    ):
+        app.include_router(
+            notes_router,
+            prefix="/api/projects/{slug}/notes",
+            dependencies=[
+                Depends(
+                    project_db_access(
+                        notes_action,
+                        guard=linked_guard("Notes"),
+                        usage_source="explorer",
+                    )
+                )
+            ],
+        )
+    # Claude Code hooks (plan 40 section 5.9): local mode only. FastAPI runs
+    # these mount-level dependencies in list order, before any of the router's
+    # own, so production answers 404 before any identity or project check.
+    app.include_router(
+        agent_hooks_router,
+        dependencies=[
+            Depends(require_local),
+            Depends(
+                project_db_access(
+                    Action.PROJECT_READ, guard=linked_guard("Agent hooks")
+                )
+            ),
         ],
     )
     app.include_router(

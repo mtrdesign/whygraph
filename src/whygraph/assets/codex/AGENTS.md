@@ -61,7 +61,13 @@ COMMIT_EACH_STEP: <true | false>
 FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 0
 ```
 
+After the implementor reports, propose each entry of its `## Decisions worth a note` with `whygraph_propose_note` (`kind` and `body` from the entry; the anchor as `qualified_name`, or `path` with `line_start` / `line_end`) and print the note ids and review links.
+
 **Skip when**: no plan markdown exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.
+
+## Recording a decision
+
+To record a decision, constraint, gotcha or convention a future reader needs and the code does not show, call `whygraph_propose_note` with `body`, `kind` (`decision`, `constraint`, `gotcha` or `convention`) and an anchor: `qualified_name`, `path` (optionally with `line_start` / `line_end`), `area`, or `project_wide: true`. A person confirms it in the portal; print the note id and the review link the tool returns. Do not propose routine facts the code already shows.
 
 ## Using CodeGraph for structural questions
 

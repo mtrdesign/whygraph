@@ -1467,6 +1467,19 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/pr/{{number}}", "GET"): _READ,
     (f"{_P}/issue/{{number}}", "GET"): _READ,
     # The Chat router: include_router(..., project_db_access(PROJECT_CHAT))
+    # Project notes (plan 40): reads for project.read, writes for project.chat
+    (f"{_P}/notes", "GET"): _READ,
+    (f"{_P}/notes/summary", "GET"): _READ,
+    (f"{_P}/notes/for-target", "GET"): _READ,
+    (f"{_P}/notes/{{note_id}}", "GET"): _READ,
+    (f"{_P}/notes", "POST"): _CHAT,
+    (f"{_P}/notes/{{note_id}}/confirm", "POST"): _CHAT,
+    (f"{_P}/notes/{{note_id}}/reconfirm", "POST"): _CHAT,
+    (f"{_P}/notes/{{note_id}}/retire", "POST"): _CHAT,
+    (f"{_P}/notes/reject-agent-proposals", "POST"): _CHAT,
+    # Claude Code hooks (plan 40 section 5.9): local only, project.read
+    (f"{_P}/agent-hooks/session-start", "POST"): _READ,
+    (f"{_P}/agent-hooks/post-tool", "POST"): _READ,
     (f"{_P}/areas/suggest", "GET"): _CONFIGURE,
     (f"{_P}/chat/providers", "GET"): _CHAT,
     (f"{_P}/chat/modes", "GET"): _CHAT,
@@ -1540,6 +1553,9 @@ LOCAL_ONLY_ROUTES = {
     ("/api/platform/pending/{link_id}", "DELETE"),
     # The GitHub token test (M2f-3 section 4.13): production has no PATs
     ("/api/projects/{slug}/github-token/test", "POST"),
+    # Claude Code hooks (plan 40 section 5.9): the helper only runs locally
+    ("/api/projects/{slug}/agent-hooks/session-start", "POST"),
+    ("/api/projects/{slug}/agent-hooks/post-tool", "POST"),
 }
 """Local mode's own routes (M2e plan section 4.8): org-scoped, but gated by
 :func:`~whygraph.portal.deps.require_local`, so production answers ``404`` on
@@ -1619,6 +1635,7 @@ _FILL = {
     "{rest:path}": "x/y",
     "{session_id}": "1",
     "{message_id}": "1",
+    "{note_id}": "1",
     "{sha}": "abc",
     "{number}": "1",
     "{run_id}": "1",
@@ -2189,7 +2206,10 @@ def test_uninitialized_project_gates_data_routes_and_creates_no_db(
     )
     plan = init_project(ready, "demo", agents=["claude"], dry_run=True)
     assert plan["initialized"] is False
-    assert [f["status"] for f in plan["agent_files"]] == ["write"]
+    assert [(f["file"], f["status"]) for f in plan["agent_files"]] == [
+        (".mcp.json", "write"),
+        (".claude/settings.json", "write"),
+    ]
     assert not (root / ".whygraph").exists()
     assert not (root / ".mcp.json").exists()
 
@@ -2460,6 +2480,100 @@ def test_remove_strips_hooks_markers_and_only_whygraph_entries(
     assert ready.get("/api/projects/demo/tree").status_code == 409
     init_project(ready, "demo")
     assert ready.get("/api/projects/demo/tree").status_code == 200
+
+
+def test_remove_deletes_the_agent_helper_before_sync_hooks(
+    ready: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.hooks import agent_hook_helper_path, helper_path
+    from whygraph.portal import routes as portal_routes
+
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    add_local(ready, root)
+    init_project(ready, "demo", agents=["claude"])
+    assert agent_hook_helper_path(root).is_file() and helper_path(root).is_file()
+    settings = json.loads((root / ".claude" / "settings.json").read_text())
+    assert set(settings["hooks"]) == {"SessionStart", "PostToolUse"}
+
+    calls: list[str] = []
+    real_remove = portal_routes.remove_agent_hook_helper
+    real_sync = portal_routes.sync_hooks
+
+    def remove(project_root: Path) -> bool:
+        calls.append("remove_agent_hook_helper")
+        return real_remove(project_root)
+
+    def sync(project_root: Path, names) -> object:
+        calls.append(f"sync_hooks({list(names)})")
+        return real_sync(project_root, names)
+
+    monkeypatch.setattr(portal_routes, "remove_agent_hook_helper", remove)
+    monkeypatch.setattr(portal_routes, "sync_hooks", sync)
+
+    removed = ready.request(
+        "DELETE", "/api/projects/demo", json={"strip_agent_entries": True}
+    )
+
+    assert removed.status_code == 200, removed.text
+    assert calls == ["remove_agent_hook_helper", "sync_hooks([])"]
+    assert not (root / ".git" / "whygraph").exists()  # both helpers and the dir
+    assert json.loads((root / ".claude" / "settings.json").read_text()) == {}
+    files = {f["file"]: f["status"] for f in removed.json()["agent_files"]}
+    assert files == {".mcp.json": "overwrite", ".claude/settings.json": "overwrite"}
+
+
+def test_remove_asks_before_rewriting_a_tracked_settings_json(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    add_local(ready, root)
+    init_project(ready, "demo", agents=["claude"])
+    _git(root, "add", "-f", ".claude/settings.json")
+    before = (root / ".claude" / "settings.json").read_text()
+
+    refused = ready.request(
+        "DELETE", "/api/projects/demo", json={"strip_agent_entries": True}
+    )
+
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "needs_confirmation"
+    assert [f["file"] for f in refused.json()["agent_files"]] == [
+        ".claude/settings.json"
+    ]
+    assert (root / ".claude" / "settings.json").read_text() == before
+    assert ready.get("/api/projects/demo").status_code == 200
+
+    done = ready.request(
+        "DELETE",
+        "/api/projects/demo",
+        json={
+            "strip_agent_entries": True,
+            "confirm_tracked": [".claude/settings.json"],
+        },
+    )
+    assert done.status_code == 200, done.text
+    assert json.loads((root / ".claude" / "settings.json").read_text()) == {}
+
+
+def test_a_declined_tracked_settings_json_still_initializes(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    seed_codegraph(root)
+    (root / ".claude").mkdir()
+    (root / ".claude" / "settings.json").write_text('{"model": "x"}\n')
+    _git(root, "add", ".claude/settings.json")
+    add_local(ready, root)
+
+    done = init_project(ready, "demo", agents=["claude"])
+
+    assert done["initialized"] is True and done["marker_written"] is True
+    pending = [f for f in done["agent_files"] if f["status"] == "needs_confirmation"]
+    assert [f["file"] for f in pending] == [".claude/settings.json"]
+    assert pending[0]["reason"].startswith("hooks not installed")
+    assert (root / ".claude" / "settings.json").read_text() == '{"model": "x"}\n'
 
 
 def test_remove_is_refused_while_a_scan_is_queued(

@@ -96,6 +96,9 @@ remote exposure yet; both are on the [roadmap](../roadmap.md). The portal's
 [production mode](production.md) adds accounts and organizations for people, but serves no `/mcp`
 endpoint.
 
+In production, [project notes](../guide/notes.md) reach people through Chat and the Explorer only:
+there is no MCP endpoint to propose through or read from, and the platform API carries none.
+
 !!! note "Not for shared machines"
     Every user of the machine can reach the loopback port. See the
     [security model](../portal/security.md#shared-machines) before running the portal anywhere other

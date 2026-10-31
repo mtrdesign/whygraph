@@ -10,13 +10,15 @@ import { ErrorState } from "./state/ErrorState";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { RelationshipsTab } from "./RelationshipsTab";
 import { RationaleTab } from "./RationaleTab";
+import { NotesTab } from "./NotesTab";
 import { EvidenceTab } from "./EvidenceTab";
 import { HistoryTab } from "./HistoryTab";
 
-type TabKey = "relationships" | "rationale" | "evidence" | "history";
+type TabKey = "relationships" | "rationale" | "notes" | "evidence" | "history";
 const TABS: { key: TabKey; label: string }[] = [
   { key: "relationships", label: "Relationships" },
   { key: "rationale", label: "Rationale" },
+  { key: "notes", label: "Notes" },
   { key: "evidence", label: "Evidence" },
   { key: "history", label: "History" },
 ];
@@ -93,6 +95,8 @@ export function DetailPanel() {
                 <RelationshipsTab relations={data.relations} />
               ) : t.key === "rationale" ? (
                 <RationaleTab qualifiedName={selectedQn} />
+              ) : t.key === "notes" ? (
+                <NotesTab qualifiedName={selectedQn} />
               ) : t.key === "evidence" ? (
                 <EvidenceTab qualifiedName={selectedQn} />
               ) : (

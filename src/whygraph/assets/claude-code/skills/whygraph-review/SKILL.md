@@ -30,7 +30,7 @@ BASE: <base | auto>
 GENERATE: <true | false>
 ```
 
-The reviewer has its own system prompt covering the diff, the hunk-to-symbol mapping, the card lookups and the output contract - do not inline review instructions here.
+The reviewer has its own system prompt covering the diff, the hunk-to-symbol mapping, the card lookups and the output contract - do not inline review instructions here. Cards now carry `notes`; a hunk that contradicts a confirmed note is a finding.
 
 ## Step 3 - Print the result
 

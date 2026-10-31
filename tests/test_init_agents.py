@@ -146,6 +146,28 @@ def test_claude_writes_mcp_json_and_installs_assets(tmp_path: Path) -> None:
     assert result.assets["claude"].written
 
 
+def test_claude_merges_its_hooks_into_settings_json(tmp_path: Path) -> None:
+    result = _init(tmp_path, "claude")
+
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == (
+        agents.CLAUDE_HOOK_SESSION_START
+    )
+    assert settings["hooks"]["PostToolUse"][0]["matcher"] == "Read|Edit|Write"
+    assert [f.file for f in result.agent_files] == [
+        ".mcp.json",
+        ".claude/settings.json",
+    ]
+    assert not (tmp_path / ".claude" / "settings.local.json").exists()
+
+
+@pytest.mark.parametrize("agent", ["cursor", "vscode", "codex"])
+def test_other_agents_write_no_claude_settings(tmp_path: Path, agent: str) -> None:
+    _init(tmp_path, agent)
+
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
 def test_claude_force_overwrites_existing(tmp_path: Path) -> None:
     (tmp_path / ".claude" / "agents").mkdir(parents=True)
     (tmp_path / ".claude" / "agents" / "planner.md").write_text("USER EDIT")

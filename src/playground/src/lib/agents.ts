@@ -52,6 +52,13 @@ export const AGENTS: AgentInfo[] = [
 
 export const agentInfo = (id: string): AgentInfo | undefined => AGENTS.find((a) => a.id === id);
 
+/**
+ * Claude Code's hooks file. A pending confirmation for it never blocks Set up or
+ * Save: unconfirmed, the hooks just stay uninstalled (the backend still writes the
+ * markers), so it is left out of every "confirm the committed file" gate.
+ */
+export const CLAUDE_SETTINGS_FILE = ".claude/settings.json";
+
 /** Notes that depend on the combination of selected agents. */
 export function selectionNotes(selected: readonly string[]): string[] {
   const notes: string[] = [];

@@ -2,7 +2,7 @@
 name: whygraph-implement
 description: Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure, appends an Implementation log to the plan.
 argument-hint: <plan.md> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku]
-allowed-tools: Agent, Read
+allowed-tools: Agent, Read, mcp__whygraph__whygraph_propose_note
 disable-model-invocation: true
 ---
 
@@ -57,4 +57,8 @@ When the implementor returns, print its output **verbatim** to the user. Do not 
 
 Do not edit the plan file from this command — the subagent owns all log mutations.
 
-This command's only job is: parse → validate → dispatch → print. Do not edit other files, run other tools, or improvise.
+## Step 5 — Propose the listed decisions
+
+If the implementor's report has a `## Decisions worth a note` section, call the MCP tool `whygraph_propose_note` once per listed entry: `kind` and `body` from the entry; for the anchor, a `qualified_name`, or `path` (with `line_start` and `line_end` when the entry gives lines). Then print, for each, the note id and its review link (the portal page path the tool returns). A tool error: print it verbatim and go on to the next entry. With no such section, do nothing here.
+
+This command's only job is: parse → validate → dispatch → print → propose the listed decisions. Do not edit other files, run other tools, or improvise.

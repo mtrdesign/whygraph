@@ -109,6 +109,9 @@ export function CommandPalette({ slug }: { slug?: string }) {
     ? [
         { label: "Overview", run: () => navigate({ to: "/p/$slug", params: { slug } }) },
         ...(linked ? [] : [{ label: "Explorer", run: () => navigate({ to: "/p/$slug/explorer", params: { slug } }) }]),
+        ...(linked || !current?.initialized || current.importing
+          ? []
+          : [{ label: "Notes", run: () => navigate({ to: "/p/$slug/notes", params: { slug } }) }]),
         ...(!canChat
           ? []
           : [{ label: "New chat", run: () => navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: undefined } }) }]),

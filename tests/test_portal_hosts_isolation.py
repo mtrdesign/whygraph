@@ -90,6 +90,7 @@ from test_portal_tenancy import (
     _url,
     assert_no_leak,
     newcomer_github_id,
+    seed_note,
     seed_question,
     seed_usage,
     wait_for,
@@ -548,6 +549,8 @@ def prod_world(
             (first,) = _wait_idle(world, org)
             assert first["status"] == "ok", first
             seed_usage(client, org)
+            world.sign_in(world.owner_of(org))
+            seed_note(client, org, prefix=at(org.slug))
         world.sign_out()
         yield world
         scanner.hold.unlink(missing_ok=True)

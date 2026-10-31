@@ -36,7 +36,7 @@ from whygraph.core.usage import CallOutcome, count_agent_call
 
 from .descriptions import WHYGRAPH_INSTRUCTIONS
 from .errors import WhyGraphError
-from . import area_history, evidence, prompts, rationale, resources
+from . import area_history, evidence, notes, prompts, rationale, resources
 
 MCP_THREAD_TOKENS = 8
 """Worker threads MCP bodies may occupy at once (see :data:`_MCP_LIMITER`)."""
@@ -211,5 +211,6 @@ _registrar = ThreadOffload(mcp)
 evidence.register(_registrar)
 rationale.register(_registrar)
 area_history.register(_registrar)
+notes.register(_registrar)
 resources.register(_registrar)
 prompts.register(_registrar)

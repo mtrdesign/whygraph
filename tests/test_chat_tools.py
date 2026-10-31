@@ -31,6 +31,7 @@ from whygraph.chat.tools import (
 )
 from whygraph.core.config import ChatConfig, Config
 from whygraph.db import engine as db_engine
+from whygraph.db import ensure_initialized
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -115,6 +116,16 @@ def chat_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, codegraph_db_fact
         core._reset_config()
 
 
+@pytest.fixture(autouse=True)
+def _migrated_for_rationale(request: pytest.FixtureRequest) -> None:
+    """``get_rationale`` reads ``project_note``; the other tests want a bare DB."""
+    if "chat_repo" in request.fixturenames and request.node.name.startswith(
+        "test_rationale"
+    ):
+        request.getfixturevalue("chat_repo")
+        ensure_initialized()
+
+
 def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
     """Dispatch and JSON-decode, so tests assert on structure not strings."""
     return json.loads(registry.dispatch(name, arguments))
@@ -125,10 +136,10 @@ def _result(registry: ToolRegistry, name: str, **arguments) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_twenty_one_tools_with_unique_names_and_object_schemas() -> None:
+def test_twenty_three_tools_with_unique_names_and_object_schemas() -> None:
     names = [spec.name for spec in TOOL_SPECS]
-    assert len(names) == 21
-    assert len(set(names)) == 21
+    assert len(names) == 23
+    assert len(set(names)) == 23
     assert set(names) == {
         "search_symbols",
         "get_symbol",
@@ -151,6 +162,8 @@ def test_twenty_one_tools_with_unique_names_and_object_schemas() -> None:
         "render_chart",
         "read_file",
         "list_dir",
+        "find_notes",
+        "propose_note",
     }
     for spec in TOOL_SPECS:
         assert spec.parameters["type"] == "object"
@@ -2661,3 +2674,230 @@ def test_a_long_burndown_is_thinned_but_ends_on_its_last_day() -> None:
     assert first == "2026-01-01" and step > 1
     assert len(rows) <= _BURNDOWN_POINTS + 2
     assert rows[-1] == ["2026-07-20", 1, 0]
+
+
+# ---------------------------------------------------------------------------
+# Team notes: find_notes, propose_note, notes on cards (plan 40 step 6)
+# ---------------------------------------------------------------------------
+
+from test_mcp_notes import (  # noqa: E402
+    A_SOURCE,
+    PROJECT,
+    _confirmed,
+    _index,
+    _node as _note_node,
+    _propose,
+    project as _notes_project,  # noqa: F401 -- the fixture, under a private name
+)
+from whygraph.chat.harness import build_system_prompt  # noqa: E402
+from whygraph.core.context import use_actor  # noqa: E402
+from whygraph.db import get_session  # noqa: E402
+from whygraph.db.models import ProjectNote  # noqa: E402
+from sqlmodel import select  # noqa: E402
+
+_SECRET = "Never call billing synchronously from checkout."
+
+
+@pytest.fixture
+def note_project(_notes_project):  # noqa: F811
+    return _notes_project
+
+
+@pytest.fixture
+def notes_registry(note_project):
+    with use_actor("u1"):
+        yield ToolRegistry(note_origin="chat:7", max_rationale_generations=1)
+
+
+def test_find_notes_is_concurrent_and_propose_note_is_serial() -> None:
+    assert "propose_note" in chat_tools.SERIAL_TOOLS
+    assert "find_notes" not in chat_tools.SERIAL_TOOLS
+
+
+def test_find_notes_each_argument_maps_to_its_function(
+    note_project,
+    notes_registry,
+) -> None:
+    sym = _confirmed({"kind": "symbol", "qualified_name": "pkg.a"}, "Symbol fact.")
+    path = _confirmed({"kind": "path", "path": "src/pkg"}, "Path fact.")
+    area = _confirmed({"kind": "area", "area": "chat"}, "Area fact.")
+    wide = _confirmed(PROJECT, _SECRET)
+    pending = _propose("Still waiting for review.")["id"]
+
+    def ids(**args) -> list[int]:
+        return [n["id"] for n in _result(notes_registry, "find_notes", **args)["notes"]]
+
+    assert set(ids()) == {sym, path, area, wide}  # confirmed only
+    assert pending not in ids()
+    assert ids(project_wide=True) == [wide]
+    assert set(ids(qualified_name="pkg.a")) == {sym, path}
+    assert ids(path="src/pkg") == [path] or sym in ids(path="src/pkg")
+    assert area in ids(area="chat")
+    assert ids(query="Symbol fact") == [sym]
+    assert pending not in ids(query="waiting")
+
+
+def test_find_notes_drops_whole_notes_to_fit_and_reports_more(
+    note_project,
+    notes_registry,
+) -> None:
+    for n in range(10):
+        _confirmed(PROJECT, f"{n} " + "word " * 195)
+    result = _result(notes_registry, "find_notes")
+    text = json.dumps({"notes": result["notes"]}, default=str)
+    assert len(text) <= chat_tools.FIND_NOTES_MAX_CHARS
+    assert result["more"] == 10 - len(result["notes"]) > 0
+    assert all(
+        n["body"].endswith("word") or n["body"].endswith("word ")
+        for n in result["notes"]
+    )
+
+
+def test_propose_note_happy_path_and_a_proposal_is_not_found(
+    note_project,
+    notes_registry,
+) -> None:
+    result = _result(
+        notes_registry,
+        "propose_note",
+        body=_SECRET,
+        kind="constraint",
+        anchor={"kind": "symbol", "qualified_name": "pkg.a"},
+    )
+    assert list(result)[0] == "note_id"
+    assert result["status"] == "proposed"
+    assert result["duplicate"] is False
+    assert result["review"] == f"/p/demo/notes?id={result['note_id']}"
+    assert result["note"]["body"] == _SECRET
+    with get_session() as session:
+        row = session.exec(select(ProjectNote)).one()
+        stored = (row.source, row.origin, row.proposed_by)
+    assert stored == ("chat", "chat:7", "u1")
+    assert _result(notes_registry, "find_notes", qualified_name="pkg.a")["notes"] == []
+    assert _result(notes_registry, "find_notes", project_wide=True)["notes"] == []
+
+
+def test_propose_note_dedupe_hit_on_anothers_proposal_hides_the_note(
+    note_project,
+    notes_registry,
+) -> None:
+    other = _propose(_SECRET, actor="u2")["id"]
+    result = _result(
+        notes_registry, "propose_note", body=_SECRET, kind="decision", anchor=PROJECT
+    )
+    assert result["note_id"] == other
+    assert result["duplicate"] is True
+    assert "note" not in result
+
+
+def test_propose_note_budget_is_two_per_turn_and_not_an_error(
+    note_project,
+    notes_registry,
+) -> None:
+    for n in range(2):
+        out = _result(
+            notes_registry,
+            "propose_note",
+            body=f"Distinct fact {n}.",
+            kind="decision",
+            anchor=PROJECT,
+        )
+        assert out["status"] == "proposed"
+    text, outcome = notes_registry.dispatch_outcome(
+        "propose_note",
+        {"body": "A third.", "kind": "decision", "anchor": PROJECT},
+    )
+    assert json.loads(text) == {
+        "status": "not_proposed",
+        "note": "the proposal budget for this turn is used",
+    }
+    assert outcome == "ok"
+    with get_session() as session:
+        assert len(session.exec(select(ProjectNote)).all()) == 2
+
+
+def test_propose_note_validation_errors_come_back_as_error_results(
+    note_project,
+    notes_registry,
+) -> None:
+    result = _result(
+        notes_registry, "propose_note", body="", kind="decision", anchor=PROJECT
+    )
+    assert "error" in result
+    assert notes_registry.proposals_used == 0
+
+
+def test_get_rationale_carries_notes_on_every_return(
+    note_project,
+    notes_registry,
+    monkeypatch,
+) -> None:
+    note_id = _confirmed({"kind": "symbol", "qualified_name": "pkg.a"}, _SECRET)
+    present = [_fake_evidence_item()]
+    monkeypatch.setattr(chat_tools, "lookup_cached", lambda *a, **k: None)
+    monkeypatch.setattr(
+        chat_tools, "whygraph_rationale_brief", lambda **kw: {"purpose": "p"}
+    )
+
+    def get() -> dict:
+        return _result(notes_registry, "get_rationale", qualified_name="pkg.a")
+
+    monkeypatch.setattr(chat_tools, "collect_evidence", lambda t, limit=20: [])
+    no_evidence = get()
+    monkeypatch.setattr(chat_tools, "collect_evidence", lambda t, limit=20: present)
+    generated = get()  # budget of one: generates
+    not_generated = get()
+    monkeypatch.setattr(
+        chat_tools,
+        "lookup_cached",
+        lambda *a, **k: (SimpleNamespace(), "2026-01-01T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(
+        chat_tools, "_format_response", lambda *a, **k: {"purpose": "cached"}
+    )
+    cached = get()
+    assert no_evidence["status"] == "no_evidence"
+    assert generated["generated"] is True
+    assert not_generated["status"] == "not_generated"
+    assert cached["generated"] is False
+    for result in (no_evidence, generated, not_generated, cached):
+        assert [n["id"] for n in result["notes"]] == [note_id]
+        assert result["notes"][0]["anchor_state"] == "current"
+
+
+def test_get_rationale_shows_a_changed_note_after_the_code_is_edited(
+    note_project,
+    notes_registry,
+    monkeypatch,
+) -> None:
+    _confirmed({"kind": "symbol", "qualified_name": "pkg.a"}, _SECRET)
+    (note_project.root / "src/pkg/a.py").write_text(
+        A_SOURCE.replace("return 1", "return 99")
+    )
+    _index(note_project.root, [_note_node("pkg.a", "src/pkg/a.py", 1, 2)])
+    monkeypatch.setattr(chat_tools, "collect_evidence", lambda t, limit=20: [])
+    result = _result(notes_registry, "get_rationale", qualified_name="pkg.a")
+    assert result["notes"][0]["anchor_state"] == "changed"
+
+
+def test_overview_counts_project_wide_notes_and_never_shows_a_body(
+    note_project,
+    notes_registry,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        chat_tools, "_repo_overview_resource", lambda: {"repository": "demo"}
+    )
+    assert "team_notes" not in _result(notes_registry, "get_repo_overview")
+    _confirmed(PROJECT, _SECRET)
+    _confirmed(PROJECT, "Another project-wide fact.")
+    _confirmed({"kind": "path", "path": "src/pkg"}, "Not project wide.")
+    overview = _result(notes_registry, "get_repo_overview")
+    assert overview["team_notes"] == {
+        "project_wide": 2,
+        "hint": "call find_notes(project_wide=true)",
+    }
+    for message in build_system_prompt(notes_registry):
+        assert _SECRET not in message.content
+        assert "Another project-wide fact" not in message.content
+    assert "project_wide" in build_system_prompt(notes_registry)[1].content

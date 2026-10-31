@@ -126,3 +126,8 @@ def test_starters_take_the_first_area_or_a_generic_phrase() -> None:
 def test_engineer_starters_have_no_area() -> None:
     engineer = MODES["engineer"]
     assert render_starters(engineer, "chat") == engineer.starters
+
+
+@pytest.mark.parametrize("mode_id", MODE_IDS)
+def test_every_mode_prefers_find_notes(mode_id: str) -> None:
+    assert "find_notes" in MODES[mode_id].prefer

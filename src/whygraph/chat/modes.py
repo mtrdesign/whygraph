@@ -99,7 +99,13 @@ MODES: Mapping[str, Mode] = MappingProxyType(
                 "Explain how this project is structured",
                 "Which areas have no rationale yet?",
             ),
-            prefer=("get_area_outline", "get_symbol", "find_changes", "get_rationale"),
+            prefer=(
+                "get_area_outline",
+                "get_symbol",
+                "find_changes",
+                "get_rationale",
+                "find_notes",
+            ),
             avoid=(),
         ),
         "lead": Mode(
@@ -122,6 +128,7 @@ MODES: Mapping[str, Mode] = MappingProxyType(
                 "run_project_stats",
                 "render_chart",
                 "get_rationale",
+                "find_notes",
             ),
             avoid=("get_symbol", "read_file"),
         ),

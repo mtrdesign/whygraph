@@ -29,9 +29,11 @@ from whygraph.core.config import Config
 from whygraph.core.context import (
     ProjectContext,
     ProjectContextError,
+    current_actor,
     current_project,
     is_strict,
     set_strict,
+    use_actor,
     use_project,
 )
 from whygraph.db import engine as db_engine
@@ -401,3 +403,33 @@ def test_analyze_pool_workers_see_context_in_strict_mode(
     with use_project(projects.b):
         with get_session() as session:
             assert session.exec(select(CommitRow)).all() == []
+
+
+def test_actor_binds_nests_and_resets() -> None:
+    assert current_actor() is None
+    with use_actor("u-1"):
+        assert current_actor() == "u-1"
+        with use_actor("u-2"):
+            assert current_actor() == "u-2"
+        assert current_actor() == "u-1"
+        with use_actor(None):
+            assert current_actor() is None
+    assert current_actor() is None
+
+
+def test_actor_resets_after_an_exception() -> None:
+    with pytest.raises(RuntimeError):
+        with use_actor("u-1"):
+            raise RuntimeError("boom")
+    assert current_actor() is None
+
+
+def test_actor_is_carried_into_a_pool_with_a_copied_context() -> None:
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    with use_actor("u-pool"), ThreadPoolExecutor(max_workers=2) as pool:
+        copied = pool.submit(contextvars.copy_context().run, current_actor).result()
+        bare = pool.submit(current_actor).result()
+    assert copied == "u-pool"
+    assert bare is None

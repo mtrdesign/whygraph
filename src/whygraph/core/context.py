@@ -126,6 +126,8 @@ _current: ContextVar[ProjectContext | None] = ContextVar(
     "whygraph_project", default=None
 )
 
+_actor: ContextVar[str | None] = ContextVar("whygraph_actor", default=None)
+
 # Process-wide, not per-context: strict mode is a property of the process
 # (the portal), not of one request.
 _strict: bool = False
@@ -161,6 +163,31 @@ def use_project(ctx: ProjectContext) -> Iterator[ProjectContext]:
         yield ctx
     finally:
         _current.reset(token)
+
+
+@contextlib.contextmanager
+def use_actor(uid: str | None) -> Iterator[None]:
+    """Bind the acting user's uid for the duration of a block.
+
+    Mirrors :func:`use_project`: blocks nest, the previous value comes
+    back on exit, and the binding follows :mod:`contextvars` semantics
+    (visible in a copied context, not in a bare thread).
+
+    Parameters
+    ----------
+    uid : str or None
+        The stable ``users.uid`` of the caller, or ``None`` for nobody.
+    """
+    token = _actor.set(uid)
+    try:
+        yield
+    finally:
+        _actor.reset(token)
+
+
+def current_actor() -> str | None:
+    """Return the uid bound by the innermost :func:`use_actor`, or ``None``."""
+    return _actor.get()
 
 
 def current_project() -> ProjectContext | None:
@@ -242,8 +269,10 @@ __all__ = [
     "ProjectContext",
     "ProjectContextError",
     "active_project",
+    "current_actor",
     "current_project",
     "is_strict",
     "set_strict",
+    "use_actor",
     "use_project",
 ]

@@ -35,6 +35,7 @@ def test_mcp_server_registers_evidence_and_rationale_tools() -> None:
         "whygraph_evidence_for",
         "whygraph_rationale_brief",
         "whygraph_area_history",
+        "whygraph_propose_note",
     }
 
 
@@ -48,6 +49,7 @@ def test_mcp_server_registers_resources() -> None:
         "whygraph://commit/{sha}",
         "whygraph://pr/{number}",
         "whygraph://issue/{number}",
+        "whygraph://note/{id}",
     }
 
 

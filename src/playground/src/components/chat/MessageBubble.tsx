@@ -19,6 +19,7 @@ import { Skeleton } from "../ui/skeleton";
 import { Textarea } from "../ui/textarea";
 import { formatNumber } from "../../lib/format";
 import { Markdown } from "./Markdown";
+import { ProposedNoteCard } from "./ProposedNoteCard";
 import { ToolCallCard, type ToolActivity } from "./ToolCallCard";
 
 // ECharts is ~196 KB gzipped even fully tree-shaken — measured, against a vendor
@@ -504,6 +505,9 @@ function AssistantBubble({
                 // expansion state to another as the transcript re-renders.
                 <div key={activity.id}>
                   <ToolCallCard activity={activity} />
+                  {activity.name === "propose_note" && !activity.running && (
+                    <ProposedNoteCard result={activity.result} />
+                  )}
                   {chart && (
                     <Suspense
                       fallback={

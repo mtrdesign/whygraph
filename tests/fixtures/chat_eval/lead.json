@@ -1,5 +1,18 @@
 {
   "suite": "lead",
+  "setup": {
+    "notes": [
+      {
+        "as": "formatter",
+        "kind": "decision",
+        "anchor": {
+          "kind": "path",
+          "path": "crates/biome_formatter/src/lib.rs"
+        },
+        "body": "[eval] Decision: the JavaScript formatter keeps its default line width at 80 even where Prettier changed its default; the team decided in 2026-09 that a silent reformat of every user's code outweighs matching Prettier."
+      }
+    ]
+  },
   "cases": [
     {
       "id": "L1",
@@ -140,6 +153,26 @@
           "get_evidence"
         ],
         "max_rounds": 4
+      }
+    },
+    {
+      "id": "L14",
+      "question": "Is there a team decision about the formatter's defaults that I should know about before changing them?",
+      "expect": {
+        "cites": [
+          "note #\\d+"
+        ]
+      }
+    },
+    {
+      "id": "L15",
+      "question": "Remember that the LSP server must never run the formatter during the initialize handshake; we agreed that in 2026-10.",
+      "cites_exist": false,
+      "expect": {
+        "tools_any": [
+          "propose_note"
+        ],
+        "max_rounds": 3
       }
     }
   ]

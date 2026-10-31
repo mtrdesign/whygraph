@@ -168,6 +168,57 @@ class CodeGraph:
         ).fetchone()
         return Symbol.from_row(row) if row else None
 
+    def symbol_in_file(self, qualified_name: str, path: str) -> Symbol | None:
+        """Look a symbol up by its fully-qualified name within one file.
+
+        Unlike :meth:`symbol`, which returns the first row of any file, this
+        answers for the definition in ``path`` only, so a name defined in
+        several files resolves to the one the caller anchored.
+
+        Parameters
+        ----------
+        qualified_name : str
+            The dotted name, e.g. ``"pkg.module.Class.method"``.
+        path : str
+            Repository-relative file path, as in :attr:`Symbol.file_path`.
+
+        Returns
+        -------
+        Symbol or None
+            The matching symbol, or ``None`` when ``path`` defines no such
+            name. If several rows of that file share the name, the first is
+            returned.
+        """
+        row = self._conn.execute(
+            f"{_NODE_SELECT} WHERE qualified_name = ? AND file_path = ? LIMIT 1",
+            (qualified_name, path),
+        ).fetchone()
+        return Symbol.from_row(row) if row else None
+
+    def symbol_count(self, qualified_name: str) -> int:
+        """Count the files that define ``qualified_name``.
+
+        :meth:`symbol` returns the first row of any file, so a caller that
+        must hash the right file checks this first: more than one means the
+        name alone does not identify a definition.
+
+        Parameters
+        ----------
+        qualified_name : str
+            The dotted name, e.g. ``"pkg.module.Class.method"``.
+
+        Returns
+        -------
+        int
+            The number of distinct files with a node of that name; ``0`` when
+            the graph has none.
+        """
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT file_path) FROM nodes WHERE qualified_name = ?",
+            (qualified_name,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
     def file_hash(self, path: str) -> str | None:
         """The sha256 CodeGraph recorded for a file when it last indexed it.
 

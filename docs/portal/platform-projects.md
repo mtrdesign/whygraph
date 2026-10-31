@@ -127,7 +127,7 @@ them; the portal never fetches for you.
 
 ## What your agent sees
 
-The three tools and the resources work as on any project (see the [MCP
+The tools and the resources work as on any project (see the [MCP
 reference](../reference/mcp.md#linked-projects)), with two additions: every result carries a
 `platform` block, and each commit WhyGraph could not take from the platform is labelled with a
 `push_status`:
@@ -146,6 +146,12 @@ Rationale cards are generated **on the platform**, by the organization's own mod
 shared by everyone on the project: an agent that asks for a card nobody has generated yet spends the
 organization's [hourly agent limit](../deploy/production.md#agent-limits), and an organization can set
 it to zero so agents get only cards that exist.
+
+### No notes
+
+A linked project has no local WhyGraph database, so it has no [project notes](../guide/notes.md):
+`whygraph_propose_note` and `whygraph://note/{id}` are refused (`note_linked`, `not_found`), the
+platform's cards carry no `notes`, and the portal shows no Notes page for the project.
 
 ### Offline
 

@@ -15,7 +15,7 @@ from importlib.resources import files
 from whygraph.mcp.server import mcp
 
 _CALL = re.compile(
-    r"(whygraph_(?:evidence_for|rationale_brief|area_history))\(([^)]*)\)"
+    r"(whygraph_(?:evidence_for|rationale_brief|area_history|propose_note))\(([^)]*)\)"
 )
 _KEY = re.compile(r"(?<![\w.])([a-z_][a-z0-9_]*)\s*=")
 

@@ -61,6 +61,7 @@ class FakeLookups:
         commits: list[str] = (),
         cached: set[str] = frozenset(),
         indexed: bool = True,
+        notes: dict[str, int] | None = None,
     ) -> None:
         self._symbols = list(symbols)
         self._files = set(files)
@@ -68,6 +69,7 @@ class FakeLookups:
         self._issues = issues or {}
         self._commits = sorted(commits)
         self._cached = set(cached)
+        self._notes = notes or {}
         self.indexed = indexed
         self.calls: list[tuple] = []
 
@@ -88,6 +90,9 @@ class FakeLookups:
     def has_file(self, path):
         self.calls.append(("has_file", path))
         return path in self._files
+
+    def note_count(self, symbol):
+        return self._notes.get(symbol.qualified_name, 0)
 
     def pull_request_state(self, number):
         return self._prs.get(number)
@@ -521,3 +526,86 @@ def test_real_lookups_without_an_index_skip_symbols(
         assert ground("what is run_turn?", lookups) is None
     finally:
         lookups.close()
+
+
+# ---------------------------------------------------------------------------
+# Team notes: a count, never a body (plan 40 step 6)
+# ---------------------------------------------------------------------------
+
+
+def test_a_symbol_entry_carries_a_note_count_only_when_positive() -> None:
+    lookups = FakeLookups(
+        symbols=[_sym("run_turn"), _sym("other")], notes={"run_turn": 2}
+    )
+    entries = _resolve(["run_turn", "other"], lookups)
+    assert entries[0]["notes"] == 2
+    assert "notes" not in entries[1]
+    suffix = grounding.references_suffix(entries)
+    assert suffix is not None and '"notes":2' in suffix
+
+
+def test_note_hash_number_is_not_a_pull_request_or_issue() -> None:
+    assert extract_references("what does note #12 say?") == ()
+    assert extract_references("see Note #12 and #13") == ("#13",)
+    assert extract_references("see #12") == ("#12",)
+    lookups = FakeLookups(prs={12: "open"}, issues={12: "open"})
+    assert ground("what does note #12 say?", lookups) is None
+
+
+def test_real_note_count_is_confirmed_symbol_and_range_notes_only(
+    real_lookups,
+) -> None:
+    from whygraph.db.models import ProjectNote
+
+    base = {
+        "kind": "decision",
+        "status": "confirmed",
+        "source": "human",
+        "origin": None,
+        "proposed_by": "u1",
+        "proposed_at": "t",
+        "body": "SECRET BODY",
+    }
+    with get_session() as session:
+        session.add_all(
+            [
+                ProjectNote(
+                    **base,
+                    anchor_kind="symbol",
+                    qualified_name="render",
+                    anchor_path="src/render.py",
+                    line_start=1,
+                    line_end=9,
+                ),
+                ProjectNote(
+                    **{**base, "status": "proposed"},
+                    anchor_kind="symbol",
+                    qualified_name="render",
+                    anchor_path="src/render.py",
+                    line_start=1,
+                    line_end=9,
+                ),
+                ProjectNote(
+                    **base,
+                    anchor_kind="range",
+                    anchor_path="src/render.py",
+                    line_start=4,
+                    line_end=5,
+                ),
+                ProjectNote(
+                    **base,
+                    anchor_kind="range",
+                    anchor_path="src/render.py",
+                    line_start=500,
+                    line_end=501,
+                ),
+                ProjectNote(**base, anchor_kind="project"),
+            ]
+        )
+        session.commit()
+    symbol = real_lookups.symbol("render")
+    assert real_lookups.note_count(symbol) == 2
+    suffix = ground("why `render`?", real_lookups)
+    assert suffix is not None
+    assert '"notes":2' in suffix
+    assert "SECRET BODY" not in suffix

@@ -231,6 +231,23 @@ value. Overrides apply to calls made **from then on**: past rows keep the price 
 with. The first-scan estimate on a project uses the same table and your overrides, and says "your
 organization's prices" when an override applied.
 
+## Agent calls that count as failed
+
+The call counters of [Agent activity](agents.md#agent-activity) are separate from this ledger: they
+count calls, never money. Two rules about the note tools:
+
+- A `whygraph_propose_note` call refused with `note_limit` (a cap on agent proposals), `note_invalid`
+  or `note_linked` counts as a **failed** call on purpose, so an agent that keeps hitting the cap shows
+  as an error rate in the Overview. A reading of a note that does not exist (`whygraph://note/{id}`
+  answering `not_found`) is counted as a failed call too, like the other resources.
+- A `whygraph_rationale_brief` call that finds no evidence for new code but returns the notes written
+  about it counts as **successful**.
+- The Chat assistant's per-turn limit of two proposals is **not** a failure: the third `propose_note`
+  of a turn is declined with a plain answer and counts as a successful tool call. A `note_limit` or
+  `note_invalid` refusal in Chat is a failed call like any other.
+
+Neither tool records a usage row: proposing and reading notes never call a model.
+
 ## Retention and deletion
 
 Calls are kept for **400 days** and then deleted, like the audit log. Budget crossings are kept for

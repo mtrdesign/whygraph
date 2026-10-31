@@ -56,4 +56,6 @@ When the implementor returns, print its output **verbatim** to the user. Do not 
 
 Do not edit the plan file from this prompt — the subagent owns all log mutations.
 
+If the report has a `## Decisions worth a note` section, end by telling the user to run `/whygraph-note` once for each listed entry (this prompt has no WhyGraph tools, so it cannot record them itself).
+
 This prompt's only job is: parse → validate → dispatch → print. Do not edit other files, run other tools, or improvise.

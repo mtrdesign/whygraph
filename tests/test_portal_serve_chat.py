@@ -2593,6 +2593,9 @@ class _Lookups:
         self._fail = fail
         self.closed = False
 
+    def note_count(self, symbol):
+        return 0
+
     def pull_request_state(self, number):
         if self._fail:
             raise RuntimeError("the forge table is gone")
@@ -2911,3 +2914,34 @@ def test_rating_needs_no_budget_no_key_and_no_turn_lease(
         assert chat_client.put(_fb(sid, final), json={"rating": -1}).status_code == 200
     finally:
         serve_chat._release(key, holder)
+
+
+def test_chat_turn_worker_and_tool_pool_inherit_the_actor(
+    chat_client, monkeypatch
+) -> None:
+    """The actor bound in ``_start_turn`` reaches the worker and a tool pool."""
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    from whygraph.core.context import current_actor
+
+    seen: dict[str, str | None] = {}
+
+    def _run(*, client, history, registry=None, **kwargs):
+        seen["worker"] = current_actor()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            seen["tool"] = pool.submit(
+                contextvars.copy_context().run, current_actor
+            ).result()
+        yield TextDelta(text="ok")
+        yield TurnDone("stop")
+
+    monkeypatch.setattr(serve_chat, "make_chat_client", lambda *a, **k: object())
+    monkeypatch.setattr(serve_chat, "run_turn", _run)
+    monkeypatch.setattr(serve_chat, "_caller_uid", lambda request: "u-actor")
+    session = _new_session(chat_client)
+    chat_client.post(
+        f"/api/chat/sessions/{session['id']}/messages", json={"content": "hi"}
+    )
+    assert seen == {"worker": "u-actor", "tool": "u-actor"}
+    assert current_actor() is None

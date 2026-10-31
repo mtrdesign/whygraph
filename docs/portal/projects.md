@@ -272,6 +272,12 @@ When commits are waiting for a description, the Overview shows how many, with th
 the project's usage also get **Usage this month**: the spend against the budget, split by task, with a
 link to the project's usage and budgets.
 
+### Notes card { #notes-card }
+
+The **Notes** card counts the project's [notes](../guide/notes.md): how many are waiting for review
+(and how many of those came from agents) and how many are confirmed, with a link to the Notes page
+("Review notes" when something is waiting). It shows counts only. A linked project has no card.
+
 ### Agent activity
 
 **Agent activity** counts the calls agents made to this project over the last 30 days: MCP calls
@@ -296,6 +302,7 @@ counted by tool name, per project, with no member. It is not part of the agent t
 |---|---|
 | **Explorer** | Browse the graph, evidence and rationale ([The Explorer](../guide/playground.md)) |
 | **Chat** | Ask questions ([The Chat assistant](../guide/chat.md)) |
+| **Notes** | Review and confirm what members and agents proposed ([Project notes](../guide/notes.md)); the item shows a badge while proposals wait. A linked project has no Notes item |
 | **Scans** | See each run's progress and log; start a rescan, or **Cancel** a queued or running run |
 | **Settings** | Change configuration, reconfigure agents, or remove the project |
 

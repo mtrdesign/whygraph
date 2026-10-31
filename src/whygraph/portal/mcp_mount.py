@@ -46,7 +46,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
-from whygraph.core.context import use_project
+from whygraph.core.context import use_actor, use_project
 from whygraph.core.usage import use_usage_sink
 from whygraph.mcp.server import mcp
 
@@ -247,7 +247,11 @@ class McpDispatcher:
             principal=principal,
             user_id=access.user_id,
         )
-        with use_project(project.ctx), use_usage_sink(sink):
+        with (
+            use_project(project.ctx),
+            use_actor(principal.uid),
+            use_usage_sink(sink),
+        ):
             await self.state.session_manager.handle_request(scope, receive, send)
 
 

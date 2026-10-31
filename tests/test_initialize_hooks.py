@@ -119,3 +119,58 @@ def test_not_a_git_repo_warns_but_initialize_succeeds(tmp_path: Path) -> None:
 
     assert result.hooks_error and "not a git repository" in result.hooks_error
     assert (plain / ".gitignore").exists()
+
+
+# ---- the Claude Code agent hook helper (plan 40 step 12) --------------------
+
+
+def test_the_agent_helper_is_independent_of_scan_hooks(repo: Path) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    initialize_project(
+        repo, agents=["claude"], hooks=False, mcp=HttpMcp(slug="demo"), marker=None
+    )
+
+    assert agent_hook_helper_path(repo).is_file()
+    assert not helper_path(repo).exists()
+    assert _managed(repo) == set()
+
+
+def test_scan_hooks_off_and_claude_removed_leave_no_helper_dir(repo: Path) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    initialize_project(
+        repo, agents=["claude"], hooks=True, mcp=HttpMcp(slug="demo"), marker=None
+    )
+    assert helper_path(repo).is_file() and agent_hook_helper_path(repo).is_file()
+
+    result = initialize_project(
+        repo,
+        agents=[],
+        hooks=False,
+        mcp=HttpMcp(slug="demo"),
+        marker=None,
+        agent_actions={"claude": "remove"},
+    )
+
+    assert result.hooks_error is None
+    assert not (repo / ".git" / "whygraph").exists()
+
+
+def test_scan_hooks_on_and_claude_removed_keep_whygraph_scan(repo: Path) -> None:
+    from whygraph.hooks import agent_hook_helper_path
+
+    initialize_project(
+        repo, agents=["claude"], hooks=True, mcp=HttpMcp(slug="demo"), marker=None
+    )
+    initialize_project(
+        repo,
+        agents=[],
+        hooks=True,
+        mcp=HttpMcp(slug="demo"),
+        marker=None,
+        agent_actions={"claude": "remove"},
+    )
+
+    assert not agent_hook_helper_path(repo).exists()
+    assert helper_path(repo).is_file()

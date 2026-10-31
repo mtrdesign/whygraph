@@ -871,6 +871,36 @@ def test_a_changed_overview_leaves_the_stable_prompt_byte_identical(
     assert overview_a.content != overview_b.content
 
 
+def test_a_purpose_in_the_overview_leaves_the_stable_prompt_byte_identical(
+    _repo_root: Path,
+) -> None:
+    """Plan 41: the purpose rides the overview message, never the first one.
+
+    (The `system.md` sentence naming `purpose` is a one-time change; after it
+    the first message is the same with or without a purpose.)
+    """
+
+    class _WithPurpose(StubRegistry):
+        def dispatch(self, name, arguments):
+            if name == "get_repo_overview":
+                return json.dumps(
+                    {
+                        "commits": 3,
+                        "purpose": {
+                            "text": "- note #1 [purpose]",
+                            "source": "analysis",
+                        },
+                    }
+                )
+            return super().dispatch(name, arguments)
+
+    plain, overview_a = build_system_prompt(StubRegistry())
+    with_purpose, overview_b = build_system_prompt(_WithPurpose())
+    assert plain.content == with_purpose.content
+    assert "`purpose` is a confirmed, machine-drafted" in plain.content
+    assert '"purpose"' in overview_b.content and '"purpose"' not in overview_a.content
+
+
 def test_system_prompt_documents_the_deep_link_convention(_repo_root: Path) -> None:
     content = build_system_prompt(StubRegistry())[0].content
     assert "whygraph://symbol/" in content

@@ -64,6 +64,8 @@ from whygraph.mcp.notes import (
     list_notes,
     notes_for_target,
     project_notes,
+    purpose_notes,
+    render_note_line,
     propose,
     proposal_result,
 )
@@ -375,7 +377,9 @@ _SPECS: tuple[ToolSpec, ...] = (
             "Get repository-wide totals: commit / PR / issue counts, the date "
             "range of scanned history, when the last scan ran, how much of "
             "the history has LLM descriptions, and the top contributors, "
-            "plus the configured areas. "
+            "plus the configured areas and, when a member confirmed one, the "
+            "project's `purpose` (a machine-drafted statement of what it is "
+            "for; `source` says so). "
             "These SIX FIXED NUMBERS and nothing else — it has no per-file, "
             "per-month, or per-PR breakdown, so for hotspot files, churn, "
             "velocity over time, or cycle time use run_project_stats. For the "
@@ -568,9 +572,7 @@ _SPECS: tuple[ToolSpec, ...] = (
                 },
                 "kind": {
                     "type": "string",
-                    "description": (
-                        "decision, constraint, gotcha, convention or context."
-                    ),
+                    "description": ("decision, constraint, gotcha or convention."),
                 },
                 "anchor": {
                     "type": "object",
@@ -1079,6 +1081,9 @@ def _get_repo_overview() -> dict:
     overview = _repo_overview_resource()
     if configured_areas():
         overview = {**overview, "areas": overview_block()}
+    purpose = _purpose_line()
+    if purpose:
+        overview = {**overview, "purpose": {"text": purpose, "source": "analysis"}}
     count = _project_wide_note_count()
     if count:
         # A count, never a body: member-written text stays out of system messages.
@@ -1098,11 +1103,37 @@ def _is_linked() -> bool:
     return project is not None and project.remote is not None
 
 
+PURPOSE_LINE_MAX = 600
+"""Cap on the overview's purpose line, prefix included."""
+
+
+def _purpose_line() -> str | None:
+    """The confirmed purpose as one capped note line, else ``None``.
+
+    A proposed or retired purpose never appears; a linked project has none.
+    The cap applies to the rendered line (``render_note_line`` escapes
+    non-ASCII), cut at the last space at or below 597 characters.
+    """
+    if _is_linked():
+        return None
+    note = purpose_notes()["confirmed"]
+    if note is None:
+        return None
+    line = render_note_line(note)
+    if len(line) <= PURPOSE_LINE_MAX:
+        return line
+    head = line[: PURPOSE_LINE_MAX - 3]
+    cut = head.rfind(" ")
+    return (head[:cut] if cut > 0 else head) + "..."
+
+
 def _project_wide_note_count() -> int:
     """How many confirmed project-wide notes exist (0 on a linked project)."""
     if _is_linked():
         return 0
-    return len(list_notes(status="confirmed", anchor_kind="project", limit=100))
+    notes = list_notes(status="confirmed", anchor_kind="project", limit=100)
+    # The purpose's body is inline in the overview, so it is not counted.
+    return sum(1 for note in notes if note.get("kind") != "purpose")
 
 
 FIND_NOTES_LIMIT = 10

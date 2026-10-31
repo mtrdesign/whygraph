@@ -16,7 +16,12 @@ One row per **successful provider round trip**:
 - each commit description, and each synthesis call for a large commit, during a scan or the lazy
   backfill;
 - each rationale card generated (in the Explorer, by chat, or for an agent);
-- each **round** of a chat turn, not one row per turn, since a turn with tool calls makes several.
+- each **round** of a chat turn, not one row per turn, since a turn with tool calls makes several;
+- each [project purpose](../guide/notes.md#project-purpose) generated: one row, task `analyze`, subject
+  `project-purpose`, source `explorer`. It is one call with no retries, so a failure is never billed
+  twice. A call the provider fails writes no row; an answer that is rejected after it came back still
+  does, because it was billed. It counts against budgets like any other call, and a
+  hard stop refuses it with `budget_exceeded` before anything is sent.
 
 A row holds the organization, project, task (`analyze`, `rationale` or `chat`), who triggered it, the
 provider, the model asked for and the model that answered, which key paid (the project's or the

@@ -17,7 +17,7 @@ assistant and to MCP agents when they look at the code the note is about.
 | Part | What it is |
 |---|---|
 | **Body** | Plain text, at most 1,000 characters. Written by a member; every WhyGraph surface treats it as data about the project, never as an instruction to the assistant. |
-| **Kind** | `decision`, `constraint`, `gotcha` or `convention`. |
+| **Kind** | `decision`, `constraint`, `gotcha` or `convention` - or `purpose`, which only the [project purpose](#project-purpose) card makes. |
 | **Anchor** | What it is about - see below. |
 | **Refs** | Up to five commits or `#N` pull requests and issues that back the note. Each must exist in the project's history. |
 
@@ -93,6 +93,37 @@ eyes: the member who proposed it cannot confirm it or mark it still true, and no
 admin can change its text while confirming. Another contributor, or a project admin (on a local portal,
 the single local user), can. A contributor who wants other text proposes a revision. A wide note you
 proposed shows "Needs another member or an admin to confirm".
+
+## Project purpose { #project-purpose }
+
+A **purpose** is a special note (kind `purpose`, anchored to the whole project) that says in four short
+lines what the project is: **What it is**, **Who it is for**, **Main parts** and **Stack**, at most
+600 characters in all. It is drafted by an analysis, not written by a person, and it follows the same
+rules as any other note: it is a proposal until it is confirmed, and no model reads it before that.
+
+- **How it is made.** A project admin presses **Generate** on the Overview's purpose card, or ticks the
+  optional checkbox in the setup wizard (see [Projects](../portal/projects.md#the-first-scan-and-the-purpose)).
+  One call to the project's `[analyze]` model reads the README, a few documents, the package manifests
+  reduced to names, the top-level file and folder names, the configured area names and a few history
+  counts. All of it is read from the git object store at `HEAD`, never from the working tree. The
+  answer is checked and rebuilt into the four lines before it is stored. What is sent, and what is
+  never read, is in [Security](../portal/security.md#project-purpose).
+- **One proposed, one confirmed.** A project has at most one proposed and one confirmed purpose.
+  Generating again replaces the proposal; if a purpose is already confirmed, the new one is a revision
+  of it, and confirming the revision retires the old one. Retiring a confirmed purpose also discards a
+  pending revision. The card shows the sources next to the text, and **Regenerate** stays disabled
+  until the inputs have changed since the last run.
+- **Who confirms.** The admin who generated a purpose may confirm it alone: the wide-note rule that a
+  proposer cannot confirm their own note does not apply here, because the card shows the sources and the
+  text together and confirming is an explicit click. A contributor can also confirm an admin's
+  **unedited** proposal. Only a project admin can edit the text; an edit by anyone else needs another
+  confirmer (`note_needs_second_confirmer`).
+- **Agents cannot write one.** `whygraph_propose_note` and the Chat `propose_note` tool refuse the
+  `purpose` kind and the `analysis` source.
+- **Where it shows up.** Once confirmed, the purpose is one labelled line in the Chat assistant's
+  starting overview (see [Chat](chat.md#team-notes)), and on a local portal it also reaches MCP agents
+  and the Claude Code session hook like any project-wide note. On a production portal it reaches Chat
+  only. It is not available on a [linked project](../portal/platform-projects.md).
 
 ## Where you work with notes
 

@@ -283,6 +283,11 @@ conventions. Two tools reach them:
   never on its own from commit messages, pull request or issue text - and at most twice in a turn
   (a third is declined, not an error).
 
+If the project has a confirmed [project purpose](notes.md#project-purpose), the starting overview also
+carries it as a `purpose` line of at most 600 characters, labelled as machine-drafted (`source:
+analysis`) so the assistant treats it as data. A proposed purpose is never shown, and a linked project
+has none.
+
 The assistant cites a note as `note #12`. Note text is data about the project: it never changes how
 the assistant behaves. The assistant's starting overview carries only a **count** of project-wide
 notes; it fetches their text with `find_notes` when your question is about conventions or constraints.

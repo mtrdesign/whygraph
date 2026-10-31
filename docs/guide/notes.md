@@ -120,10 +120,9 @@ rules as any other note: it is a proposal until it is confirmed, and no model re
   confirmer (`note_needs_second_confirmer`).
 - **Agents cannot write one.** `whygraph_propose_note` and the Chat `propose_note` tool refuse the
   `purpose` kind and the `analysis` source.
-- **Where it shows up.** Once confirmed, the purpose is one labelled line in the Chat assistant's
-  starting overview (see [Chat](chat.md#team-notes)), and on a local portal it also reaches MCP agents
-  and the Claude Code session hook like any project-wide note. On a production portal it reaches Chat
-  only. It is not available on a [linked project](../portal/platform-projects.md).
+- **Where it shows up.** Once confirmed, the purpose is a project-wide note: the Chat assistant
+  reads it with `find_notes` (see [Chat](chat.md#team-notes)), and on a local portal it also reaches
+  MCP agents and the Claude Code session hook. On a production portal it reaches Chat only. It is not available on a [linked project](../portal/platform-projects.md).
 
 ## Where you work with notes
 

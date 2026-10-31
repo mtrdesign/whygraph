@@ -18,8 +18,7 @@
 - **Project purpose.** A project admin can have the portal draft a four-line statement of what the
   project is for - from the README, a few docs, reduced manifests and top-level names, read from git
   and sent to the `[analyze]` model with one call - then confirm it as a project note. It is optional
-  (a card on the Overview and an unticked wizard checkbox) and shows up as one labelled line in Chat's
-  starting overview. See [Project purpose](../guide/notes.md#project-purpose) and
+  (a card on the Overview and an unticked wizard checkbox) and is read like any project-wide note. See [Project purpose](../guide/notes.md#project-purpose) and
   [Security](../portal/security.md#project-purpose).
 - **Rate a Chat reply.** A finished reply has a thumbs up and a thumbs down; thumbs down takes a reason
   and an optional note. See [Rating a reply](../guide/chat.md#rating-a-reply).

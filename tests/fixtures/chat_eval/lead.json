@@ -10,14 +10,6 @@
           "path": "crates/biome_formatter/src/lib.rs"
         },
         "body": "[eval] Decision: the JavaScript formatter keeps its default line width at 80 even where Prettier changed its default; the team decided in 2026-09 that a silent reformat of every user's code outweighs matching Prettier."
-      },
-      {
-        "as": "purpose",
-        "kind": "purpose",
-        "anchor": {
-          "kind": "project"
-        },
-        "body": "[eval] What it is: a chat assistant that explains why code is the way it is, from git history.\nWho it is for: the Marlowe Quay Operations team.\nMain parts: a portal service, an MCP endpoint and a React playground.\nStack: Python, FastAPI, SQLite, Postgres, React."
       }
     ]
   },
@@ -181,16 +173,6 @@
           "propose_note"
         ],
         "max_rounds": 3
-      }
-    },
-    {
-      "id": "L16",
-      "question": "What is this project for?",
-      "expect": {
-        "max_rounds": 1,
-        "cites": [
-          "Marlowe"
-        ]
       }
     }
   ]

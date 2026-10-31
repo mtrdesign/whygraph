@@ -2687,7 +2687,6 @@ from test_mcp_notes import (  # noqa: E402
     _index,
     _node as _note_node,
     _propose,
-    _set,
     project as _notes_project,  # noqa: F401 -- the fixture, under a private name
 )
 from whygraph.chat.harness import build_system_prompt  # noqa: E402
@@ -2905,19 +2904,13 @@ def test_overview_counts_project_wide_notes_and_never_shows_a_body(
 
 
 # ---------------------------------------------------------------------------
-# Plan 41 step 6: the confirmed purpose in the overview
+# Plan 41: the purpose is a project-wide note, not an overview line (D6)
 # ---------------------------------------------------------------------------
 
 _PURPOSE = (
     "What it is: A booking tool.\nWho it is for: Reception.\n"
     "Main parts: api, worker.\nStack: Python"
 )
-
-
-def _stub_overview(monkeypatch) -> None:
-    monkeypatch.setattr(
-        chat_tools, "_repo_overview_resource", lambda: {"repository": "demo"}
-    )
 
 
 def _confirmed_purpose(body: str = _PURPOSE) -> int:
@@ -2928,86 +2921,40 @@ def _confirmed_purpose(body: str = _PURPOSE) -> int:
     return note["id"]
 
 
-def test_overview_carries_only_a_confirmed_purpose(
+def test_overview_never_carries_a_purpose_key(
     note_project,
     notes_registry,
     monkeypatch,
 ) -> None:
-    from whygraph.mcp import notes as mcp_notes
-
-    _stub_overview(monkeypatch)
-    assert "purpose" not in _result(notes_registry, "get_repo_overview")
-    note, _ = mcp_notes.propose_purpose(_PURPOSE, actor_uid="u1", run_id=None)
-    assert "purpose" not in _result(notes_registry, "get_repo_overview")  # proposed
-    mcp_notes.confirm(note["id"], actor_uid="u2", actor_can_configure=True)
-    purpose = _result(notes_registry, "get_repo_overview")["purpose"]
-    assert purpose["source"] == "analysis"
-    assert purpose["text"].startswith(
-        f"- note #{note['id']} [purpose] (project, n/a): "
+    monkeypatch.setattr(
+        chat_tools, "_repo_overview_resource", lambda: {"repository": "demo"}
     )
-    assert "A booking tool." in purpose["text"] and "\n" not in purpose["text"]
-    mcp_notes.retire(note["id"], actor_uid="u2", reason="wrong")
-    assert "purpose" not in _result(notes_registry, "get_repo_overview")  # retired
-
-
-def test_the_purpose_is_not_counted_as_a_team_note(
-    note_project,
-    notes_registry,
-    monkeypatch,
-) -> None:
-    _stub_overview(monkeypatch)
     _confirmed_purpose()
     overview = _result(notes_registry, "get_repo_overview")
-    assert "purpose" in overview and "team_notes" not in overview
-    _confirmed(PROJECT, "A project-wide fact.")
+    assert "purpose" not in overview
+    assert "booking tool" not in json.dumps(overview)
+
+
+def test_the_confirmed_purpose_counts_in_team_notes(
+    note_project,
+    notes_registry,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        chat_tools, "_repo_overview_resource", lambda: {"repository": "demo"}
+    )
+    _confirmed_purpose()
     assert _result(notes_registry, "get_repo_overview")["team_notes"] == {
         "project_wide": 1,
         "hint": "call find_notes(project_wide=true)",
     }
 
 
-def test_a_long_purpose_is_cut_at_a_space_within_600_with_the_prefix(
+def test_find_notes_project_wide_returns_the_confirmed_purpose(
     note_project,
     notes_registry,
-    monkeypatch,
 ) -> None:
-    _stub_overview(monkeypatch)
     note_id = _confirmed_purpose()
-    _set(note_id, body="word " * 300)
-    text = _result(notes_registry, "get_repo_overview")["purpose"]["text"]
-    assert text.startswith(f"- note #{note_id} [purpose] (project, n/a): ")
-    assert len(text) <= 600 and text.endswith("...")
-    assert not text[:-3].endswith(" ")
-
-
-def test_a_long_non_ascii_purpose_is_cut_cleanly_never_past_600(
-    note_project,
-    notes_registry,
-    monkeypatch,
-) -> None:
-    _stub_overview(monkeypatch)
-    note_id = _confirmed_purpose()
-    # 400 characters, but json.dumps escapes each one to a 6-character \uXXXX.
-    _set(note_id, body=" ".join(["\u65e5\u672c\u8a9e"] * 100))
-    text = _result(notes_registry, "get_repo_overview")["purpose"]["text"]
-    assert len(text) <= 600 and text.endswith("...")
-    body = text[len("- note #") :]
-    assert "\\u65e5" in body and not body[:-3].endswith("\\")
-    assert not text[:-3].endswith(" ")
-
-
-def test_a_linked_project_skips_the_purpose_lookup(
-    note_project,
-    notes_registry,
-    monkeypatch,
-) -> None:
-    _stub_overview(monkeypatch)
-    _confirmed_purpose()
-    monkeypatch.setattr(chat_tools, "_is_linked", lambda: True)
-
-    def _boom():
-        raise AssertionError("purpose_notes must not run on a linked project")
-
-    monkeypatch.setattr(chat_tools, "purpose_notes", _boom)
-    overview = _result(notes_registry, "get_repo_overview")
-    assert "purpose" not in overview and "team_notes" not in overview
+    notes = _result(notes_registry, "find_notes", project_wide=True)["notes"]
+    assert [n["id"] for n in notes] == [note_id]
+    assert notes[0]["kind"] == "purpose"

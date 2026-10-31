@@ -1159,6 +1159,32 @@ def _run_case_turns(
     return _merge_turns(per_turn), list(dict.fromkeys(failures)), notes
 
 
+def _cases_from(suite: dict, from_case: str | None) -> list[dict]:
+    """The suite's cases, skipping those before ``from_case`` (if it is in the suite)."""
+    cases = suite["cases"]
+    ids = [c["id"] for c in cases]
+    if from_case and from_case in ids:
+        return cases[ids.index(from_case) :]
+    return cases
+
+
+def _stop_message(
+    args, suite: dict, case: dict, trial: int, n_turns: int, spent: float
+) -> str:
+    """The plain-language ``--stop-above`` stop line, with how to resume."""
+    reserve = TURN_COST_MARGIN * n_turns
+    return (
+        f"! --stop-above stopped the run before {case['id']} t{trial} "
+        f"(suite {suite['suite']}): that case has {n_turns} turn(s), so the "
+        f"guard reserves {n_turns} x ${TURN_COST_MARGIN:.2f} = ${reserve:.2f}; "
+        f"org spend ${spent:.2f} + ${reserve:.2f} = ${spent + reserve:.2f} is "
+        f"above the ceiling ${args.stop_above:.2f}. Raise --stop-above (it is a "
+        "ceiling on the org's month spend, not an allowance) or resume the "
+        f"remaining cases with: --suite <{suite['suite']} file> "
+        f"--from-case {case['id']}"
+    )
+
+
 def _run_suite_pass(
     args, provider: str | None, model: str | None, suite: dict, k: int
 ) -> list[dict]:
@@ -1172,17 +1198,17 @@ def _run_suite_pass(
         session_body["mode"] = args.mode
     trials: list[dict] = []
     note_ids = suite.get("_note_ids") or {}
-    for case in suite["cases"]:
+    for case in _cases_from(suite, getattr(args, "from_case", None)):
         turns = _case_turns(case)
         if note_ids:
             case = {**case, "expect": _substitute(case.get("expect") or {}, note_ids)}
         for trial in range(1, k + 1):
+            spent = _spent(args) if args.stop_above is not None else 0.0
             if args.stop_above is not None and (
-                _spent(args) + TURN_COST_MARGIN * len(turns) > args.stop_above
+                spent + TURN_COST_MARGIN * len(turns) > args.stop_above
             ):
                 print(
-                    f"! org spend would cross {args.stop_above}: stopping before "
-                    f"{case['id']} t{trial}",
+                    _stop_message(args, suite, case, trial, len(turns), spent),
                     file=sys.stderr,
                 )
                 return trials
@@ -2360,6 +2386,22 @@ def _self_test_multi_turn() -> bool:
     finally:
         globals().update(saved)
     ok &= stopped == [] and TURN_COST_MARGIN * 3 > 0.5
+    # The stop line names the case, turns, reserve, spend, ceiling, resume.
+    msg = _stop_message(args, suite, suite["cases"][0], 1, 3, 0.0)
+    ok &= all(
+        part in msg
+        for part in (
+            "M1 t1",
+            "3 turn(s)",
+            "3 x $0.30 = $0.90",
+            "$0.50",
+            "--from-case M1",
+        )
+    )
+    # --from-case skips earlier cases, only in a suite that has the ID.
+    two = {"suite": "t", "cases": [{"id": "A"}, {"id": "B"}, {"id": "C"}]}
+    ok &= [c["id"] for c in _cases_from(two, "B")] == ["B", "C"]
+    ok &= len(_cases_from(two, "Z")) == 3 and len(_cases_from(two, None)) == 3
     return bool(ok)
 
 
@@ -2754,7 +2796,18 @@ def main() -> int:
         default=None,
         metavar="USD",
         help="Stop before any trial that could push the org's month spend above "
-        "this (checked against GET /api/budgets).",
+        "this (checked against GET /api/budgets). The check reserves about "
+        "$0.30 per turn of the NEXT case, so the ceiling (spend just before "
+        "the run + allowance) must cover the expected spend plus about $0.30 "
+        "per turn of the longest remaining case, or the run stops early. "
+        "Resume with --from-case.",
+    )
+    parser.add_argument(
+        "--from-case",
+        default=None,
+        metavar="ID",
+        help="In each --suite that has a case with this ID, skip the cases "
+        "before it (to resume after a --stop-above stop).",
     )
     parser.add_argument(
         "--warmup",

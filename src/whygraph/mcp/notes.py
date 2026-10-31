@@ -1976,7 +1976,13 @@ def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
     budget : int, optional
         Characters of :func:`render_note_line` output (plus one newline per
         note) the result may take. A note that does not fit is skipped and
-        the next ones are still tried, so a note is never cut.
+        the next ones are still tried, so a note is never cut. The confirmed
+        purpose is always kept and charged first: its line is bounded by its
+        body (see :func:`render_note_line`), at most about 1,240 characters
+        for a 600-character body, so under the default budget it always
+        fits; only a smaller ``budget`` (or a purpose edited past 600
+        characters at confirm time, at most :data:`BODY_MAX_CHARS`) can make
+        the result exceed ``budget``, and then the purpose is all it holds.
 
     Returns
     -------
@@ -2001,7 +2007,7 @@ def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
         for row in rows:
             view = _view(row, "n/a", None)
             cost = len(render_note_line(view)) + 1
-            if used + cost > budget:
+            if used + cost > budget and row.kind != PURPOSE_KIND:
                 continue
             used += cost
             out.append(view)
@@ -2017,6 +2023,20 @@ def render_note_line(note: NoteView) -> str:
     ``<body>`` is the JSON string of the body with every whitespace run
     (``\\n``, ``\\r``, U+2028, U+2029, ...) collapsed to one space. A body can
     therefore never forge a heading or a second note.
+
+    A ``purpose`` note's body is rendered with ``ensure_ascii=False`` instead,
+    after every character :meth:`str.isprintable` refuses (the Unicode
+    ``C*`` and ``Z*`` categories other than the ASCII space: controls,
+    format, bidi and zero-width characters, private use, surrogates,
+    unassigned code points and any separator the whitespace collapse left) is
+    replaced by U+FFFD. Its line is therefore still one line of printable
+    characters (only ``"`` and ``\\`` are escaped, as ``\\"`` and ``\\\\``),
+    and is at most ``2 * len(body) + 2`` characters after the prefix, so a
+    600-character purpose in any script always fits
+    :data:`PROJECT_NOTES_BUDGET_CHARS`; with ASCII escapes a CJK purpose
+    cost six characters per character and was skipped by
+    :func:`project_notes`. Every other note keeps the ASCII rendering
+    unchanged.
 
     Parameters
     ----------
@@ -2038,7 +2058,12 @@ def render_note_line(note: NoteView) -> str:
         where = json.dumps(anchor.get("qualified_name"))
     else:
         where = json.dumps(anchor.get("path"))
-    body = json.dumps(" ".join(str(note.get("body", "")).split()))
+    flat = " ".join(str(note.get("body", "")).split())
+    if note.get("kind") == PURPOSE_KIND:
+        printable = "".join(ch if ch.isprintable() else "\ufffd" for ch in flat)
+        body = json.dumps(printable, ensure_ascii=False)
+    else:
+        body = json.dumps(flat)
     state = note.get("anchor_state", "unknown")
     return f"- note #{note.get('id')} [{note.get('kind')}] ({where}, {state}): {body}"
 

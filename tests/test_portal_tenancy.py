@@ -1212,6 +1212,15 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"proposed_by": o.owner_uid or "someone", "origin": "mcp"},
         shows=lambda o: ["rejected"],
     ),
+    # The project-purpose card (plan 41): no purpose yet. Each org has an
+    # analyze key, and its marked repo (no README, no manifest) is too small
+    # to describe, so a generation stops at 422 before any network call.
+    ("GET", "/api/projects/{slug}/purpose"): Call(
+        200, shows=lambda o: ['"proposed":null']
+    ),
+    ("POST", "/api/projects/{slug}/purpose"): Call(
+        422, shows=lambda o: ["purpose_no_input"]
+    ),
     # Claude Code hooks (plan 40): local only, left out of the production
     # sweeps; the answer is the same {} for everyone (no path in the body).
     ("POST", "/api/projects/{slug}/agent-hooks/session-start"): Call(
@@ -1725,6 +1734,8 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("GET", "/api/projects/{slug}/models/{provider}"),
         # Suggesting areas for Settings (plan 38 section 5.7)
         ("GET", "/api/projects/{slug}/areas/suggest"),
+        # Generating the project purpose (plan 41 D7: project.scan_full)
+        ("POST", "/api/projects/{slug}/purpose"),
     }
     # Everyone reads the price table (it prices their own estimates).
     assert ("GET", "/api/prices") in MEMBER_ROUTES

@@ -166,6 +166,9 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("POST", f"/api/projects/{SLUG}/notes/1/reconfirm", None),
     ("POST", f"/api/projects/{SLUG}/notes/1/retire", {"reason": "wrong"}),
     ("POST", f"/api/projects/{SLUG}/notes/reject-agent-proposals", {}),
+    # ... and so does the project-purpose card (plan 41).
+    ("GET", f"/api/projects/{SLUG}/purpose", None),
+    ("POST", f"/api/projects/{SLUG}/purpose", None),
     # Claude Code hooks: linked projects get none (plan 40 section 5.9).
     ("POST", f"/api/projects/{SLUG}/agent-hooks/session-start", {}),
     ("POST", f"/api/projects/{SLUG}/agent-hooks/post-tool", {}),

@@ -1477,6 +1477,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/notes/{{note_id}}/reconfirm", "POST"): _CHAT,
     (f"{_P}/notes/{{note_id}}/retire", "POST"): _CHAT,
     (f"{_P}/notes/reject-agent-proposals", "POST"): _CHAT,
+    # The project-purpose card (plan 41): a generation is project.scan_full
+    (f"{_P}/purpose", "GET"): _READ,
+    (f"{_P}/purpose", "POST"): "project.scan_full",
     # Claude Code hooks (plan 40 section 5.9): local only, project.read
     (f"{_P}/agent-hooks/session-start", "POST"): _READ,
     (f"{_P}/agent-hooks/post-tool", "POST"): _READ,

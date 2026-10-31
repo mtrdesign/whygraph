@@ -666,6 +666,7 @@ plus these GitHub, member, project and organization events:
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `note_confirmed`, `note_reconfirmed`, `note_retired` | A member confirmed a project note, marked it still true, or retired it (with the note id, its source and anchor kind, and whether the confirmer was also the proposer; never the note text). |
 | `note_bulk_rejected` | A member rejected all of one person's pending agent proposals from one origin (with the proposer as the target, the origin and the count). |
+| `purpose_generated` | A project admin generated a project purpose and a model call was made (with the run id, its `status` - `ok` or `failed` - the model and the token counts; never the inputs or the text). |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
 | `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |

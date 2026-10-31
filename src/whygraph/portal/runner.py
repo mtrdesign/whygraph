@@ -1655,6 +1655,35 @@ class ScanRunner:
                 if left:
                     self._requesting[project_id] = left
 
+    @contextmanager
+    def claim_project(self, project_id: int) -> Iterator[None]:
+        """Hold off a removal of the project while in-process work runs for it.
+
+        The same claim a scan request holds (:meth:`_claim_request`), for
+        work the portal does in its own process: a project-purpose
+        generation (plan 41 D3). While it is held, :meth:`reserve_removal`
+        (and an org deletion's :meth:`reserve_projects`) raises
+        :class:`ProjectBusy`, so a late write cannot recreate a removed
+        project's directory.
+
+        Parameters
+        ----------
+        project_id : int
+            ``projects.id``.
+
+        Yields
+        ------
+        None
+            The claim is released when the block exits.
+
+        Raises
+        ------
+        ProjectBusy
+            If the project is being removed.
+        """
+        with self._claim_request(project_id):
+            yield
+
     # ---- requests -------------------------------------------------------
 
     async def request_scan(

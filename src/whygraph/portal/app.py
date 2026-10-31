@@ -142,6 +142,7 @@ from .orgs import ensure_builtin_org
 from .onboarding_routes import onboarding_router, welcome_router
 from .overview_routes import overview_router
 from .notes_routes import notes_read_router, notes_write_router
+from .purpose_routes import purpose_read_router, purpose_write_router
 from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
@@ -359,6 +360,26 @@ def create_portal_app(
                         notes_action,
                         guard=linked_guard("Notes"),
                         usage_source="explorer",
+                    )
+                )
+            ],
+        )
+    # The project-purpose card (plan 41): reads need project.read; a
+    # generation is an LLM call only a project admin starts (project.scan_full),
+    # charged to the caller. A linked project has no purpose here.
+    for purpose_router, purpose_action, purpose_usage in (
+        (purpose_read_router, Action.PROJECT_READ, None),
+        (purpose_write_router, Action.PROJECT_SCAN_FULL, "explorer"),
+    ):
+        app.include_router(
+            purpose_router,
+            prefix="/api/projects/{slug}/purpose",
+            dependencies=[
+                Depends(
+                    project_db_access(
+                        purpose_action,
+                        guard=linked_guard("Project purpose"),
+                        usage_source=purpose_usage,
                     )
                 )
             ],

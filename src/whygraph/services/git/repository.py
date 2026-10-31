@@ -18,6 +18,7 @@ from .commands import (
     PRIVATE_TAGS_PREFIX,
     TAGS_SOURCE_PREFIX,
     GitBlameCmd,
+    GitCatBlobCmd,
     GitCheckMailmapCmd,
     GitCheckoutPathsCmd,
     GitCheckoutResetCmd,
@@ -35,6 +36,7 @@ from .commands import (
     GitLogCommitCmd,
     GitLsRemoteBranchCmd,
     GitLsRemoteRefsCmd,
+    GitLsTreeLongCmd,
     GitLsTreeNamesCmd,
     GitRefExistsCmd,
     GitRemoteRefsContainingCmd,
@@ -46,6 +48,7 @@ from .commands import (
     GitSetRemoteUrlCmd,
     GitSymbolicRefCmd,
     GitTagsCmd,
+    TreeEntry,
 )
 from .commit import Commit
 from .commits import Commits
@@ -377,6 +380,122 @@ class Repository:
             return self._shell.run(GitLsTreeNamesCmd(ref, paths), cwd=self.root)
         except ShellError as exc:
             raise GitError(f"failed to list the files {ref} tracks") from exc
+
+    def head_commit(self) -> str | None:
+        """The commit ``HEAD`` names, or ``None`` (an unborn branch, or git fails).
+
+        Purely local, with global and system git config ignored
+        (:func:`~.credentials.git_env`).
+
+        Returns
+        -------
+        str or None
+            The full SHA.
+        """
+        try:
+            return self._shell.run(
+                GitResolveCommitCmd("HEAD"), cwd=self.root, check=False, env=git_env()
+            )
+        except ShellError:
+            return None
+
+    def tree_entries(self, ref: str, *paths: str) -> tuple[TreeEntry, ...]:
+        """``git ls-tree -z -l`` of ``ref``: exact ``paths``, or the top level.
+
+        Reads the object store only, never the working tree; global and
+        system git config are ignored (:func:`~.credentials.git_env`). Paths
+        are literal (no globbing); a path under a symbolic link or a file
+        lists nothing.
+
+        Parameters
+        ----------
+        ref : str
+            The commit-ish to read (a full SHA, or ``"HEAD"``).
+        *paths : str
+            Root-relative paths; none lists the top-level entries.
+
+        Returns
+        -------
+        tuple of TreeEntry
+            The entries, in git's order; empty when ``ref`` has none there.
+
+        Raises
+        ------
+        GitError
+            If ``ref`` is unusable or ``git`` fails.
+        """
+        if not ref or ref.startswith("-"):
+            raise GitError(f"unusable ref {ref!r}")
+        cmd = GitLsTreeLongCmd(ref, paths)
+        try:
+            result = subprocess.run(
+                cmd.argv(),
+                cwd=self.root,
+                capture_output=True,
+                timeout=self._shell.timeout,
+                check=False,
+                env=git_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GitError("failed to list the tree") from exc
+        if result.returncode != 0:
+            lines = os.fsdecode(result.stderr).strip().splitlines()
+            detail = lines[-1] if lines else f"exit {result.returncode}"
+            raise GitError(f"failed to list the tree: {detail}")
+        return cmd.parse_bytes(result.stdout)
+
+    def blob_prefix(self, sha: str, max_bytes: int) -> tuple[bytes, bool]:
+        """At most ``max_bytes`` of blob ``sha``, read from the object store.
+
+        ``git cat-file blob`` is streamed and stopped once ``max_bytes`` are
+        read, so an oversized blob is never held whole. Global and system
+        git config are ignored (:func:`~.credentials.git_env`).
+
+        Parameters
+        ----------
+        sha : str
+            A blob id from :meth:`tree_entries`.
+        max_bytes : int
+            The most bytes to return (``>= 0``).
+
+        Returns
+        -------
+        tuple of (bytes, bool)
+            The bytes, and whether the blob was longer (truncated).
+
+        Raises
+        ------
+        GitError
+            If ``sha`` is unusable or ``git`` fails.
+        """
+        if not sha or sha.startswith("-") or max_bytes < 0:
+            raise GitError(f"unusable blob {sha!r}")
+        try:
+            proc = subprocess.Popen(
+                GitCatBlobCmd(sha).argv(),
+                cwd=self.root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=git_env(),
+            )
+        except OSError as exc:
+            raise GitError("failed to read a blob") from exc
+        assert proc.stdout is not None
+        try:
+            data = proc.stdout.read(max_bytes)
+            truncated = bool(proc.stdout.read(1))
+        finally:
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                code = proc.wait(timeout=self._shell.timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise GitError("failed to read a blob: timed out") from exc
+        if not truncated and code != 0:
+            raise GitError(f"failed to read a blob: exit {code}")
+        return data, truncated
 
     def _ref_exists(self, ref: str) -> bool:
         """Whether ``ref`` resolves to a commit; ``False`` if git fails."""

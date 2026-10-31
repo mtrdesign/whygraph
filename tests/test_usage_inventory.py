@@ -35,6 +35,7 @@ METERED_FUNCTIONS = frozenset(
     {
         ("analyze/llm_descriptor.py", "LlmDescriptor._describe_one"),
         ("analyze/llm_descriptor.py", "LlmDescriptor._synthesize"),
+        ("analyze/project_purpose.py", "generate"),
         ("analyze/rationale_generator.py", "RationaleGenerator.generate"),
         ("chat/harness.py", "run_turn"),
     }

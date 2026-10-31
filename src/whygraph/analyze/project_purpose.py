@@ -1,10 +1,10 @@
-"""Project purpose: the inputs of the short "what is this project for" card.
+"""Project purpose: the short "what is this project for" card.
 
 This module gathers what one model call may see about a project (plan 41
-§5.3). Everything that comes from the repository is **untrusted input**
-and is read from the git object store at ``HEAD`` only, never from the
-working tree (D4): :func:`read_blob` is the one reader. It resolves an
-exact path with ``git ls-tree -z -l``, refuses anything but a regular
+§5.3), makes that call and rebuilds its answer. Everything that comes
+from the repository is **untrusted input** and is read from the git
+object store at ``HEAD`` only, never from the working tree (D4):
+:func:`read_blob` is the one reader. It resolves an exact path with ``git ls-tree -z -l``, refuses anything but a regular
 blob (a symbolic link, mode ``120000``, or a submodule, ``160000``, is
 skipped), streams at most the cap with ``git cat-file blob``, and returns
 ``None`` for a binary or undecodable blob. A symbolic link, a FIFO, a
@@ -26,6 +26,13 @@ Public API
 * :func:`gather_inputs` - every input, within the 24 KB total.
 * :func:`read_blob` - the one reader of repository content.
 * :func:`redact_purpose_text` - the purpose-specific redactor.
+* :func:`generate` - the one model call (no retry), metered before parsing.
+* :func:`rebuild_body` - validate an answer and rebuild the four lines (D9).
+* :class:`PurposeResult`, :class:`PurposeInvalid` - its result and refusal.
+
+The model sees every repository string inside a per-call random
+``<repo_data_{16 hex}>`` fence (D12); its answer is never stored as
+written, only the four values :func:`rebuild_body` extracts and caps.
 """
 
 from __future__ import annotations
@@ -34,17 +41,26 @@ import codecs
 import hashlib
 import json
 import re
+import secrets
+import time
 import tomllib
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib.resources import files
 
 from sqlalchemy import case, func
 from sqlmodel import Session, col, select
 
 from whygraph.chat.areas import configured_areas, overview_block, suggest_areas
+from whygraph.core.config import Config
+from whygraph.core.usage import record_usage
 from whygraph.db.models import Commit, CommitFileChange
 from whygraph.services.git import Repository, redact_tokens
 from whygraph.services.git.commands import TreeEntry
+from whygraph.services.llm import CompletionRequest, LlmClientFactory
+
+from .exceptions import AnalyzeError
 
 KB = 1024
 
@@ -677,3 +693,353 @@ def gather_inputs(session: Session, git: Repository) -> PurposeInputs:
         sources=[path for path, _ in files][:MAX_SOURCES],
         head=head,
     )
+
+
+# --- generation (D9, D11, D12) ----------------------------------------------
+
+PURPOSE_SUBJECT = "project-purpose"
+"""The usage ledger's ``subject`` for a purpose generation (task ``analyze``)."""
+
+PURPOSE_LABELS = ("What it is", "Who it is for", "Main parts", "Stack")
+"""The four labels of a purpose body, in order (case-sensitive)."""
+
+PART_CAPS = {"What it is": 200, "Who it is for": 150, "Main parts": 250, "Stack": 200}
+"""The most characters of each part's value."""
+
+STACK_MAX_ITEMS = 12
+"""The most comma-separated items in ``Stack``."""
+
+STACK_ITEM_MAX = 40
+"""The most characters of one ``Stack`` item."""
+
+BODY_MAX_CHARS = 600
+"""The most characters of the rebuilt four-line body."""
+
+_MAIN_PARTS_FLOOR = 80
+"""``Main parts`` is shortened down to this before ``Stack`` items are dropped."""
+
+_TRUNCATED = frozenset({"length", "max_tokens"})
+"""``finish_reason`` values of an answer cut at the token limit (OpenAI, Anthropic)."""
+
+_FORBIDDEN = ("://", "www.", "](", "`", "|", "$(", "&&", ";", ">")
+"""Substrings that reject an answer (checked on the lower-cased normalized text)."""
+
+_INVISIBLE = frozenset(
+    chr(code)
+    for code in (
+        0x061C,
+        0x180E,
+        *range(0x200B, 0x2010),
+        *range(0x202A, 0x202F),
+        0x2060,
+        *range(0x2066, 0x206A),
+        0xFEFF,
+    )
+)
+"""Zero-width and bidirectional control characters; any of them rejects (AC 4)."""
+
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cs"})
+_LABEL_LINE = re.compile(r"(What it is|Who it is for|Main parts|Stack)[*_]*[ ]*:(.*)")
+_BULLET = re.compile(r" *[-*] ")
+
+
+class PurposeInvalid(AnalyzeError):
+    """The model's answer cannot be used as a purpose body (D9).
+
+    Raised after the call was recorded in the usage ledger; the caller
+    marks the run ``failed`` and never retries (no second spend).
+
+    Attributes
+    ----------
+    error_code : str
+        Always ``"purpose_invalid"``.
+    """
+
+    error_code = "purpose_invalid"
+
+
+@dataclass(frozen=True)
+class PurposeResult:
+    """One accepted purpose generation.
+
+    Attributes
+    ----------
+    body : str
+        The rebuilt four labelled lines (:func:`rebuild_body`), at most
+        :data:`BODY_MAX_CHARS` characters; never the raw model text.
+    model : str
+        The model the provider reports serving (else the one requested).
+    provider : str
+        The adapter's provider tag.
+    tokens_in : int or None
+        Prompt tokens, when reported.
+    tokens_out : int or None
+        Completion tokens, when reported.
+    """
+
+    body: str
+    model: str
+    provider: str
+    tokens_in: int | None
+    tokens_out: int | None
+
+
+def _system_prompt() -> str:
+    """The packaged system prompt (no ladder: one file for every provider)."""
+    path = files("whygraph.analyze") / "prompts" / "project_purpose" / "default"
+    return (path / "system.md").read_text(encoding="utf-8").strip()
+
+
+def _unfence(text: object, tag: str) -> str:
+    """``text`` without any ``<repo_data...>`` tag or the call's ``tag`` name."""
+    value = str(text)
+    while True:
+        stripped = _FENCE_TAG.sub("", value).replace(tag, "")
+        if stripped == value:
+            return value
+        value = stripped
+
+
+def _user_message(inputs: PurposeInputs, tag: str) -> str:
+    """The user message: one fence, ``<tag>``, around every repository string (D12)."""
+    sections: list[str] = []
+    for path, text in inputs.files:
+        body = _unfence(text, tag).strip() or "(listed by name only)"
+        sections.append(f"### File: {_unfence(path, tag)}\n{body}")
+    for title, names in (("Top-level names", inputs.layout), ("Areas", inputs.areas)):
+        kept = [n for n in (_unfence(name, tag).strip() for name in names) if n]
+        if kept:
+            sections.append(f"### {title}\n" + "\n".join(kept))
+    history = inputs.history
+    if history:
+        lines = [
+            f"Commits on the default branch: {_unfence(history.get('commits'), tag)}",
+            f"First commit: {_unfence(history.get('first_commit') or 'unknown', tag)}",
+            f"Last commit: {_unfence(history.get('last_commit') or 'unknown', tag)}",
+        ]
+        for entry in history.get("top_dirs") or []:
+            name = _unfence(entry.get("dir", ""), tag).strip()
+            if name:
+                share = _unfence(entry.get("share", ""), tag)
+                lines.append(f"Share of file changes in {name}: {share}%")
+        sections.append("### History\n" + "\n".join(lines))
+    data = "\n\n".join(sections) or "(no data)"
+    return (
+        f"Write the project card from the repository data in the {tag} block.\n\n"
+        f"<{tag}>\n{data}\n</{tag}>\n\n"
+        "Answer with the four labelled lines only."
+    )
+
+
+def generate(
+    inputs: PurposeInputs,
+    *,
+    config: Config,
+    factory: LlmClientFactory | None = None,
+) -> PurposeResult:
+    """Run the one model call of a purpose generation and rebuild its answer.
+
+    The provider and model come from ``config.model_for("analyze")`` (D2)
+    through :class:`~whygraph.services.llm.LlmClientFactory`, as
+    :meth:`~whygraph.analyze.LlmDescriptor.from_config` does, and the
+    timeout from ``config.timeout_for("analyze")``. The request never
+    retries (``max_retries=0``, D11) and leaves ``temperature`` and
+    ``max_tokens`` at the provider defaults, like the descriptor. Every
+    repository string goes inside a per-call ``<repo_data_{16 hex}>``
+    fence, with any occurrence of that tag stripped from the inputs; the
+    system message holds none (D12). The call is recorded with
+    :func:`~whygraph.core.usage.record_usage` (task ``analyze``, subject
+    :data:`PURPOSE_SUBJECT`) as soon as the provider returns, before the
+    answer is checked.
+
+    Parameters
+    ----------
+    inputs : PurposeInputs
+        What :func:`gather_inputs` returned.
+    config : Config
+        The project's configuration.
+    factory : LlmClientFactory, optional
+        Resolves the provider into a client. Defaults to a fresh
+        :class:`~whygraph.services.llm.LlmClientFactory`; tests inject one
+        with a stub adapter.
+
+    Returns
+    -------
+    PurposeResult
+        The rebuilt body and the call's provenance.
+
+    Raises
+    ------
+    PurposeInvalid
+        If the answer was cut at the token limit or fails
+        :func:`rebuild_body`. Not retried; the usage is already recorded.
+    whygraph.services.llm.LlmError
+        If the provider is unknown, its preflight fails or the call fails
+        (nothing is recorded then).
+    """
+    factory = factory if factory is not None else LlmClientFactory()
+    provider, model = config.model_for("analyze")
+    client = factory.make(provider, model=model)
+    client.preflight()
+    tag = f"repo_data_{secrets.token_hex(8)}"
+    request = CompletionRequest.of(
+        _user_message(inputs, tag),
+        system=_system_prompt(),
+        timeout_sec=config.timeout_for("analyze"),
+        max_retries=0,
+    )
+    started = time.monotonic()
+    response = client.complete(request)
+    record_usage(
+        "analyze",
+        response,
+        provider=client.provider,
+        model_requested=client.model,
+        subject=PURPOSE_SUBJECT,
+        started=started,
+    )
+    if response.finish_reason in _TRUNCATED:
+        raise PurposeInvalid("the answer was cut at the token limit")
+    return PurposeResult(
+        body=rebuild_body(response.text),
+        model=response.model or client.model,
+        provider=client.provider,
+        tokens_in=response.input_tokens,
+        tokens_out=response.output_tokens,
+    )
+
+
+def _normalize(text: str) -> str:
+    """NFKC, then reject invisible characters and drop Cc/Cf/Co/Cs except ``\\n``."""
+    text = unicodedata.normalize("NFKC", text)
+    if any(ch in _INVISIBLE for ch in text):
+        raise PurposeInvalid("the answer contains a zero-width or bidi character")
+    return "".join(
+        ch
+        for ch in text
+        if ch == "\n" or unicodedata.category(ch) not in _STRIPPED_CATEGORIES
+    )
+
+
+def _tidy(value: str) -> str:
+    """One line: whitespace collapsed, markdown ``*`` trimmed at both ends."""
+    return " ".join(value.split()).strip("* ")
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` within ``limit`` characters, cut at a word boundary when one is near."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space >= limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,.:-")
+
+
+def _extract(text: str) -> dict[str, str]:
+    """The four labelled values of a normalized answer, in order.
+
+    Leading ``*``, ``#``, ``-`` and spaces are stripped per line, so
+    markdown-decorated labels count. A line that is not a label continues
+    the current value (a bullet joins with ``", "``, prose with ``" "``);
+    a blank line ends it, and lines before the first label are ignored.
+    """
+    parts: dict[str, str] = {}
+    current: str | None = None
+    for raw in text.split("\n"):
+        line = raw.lstrip("*#- ").rstrip()
+        if not line:
+            current = None
+            continue
+        match = _LABEL_LINE.fullmatch(line)
+        if match is not None:
+            label = match.group(1)
+            if len(parts) == len(PURPOSE_LABELS) or label != PURPOSE_LABELS[len(parts)]:
+                raise PurposeInvalid(f"label {label!r} is repeated or out of order")
+            parts[label] = _tidy(match.group(2))
+            current = label
+        elif current is not None:
+            piece = _tidy(line)
+            if piece:
+                sep = ", " if _BULLET.match(raw) else " "
+                parts[current] = (
+                    f"{parts[current]}{sep}{piece}" if parts[current] else piece
+                )
+    missing = [label for label in PURPOSE_LABELS if label not in parts]
+    if missing:
+        raise PurposeInvalid(f"missing label {missing[0]!r}")
+    return parts
+
+
+def _stack_items(value: str) -> list[str]:
+    """``Stack`` as at most :data:`STACK_MAX_ITEMS` items of :data:`STACK_ITEM_MAX`."""
+    items = [_clip(_tidy(item), STACK_ITEM_MAX) for item in value.split(",")]
+    items = [item for item in items if item][:STACK_MAX_ITEMS]
+    while len(items) > 1 and len(", ".join(items)) > PART_CAPS["Stack"]:
+        items.pop()
+    return items or ["unknown"]
+
+
+def _render(parts: dict[str, str], stack: list[str]) -> str:
+    values = {**parts, "Stack": ", ".join(stack)}
+    return "\n".join(f"{label}: {values[label]}" for label in PURPOSE_LABELS)
+
+
+def rebuild_body(text: str) -> str:
+    """Validate a model answer and rebuild it as four labelled lines (D9).
+
+    In order: NFKC-normalize; reject any zero-width or bidirectional
+    control character (AC 4); strip the remaining characters of category
+    Cc, Cf, Co and Cs except ``\\n``; reject when the text contains
+    ``://``, ``www.`` (any case), ``](``, a backtick, ``|``, ``$(``,
+    ``&&``, ``;`` or ``>``; strip leading ``*``, ``#``, ``-`` and spaces
+    per line; extract the values of ``What it is:``, ``Who it is for:``,
+    ``Main parts:`` and ``Stack:`` (case-sensitive, each once, in order;
+    a missing one rejects, an empty one becomes ``unknown``); run
+    :func:`~whygraph.services.git.credentials.redact_tokens` over each
+    value; cap What at 200, Who at 150, Main parts at 250 and Stack at 200
+    characters, ``Stack`` being at most 12 comma-separated items of at
+    most 40; then shorten Main parts (down to 80) and drop trailing Stack
+    items until the body is at most :data:`BODY_MAX_CHARS`. Words such as
+    "httpx" or "HTTP API" pass.
+
+    Parameters
+    ----------
+    text : str
+        The model's raw answer.
+
+    Returns
+    -------
+    str
+        ``"What it is: ...\\nWho it is for: ...\\nMain parts: ...\\nStack: ..."``,
+        built from the extracted values only, never the raw text.
+
+    Raises
+    ------
+    PurposeInvalid
+        If the answer is rejected.
+    """
+    text = _normalize(text)
+    lowered = text.lower()
+    for needle in _FORBIDDEN:
+        if needle in lowered:
+            raise PurposeInvalid(f"the answer contains {needle!r}")
+    parts = _extract(text)
+    for label in PURPOSE_LABELS:
+        value = redact_tokens(parts[label])
+        if label != "Stack":
+            value = _clip(value, PART_CAPS[label])
+        parts[label] = value or "unknown"
+    stack = _stack_items(parts["Stack"])
+    body = _render(parts, stack)
+    overflow = len(body) - BODY_MAX_CHARS
+    if overflow > 0:
+        main = parts["Main parts"]
+        limit = max(_MAIN_PARTS_FLOOR, len(main) - overflow)
+        parts["Main parts"] = _clip(main, limit) or "unknown"
+        body = _render(parts, stack)
+    while len(body) > BODY_MAX_CHARS and len(stack) > 1:
+        stack.pop()
+        body = _render(parts, stack)
+    return body

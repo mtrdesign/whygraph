@@ -105,8 +105,11 @@ class OpenAIAdapter(LlmClient):
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
 
+        client = self._client
+        if request.max_retries is not None:
+            client = client.with_options(max_retries=request.max_retries)
         try:
-            result = self._client.chat.completions.create(**kwargs)
+            result = client.chat.completions.create(**kwargs)
         except openai.APIError as exc:
             raise LlmError(f"openai API error: {exc}") from exc
 

@@ -85,8 +85,11 @@ class AnthropicAdapter(LlmClient):
         if request.temperature is not None:
             kwargs["temperature"] = request.temperature
 
+        client = self._client
+        if request.max_retries is not None:
+            client = client.with_options(max_retries=request.max_retries)
         try:
-            result = self._client.messages.create(**kwargs)
+            result = client.messages.create(**kwargs)
         except anthropic.APIError as exc:
             raise LlmError(f"anthropic API error: {exc}") from exc
 

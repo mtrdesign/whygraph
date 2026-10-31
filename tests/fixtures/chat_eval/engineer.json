@@ -29,6 +29,14 @@
           "qualified_name": "run_turn"
         },
         "body": "[eval] Convention (unreviewed draft): callers of run_turn should retry a failed provider call twice with backoff before showing the user an error."
+      },
+      {
+        "as": "purpose",
+        "kind": "purpose",
+        "anchor": {
+          "kind": "project"
+        },
+        "body": "[eval] What it is: a chat assistant that explains why code is the way it is, from git history.\nWho it is for: the Tidewrack Platform Guild team.\nMain parts: a portal service, an MCP endpoint and a React playground.\nStack: Python, FastAPI, SQLite, Postgres, React."
       }
     ]
   },
@@ -211,6 +219,16 @@
         ],
         "forbid": [
           "note #{pending}\\b"
+        ]
+      }
+    },
+    {
+      "id": "E17",
+      "question": "What is this project for?",
+      "expect": {
+        "max_rounds": 1,
+        "cites": [
+          "Tidewrack"
         ]
       }
     }

@@ -738,6 +738,35 @@ def _list_notes(args, **params) -> list[dict]:
         before = min(note["id"] for note in page)
 
 
+def _propose_purpose_local(args, body: str) -> dict:
+    """Create a ``purpose`` proposal in-process (``--data-dir`` names the portal's data).
+
+    The notes routes refuse ``kind="purpose"`` (plan 41 D8): ``propose_purpose``
+    is its only writer, so the script calls it under the project's context,
+    as ``--replay`` does. The portal then confirms it over HTTP like any note.
+    """
+    from dataclasses import replace
+
+    from whygraph.core import Config
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.mcp import notes
+    from whygraph.portal.paths import project_db_path
+
+    if not args.data_dir:
+        raise SystemExit(
+            "! a purpose setup note needs --data-dir (the portal's data dir)"
+        )
+    root = _get_json(f"{args.base.rstrip('/')}/api/projects/{args.slug}")["root"]
+    config = replace(
+        Config.defaults(),
+        whygraph_db=project_db_path(Path(args.data_dir).resolve(), "local", args.slug),
+        codegraph_db=Path(root) / ".codegraph" / "codegraph.db",
+    )
+    with use_project(ProjectContext(slug=args.slug, root=Path(root), config=config)):
+        view, _retired = notes.propose_purpose(body, actor_uid="eval-script")
+    return dict(view)
+
+
 def _setup_notes(args, suite: dict) -> dict[str, int]:
     """Create and confirm a suite's ``setup.notes``; return ``{name: note id}``.
 
@@ -746,19 +775,39 @@ def _setup_notes(args, suite: dict) -> dict[str, int]:
     proposal is confirmed unless ``"confirm": false``. A note that exists in the
     wrong state (confirmed where a proposal was wanted) stops the run, because
     the case would not test what it says. Only ``as``-named notes are returned.
+
+    An entry with ``"kind": "purpose"`` is created by :func:`_propose_purpose_local`
+    (the routes refuse that kind) and confirmed over HTTP. The slug must hold no
+    live purpose that is not an ``[eval] `` one: setup refuses rather than
+    superseding a real project purpose.
     """
     entries = (suite.get("setup") or {}).get("notes") or []
     ids: dict[str, int] = {}
     if not entries:
         return ids
     existing = [n for n in _list_notes(args) if n.get("status") != "retired"]
+    if any(e.get("kind") == "purpose" for e in entries):
+        foreign = [
+            n
+            for n in existing
+            if n.get("kind") == "purpose" and not n["body"].startswith(EVAL_PREFIX)
+        ]
+        if foreign:
+            raise SystemExit(
+                f"! {args.slug} holds a non-eval project purpose (note "
+                f"#{foreign[0]['id']}): use a scratch slug; the eval never "
+                "supersedes a real purpose"
+            )
     for entry in entries:
         body = entry["body"]
         if not body.startswith(EVAL_PREFIX):
             raise SystemExit(f"! setup note body must start with {EVAL_PREFIX!r}")
         wanted = "confirmed" if entry.get("confirm", True) else "proposed"
         note = next((n for n in existing if n["body"] == body), None)
-        if note is None:
+        if note is None and entry.get("kind") == "purpose":
+            note = _propose_purpose_local(args, body)
+            existing.append(note)
+        elif note is None:
             payload = {k: entry[k] for k in ("body", "kind", "anchor") if k in entry}
             try:
                 note = _post(_notes_api(args), payload)
@@ -2165,6 +2214,36 @@ def _self_test_notes() -> bool:
         pass
     finally:
         globals().update(saved)
+    # A purpose entry goes through propose_purpose, then the confirm route.
+    purpose = "[eval] What it is: x\nWho it is for: Tidewrack Guild"
+    made: list[str] = []
+
+    def fake_purpose(a, body):
+        made.append(body)
+        note = {"id": 40, "kind": "purpose", "body": body, "status": "proposed"}
+        store.append(note)
+        return note
+
+    store[:] = [{"id": 20, "body": "[eval] have", "status": "proposed"}]
+    pure = {"setup": {"notes": [{"as": "purpose", "kind": "purpose", "body": purpose}]}}
+    patched["_propose_purpose_local"] = fake_purpose
+    saved["_propose_purpose_local"] = globals()["_propose_purpose_local"]
+    try:
+        globals().update(patched)
+        ids = _setup_notes(args, pure)
+        again = _setup_notes(args, pure)
+        ok &= ids == again == {"purpose": 40} and made == [purpose]
+        ok &= store[-1]["status"] == "confirmed"
+        store.append(
+            {"id": 41, "kind": "purpose", "body": "real one", "status": "confirmed"}
+        )
+        try:
+            _setup_notes(args, pure)  # a non-eval live purpose: refused
+            ok = False
+        except SystemExit:
+            pass
+    finally:
+        globals().update(saved)
     # note_limit refusals are recognised in a propose_note result.
     ok &= bool(
         NOTE_LIMIT_RE.search(
@@ -2726,7 +2805,11 @@ def main() -> int:
         help="Rebuild every request of a report's sessions in-process (no model "
         "calls) and write per-request estimated tokens and modelled cost.",
     )
-    parser.add_argument("--data-dir", metavar="DIR", help="--replay: portal data dir.")
+    parser.add_argument(
+        "--data-dir",
+        metavar="DIR",
+        help="Portal data dir (--replay; a purpose setup note).",
+    )
     parser.add_argument("--out", metavar="REPLAY_JSON", help="--replay: output file.")
     parser.add_argument(
         "--context-budget",
@@ -2744,7 +2827,8 @@ def main() -> int:
         "--cleanup-notes",
         action="store_true",
         help="Retire every '[eval] ' note of --slug (what a suite's setup.notes "
-        "created) and exit. Uses the portal's notes routes; no provider key.",
+        "created, a purpose included) and exit. Uses the portal's notes routes; "
+        "no provider key.",
     )
     parser.add_argument(
         "--self-test",

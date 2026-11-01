@@ -61,7 +61,7 @@ from whygraph.agents import (
     resolve_agent,
 )
 from whygraph.core.config import Config, ConfigError, normalize_v2
-from whygraph.core.context import use_project
+from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.db.engine import dispose_engine
 from whygraph.hooks import (
@@ -2705,6 +2705,112 @@ def get_project_config(
     return body
 
 
+def checked_project_layer(
+    session: Session,
+    state: PortalState,
+    project: BoundProject,
+    raw_layer: dict,
+    *,
+    linked: bool,
+) -> dict:
+    """Validate a project config layer and save it in the caller's session.
+
+    Runs the ``PUT`` checks (rule 4, the allowlist, ``normalize_v2`` and the
+    value checks, or the linked project's ``[scan].hooks``-only filter) and
+    :func:`save_layer`. Nothing is committed: the caller decides whether to
+    commit or roll back.
+
+    Parameters
+    ----------
+    session : Session
+        The portal-DB session the layer is saved in.
+    state : PortalState
+        The portal state (its mode picks the allowlist).
+    project : BoundProject
+        The project the layer belongs to.
+    raw_layer : dict
+        The layer as submitted.
+    linked : bool
+        True for a linked (``platform``) project.
+
+    Returns
+    -------
+    dict
+        The layer that was saved.
+
+    Raises
+    ------
+    ApiError
+        ``422`` for a refused key or value, or a layer the store refuses.
+    """
+    kept = (
+        _linked_layer(raw_layer, project, project.root)
+        if linked
+        else _checked_layer(
+            raw_layer,
+            put_allowlist(state.mode),
+            project.root,
+            load_layer(session, project.id, org_id=project.org_id),
+        )
+    )
+    try:
+        save_layer(session, project.id, kept, org_id=project.org_id)
+    except ConfigPolicyError as exc:
+        raise ApiError(422, str(exc)) from exc
+    return kept
+
+
+def finish_project_layer(
+    state: PortalState,
+    project: BoundProject,
+    new_ctx: ProjectContext,
+    old_hooks: Any,
+) -> tuple[dict | None, str | None]:
+    """Run the effects of a committed config save.
+
+    Invalidates the project's cached context, then re-syncs the git hooks
+    when ``[scan].hooks`` changed on an initialized local or linked project
+    (never in production). Call it after the commit.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal state.
+    project : BoundProject
+        The project whose layer was saved.
+    new_ctx : ProjectContext
+        The context built from the saved layers.
+    old_hooks : Any
+        ``scan_hooks`` of the config before the save.
+
+    Returns
+    -------
+    tuple of (dict or None, str or None)
+        The hooks result and the hooks error message (both ``None`` when
+        nothing was synced).
+    """
+    state.contexts.invalidate(project.id)
+
+    hooks: dict | None = None
+    hooks_error: str | None = None
+    new_hooks = new_ctx.config.scan_hooks
+    if (
+        new_hooks != old_hooks
+        and state.mode != "production"
+        and project.initialized_at is not None
+        and project.source in ("local", "platform")
+        and project.root.is_dir()
+    ):
+        unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
+        try:
+            if unsafe:
+                raise HooksError(f"hooks not changed: {unsafe}")
+            hooks = _hooks_dict(sync_hooks(project.root, resolve_hook_names(new_hooks)))
+        except HooksError as exc:
+            hooks_error = str(exc)
+    return hooks, hooks_error
+
+
 @projects_router.put("/{slug}/config")
 def put_project_config(
     body: ConfigBody,
@@ -2736,45 +2842,14 @@ def put_project_config(
         if row is None:
             raise ApiError(404, f"project {project.slug!r} not found")
         if body.config is not None:
-            kept = (
-                _linked_layer(body.config, project, project.root)
-                if linked
-                else _checked_layer(
-                    body.config,
-                    put_allowlist(state.mode),
-                    project.root,
-                    load_layer(session, project.id, org_id=project.org_id),
-                )
-            )
-            try:
-                save_layer(session, project.id, kept, org_id=project.org_id)
-            except ConfigPolicyError as exc:
-                raise ApiError(422, str(exc)) from exc
+            checked_project_layer(session, state, project, body.config, linked=linked)
         if body.secrets is not None:
             _apply_secrets(session, body.secrets, project.id, org_id=project.org_id)
         try:
             new_ctx = build_project_context(session, row)
         except ConfigError as exc:
             raise ApiError(422, str(exc)) from exc
-    state.contexts.invalidate(project.id)
-
-    hooks: dict | None = None
-    hooks_error: str | None = None
-    new_hooks = new_ctx.config.scan_hooks
-    if (
-        new_hooks != old_hooks
-        and state.mode != "production"
-        and project.initialized_at is not None
-        and project.source in ("local", "platform")
-        and project.root.is_dir()
-    ):
-        unsafe = _unsafe_reason(project.root, project.root / LEGACY_HELPER_RELPATH)
-        try:
-            if unsafe:
-                raise HooksError(f"hooks not changed: {unsafe}")
-            hooks = _hooks_dict(sync_hooks(project.root, resolve_hook_names(new_hooks)))
-        except HooksError as exc:
-            hooks_error = str(exc)
+    hooks, hooks_error = finish_project_layer(state, project, new_ctx, old_hooks)
 
     with get_session() as session:
         # A linked project's secrets stay null, as on GET (BUG-21).

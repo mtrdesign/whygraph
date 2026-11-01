@@ -28,6 +28,7 @@ from sqlalchemy import func
 from sqlmodel import col, select
 
 from whygraph.db.engine import get_session as project_session
+from whygraph.db.models.imported_actor import ImportedActor
 from whygraph.db.models.project_note import ProjectNote
 from whygraph.mcp import notes
 from whygraph.mcp.targets import resolve_target
@@ -83,27 +84,58 @@ def _uid(request: Request) -> str | None:
     return None if principal is None else principal.uid
 
 
+IMPORTED_PREFIX = "imported:"
+"""Every uid that came from an import bundle starts with this (plan 42 D12)."""
+
+
 def _names(uids: set[str]) -> dict[str, str]:
-    """``uid`` -> display name from the portal's ``users`` table."""
+    """``uid`` -> display name.
+
+    A plain uid is resolved in the portal's ``users`` table; an ``imported:``
+    uid only in the project's ``imported_actor`` table, never in ``users``
+    (plan 42 D12: a bundle cannot borrow a real member's name).
+    """
     if not uids:
         return {}
-    with get_session() as db:
-        return dict(
-            db.exec(
-                select(User.uid, User.display_name).where(col(User.uid).in_(uids))
-            ).all()
-        )
+    imported = {u for u in uids if u.startswith(IMPORTED_PREFIX)}
+    plain = uids - imported
+    names: dict[str, str] = {}
+    if plain:
+        with get_session() as db:
+            names.update(
+                db.exec(
+                    select(User.uid, User.display_name).where(col(User.uid).in_(plain))
+                ).all()
+            )
+    if imported:
+        with project_session() as session:
+            names.update(
+                session.exec(
+                    select(ImportedActor.uid, ImportedActor.display_name).where(
+                        col(ImportedActor.uid).in_(imported)
+                    )
+                ).all()
+            )
+    return names
 
 
 def _with_names(views: list[dict]) -> list[dict]:
-    """Add ``proposed_by_name`` and ``confirmed_by_name`` to each note."""
+    """Add the author names and ``*_by_imported`` flags to each note."""
     uids = {v["proposed_by"] for v in views if v.get("proposed_by")}
     uids |= {v["confirmed_by"] for v in views if v.get("confirmed_by")}
     names = _names(uids)
     for view in views:
-        view["proposed_by_name"] = names.get(view.get("proposed_by"), FORMER_MEMBER)
-        if view.get("confirmed_by"):
-            view["confirmed_by_name"] = names.get(view["confirmed_by"], FORMER_MEMBER)
+        proposer = view.get("proposed_by")
+        view["proposed_by_name"] = names.get(proposer, FORMER_MEMBER)
+        view["proposed_by_imported"] = bool(proposer) and proposer.startswith(
+            IMPORTED_PREFIX
+        )
+        confirmer = view.get("confirmed_by")
+        view["confirmed_by_imported"] = bool(confirmer) and confirmer.startswith(
+            IMPORTED_PREFIX
+        )
+        if confirmer:
+            view["confirmed_by_name"] = names.get(confirmer, FORMER_MEMBER)
     return views
 
 

@@ -417,6 +417,24 @@ payload. The portal writes every `"` inside that text as `\u0022`, and the helpe
 that holds a literal `"` there, so nothing can follow the text to add a key such as `continue` or
 `decision`. A note reaches the model labelled as member-written data, not instructions.
 
+## Project transfer { #project-transfer }
+
+A bundle from [Export and import](transfer.md) is untrusted input, including one you made.
+
+- **Admin only.** Export and import need `project.configure`, and both are refused on a linked project.
+  A production org's exports and imports are written to the security event log, never with any text.
+- **Read as an archive, never extracted.** Entry names, flags, sizes, counts, the central directory and
+  every member's hash are checked before a line is parsed; a hostile or oversized archive is refused
+  with nothing written. Row, line and total-size limits apply while reading.
+- **Validated, not trusted.** Every record is parsed against a strict model; control characters are
+  replaced, over-long fields skipped. Anchor paths go through the same deny-list and containment checks
+  as a note written by hand.
+- **Confirmed notes reach agents**, so the preview shows every wide one verbatim before you apply.
+  Imported rationale cards are marked and removable in one step; descriptions are only validated.
+- **Who wrote it is display-only.** Names in a bundle never map to a member of the target.
+- **The bundle may hold secrets in your chats** (tool output with file contents). Delete it after use.
+  No key, token or password is ever exported.
+
 ## Project purpose { #project-purpose }
 
 Generating a [project purpose](../guide/notes.md#project-purpose) sends repository text to the model

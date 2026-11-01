@@ -94,6 +94,13 @@ The last step is one screen you can read while the first scan runs:
   only. Someone without access to the project's spend sees the number of commits without a price.
   An empty history says "No commits yet".
 
+### Moving from another portal { #moving-from-another-portal }
+
+Once the first scan is `ok`, a card **Moving from another portal? Import a bundle first** sits above the
+describe and purpose options. It opens the same preview as Settings; see
+[Export and import a project](transfer.md). Import before describing, so what the bundle already
+describes is not paid for again.
+
 ### The first scan and the purpose { #the-first-scan-and-the-purpose }
 
 While the first scan runs, a project admin sees an optional checkbox, **Draft a project purpose when

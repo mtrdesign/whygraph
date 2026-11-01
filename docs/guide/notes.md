@@ -168,9 +168,19 @@ confirms nothing. It leaves other members' proposals and every confirmed note al
 - A note whose anchor `changed` is shown with that state, and the assistant says so when it cites it.
 - Notes never feed the generation of a rationale card, and a cached card is not invalidated by a note.
 
+## Imported notes { #imported-notes }
+
+A project admin can [import a bundle](../portal/transfer.md) from another portal or project of the same
+repository. Imported notes arrive with the status they had (confirmed stays confirmed, and the preview
+shows every wide confirmed note in full before you apply), and show a small **imported** badge beside
+the author. The author line shows the names the bundle carried, never a member of this portal who
+happens to share an id. A range note whose lines changed since it was confirmed arrives `changed`:
+mark it **Still true** or retire it as usual. A note the project retired is never brought back, and the
+organization's own `[areas]` do not travel, so an area note needs that area on the target.
+
 ## Removing a project
 
-Notes live in the project's WhyGraph database, so they follow its history. Removing a local project
+Notes live in the project's WhyGraph database, so they follow its history; [export the project](../portal/transfer.md) first to keep them elsewhere. Removing a local project
 keeps them unless you ask for the history to be deleted. Removing a production project deletes its notes
 unless **Keep history** is ticked.
 

@@ -38,17 +38,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterable, Iterator, Sequence
 
 from sqlalchemy import delete
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence, Rationale
+from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.db import get_session
 from whygraph.db.models import RationaleCache
 
+from .notes import _import_time, _lexical_path
 from .targets import Target
 
 
@@ -377,3 +382,400 @@ def purge_paths(session: Session, paths: Iterable[str]) -> int:
         )
         deleted += result.rowcount or 0
     return deleted
+
+
+# ---------------------------------------------------------------------------
+# Import from a project-transfer bundle (plan 42 section 5.5)
+# ---------------------------------------------------------------------------
+
+_IMPORT_SPAN_MAX = 5_000
+_IMPORT_TEXT_MAX = 32_000
+_IMPORT_LIST_ITEMS = 50
+_IMPORT_ITEM_MAX = 4_000
+_IMPORT_IDENT_MAX = 200
+_IMPORT_FUTURE_SLACK = timedelta(minutes=5)
+_IMPORT_INT_MAX = 2**31
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass
+class RationaleImportResult:
+    """What :func:`import_rows` did (plan 42 section 7.2 ``rationale``).
+
+    Attributes
+    ----------
+    inserted : int
+        Rows newly written.
+    existing : int
+        Valid rows whose key the target already holds (the target wins), or
+        that repeat an earlier record of the same bundle.
+    skipped_oversize : int
+        Records skipped for an over-long field, too many list items or a bad
+        line span.
+    skipped_denied : int
+        Records whose path is on Chat's deny-list.
+    inactive_model : int
+        Valid rows whose ``(provider, model)`` differs from the target's
+        ``cache_key``: they are stored but no lookup reads them.
+    """
+
+    inserted: int = 0
+    existing: int = 0
+    skipped_oversize: int = 0
+    skipped_denied: int = 0
+    inactive_model: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """The counts block as a plain dict."""
+        return {
+            "inserted": self.inserted,
+            "existing": self.existing,
+            "inactive_model": self.inactive_model,
+            "skipped_oversize": self.skipped_oversize,
+            "skipped_denied": self.skipped_denied,
+        }
+
+
+def _as_mapping(record: Any) -> Mapping[str, Any]:
+    """A wire model or a plain mapping, as a mapping."""
+    if isinstance(record, Mapping):
+        return record
+    return record.model_dump()
+
+
+def _import_int(value: object, name: str, *, nullable: bool = False) -> int | None:
+    """An int in ``0..2**31`` (or ``None`` when ``nullable``), else a format error."""
+    if value is None and nullable:
+        return None
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= _IMPORT_INT_MAX
+    ):
+        raise ImportFormatError(name, "must be an integer between 0 and 2**31")
+    return value
+
+
+def _import_line(value: object, name: str, *, field_name: str) -> str | None:
+    """A single-line optional identifier at most 200 chars, or ``None`` when absent."""
+    if value is None:
+        return None
+    text = clean_text(
+        value, multiline=False, max_chars=_IMPORT_IDENT_MAX, field=field_name
+    )
+    if text is None:
+        raise ImportFormatError(
+            field_name, f"must be at most {_IMPORT_IDENT_MAX} characters"
+        )
+    return text
+
+
+class RationaleImport:
+    """Check, then insert, a bundle's rationale cards in batches (plan 42 Q11).
+
+    Two passes over the same records, so the caller can stream a large
+    member instead of holding it: :meth:`check` format-checks **every**
+    record before anything is written and counts the skips and the in-bundle
+    repeats; :meth:`rows` re-reads the records and yields the rows to insert;
+    :meth:`insert` writes one batch of them. Repeats are found over the whole
+    member in :meth:`check`, so a batch never meets another batch's key and
+    a rolled-back dry run counts exactly what the apply writes.
+
+    Parameters
+    ----------
+    now : datetime
+        The importer's clock; a ``cached_at`` more than five minutes after it
+        refuses the bundle.
+    cache_key : tuple of str
+        The target's ``(provider, _model_key(model))`` under the config the
+        import leaves in force; rows keyed otherwise count as
+        ``inactive_model``.
+
+    Attributes
+    ----------
+    result : RationaleImportResult
+        The counts so far.
+    """
+
+    def __init__(self, *, now: datetime, cache_key: tuple[str, str]) -> None:
+        self.result = RationaleImportResult()
+        self._latest = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)) + (
+            _IMPORT_FUTURE_SLACK
+        )
+        self._cache_key = cache_key
+        self._paths: dict[str, str | None] = {}  # one lexical check per path
+
+    def _checked(
+        self, records: Iterable[Any]
+    ) -> Iterator[tuple[int, dict[str, Any] | str | None]]:
+        """Each record's position and :func:`_check_rationale` outcome."""
+        for index, raw in enumerate(records):
+            try:
+                yield (
+                    index,
+                    _check_rationale(_as_mapping(raw), self._latest, self._paths),
+                )
+            except ImportFormatError as exc:
+                exc.index = index
+                raise
+
+    def check(self, records: Iterable[Any]) -> set[int]:
+        """Pass one: format-check every record and count what will not be inserted.
+
+        Parameters
+        ----------
+        records : Iterable
+            Wire records (``RationaleRecord``) or equivalent mappings, in
+            line order.
+
+        Returns
+        -------
+        set of int
+            The 0-based positions to leave out of :meth:`rows`: skipped
+            records and repeats of an earlier record's key.
+
+        Raises
+        ------
+        ImportFormatError
+            A wrong type, a malformed path, fingerprint or timestamp, a
+            control character in a single-line field, or a ``cached_at`` in
+            the future. ``index`` is the 0-based record position.
+        """
+        result = self.result
+        drop: set[int] = set()
+        seen: set[tuple[str, int, int, str, str]] = set()
+        for index, row in self._checked(records):
+            if not isinstance(row, dict):
+                if row == "denied":
+                    result.skipped_denied += 1
+                else:
+                    result.skipped_oversize += 1
+                drop.add(index)
+                continue
+            if (row["provider"], _model_key(row["model"])) != self._cache_key:
+                result.inactive_model += 1
+            key = (
+                row["path"],
+                row["line_start"],
+                row["line_end"],
+                row["provider"],
+                row["model"],
+            )
+            if key in seen:
+                result.existing += 1
+                drop.add(index)
+                continue
+            seen.add(key)
+        return drop
+
+    def rows(self, records: Iterable[Any], drop: set[int]) -> Iterator[dict[str, Any]]:
+        """Pass two: the rows to insert, for the records :meth:`check` passed.
+
+        Parameters
+        ----------
+        records : Iterable
+            The same records, in the same order, as :meth:`check` saw.
+        drop : set of int
+            What :meth:`check` returned.
+
+        Yields
+        ------
+        dict
+            One ``rationale_cache`` row without ``import_id``.
+        """
+        for index, row in self._checked(records):
+            if isinstance(row, dict) and index not in drop:
+                yield row
+
+    def insert(
+        self, session: Session, rows: Sequence[dict[str, Any]], *, import_id: int
+    ) -> None:
+        """Insert one batch; a key the target already holds is kept (D3).
+
+        ``INSERT ... ON CONFLICT DO NOTHING``, every row stamped with
+        ``import_id`` so :func:`remove_imported` can undo the import. Runs in
+        the caller's session and never commits.
+
+        Parameters
+        ----------
+        session : Session
+            A session on the project's WhyGraph DB, inside the caller's write
+            transaction.
+        rows : sequence of dict
+            Rows from :meth:`rows`.
+        import_id : int
+            The ``project_import.id`` stamped on every inserted row.
+        """
+        if not rows:
+            return
+        # One compiled statement run as executemany: compiling a multi-row
+        # INSERT per chunk costs more than running it.
+        outcome = session.connection().execute(
+            sqlite_insert(RationaleCache).on_conflict_do_nothing(),
+            [{**row, "import_id": import_id} for row in rows],
+        )
+        self.result.inserted += outcome.rowcount
+        self.result.existing += len(rows) - outcome.rowcount
+
+
+def import_rows(
+    session: Session,
+    records: Iterable[Any],
+    *,
+    import_id: int,
+    now: datetime,
+    cache_key: tuple[str, str],
+) -> RationaleImportResult:
+    """Insert imported rationale cards that the target does not hold yet, in one call.
+
+    The target wins (plan 42 D3): a row is written only when its
+    ``(path, line_start, line_end, provider, model)`` key is absent
+    (``INSERT ... ON CONFLICT DO NOTHING``), and every row it writes carries
+    ``import_id`` so :func:`remove_imported` can undo the import. A card's
+    evidence fingerprint is the (forgeable) hash of commit SHAs, so imported
+    rows are only as trustworthy as the bundle; that is why they are marked.
+    The transfer import runs the same steps in batches through
+    :class:`RationaleImport`.
+
+    Parameters
+    ----------
+    session : Session
+        A session on the project's WhyGraph DB; the caller commits (or rolls
+        back, for a dry run).
+    records : Iterable
+        Wire records (``RationaleRecord``) or equivalent mappings.
+    import_id : int
+        The ``project_import.id`` stamped on every inserted row.
+    now : datetime
+        The importer's clock; a ``cached_at`` more than five minutes after it
+        refuses the bundle.
+    cache_key : tuple of str
+        The target's ``(provider, _model_key(model))`` under the config the
+        import leaves in force; rows keyed otherwise count as
+        ``inactive_model``.
+
+    Returns
+    -------
+    RationaleImportResult
+        The counts.
+
+    Raises
+    ------
+    ImportFormatError
+        As :meth:`RationaleImport.check`; nothing is written.
+    """
+    records = list(records)
+    job = RationaleImport(now=now, cache_key=cache_key)
+    drop = job.check(records)
+    job.insert(session, list(job.rows(records, drop)), import_id=import_id)
+    return job.result
+
+
+def _check_rationale(
+    record: Mapping[str, Any], latest: datetime, paths: dict[str, str | None]
+) -> dict[str, Any] | str | None:
+    """One record as a row dict; ``None`` to skip (size), ``"denied"`` to skip (path)."""
+    raw_path = record.get("path")
+    if isinstance(raw_path, str) and raw_path in paths:
+        path = paths[raw_path]
+    else:
+        path = _lexical_path(raw_path, field="path")
+        paths[raw_path] = path  # type: ignore[index]
+    line_start = _import_int(record.get("line_start"), "line_start")
+    line_end = _import_int(record.get("line_end"), "line_end")
+    assert line_start is not None and line_end is not None
+    provider = _import_line(record.get("provider"), "provider", field_name="provider")
+    model = _import_line(record.get("model"), "model", field_name="model")
+    if provider is None or model is None:
+        raise ImportFormatError("provider", "provider and model are required")
+    fingerprint = record.get("evidence_fingerprint")
+    if not isinstance(fingerprint, str) or not _FINGERPRINT_RE.fullmatch(fingerprint):
+        raise ImportFormatError("evidence_fingerprint", "must be 64 lowercase hex")
+    cached_at = _import_time(record.get("cached_at"), "cached_at", latest)
+    if cached_at is None:
+        raise ImportFormatError("cached_at", "must be an ISO-8601 timestamp")
+    input_tokens = _import_int(
+        record.get("input_tokens"), "input_tokens", nullable=True
+    )
+    output_tokens = _import_int(
+        record.get("output_tokens"), "output_tokens", nullable=True
+    )
+    actual_provider = _import_line(
+        record.get("actual_provider"), "actual_provider", field_name="actual_provider"
+    )
+    actual_model = _import_line(
+        record.get("actual_model"), "actual_model", field_name="actual_model"
+    )
+    qualified_name = _import_line(
+        record.get("qualified_name"), "qualified_name", field_name="qualified_name"
+    )
+    texts: dict[str, str | None] = {}
+    for name in ("purpose", "why"):
+        texts[name] = clean_text(
+            record.get(name), multiline=True, max_chars=_IMPORT_TEXT_MAX, field=name
+        )
+    lists: dict[str, list[str] | None] = {}
+    for name in ("constraints", "tradeoffs", "risks"):
+        value = record.get(name)
+        if not isinstance(value, list | tuple):
+            raise ImportFormatError(name, "must be a list of text")
+        items: list[str] | None = []
+        if len(value) > _IMPORT_LIST_ITEMS:
+            items = None
+        else:
+            for item in value:
+                text = clean_text(
+                    item, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
+                )
+                if text is None:
+                    items = None
+                    break
+                items.append(text)
+        lists[name] = items
+    # Format errors above win over skips; the skips follow.
+    if path is None:
+        return "denied"
+    if (
+        not 1 <= line_start <= line_end
+        or line_end - line_start > _IMPORT_SPAN_MAX
+        or any(v is None for v in (*texts.values(), *lists.values()))
+    ):
+        return None
+    return {
+        "path": path,
+        "line_start": line_start,
+        "line_end": line_end,
+        "provider": provider,
+        "model": model,
+        "evidence_fingerprint": fingerprint,
+        "cached_at": cached_at,
+        "purpose": texts["purpose"],
+        "why": texts["why"],
+        "constraints": json.dumps(lists["constraints"]),
+        "tradeoffs": json.dumps(lists["tradeoffs"]),
+        "risks": json.dumps(lists["risks"]),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "actual_provider": actual_provider,
+        "actual_model": actual_model,
+        "qualified_name": qualified_name,
+    }
+
+
+def remove_imported(session: Session) -> int:
+    """Delete every rationale card an import wrote (``import_id IS NOT NULL``).
+
+    Parameters
+    ----------
+    session : Session
+        A session on the project's WhyGraph DB; the caller commits.
+
+    Returns
+    -------
+    int
+        The number of rows deleted.
+    """
+    result = session.exec(  # type: ignore[call-overload]
+        delete(RationaleCache).where(col(RationaleCache.import_id).is_not(None))
+    )
+    return result.rowcount or 0

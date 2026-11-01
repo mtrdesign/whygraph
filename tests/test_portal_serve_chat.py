@@ -482,6 +482,34 @@ def test_delete_removes_the_messages_too(chat_client, monkeypatch) -> None:
     assert chat_client.get("/api/chat/sessions").json() == []
 
 
+def test_delete_removes_the_imported_chat_row(chat_client, monkeypatch) -> None:
+    from whygraph.db.models import ImportedChat, ProjectImport
+
+    session = _new_session(chat_client)
+    with use_project(chat_client.context()), project_session() as db:
+        imp = ProjectImport(
+            bundle_sha256="0" * 64,
+            imported_by="u",
+            imported_at="2026-11-01T00:00:00Z",
+            source_mode="local",
+            source_label="org/slug",
+            whygraph_version="x",
+            counts="{}",
+        )
+        db.add(imp)
+        db.commit()
+        db.refresh(imp)
+        db.add(
+            ImportedChat(origin_key="k1", session_id=session["id"], import_id=imp.id)
+        )
+        db.commit()
+
+    # The FK would have refused the parent delete had the row been left behind.
+    assert chat_client.delete(f"/api/chat/sessions/{session['id']}").status_code == 204
+    with use_project(chat_client.context()), project_session() as db:
+        assert db.get(ImportedChat, "k1") is None
+
+
 # ---------------------------------------------------------------------------
 # Titling
 # ---------------------------------------------------------------------------

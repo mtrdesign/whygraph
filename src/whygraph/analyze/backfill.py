@@ -23,10 +23,14 @@ columns" recipe, which lives here.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
-from sqlmodel import select
+from sqlmodel import Session, col, select
 
+from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.core.usage import usage_blocked
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
@@ -269,3 +273,405 @@ def backfill_all(
                 exc,
             )
     return succeeded
+
+
+# ---------------------------------------------------------------------------
+# Import from a project-transfer bundle (plan 42 section 5.5)
+# ---------------------------------------------------------------------------
+
+_IMPORT_DESCRIPTION_MAX = 64_000
+_IMPORT_MODEL_MAX = 200
+_IMPORT_PATH_MAX = 4_096
+_MODEL_LABEL_RE = re.compile(r"[^:]+:.+")
+_IN_CHUNK = 500
+
+
+@dataclass
+class DescriptionImportResult:
+    """What :func:`import_descriptions` did (plan 42 section 7.2 ``descriptions``).
+
+    Attributes
+    ----------
+    filled : int
+        Commit and file descriptions written (rows that were ``NULL``).
+    kept_target : int
+        Records whose target row already had a description (a target stub
+        included), or that repeat an earlier record of the bundle.
+    missing_commit : int
+        Records whose commit (or, for a file record, commit and path) is not
+        a row on the target.
+    skipped_oversize : int
+        Records skipped for a description over 64,000 characters.
+    """
+
+    filled: int = 0
+    kept_target: int = 0
+    missing_commit: int = 0
+    skipped_oversize: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """The counts block as a plain dict."""
+        return {
+            "filled": self.filled,
+            "kept_target": self.kept_target,
+            "missing_commit": self.missing_commit,
+            "skipped_oversize": self.skipped_oversize,
+        }
+
+
+def _check_description(rec: Mapping[str, Any], *, path: bool) -> tuple[str, str] | None:
+    """The ``(text, model)`` of a record; ``None`` when the text is too long."""
+    if path:
+        value = rec.get("path")
+        if not isinstance(value, str) or not value:
+            raise ImportFormatError("path", "must be a repository path")
+        if (
+            clean_text(value, multiline=False, max_chars=_IMPORT_PATH_MAX, field="path")
+            is None
+        ):
+            raise ImportFormatError("path", "is too long")
+    model = clean_text(
+        rec.get("llm_description_model"),
+        multiline=False,
+        max_chars=_IMPORT_MODEL_MAX,
+        field="llm_description_model",
+    )
+    if model is None or not _MODEL_LABEL_RE.fullmatch(model):
+        raise ImportFormatError(
+            "llm_description_model", "must look like <provider>:<model>"
+        )
+    text = clean_text(
+        rec.get("llm_description"),
+        multiline=True,
+        max_chars=_IMPORT_DESCRIPTION_MAX,
+        field="llm_description",
+    )
+    if text is None:
+        return None
+    return text, model
+
+
+CommitFill = tuple[str, str, str]
+"""A checked commit description: ``(sha, text, model)``."""
+
+FileFill = tuple[str, str, str, str]
+"""A checked file description: ``(commit_sha, path, text, model)``."""
+
+
+def _checked_commit(rec: Mapping[str, Any]) -> CommitFill | None:
+    """A commit record as ``(sha, text, model)``; ``None`` when the text is too long."""
+    sha = _sha(rec.get("sha"), "sha")
+    checked = _check_description(rec, path=False)
+    return None if checked is None else (sha, *checked)
+
+
+def _checked_file(rec: Mapping[str, Any]) -> FileFill | None:
+    """A file record as ``(sha, path, text, model)``; ``None`` when too long."""
+    try:
+        sha = _sha(rec.get("commit_sha"), "commit_sha")
+        checked = _check_description(rec, path=True)
+    except ImportFormatError as exc:
+        exc.field = f"file.{exc.field}"
+        raise
+    return None if checked is None else (sha, rec["path"], *checked)
+
+
+def _each(
+    records: Iterable[Any], check: Callable[[Mapping[str, Any]], Any]
+) -> Iterator[tuple[int, Any]]:
+    """Each record's position and ``check`` outcome; errors carry the position."""
+    for index, raw in enumerate(records):
+        rec = raw if isinstance(raw, Mapping) else raw.model_dump()
+        try:
+            yield index, check(rec)
+        except ImportFormatError as exc:
+            exc.index = index
+            raise
+
+
+class DescriptionImport:
+    """Check, then fill, a bundle's LLM descriptions in batches (plan 42 Q11).
+
+    Two passes over each member, so the caller can stream it instead of
+    holding it: :meth:`check_commits` / :meth:`check_files` format-check
+    **every** record before anything is written and count the over-long
+    records and the in-bundle repeats (the first record of a key wins);
+    :meth:`commit_rows` / :meth:`file_rows` re-read the records and yield
+    the checked ones; :meth:`fill_commits` / :meth:`fill_files` write one
+    batch. Repeats are found over the whole member, so no two batches touch
+    the same key and a rolled-back dry run counts exactly what the apply
+    writes.
+
+    Only ``NULL`` descriptions are written (plan 42 D3), so a target stub
+    (``llm_description_model`` ``NULL``) and any description the target made
+    itself stay. Commits match by SHA; file descriptions by
+    ``(commit_sha, path)``. Nothing is created: a record without a target
+    row only counts.
+
+    Attributes
+    ----------
+    result : DescriptionImportResult
+        The counts so far; commit and file records share them.
+    """
+
+    def __init__(self) -> None:
+        self.result = DescriptionImportResult()
+
+    def _check(
+        self, records: Iterable[Any], check: Callable[[Mapping[str, Any]], Any], key
+    ) -> set[int]:
+        """Pass one over one member; the positions :meth:`_rows` leaves out."""
+        drop: set[int] = set()
+        seen: set = set()
+        for index, checked in _each(records, check):
+            if checked is None:
+                self.result.skipped_oversize += 1
+                drop.add(index)
+                continue
+            k = key(checked)
+            if k in seen:
+                self.result.kept_target += 1
+                drop.add(index)
+            else:
+                seen.add(k)
+        return drop
+
+    def check_commits(self, records: Iterable[Any]) -> set[int]:
+        """Pass one over ``commit_descriptions.jsonl``.
+
+        Parameters
+        ----------
+        records : Iterable
+            ``CommitDescriptionRecord`` models or equivalent mappings, in
+            line order.
+
+        Returns
+        -------
+        set of int
+            The 0-based positions :meth:`commit_rows` leaves out (over-long,
+            or a repeat of an earlier SHA).
+
+        Raises
+        ------
+        ImportFormatError
+            A wrong type, a malformed SHA or model label, or a control
+            character in a single-line field; ``index`` is the position.
+        """
+        return self._check(records, _checked_commit, lambda c: c[0])
+
+    def check_files(self, records: Iterable[Any]) -> set[int]:
+        """Pass one over ``file_descriptions.jsonl``.
+
+        Parameters
+        ----------
+        records : Iterable
+            ``FileDescriptionRecord`` models or equivalent mappings, in line
+            order.
+
+        Returns
+        -------
+        set of int
+            The 0-based positions :meth:`file_rows` leaves out (over-long,
+            or a repeat of an earlier ``(commit_sha, path)``).
+
+        Raises
+        ------
+        ImportFormatError
+            As :meth:`check_commits`, plus a malformed path; the field name
+            is prefixed ``file.``.
+        """
+        return self._check(records, _checked_file, lambda f: (f[0], f[1]))
+
+    @staticmethod
+    def commit_rows(records: Iterable[Any], drop: set[int]) -> Iterator[CommitFill]:
+        """Pass two: the checked commit descriptions :meth:`check_commits` kept.
+
+        Parameters
+        ----------
+        records : Iterable
+            The same records, in the same order, as pass one saw.
+        drop : set of int
+            What :meth:`check_commits` returned.
+
+        Yields
+        ------
+        tuple of (str, str, str)
+            ``(sha, text, model)``.
+        """
+        for index, checked in _each(records, _checked_commit):
+            if checked is not None and index not in drop:
+                yield checked
+
+    @staticmethod
+    def file_rows(records: Iterable[Any], drop: set[int]) -> Iterator[FileFill]:
+        """Pass two: the checked file descriptions :meth:`check_files` kept.
+
+        Parameters
+        ----------
+        records : Iterable
+            The same records, in the same order, as pass one saw.
+        drop : set of int
+            What :meth:`check_files` returned.
+
+        Yields
+        ------
+        tuple of (str, str, str, str)
+            ``(commit_sha, path, text, model)``.
+        """
+        for index, checked in _each(records, _checked_file):
+            if checked is not None and index not in drop:
+                yield checked
+
+    def fill_commits(self, session: Session, batch: Sequence[CommitFill]) -> None:
+        """Fill the target's ``NULL`` commit descriptions for one batch.
+
+        Runs in the caller's session (inside its write transaction) and never
+        commits.
+
+        Parameters
+        ----------
+        session : Session
+            A session on the project's WhyGraph DB.
+        batch : sequence of tuple
+            Rows from :meth:`commit_rows`, no SHA twice.
+        """
+        result = self.result
+        fills: list[tuple[str, str, str]] = []
+        for start in range(0, len(batch), _IN_CHUNK):
+            chunk = batch[start : start + _IN_CHUNK]
+            state = dict(
+                session.exec(  # type: ignore[call-overload]
+                    select(
+                        CommitRow.sha, col(CommitRow.llm_description).is_(None)
+                    ).where(col(CommitRow.sha).in_([c[0] for c in chunk]))
+                ).all()
+            )
+            for sha, text, model in chunk:
+                if sha not in state:
+                    result.missing_commit += 1
+                elif not state[sha]:
+                    result.kept_target += 1
+                else:
+                    fills.append((text, model, sha))
+        if fills:
+            _run_fill(session, _COMMIT_FILL, fills)
+            result.filled += len(fills)
+
+    def fill_files(self, session: Session, batch: Sequence[FileFill]) -> None:
+        """Fill the target's ``NULL`` file descriptions for one batch.
+
+        Every ``commit_file_change`` row of the ``(commit_sha, path)`` with a
+        ``NULL`` description is filled; the record counts once. Runs in the
+        caller's session and never commits.
+
+        Parameters
+        ----------
+        session : Session
+            A session on the project's WhyGraph DB.
+        batch : sequence of tuple
+            Rows from :meth:`file_rows`, no ``(commit_sha, path)`` twice.
+        """
+        result = self.result
+        by_sha: dict[str, list[tuple[str, str, str]]] = {}
+        for sha, path, text, model in batch:
+            by_sha.setdefault(sha, []).append((path, text, model))
+        shas = sorted(by_sha)
+        file_fills: list[tuple[str, str, int]] = []
+        for start in range(0, len(shas), _IN_CHUNK):
+            chunk = shas[start : start + _IN_CHUNK]
+            rows: dict[tuple[str, str], list[tuple[int, bool]]] = {}
+            for rid, sha, path, empty in session.exec(  # type: ignore[call-overload]
+                select(
+                    CommitFileChange.id,
+                    CommitFileChange.commit_sha,
+                    CommitFileChange.path,
+                    col(CommitFileChange.llm_description).is_(None),
+                ).where(col(CommitFileChange.commit_sha).in_(chunk))
+            ).all():
+                rows.setdefault((sha, path), []).append((rid, bool(empty)))
+            for sha in chunk:
+                for path, text, model in by_sha[sha]:
+                    found = rows.get((sha, path))
+                    if not found:
+                        result.missing_commit += 1
+                        continue
+                    empties = [rid for rid, empty in found if empty]
+                    if not empties:
+                        result.kept_target += 1
+                        continue
+                    file_fills.extend((text, model, rid) for rid in empties)
+                    result.filled += 1
+        if file_fills:
+            _run_fill(session, _FILE_FILL, file_fills)
+
+
+def import_descriptions(
+    session: Session,
+    commits: Iterable[Any],
+    files: Iterable[Any],
+) -> DescriptionImportResult:
+    """Fill the target's missing LLM descriptions from a transfer bundle, in one call.
+
+    Only ``NULL`` descriptions are written (plan 42 D3), so a target stub
+    (``llm_description_model`` ``NULL``) and any description the target made
+    itself stay. Commits match by SHA; file descriptions by
+    ``(commit_sha, path)``. Nothing is created: a record without a target row
+    only counts. Runs in the caller's session and never commits. The
+    transfer import runs the same steps in batches through
+    :class:`DescriptionImport`.
+
+    Parameters
+    ----------
+    session : Session
+        A session on the project's WhyGraph DB.
+    commits : Iterable
+        ``CommitDescriptionRecord`` models or equivalent mappings.
+    files : Iterable
+        ``FileDescriptionRecord`` models or equivalent mappings.
+
+    Returns
+    -------
+    DescriptionImportResult
+        The counts; commit and file records share them.
+
+    Raises
+    ------
+    ImportFormatError
+        A wrong type, a malformed SHA, path or model label, or a control
+        character in a single-line field. ``index`` is the position inside
+        ``commits`` or ``files``; the field name is prefixed ``file.`` for a
+        file record. Both members are checked before anything is written.
+    """
+    commits, files = list(commits), list(files)
+    job = DescriptionImport()
+    commit_drop = job.check_commits(commits)
+    file_drop = job.check_files(files)
+    job.fill_commits(session, list(job.commit_rows(commits, commit_drop)))
+    job.fill_files(session, list(job.file_rows(files, file_drop)))
+    return job.result
+
+
+_COMMIT_FILL = (
+    'UPDATE "commit" SET llm_description = ?, llm_description_model = ? '
+    "WHERE sha = ? AND llm_description IS NULL"
+)
+_FILE_FILL = (
+    "UPDATE commit_file_change SET llm_description = ?, llm_description_model = ? "
+    "WHERE id = ? AND llm_description IS NULL"
+)
+
+
+def _run_fill(session: Session, statement: str, rows: list[tuple]) -> None:
+    """``executemany`` on the DBAPI cursor: the project DB is always SQLite.
+
+    Going through SQLAlchemy's compiled ``update()`` costs more per row than
+    the update itself at the bundle's row caps.
+    """
+    session.connection().exec_driver_sql(statement, rows)  # type: ignore[arg-type]
+
+
+def _sha(value: object, name: str) -> str:
+    """A full lowercase 40-hex commit SHA, else a format error."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise ImportFormatError(name, "must be a 40-character lowercase SHA")
+    return value

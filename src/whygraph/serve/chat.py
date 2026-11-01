@@ -32,21 +32,24 @@ filled, not from a ``portal`` import, so ``serve/`` stays below the portal.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Iterator
-from datetime import datetime, timezone
-from typing import Literal
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
 from pathlib import Path
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, insert, or_
 from sqlmodel import col, delete, func, select
 
 from whygraph.chat.harness import (
@@ -63,11 +66,17 @@ from whygraph.chat.harness import (
     run_turn,
 )
 from whygraph.chat.areas import configured_areas
-from whygraph.chat.grounding import ground, with_references
+from whygraph.chat.grounding import (
+    MAX_SUFFIX_CHARS,
+    _render,
+    ground,
+    with_references,
+)
 from whygraph.chat.modes import DEFAULT_MODE, MODE_IDS, MODES, render_starters
 from whygraph.chat.tools import ToolRegistry
 from whygraph.core import Config, ConfigError, get_config
 from whygraph.core.context import current_project, use_actor
+from whygraph.core.import_checks import SINGLE_LINE_BAD, ImportFormatError, clean_text
 from whygraph.core.usage import (
     BUDGET_EXCEEDED,
     UsageBlocked,
@@ -77,7 +86,13 @@ from whygraph.core.usage import (
 from whygraph.db import get_session
 from whygraph.db.models import ChatMessage as ChatMessageRow
 from whygraph.db.models import ChatSession as ChatSessionRow
-from whygraph.db.models import Commit, Issue, ProjectNote, PullRequest
+from whygraph.db.models import (
+    Commit,
+    ImportedChat,
+    Issue,
+    ProjectNote,
+    PullRequest,
+)
 from whygraph.mcp.rationale_cache import lookup_exact
 from whygraph.mcp.targets import indexed_symbol_target, repo_root
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, Symbol
@@ -638,7 +653,7 @@ def update_session(session_id: int, body: UpdateSessionBody, request: Request) -
 
 @router.delete("/sessions/{session_id}", status_code=204)
 def delete_session(session_id: int, request: Request) -> Response:
-    """Delete a session and its messages.
+    """Delete a session, its messages and its ``imported_chat`` row.
 
     Messages are removed explicitly rather than by cascade: the FK has no
     ``ON DELETE`` clause, and ``foreign_keys=ON`` would otherwise reject the
@@ -657,6 +672,9 @@ def delete_session(session_id: int, request: Request) -> Response:
                 delete(ChatMessageRow).where(
                     col(ChatMessageRow.session_id) == session_id
                 )
+            )
+            session.execute(
+                delete(ImportedChat).where(col(ImportedChat.session_id) == session_id)
             )
             session.delete(row)
             session.commit()
@@ -2048,6 +2066,770 @@ def fork_session(session_id: int, body: ForkBody, request: Request) -> dict:
             return _session_dict(branch, message_count=len(copied))
     finally:
         _release(key, holder)
+
+
+# ---------------------------------------------------------------------------
+# Import from a project-transfer bundle (plan 42 section 5.4)
+# ---------------------------------------------------------------------------
+
+IMPORT_ROLES = ("user", "assistant", "tool")
+"""The message roles this module writes, and so the only ones an import takes."""
+
+IMPORT_CONTENT_MAX_CHARS = 1_000_000
+"""Cap on an imported message's ``content``."""
+
+IMPORT_TEXT_MAX_CHARS = 200_000
+"""Cap on an imported ``reasoning``, ``error`` and replayed ``reasoning_content``."""
+
+IMPORT_LINE_MAX_CHARS = 200
+"""Cap on every single-line chat field (model, ids, tool names, stop reasons)."""
+
+IMPORT_ARGUMENTS_MAX_BYTES = 64 * 1024
+"""Cap on one tool call's ``arguments``, serialised as UTF-8 JSON."""
+
+IMPORT_ARGUMENTS_MAX_DEPTH = 10
+"""Deepest nesting of one tool call's ``arguments`` (the object itself is 1)."""
+
+IMPORT_INT_MAX = 2**31
+"""Largest integer an imported chat row may carry."""
+
+_IMPORT_FUTURE_SLACK = timedelta(minutes=5)
+_ORIGIN_KEY_RE = re.compile(r"[0-9a-f]{64}")
+_UNKEPT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")
+"""What a multi-line text does not keep: control characters but tab, LF and CR,
+and lone surrogates (exactly what :func:`clean_text` replaces)."""
+_TITLE_CONTROL_RE = SINGLE_LINE_BAD
+"""What a title does not keep: everything a single-line import field refuses."""
+_LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+_GROUNDING_INPUT_MAX_CHARS = 6 * MAX_SUFFIX_CHARS
+"""A stored References block longer than this cannot re-render small enough
+(a ``\\uXXXX`` escape is the most a character can shrink by)."""
+_REFERENCES_OVERHEAD = len(with_references("", ""))
+_IMPORT_MESSAGE_COLUMNS = ("id", "session_id", "parent_id", *_COPIED_COLUMNS)
+_IMPORT_MESSAGE_INSERT = (
+    f"INSERT INTO chat_message ({', '.join(_IMPORT_MESSAGE_COLUMNS)}) "
+    f"VALUES ({', '.join('?' * len(_IMPORT_MESSAGE_COLUMNS))})"
+)
+
+
+def native_origin_key(row: ChatSessionRow) -> str:
+    """The round-trip identity of a session this project created itself (plan 42 D6).
+
+    ``sha256("chat|" + owner_uid + "|" + id + "|" + created_at)``, the owner
+    empty when unset. An export sends it as the session's ``origin_key``
+    unless the session was itself imported (then its ``imported_chat`` key
+    travels), so a session that comes back to its own project matches it.
+
+    Parameters
+    ----------
+    row : ChatSessionRow
+        A persisted session (anything with ``owner_uid``, ``id`` and
+        ``created_at``).
+
+    Returns
+    -------
+    str
+        64 lowercase hex characters.
+    """
+    return _origin_key(row.owner_uid, row.id, row.created_at)
+
+
+def _origin_key(owner_uid: str | None, session_id: int | None, created_at: str) -> str:
+    """:func:`native_origin_key` over the three columns."""
+    text = f"chat|{owner_uid or ''}|{session_id}|{created_at}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class ChatImportResult:
+    """What :func:`import_sessions` did.
+
+    Attributes
+    ----------
+    sessions : int
+        Sessions inserted.
+    matched_existing : int
+        Sessions whose origin key names a session already in this project
+        (imported earlier, or created here); their messages were skipped.
+    skipped_oversize : int
+        Sessions skipped with all their messages because a field was over
+        its cap (plan 42 D16).
+    messages : int
+        Messages inserted.
+    providers : set of str
+        The providers of the inserted sessions.
+    chat_ids : dict of int to int
+        Source session id -> target session id for every session that was
+        inserted **or** matched; the notes import remaps ``chat:<n>``
+        origins through it.
+    """
+
+    sessions: int = 0
+    matched_existing: int = 0
+    skipped_oversize: int = 0
+    messages: int = 0
+    providers: set[str] = field(default_factory=set)
+    chat_ids: dict[int, int] = field(default_factory=dict)
+
+    def counts(self) -> dict[str, Any]:
+        """The ``chats`` block of the transfer ``ImportResult`` (plan 42 section 7.2).
+
+        Returns
+        -------
+        dict
+            ``sessions``, ``matched_existing``, ``skipped_oversize``,
+            ``messages`` and the sorted ``providers``; no ids.
+        """
+        return {
+            "sessions": self.sessions,
+            "matched_existing": self.matched_existing,
+            "skipped_oversize": self.skipped_oversize,
+            "messages": self.messages,
+            "providers": sorted(self.providers),
+        }
+
+
+@dataclass
+class _ImportedMessage:
+    """One checked message, its columns ready to insert."""
+
+    index: int
+    source_id: int
+    parent: int | None
+    values: dict[str, Any]
+
+
+@dataclass
+class _ImportedSession:
+    """One checked session with its checked messages."""
+
+    index: int
+    source_id: int
+    origin_key: str
+    leaf: int | None
+    values: dict[str, Any]
+    oversize: bool
+    messages: list[_ImportedMessage] = field(default_factory=list)
+
+
+def _record(raw: object, name: str) -> Mapping[str, Any]:
+    """A record's fields: a mapping as is, a wire model's field values, else refused."""
+    if type(raw) is dict or isinstance(raw, Mapping):
+        return raw  # type: ignore[return-value]
+    values = getattr(raw, "__dict__", None)
+    if type(values) is not dict or not hasattr(type(raw), "model_fields"):
+        raise ImportFormatError(name, "must be an object")
+    return values
+
+
+class _Checker:
+    """Field checks for one record; a size violation sets :attr:`oversize`.
+
+    A format violation raises :class:`ImportFormatError` naming
+    ``<prefix>.<field>``; a size violation only flags the record, so every
+    field is still format-checked.
+    """
+
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+        self.oversize = False
+
+    def error(self, name: str, reason: str) -> ImportFormatError:
+        """A format violation of one field."""
+        return ImportFormatError(f"{self.prefix}.{name}", reason)
+
+    def integer(self, value: object, name: str, *, nullable: bool = False) -> Any:
+        """An integer in ``0..IMPORT_INT_MAX`` (``None`` only when ``nullable``)."""
+        if value is None and nullable:
+            return None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= IMPORT_INT_MAX
+        ):
+            raise self.error(name, f"must be an integer from 0 to {IMPORT_INT_MAX}")
+        return value
+
+    def text(
+        self,
+        value: object,
+        name: str,
+        *,
+        max_chars: int,
+        multiline: bool,
+        nullable: bool = False,
+    ) -> Any:
+        """:func:`clean_text`; ``""`` (and the flag) when over ``max_chars``."""
+        if value is None:
+            if nullable:
+                return None
+            raise self.error(name, "is required")
+        if (
+            multiline
+            and isinstance(value, str)
+            and not _UNKEPT_CONTROL_RE.search(value)
+        ):
+            # Fast path, same result: clean_text walks every character of a
+            # text with line breaks in Python.
+            if len(value) > max_chars:
+                self.oversize = True
+                return ""
+            return value
+        cleaned = clean_text(
+            value,
+            multiline=multiline,
+            max_chars=max_chars,
+            field=f"{self.prefix}.{name}",
+        )
+        if cleaned is None:
+            self.oversize = True
+            return ""
+        return cleaned
+
+    def choice(
+        self, value: object, name: str, allowed: tuple[str, ...], *, lenient: bool
+    ) -> str | None:
+        """``value`` when in ``allowed``; else ``None`` if ``lenient``, else refused."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise self.error(name, "must be text")
+        if value in allowed:
+            return value
+        if lenient:
+            return None
+        raise self.error(name, f"must be one of {', '.join(allowed)}")
+
+    def timestamp(self, value: object, name: str, latest: datetime) -> str:
+        """An ISO-8601 timestamp no later than ``latest``, kept verbatim."""
+        if not isinstance(value, str) or not value.isascii() or len(value) > 40:
+            raise self.error(name, "must be an ISO-8601 timestamp")
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            raise self.error(name, "must be an ISO-8601 timestamp") from None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if moment > latest:
+            raise self.error(name, "must not be in the future")
+        return value
+
+
+def _import_title(value: object) -> str:
+    """A session title on one line: line breaks become spaces, the rest U+FFFD.
+
+    Titles are cleaned rather than refused: first-message titling stores the
+    first 80 characters of the question, line breaks included.
+    """
+    if not isinstance(value, str):
+        raise ImportFormatError("session.title", "must be text")
+    text = _TITLE_CONTROL_RE.sub(
+        lambda m: " " if m.group() in "\t\n\r\u2028\u2029" else "\ufffd", value
+    )
+    return text.strip()[:TITLE_MAX_CHARS] or DEFAULT_TITLE
+
+
+def _check_session(raw: object, latest: datetime) -> _ImportedSession:
+    """Check one ``chat_sessions.jsonl`` record (plan 42 section 5.4)."""
+    check = _Checker("session")
+    rec = _record(raw, "session")
+    source_id = check.integer(rec.get("id"), "id")
+    origin_key = rec.get("origin_key")
+    if not isinstance(origin_key, str) or not _ORIGIN_KEY_RE.fullmatch(origin_key):
+        raise check.error("origin_key", "must be 64 lowercase hex characters")
+    provider = check.choice(
+        rec.get("provider"), "provider", CHAT_PROVIDERS, lenient=False
+    )
+    if provider is None:
+        raise check.error("provider", "is required")
+    model = check.text(
+        rec.get("model"),
+        "model",
+        max_chars=IMPORT_LINE_MAX_CHARS,
+        multiline=False,
+    )
+    if not check.oversize and not model.strip():
+        raise check.error("model", "must not be empty")
+    values = {
+        "title": _import_title(rec.get("title")),
+        "provider": provider,
+        "model": model,
+        "effort": check.choice(
+            rec.get("effort"), "effort", EFFORT_LEVELS, lenient=False
+        ),
+        "mode": check.choice(rec.get("mode"), "mode", MODE_IDS, lenient=True),
+        "created_at": check.timestamp(rec.get("created_at"), "created_at", latest),
+        "updated_at": check.timestamp(rec.get("updated_at"), "updated_at", latest),
+    }
+    leaf = check.integer(rec.get("active_leaf_id"), "active_leaf_id", nullable=True)
+    return _ImportedSession(
+        index=-1,
+        source_id=source_id,
+        origin_key=origin_key,
+        leaf=leaf,
+        values=values,
+        oversize=check.oversize,
+    )
+
+
+def _arguments_depth_ok(arguments: dict) -> bool:
+    """Whether ``arguments`` nests at most :data:`IMPORT_ARGUMENTS_MAX_DEPTH` levels."""
+    stack: list[tuple[object, int]] = [(arguments, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict | list | tuple):
+            if depth > IMPORT_ARGUMENTS_MAX_DEPTH:
+                return False
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children)
+    return True
+
+
+def _import_tool_calls(check: _Checker, value: object) -> str:
+    """The re-serialised ``tool_calls`` list of ``{id, name, arguments}``."""
+    if value is None:
+        return "[]"
+    if not isinstance(value, list | tuple):
+        raise check.error("tool_calls", "must be a list")
+    calls = []
+    for item in value:
+        call = _record(item, "message.tool_calls")
+        call_id = check.text(
+            call.get("id"),
+            "tool_calls.id",
+            max_chars=IMPORT_LINE_MAX_CHARS,
+            multiline=False,
+        )
+        name = check.text(
+            call.get("name"),
+            "tool_calls.name",
+            max_chars=IMPORT_LINE_MAX_CHARS,
+            multiline=False,
+        )
+        arguments = call.get("arguments")
+        if not isinstance(arguments, dict):
+            raise check.error("tool_calls.arguments", "must be a JSON object")
+        if not _arguments_depth_ok(arguments):
+            raise check.error(
+                "tool_calls.arguments",
+                f"must nest at most {IMPORT_ARGUMENTS_MAX_DEPTH} levels",
+            )
+        try:
+            encoded = json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError, RecursionError):
+            raise check.error("tool_calls.arguments", "must be plain JSON") from None
+        try:
+            size = len(encoded.encode("utf-8"))
+        except UnicodeEncodeError:
+            # A lone surrogate: no provider or database takes it.
+            raise check.error("tool_calls.arguments", "must be valid Unicode") from None
+        if size > IMPORT_ARGUMENTS_MAX_BYTES:
+            check.oversize = True
+        calls.append({"id": call_id, "name": name, "arguments": arguments})
+    return json.dumps(calls)
+
+
+def _import_replay(check: _Checker, value: object) -> str | None:
+    """The stored replay JSON: exactly ``{"reasoning_content": str}`` or ``None`` (F6)."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        dump = getattr(value, "model_dump", None)
+        value = dump() if callable(dump) else None
+    if not isinstance(value, Mapping) or value.keys() != {"reasoning_content"}:
+        raise check.error("replay", "must be exactly {reasoning_content}")
+    reasoning = check.text(
+        value["reasoning_content"],
+        "replay.reasoning_content",
+        max_chars=IMPORT_TEXT_MAX_CHARS,
+        multiline=True,
+    )
+    return json.dumps({"reasoning_content": reasoning})
+
+
+def _refuse_constant(_value: str) -> None:
+    """``json.loads`` hook: a float or ``NaN`` / ``Infinity`` is no References value."""
+    raise ValueError("not a References value")
+
+
+def _import_grounding(check: _Checker, value: object) -> str | None:
+    """A user row's References block, parsed and re-rendered (plan 42 section 5.4).
+
+    A list of objects with scalar values; every string has its control
+    characters replaced. The result is :func:`~whygraph.chat.grounding._render`
+    of the cleaned list (byte-identical for a block the pre-pass wrote) and
+    must fit :data:`~whygraph.chat.grounding.MAX_SUFFIX_CHARS` with the
+    heading, else the record is over its cap.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise check.error("grounding", "must be text")
+    if len(value) > _GROUNDING_INPUT_MAX_CHARS:
+        check.oversize = True
+        return None
+    try:
+        entries = json.loads(
+            value, parse_float=_refuse_constant, parse_constant=_refuse_constant
+        )
+    except (ValueError, RecursionError):
+        raise check.error("grounding", "must be a References list") from None
+    if not isinstance(entries, list) or not entries:
+        raise check.error("grounding", "must be a non-empty References list")
+    cleaned: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry:
+            raise check.error("grounding", "entries must be non-empty objects")
+        out: dict[str, Any] = {}
+        for key, item in entry.items():
+            if _LONE_SURROGATE_RE.search(key) or (
+                isinstance(item, str) and _LONE_SURROGATE_RE.search(item)
+            ):
+                # Only a \uXXXX escape of half a pair gets here (stdlib json
+                # decodes it; the wire's own parser refuses one), and no
+                # database can store it.
+                raise check.error("grounding", "must not hold a lone surrogate")
+            key = check.text(
+                key,
+                "grounding",
+                max_chars=MAX_SUFFIX_CHARS,
+                multiline=True,
+            )
+            if isinstance(item, str):
+                item = check.text(
+                    item, "grounding", max_chars=MAX_SUFFIX_CHARS, multiline=True
+                )
+            elif isinstance(item, bool) or item is None:
+                pass
+            elif isinstance(item, int):
+                check.integer(item, "grounding")
+            else:
+                raise check.error("grounding", "values must be scalars")
+            out[key] = item
+        cleaned.append(out)
+    rendered = _render(cleaned)
+    if len(rendered) + _REFERENCES_OVERHEAD > MAX_SUFFIX_CHARS:
+        check.oversize = True
+        return None
+    return rendered
+
+
+def _check_message(raw: object, latest: datetime) -> tuple[int, _ImportedMessage, bool]:
+    """Check one ``chat_messages.jsonl`` record (plan 42 section 5.4).
+
+    Returns the source session id, the checked message and whether a field
+    was over its cap. The columns are exactly :data:`_COPIED_COLUMNS`.
+    """
+    check = _Checker("message")
+    rec = _record(raw, "message")
+    source_id = check.integer(rec.get("id"), "id")
+    session_id = check.integer(rec.get("session_id"), "session_id")
+    parent = check.integer(rec.get("parent_id"), "parent_id", nullable=True)
+    role = rec.get("role")
+    if not isinstance(role, str) or role not in IMPORT_ROLES:
+        raise check.error("role", f"must be one of {', '.join(IMPORT_ROLES)}")
+    tool_calls = _import_tool_calls(check, rec.get("tool_calls"))
+    if tool_calls != "[]" and role != "assistant":
+        raise check.error("tool_calls", "only an assistant message may carry them")
+    tool_call_id = check.text(
+        rec.get("tool_call_id"),
+        "tool_call_id",
+        max_chars=IMPORT_LINE_MAX_CHARS,
+        multiline=False,
+        nullable=True,
+    )
+    if (tool_call_id is None) != (role != "tool"):
+        raise check.error("tool_call_id", "is required on, and only on, a tool row")
+    is_error = rec.get("is_error")
+    if is_error is not None and not isinstance(is_error, bool):
+        raise check.error("is_error", "must be true, false or null")
+    if is_error and role != "tool":
+        raise check.error("is_error", "only a tool row may be an error")
+    replay = _import_replay(check, rec.get("replay"))
+    if replay is not None and role != "assistant":
+        raise check.error("replay", "only an assistant message may carry it")
+    grounding = _import_grounding(check, rec.get("grounding"))
+    if rec.get("grounding") is not None and role != "user":
+        raise check.error("grounding", "only a user message may carry it")
+
+    def line(name: str) -> str | None:
+        return check.text(
+            rec.get(name),
+            name,
+            max_chars=IMPORT_LINE_MAX_CHARS,
+            multiline=False,
+            nullable=True,
+        )
+
+    def long_text(name: str) -> str | None:
+        return check.text(
+            rec.get(name),
+            name,
+            max_chars=IMPORT_TEXT_MAX_CHARS,
+            multiline=True,
+            nullable=True,
+        )
+
+    checked = {
+        "role": role,
+        "content": check.text(
+            rec.get("content"),
+            "content",
+            max_chars=IMPORT_CONTENT_MAX_CHARS,
+            multiline=True,
+        ),
+        "tool_calls": tool_calls,
+        "tool_call_id": tool_call_id,
+        "is_error": is_error,
+        "input_tokens": check.integer(
+            rec.get("input_tokens"), "input_tokens", nullable=True
+        ),
+        "output_tokens": check.integer(
+            rec.get("output_tokens"), "output_tokens", nullable=True
+        ),
+        "provider": line("provider"),
+        "model": line("model"),
+        "error": long_text("error"),
+        "replay": replay,
+        "finish_reason": line("finish_reason"),
+        "effort": check.choice(
+            rec.get("effort"), "effort", EFFORT_LEVELS, lenient=True
+        ),
+        "mode": check.choice(rec.get("mode"), "mode", MODE_IDS, lenient=True),
+        "grounding": grounding,
+        "reasoning": long_text("reasoning"),
+        "created_at": check.timestamp(rec.get("created_at"), "created_at", latest),
+    }
+    message = _ImportedMessage(
+        index=-1,
+        source_id=source_id,
+        parent=parent,
+        values={column: checked[column] for column in _COPIED_COLUMNS},
+    )
+    return session_id, message, check.oversize
+
+
+def _check_sessions(
+    sessions: Iterable[object], messages: Iterable[object], latest: datetime
+) -> list[_ImportedSession]:
+    """Check every record and the message trees; nothing is written."""
+    checked: dict[int, _ImportedSession] = {}
+    origins: set[str] = set()
+    for index, raw in enumerate(sessions):
+        try:
+            item = _check_session(raw, latest)
+            if item.source_id in checked:
+                raise ImportFormatError("session.id", "repeats an earlier session")
+            if item.origin_key in origins:
+                raise ImportFormatError(
+                    "session.origin_key", "repeats an earlier session"
+                )
+        except ImportFormatError as exc:
+            exc.index = index
+            raise
+        item.index = index
+        checked[item.source_id] = item
+        origins.add(item.origin_key)
+
+    seen: set[int] = set()
+    for index, raw in enumerate(messages):
+        try:
+            session_id, message, oversize = _check_message(raw, latest)
+            owner = checked.get(session_id)
+            if owner is None:
+                raise ImportFormatError(
+                    "message.session_id", "names no session in the bundle"
+                )
+            if message.source_id in seen:
+                raise ImportFormatError("message.id", "repeats an earlier message")
+        except ImportFormatError as exc:
+            exc.index = index
+            raise
+        message.index = index
+        seen.add(message.source_id)
+        owner.messages.append(message)
+        owner.oversize = owner.oversize or oversize
+
+    for item in checked.values():
+        item.messages.sort(key=lambda m: m.source_id)
+        ids: set[int] = set()
+        for message in item.messages:
+            if message.parent is not None and message.parent not in ids:
+                raise ImportFormatError(
+                    "message.parent_id",
+                    "must name an earlier message of the same session",
+                    index=message.index,
+                )
+            ids.add(message.source_id)
+        if item.leaf is not None and item.leaf not in ids:
+            raise ImportFormatError(
+                "session.active_leaf_id",
+                "must name a message of the session",
+                index=item.index,
+            )
+    return sorted(checked.values(), key=lambda s: s.source_id)
+
+
+def check_import_sessions(
+    sessions: Iterable[object], messages: Iterable[object]
+) -> None:
+    """Format-check a bundle's chats without touching the database (plan 42 Q11).
+
+    The first pass of :func:`import_sessions` on its own (every record, the
+    message trees and the leaves), so the transfer import can refuse a
+    bundle before it writes anything.
+
+    Parameters
+    ----------
+    sessions, messages : iterable
+        ``chat_sessions.jsonl`` / ``chat_messages.jsonl`` records, as
+        :func:`import_sessions` takes them.
+
+    Raises
+    ------
+    ImportFormatError
+        As :func:`import_sessions`.
+    """
+    _check_sessions(
+        sessions, messages, datetime.now(timezone.utc) + _IMPORT_FUTURE_SLACK
+    )
+
+
+def import_sessions(
+    session,
+    sessions: Iterable[object],
+    messages: Iterable[object],
+    *,
+    owner_uid: str | None,
+    import_id: int,
+) -> ChatImportResult:
+    """Insert a transfer bundle's chat sessions and messages (plan 42 section 5.4).
+
+    The rows are replayed to providers with this project's keys on the next
+    turn (F6), so every JSON column is rebuilt from typed values rather than
+    copied: ``tool_calls`` is a list of ``{id, name, arguments}`` with an
+    object ``arguments``, ``replay`` is exactly ``{"reasoning_content"}``,
+    and ``grounding`` is re-rendered by the pre-pass's own renderer.
+
+    Two passes. The first checks every record, the message trees and the
+    leaves, and raises :class:`~whygraph.core.import_checks.ImportFormatError`
+    before anything is written. The second walks the sessions in source-id
+    order: a session whose ``origin_key`` names a session already in this
+    project (an ``imported_chat`` row, or :func:`native_origin_key` of a
+    session created here) is mapped to it and its messages skipped, so a
+    re-import or a round trip adds nothing (D6); a session with a field
+    over its cap is skipped with all its messages (D16); every other one is
+    inserted, owned by ``owner_uid``, with its messages in source-id order,
+    ``parent_id`` and ``active_leaf_id`` remapped, and an ``imported_chat``
+    row carrying its origin key.
+
+    Parameters
+    ----------
+    session : Session
+        The caller's project-DB session, inside its write transaction (the
+        new ids are allocated past the current maxima, so the caller holds
+        the write lock, ``BEGIN IMMEDIATE``). Never committed or rolled back
+        here; no other session is opened.
+    sessions : iterable
+        ``chat_sessions.jsonl`` records: mappings, or wire models read by
+        attribute. ``owner_uid`` is never read from them.
+    messages : iterable
+        ``chat_messages.jsonl`` records, same forms. Ratings are ignored.
+    owner_uid : str or None
+        The importing user, owner of every inserted session.
+    import_id : int
+        The ``project_import`` row this import logged (a foreign key of
+        ``imported_chat``).
+
+    Returns
+    -------
+    ChatImportResult
+        The counts (:meth:`ChatImportResult.counts`) and ``chat_ids``.
+
+    Raises
+    ------
+    ImportFormatError
+        A format violation. ``field`` starts with ``session.`` or
+        ``message.`` and ``index`` is the record's position in
+        ``sessions`` or ``messages`` respectively.
+
+    Notes
+    -----
+    Control characters in chat text become U+FFFD; a title's line breaks
+    become spaces. An unknown ``mode`` is stored as null (read leniently
+    anyway), and so is an unknown message ``effort``.
+    """
+    latest = datetime.now(timezone.utc) + _IMPORT_FUTURE_SLACK
+    checked = _check_sessions(sessions, messages, latest)
+    result = ChatImportResult()
+
+    session.flush()
+    # Native keys first: an imported_chat row is the stronger claim.
+    existing: dict[str, int] = {
+        _origin_key(uid, target, created_at): target
+        for target, uid, created_at in session.exec(
+            select(
+                ChatSessionRow.id, ChatSessionRow.owner_uid, ChatSessionRow.created_at
+            )
+        ).all()
+    }
+    existing.update(
+        session.exec(select(ImportedChat.origin_key, ImportedChat.session_id)).all()
+    )
+    next_session = (session.exec(select(func.max(ChatSessionRow.id))).one() or 0) + 1
+    next_message = (session.exec(select(func.max(ChatMessageRow.id))).one() or 0) + 1
+
+    session_rows: list[dict[str, Any]] = []
+    message_rows: list[tuple] = []
+    link_rows: list[dict[str, Any]] = []
+    for item in checked:
+        target = existing.get(item.origin_key)
+        if target is not None:
+            result.chat_ids[item.source_id] = target
+            result.matched_existing += 1
+            continue
+        if item.oversize:
+            result.skipped_oversize += 1
+            continue
+        new_session = next_session
+        next_session += 1
+        ids: dict[int, int] = {}
+        for message in item.messages:
+            ids[message.source_id] = next_message
+            parent = None if message.parent is None else ids[message.parent]
+            # In _IMPORT_MESSAGE_COLUMNS order: values follow _COPIED_COLUMNS.
+            message_rows.append(
+                (next_message, new_session, parent, *message.values.values())
+            )
+            next_message += 1
+        session_rows.append(
+            {
+                "id": new_session,
+                **item.values,
+                "owner_uid": owner_uid,
+                "active_leaf_id": None if item.leaf is None else ids[item.leaf],
+            }
+        )
+        link_rows.append(
+            {
+                "origin_key": item.origin_key,
+                "session_id": new_session,
+                "import_id": import_id,
+            }
+        )
+        result.chat_ids[item.source_id] = new_session
+        result.sessions += 1
+        result.messages += len(item.messages)
+        result.providers.add(item.values["provider"])
+
+    if session_rows:
+        session.execute(insert(ChatSessionRow.__table__), session_rows)
+        session.execute(insert(ImportedChat.__table__), link_rows)
+    if message_rows:
+        # The DB-API's executemany directly: at the row caps SQLAlchemy's
+        # per-row parameter processing costs as much as SQLite's insert.
+        session.connection().exec_driver_sql(_IMPORT_MESSAGE_INSERT, message_rows)
+    return result
 
 
 def _rating_target(session_id: int, message_id: int) -> ChatMessageRow:

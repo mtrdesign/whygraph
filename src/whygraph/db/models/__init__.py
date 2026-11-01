@@ -39,10 +39,13 @@ from whygraph.db.models.chat_session import ChatSession
 from whygraph.db.models.commit import Commit
 from whygraph.db.models.commit_file_change import CommitFileChange
 from whygraph.db.models.forge_crawl_state import ForgeCrawlState
+from whygraph.db.models.imported_actor import ImportedActor
+from whygraph.db.models.imported_chat import ImportedChat
 from whygraph.db.models.issue import Issue
 from whygraph.db.models.milestone import Milestone
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pr_origin_skip import PROriginSkip
+from whygraph.db.models.project_import import ProjectImport
 from whygraph.db.models.project_note import ProjectNote
 from whygraph.db.models.project_purpose_run import ProjectPurposeRun
 from whygraph.db.models.pull_request import PullRequest
@@ -56,10 +59,13 @@ __all__ = [
     "Commit",
     "CommitFileChange",
     "ForgeCrawlState",
+    "ImportedActor",
+    "ImportedChat",
     "Issue",
     "Milestone",
     "PRIssueLink",
     "PROriginSkip",
+    "ProjectImport",
     "ProjectNote",
     "ProjectPurposeRun",
     "PullRequest",

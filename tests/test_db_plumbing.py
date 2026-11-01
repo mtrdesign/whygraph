@@ -26,10 +26,13 @@ SQLMODEL_TABLES = {
     "commit",
     "commit_file_change",
     "forge_crawl_state",
+    "imported_actor",
+    "imported_chat",
     "issue",
     "milestone",
     "pr_issue_link",
     "pr_origin_skip",
+    "project_import",
     "project_note",
     "project_purpose_run",
     "pull_request",
@@ -512,9 +515,7 @@ def test_project_purpose_run_table_round_trip(
     db_path = _isolate_config_and_engine
     script = ScriptDirectory.from_config(alembic_config())
     assert len(script.get_heads()) == 1
-    assert script.get_revision(script.get_current_head()).down_revision == (
-        "b7e4c2a91d36"
-    )
+    assert script.get_revision("71460539b46f").down_revision == "b7e4c2a91d36"
 
     command.upgrade(alembic_config(), "b7e4c2a91d36")
     assert "project_purpose_run" not in _table_names(db_path)

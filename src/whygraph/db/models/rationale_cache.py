@@ -60,3 +60,4 @@ class RationaleCache(WhygraphTable, table=True):
     actual_provider: str | None = Field(default=None, sa_type=Text)
     actual_model: str | None = Field(default=None, sa_type=Text)
     qualified_name: str | None = Field(default=None, sa_type=Text)
+    import_id: int | None = Field(default=None)  # project_import.id; no FK

@@ -958,6 +958,11 @@ function init(method: string, body?: unknown, signal?: AbortSignal): RequestInit
   };
 }
 
+/** A raw (non-JSON) request body, still carrying the client header (the CSRF guard). */
+function rawInit(method: string, body: Blob, contentType: string): RequestInit {
+  return { method, headers: { ...CLIENT_HEADERS, "Content-Type": contentType }, body };
+}
+
 // The public base URL, set by the root gate from the portal state (production only).
 let baseUrl: string | null = null;
 
@@ -1993,6 +1998,68 @@ export interface NoteAnchor {
   area?: string;
 }
 
+/** One applied import, as `GET /transfer` lists it. */
+export interface TransferImportRow {
+  id: number;
+  imported_at: string;
+  imported_by: string;
+  imported_by_name: string | null;
+  source_label: string;
+  source_mode: string;
+  whygraph_version: string;
+  /** The stored result blocks of the import; `{}` or missing keys on an older or unreadable row. */
+  counts: Partial<Pick<ImportResult, "notes" | "rationale" | "descriptions" | "chats">> & {
+    purpose_runs?: ImportResult["purpose_runs"] | number;
+  };
+}
+
+export interface TransferStatus {
+  scanned: boolean;
+  imported_rationale: number;
+  max_bundle_bytes: number;
+  imports: TransferImportRow[];
+}
+
+/** A confirmed note that will reach agents broadly once imported (plan 42, Q5); `body` is verbatim. */
+export interface WideNote {
+  kind: string;
+  anchor: string;
+  target?: string | null;
+  body: string;
+  unresolved_area?: boolean;
+}
+
+/** The result of an import or its dry run (plan 42 section 7.2). */
+export interface ImportResult {
+  applied: boolean;
+  source: { mode: string; label: string; whygraph_version: string; exported_at?: string | null };
+  repo: { matched_roots: number; source_origin?: string | null; target_origin?: string | null };
+  notes: {
+    inserted: { proposed: number; confirmed: number; retired: number };
+    skipped_duplicate: number;
+    skipped_purpose: number;
+    skipped_oversize: number;
+    skipped_denied: number;
+    refs_unresolved: number;
+    revision_unlinked: number;
+    downgraded: number;
+  };
+  wide_confirmed: WideNote[];
+  purpose_runs: { inserted: number };
+  /** `partial` (with a generic `error`) only when a batch failed after the core commit: the counts are what landed. */
+  rationale: { inserted: number; existing: number; inactive_model: number; skipped_oversize: number; partial?: boolean; error?: string };
+  descriptions: { filled: number; kept_target: number; missing_commit: number; skipped_oversize: number; partial?: boolean; error?: string };
+  chats: { sessions: number; matched_existing: number; skipped_oversize: number; messages: number; providers: string[] };
+  config: {
+    present: boolean;
+    invalid: string[];
+    changes: { key: string; from: unknown; to: unknown }[];
+    applied: boolean;
+    error: string | null;
+  };
+  backup: { written: boolean; skipped_low_disk: boolean; path: string | null };
+}
+
 /** One note as `/notes` serves it (`mcp.notes.NoteView` plus the proposer's and confirmer's names). */
 export interface Note {
   id: number;
@@ -2006,9 +2073,12 @@ export interface Note {
   origin: string;
   proposed_by: string;
   proposed_by_name?: string | null;
+  /** The proposer came in with an imported bundle (plan 42); the name is display-only provenance. */
+  proposed_by_imported?: boolean;
   proposed_at: string;
   confirmed_by?: string | null;
   confirmed_by_name?: string | null;
+  confirmed_by_imported?: boolean;
   confirmed_at?: string | null;
   reconfirmed_by?: string | null;
   reconfirmed_at?: string | null;
@@ -2151,6 +2221,23 @@ export function projectApi(slug: string) {
       send<Note>("POST", `${base}/notes/${id}/reconfirm`, body),
     retireNote: (id: number, reason: NoteRetireReason) =>
       send<Note>("POST", `${base}/notes/${id}/retire`, { reason }),
+    // ---- project transfer (portal/transfer_routes.py) -----------------------
+    transfer: {
+      status: () => get<TransferStatus>(`${base}/transfer`),
+      export: async (chats: boolean): Promise<UsageCsv> => {
+        const res = await request(`/api${base}/transfer/export?chats=${chats ? 1 : 0}`, init("GET"));
+        if (!res.ok) throw await failure(res);
+        return { blob: await res.blob(), filename: attachmentName(res, `${slug}-bundle.zip`), truncated: false };
+      },
+      import: async (file: Blob, opts: { dryRun: boolean; applyConfig: boolean }) =>
+        parse<ImportResult>(
+          await request(
+            `/api${base}/transfer/import?dry_run=${opts.dryRun ? 1 : 0}&apply_config=${opts.applyConfig ? 1 : 0}`,
+            rawInit("POST", file, "application/zip"),
+          ),
+        ),
+      removeImportedRationale: () => send<{ removed: number }>("DELETE", `${base}/transfer/rationale`),
+    },
     rejectAgentProposals: (proposed_by: string, origin: string) =>
       send<{ rejected: number }>("POST", `${base}/notes/reject-agent-proposals`, { proposed_by, origin }),
 

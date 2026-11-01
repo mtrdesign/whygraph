@@ -142,6 +142,7 @@ export const PROJECT_SETTINGS_SECTIONS = [
   "agents",
   "access",
   "connections",
+  "transfer",
   "danger",
 ] as const;
 export type ProjectSettingsSection = (typeof PROJECT_SETTINGS_SECTIONS)[number];

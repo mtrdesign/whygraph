@@ -234,9 +234,10 @@ describe("SettingsLayout", () => {
       "Areas",
       "Usage",
       "Agents",
+      "Export and import",
       "Danger zone",
     ]);
-    for (const id of ["general", "models", "github", "hooks", "scanning", "areas", "budgets", "agents", "danger"]) {
+    for (const id of ["general", "models", "github", "hooks", "scanning", "areas", "budgets", "agents", "transfer", "danger"]) {
       expect(document.getElementById(`settings-${id}`)).not.toBeNull();
     }
   });

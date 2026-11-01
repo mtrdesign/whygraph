@@ -43,6 +43,9 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   note_retired: { label: "Note retired", group: "Projects" },
   note_bulk_rejected: { label: "Agent proposals rejected", group: "Projects" },
   purpose_generated: { label: "Project purpose generated", group: "Projects" },
+  project_bundle_exported: { label: "Project exported", group: "Projects" },
+  project_bundle_imported: { label: "Project bundle imported", group: "Projects" },
+  imported_rationale_removed: { label: "Imported rationale cards removed", group: "Projects" },
   // Budgets
   budget_threshold_crossed: { label: "Budget threshold crossed", group: "Budgets" },
   budget_hard_stop_engaged: { label: "Budget hard stop engaged", group: "Budgets" },

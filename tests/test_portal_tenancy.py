@@ -1221,6 +1221,19 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
     ("POST", "/api/projects/{slug}/purpose"): Call(
         422, shows=lambda o: ["purpose_no_input"]
     ),
+    # Project transfer (plan 42; test_portal_transfer.py drives it). The
+    # export is a zip (its rows are checked there); the sweep sends no body,
+    # so the import stops at the content type before any upload.
+    ("GET", "/api/projects/{slug}/transfer"): Call(
+        200, shows=lambda o: ['"imported_rationale":0']
+    ),
+    ("GET", "/api/projects/{slug}/transfer/export"): Call(200),
+    ("POST", "/api/projects/{slug}/transfer/import"): Call(
+        415, shows=lambda o: ["bundle_invalid"]
+    ),
+    ("DELETE", "/api/projects/{slug}/transfer/rationale"): Call(
+        200, shows=lambda o: ['"removed":0']
+    ),
     # Claude Code hooks (plan 40): local only, left out of the production
     # sweeps; the answer is the same {} for everyone (no path in the body).
     ("POST", "/api/projects/{slug}/agent-hooks/session-start"): Call(
@@ -1736,6 +1749,11 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("GET", "/api/projects/{slug}/areas/suggest"),
         # Generating the project purpose (plan 41 D7: project.scan_full)
         ("POST", "/api/projects/{slug}/purpose"),
+        # Project transfer (plan 42 D2): export, import, removing imported cards
+        ("GET", "/api/projects/{slug}/transfer"),
+        ("GET", "/api/projects/{slug}/transfer/export"),
+        ("POST", "/api/projects/{slug}/transfer/import"),
+        ("DELETE", "/api/projects/{slug}/transfer/rationale"),
     }
     # Everyone reads the price table (it prices their own estimates).
     assert ("GET", "/api/prices") in MEMBER_ROUTES

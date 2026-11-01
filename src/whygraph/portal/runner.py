@@ -1393,7 +1393,7 @@ class ScanRunner:
     # ---- lifecycle ------------------------------------------------------
 
     async def start(self, state: PortalState) -> None:
-        """Start the queue: sweep token files and clones, requeue ``queued`` rows, catch up, poll.
+        """Start the queue: sweep token files, clones and transfer files, requeue, catch up, poll.
 
         Called by the lifespan after the portal DB is migrated and stale
         ``running`` rows were marked ``interrupted``. Local mode then polls
@@ -1420,6 +1420,10 @@ class ScanRunner:
             await anyio.to_thread.run_sync(sweep_token_files, data_dir())
             # Only the runner clones, and this is the one portal process.
             await anyio.to_thread.run_sync(sweep_clone_dirs, data_dir())
+            # The same for project-transfer temp files (plan 42 section 5.8).
+            from .transfer_export import sweep_transfer_tmp
+
+            await anyio.to_thread.run_sync(sweep_transfer_tmp, data_dir())
             await self._requeue()
             await self.catch_up()
             await self.rebuild_unguarded_indexes()

@@ -39,6 +39,8 @@ ERROR_CALLS = frozenset(
         "NoEvidenceError",
         "RationaleGenerationError",
         "GenerationNotPermitted",
+        # A ServeError subclass: project-transfer bundle refusals (plan 42).
+        "BundleError",
     }
 )
 """The exception types whose ``code=`` keyword is an API error code."""

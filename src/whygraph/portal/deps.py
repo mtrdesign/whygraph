@@ -543,6 +543,19 @@ class PortalState:
         Key and token tests (M2f-3 plan section 4.13), one hour window, per
         key limits through ``hit_all``: ``("u", org_id, user_id)`` 10 and
         ``("o", org_id)`` 60.
+    transfer_export : Throttle
+        Project bundle exports (plan 42 section 5.8), one hour window, per
+        ``("u", org_id, user_id)``: 10.
+    transfer_import : Throttle
+        Project bundle imports, dry runs included, one hour window, per key
+        limits through ``hit_all``: ``("u", org_id, user_id)`` 20 and
+        ``("p", project_id)`` 20.
+    transfer_org : InFlight
+        Exports and imports running at once, per org id: 1 (``409 busy``
+        beyond it).
+    transfer_portal : InFlight
+        Exports and imports running at once on the whole portal (one
+        constant key): 2 (``409 busy`` beyond it).
     model_list : Throttle
         Settings' model listings (plan 36 section 4.1.3), separate from
         ``key_test``, one hour window, per key limits through ``hit_all``:
@@ -622,6 +635,11 @@ class PortalState:
         self.key_test = Throttle(60, 60 * 60)
         # Project-purpose generations (plan 41): per member and per project.
         self.purpose_generate = Throttle(30, 60 * 60)
+        # Project transfer (plan 42 D5): bundle exports and imports.
+        self.transfer_export = Throttle(10, 60 * 60)
+        self.transfer_import = Throttle(20, 60 * 60)
+        self.transfer_org = InFlight(1)
+        self.transfer_portal = InFlight(2)
         self.model_list = Throttle(120, 60 * 60)
         self.slug_check = Throttle(60, 60)
         self.github_listing: dict[int, tuple[float, bool]] = {}

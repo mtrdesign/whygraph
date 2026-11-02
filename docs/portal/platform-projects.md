@@ -196,3 +196,7 @@ status and keeps the project, its slug and its agent files. Any other collision 
 entries; your repository is never deleted) and first **revokes the connection token on the
 platform**. It tells you when that failed, so you can revoke it yourself under **Connected machines**
 on the platform. The platform's project is untouched, and removal is refused while a scan is running.
+
+!!! tip "From a local project to a production one"
+    Export the local project and [import it](transfer.md) into the production project first, then link
+    your checkout to that project here.

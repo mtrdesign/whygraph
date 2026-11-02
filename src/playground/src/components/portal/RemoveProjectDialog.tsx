@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../../api";
 import { agentInfo } from "../../lib/agents";
 import { errorMessage } from "../../lib/apiErrors";
+import { can } from "../../lib/permissions";
 import { isProduction, usePortalState } from "../../lib/identity";
 import { accountUrl, platformHost, safeHref } from "../../lib/platformLink";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
@@ -192,6 +193,20 @@ export function RemoveProjectDialog({
         </DialogHeader>
 
         <div className="flex flex-col gap-3 text-sm">
+          {!linked && can(project, "project.configure") && (
+            <p className="text-muted-foreground" data-testid="remove-export-hint">
+              Want to keep the notes and descriptions?{" "}
+              <Link
+                to="/p/$slug/settings"
+                params={{ slug: project.slug }}
+                search={{ section: "transfer" }}
+                onClick={() => onOpenChange(false)}
+                className="text-primary-text hover:underline"
+              >
+                Export this project first
+              </Link>
+            </p>
+          )}
           {production ? (
             <>
               <div>

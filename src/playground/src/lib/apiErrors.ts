@@ -384,6 +384,27 @@ export const MESSAGES: Record<string, Resolver> = {
     action: RETRY,
   },
 
+  // Project transfer (plan 42)
+  bundle_invalid: (err) =>
+    err.status === 415
+      ? "That isn't a WhyGraph bundle. Choose the .zip file an export downloaded."
+      : "This bundle couldn't be read: it is damaged, or not a WhyGraph export. The details are below.",
+  bundle_version: "This bundle was exported by a WhyGraph version this portal can't read. The details name both versions.",
+  bundle_too_large: {
+    tone: "warn",
+    message: "The bundle is too large. Export it again without chats.",
+  },
+  bundle_wrong_repo: {
+    tone: "warn",
+    message:
+      "This bundle is from another repository. Import it into the project of the repository it was exported from. A shallow clone may also be missing the first commits.",
+  },
+  transfer_needs_scan: {
+    title: "Run the first scan first",
+    tone: "warn",
+    message: "This project hasn't been scanned yet. Run its first scan, then try again.",
+  },
+
   // Usage & cost: budgets and prices (M2f-2)
   invalid_amount: "Enter a monthly budget greater than $0 and at most $1,000,000.",
   budget_above_org: (err) => {

@@ -169,6 +169,11 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     # ... and so does the project-purpose card (plan 41).
     ("GET", f"/api/projects/{SLUG}/purpose", None),
     ("POST", f"/api/projects/{SLUG}/purpose", None),
+    # ... and project transfer (plan 42 section 8.2).
+    ("GET", f"/api/projects/{SLUG}/transfer", None),
+    ("GET", f"/api/projects/{SLUG}/transfer/export", None),
+    ("POST", f"/api/projects/{SLUG}/transfer/import", None),
+    ("DELETE", f"/api/projects/{SLUG}/transfer/rationale", None),
     # Claude Code hooks: linked projects get none (plan 40 section 5.9).
     ("POST", f"/api/projects/{SLUG}/agent-hooks/session-start", {}),
     ("POST", f"/api/projects/{SLUG}/agent-hooks/post-tool", {}),

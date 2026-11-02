@@ -36,6 +36,15 @@ const STATE_BADGE: Record<NoteAnchorState, { label: string; variant: "success" |
   "n/a": null,
 };
 
+/** Marks a name that came in with an imported bundle (display-only provenance, plan 42). */
+export function ImportedBadge() {
+  return (
+    <Badge variant="outline" className="mx-1 align-middle" data-testid="imported-badge">
+      imported
+    </Badge>
+  );
+}
+
 /** The status and anchor-state badges of a note. */
 export function NoteBadges({ note }: { note: Note }) {
   const state = note.status === "confirmed" ? STATE_BADGE[note.anchor_state] : null;
@@ -336,8 +345,11 @@ export function NoteCard({
       ) : null}
       {!compact && (
         <p className="text-xs text-muted-foreground">
-          Proposed by {note.proposed_by_name ?? "a member"} {formatDateTime(note.proposed_at)}
-          {note.confirmed_at ? ` - confirmed by ${note.confirmed_by_name ?? "a member"} ${formatDateTime(note.confirmed_at)}` : ""}
+          Proposed by {note.proposed_by_name ?? "a member"}
+          {note.proposed_by_imported && <ImportedBadge />} {formatDateTime(note.proposed_at)}
+          {note.confirmed_at ? ` - confirmed by ${note.confirmed_by_name ?? "a member"}` : ""}
+          {note.confirmed_at && note.confirmed_by_imported && <ImportedBadge />}
+          {note.confirmed_at ? ` ${formatDateTime(note.confirmed_at)}` : ""}
           {note.retired_at ? ` - retired ${formatDateTime(note.retired_at)}${note.retire_reason ? ` (${note.retire_reason})` : ""}` : ""}
         </p>
       )}

@@ -10,6 +10,10 @@ each project's `whygraph.db` is in the same data directory, under `projects/<org
 data directory** (see [Copying the whole data directory](#copying-the-whole-data-directory)).
 `.codegraph/` stays in each repository and is rebuilt by a scan.
 
+!!! tip "Moving one project, not the portal"
+    To copy a single project's notes, descriptions and cards to another portal, use
+    [Export and import a project](transfer.md).
+
 ## Make a backup
 
 ```bash

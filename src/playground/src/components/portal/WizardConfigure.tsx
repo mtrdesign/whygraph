@@ -25,6 +25,7 @@ import { useScanRun, type ScanRunState } from "../../lib/scanRun";
 import { scanRunKey } from "../shell/crumbs";
 import { DisabledReason } from "../state/DisabledReason";
 import { ErrorState } from "../state/ErrorState";
+import { TransferImport } from "../settings/TransferImport";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -592,6 +593,20 @@ export function WizardConfigure({
         />
       ) : project.last_scan_at ? null : (
         <FirstScanStart slug={slug} project={project} onRun={onRun} />
+      )}
+
+      {finished && !linked && can(project, "project.configure") && (
+        <section className={CARD} data-testid="wizard-import">
+          <h2 className="text-sm font-semibold">Moving from another portal? Import a bundle first</h2>
+          <p className="text-sm text-muted-foreground">
+            A bundle from this repository brings its notes, purpose, descriptions and rationale cards, so you can skip
+            the options below. Optional.
+          </p>
+          <TransferImport
+            slug={slug}
+            onApplied={() => void queryClient.invalidateQueries({ queryKey: purposeKey(slug) })}
+          />
+        </section>
       )}
 
       {config.isError ? (

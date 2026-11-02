@@ -23,6 +23,7 @@ import { RemoveProjectDialog } from "../components/portal/RemoveProjectDialog";
 import { PathText } from "../components/layout/PathText";
 import { ReadOnlyNotice } from "../components/settings/ReadOnlyNotice";
 import { SectionForm } from "../components/settings/SectionForm";
+import { TransferSection } from "../components/settings/TransferSection";
 import { SettingsLayout, SettingsSection, type SettingsNavItem } from "../components/settings/SettingsLayout";
 import { PageSkeleton } from "../components/state/Skeletons";
 import { Button } from "../components/ui/button";
@@ -224,6 +225,7 @@ export function ProjectSettingsPage() {
   // Removing a project is an org action (ORG_REMOVE_PROJECT), not a project one.
   const showDanger = canAdmin(role) && !reader;
   const showAgents = !production;
+  const showTransfer = configurer && !reader && !linked;
   const canSetup = !reader && can(p, "project.setup");
 
   const sections: SettingsNavItem[] = linked
@@ -240,6 +242,7 @@ export function ProjectSettingsPage() {
         ...(showAgents ? [{ id: "agents", label: "Agents" }] : []),
         ...(showAccess ? [{ id: "access", label: "Access" }] : []),
         ...(showConnections ? [{ id: "connections", label: "Connected machines" }] : []),
+        ...(showTransfer ? [{ id: "transfer", label: "Export and import" }] : []),
       ];
   if (showDanger) sections.push({ id: "danger", label: "Danger zone" });
 
@@ -287,6 +290,7 @@ export function ProjectSettingsPage() {
           {showAgents && <Agents project={p} canSetup={canSetup} />}
           {showAccess && <ProjectAccess slug={slug} />}
           {showConnections && <ProjectConnectedPortals slug={slug} />}
+          {showTransfer && <TransferSection slug={slug} importing={!!p.importing} />}
         </>
       )}
 

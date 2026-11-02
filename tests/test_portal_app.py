@@ -1480,6 +1480,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     # The project-purpose card (plan 41): a generation is project.scan_full
     (f"{_P}/purpose", "GET"): _READ,
     (f"{_P}/purpose", "POST"): "project.scan_full",
+    # Project transfer (plan 42 D2, Q8): export, import and removing imported
+    # rationale cards are a project admin's
+    (f"{_P}/transfer", "GET"): _CONFIGURE,
+    (f"{_P}/transfer/export", "GET"): _CONFIGURE,
+    (f"{_P}/transfer/import", "POST"): _CONFIGURE,
+    (f"{_P}/transfer/rationale", "DELETE"): _CONFIGURE,
     # Claude Code hooks (plan 40 section 5.9): local only, project.read
     (f"{_P}/agent-hooks/session-start", "POST"): _READ,
     (f"{_P}/agent-hooks/post-tool", "POST"): _READ,

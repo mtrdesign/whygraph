@@ -31,13 +31,14 @@ model and token counts - never a body or any repository text.
 from __future__ import annotations
 
 import json
+import re
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, insert
 from sqlmodel import col, select
 
 from whygraph.analyze.exceptions import AnalyzeError
@@ -48,6 +49,7 @@ from whygraph.analyze.project_purpose import (
     generate,
 )
 from whygraph.core.config import ConfigError
+from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.core.usage import BUDGET_EXCEEDED, budget_message, usage_blocked
 from whygraph.db.engine import get_session as project_session
 from whygraph.db.models.project_note import ProjectNote
@@ -196,6 +198,174 @@ def _record(**values: Any) -> int:
         )
         session.commit()
         return int(row.id or 0)
+
+
+_IMPORT_RUN_STATUSES = frozenset({"ok", "failed", "no_input", "blocked"})
+_IMPORT_RUN_SOURCES = 20
+_IMPORT_FUTURE_SLACK = timedelta(minutes=5)
+_IMPORT_INT_MAX = 2**31
+
+
+def _import_run_line(value: object, name: str, max_chars: int) -> str | None:
+    """A single-line optional field of a purpose run; a format error when too long."""
+    if value is None:
+        return None
+    text = clean_text(value, multiline=False, max_chars=max_chars, field=name)
+    if text is None:
+        raise ImportFormatError(name, f"must be at most {max_chars} characters")
+    return text
+
+
+def _import_run_int(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= _IMPORT_INT_MAX
+    ):
+        raise ImportFormatError(name, "must be an integer between 0 and 2**31")
+    return value
+
+
+def import_runs(
+    session: Any,
+    records: Any,
+    *,
+    note_ids: dict[int, int],
+    now: datetime | None = None,
+) -> int:
+    """Insert the purpose runs of a transfer bundle (plan 42 section 5.5).
+
+    The only writer of ``project_purpose_run`` besides :func:`_record`. It
+    runs in the caller's session and never commits or prunes.
+
+    Parameters
+    ----------
+    session : Session
+        A session on the project's WhyGraph DB.
+    records : Iterable
+        ``PurposeRunRecord`` wire models or equivalent mappings.
+    note_ids : dict of int to int
+        Source note id -> target note id for the notes the import **inserted**
+        (``NotesImportResult.inserted_ids``, not ``id_map``): a run whose note
+        was skipped or matched an existing target note is skipped, so a
+        re-import never adds a run twice.
+    now : datetime, optional
+        The importer's clock for the future-timestamp bound (default: now).
+
+    Returns
+    -------
+    int
+        The number of runs inserted.
+
+    Raises
+    ------
+    ImportFormatError
+        An unknown status, a wrong type, a malformed timestamp or hash, a
+        timestamp more than five minutes in the future, a control character
+        in a single-line field or an over-long one, or a uid that already
+        carries the ``imported:`` prefix. ``index`` is the record position.
+    """
+    rows = _checked_runs(records, note_ids, now)
+    if rows:
+        session.connection().execute(insert(ProjectPurposeRun), rows)
+    return len(rows)
+
+
+def _checked_runs(
+    records: Any, note_ids: dict[int, int], now: datetime | None
+) -> list[dict[str, Any]]:
+    """Every record checked; the rows of the runs whose note landed."""
+    latest = (now or datetime.now(timezone.utc)) + _IMPORT_FUTURE_SLACK
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(records):
+        rec = raw if isinstance(raw, dict) else raw.model_dump()
+        try:
+            row = _check_run(rec, latest, note_ids)
+        except ImportFormatError as exc:
+            exc.index = index
+            raise
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def check_import_runs(records: Any, *, now: datetime | None = None) -> None:
+    """Format-check a bundle's purpose runs without writing (plan 42 Q11).
+
+    :func:`import_runs`' checks with no note landed, so the transfer import
+    can refuse a bundle before it writes anything.
+
+    Parameters
+    ----------
+    records : Iterable
+        ``PurposeRunRecord`` wire models or equivalent mappings.
+    now : datetime, optional
+        The importer's clock (default: now).
+
+    Raises
+    ------
+    ImportFormatError
+        As :func:`import_runs`.
+    """
+    _checked_runs(records, {}, now)
+
+
+def _check_run(
+    rec: dict[str, Any], latest: datetime, note_ids: dict[int, int]
+) -> dict[str, Any] | None:
+    """One run as a row dict, or ``None`` when its note did not land."""
+    status = rec.get("status")
+    if status not in _IMPORT_RUN_STATUSES:
+        raise ImportFormatError("status", "must be ok, failed, no_input or blocked")
+    requested_by = _import_run_line(rec.get("requested_by"), "requested_by", 200)
+    if requested_by is None:
+        raise ImportFormatError("requested_by", "must be text")
+    if requested_by.startswith(notes.IMPORTED_UID_PREFIX):
+        raise ImportFormatError("requested_by", "must not carry the imported: prefix")
+    if requested_by:
+        requested_by = notes.IMPORTED_UID_PREFIX + requested_by
+    started_at = notes._import_time(rec.get("started_at"), "started_at", latest)
+    finished_at = notes._import_time(rec.get("finished_at"), "finished_at", latest)
+    if started_at is None or finished_at is None:
+        raise ImportFormatError("started_at", "timestamps are required")
+    input_hash = rec.get("input_hash")
+    if input_hash is not None and (
+        not isinstance(input_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", input_hash)
+    ):
+        raise ImportFormatError("input_hash", "must be 64 lowercase hex")
+    sources = rec.get("sources")
+    sources_json: str | None = None
+    if sources is not None:
+        if not isinstance(sources, list | tuple):
+            raise ImportFormatError("sources", "must be a list of paths")
+        if len(sources) > _IMPORT_RUN_SOURCES:
+            raise ImportFormatError(
+                "sources", f"must hold at most {_IMPORT_RUN_SOURCES} paths"
+            )
+        sources_json = json.dumps(
+            [_import_run_line(item, "sources", 4_096) or "" for item in sources]
+        )
+    note_id = _import_run_int(rec.get("note_id"), "note_id")
+    row = {
+        "requested_by": requested_by,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "status": status,
+        "input_hash": input_hash,
+        "input_bytes": _import_run_int(rec.get("input_bytes"), "input_bytes"),
+        "sources": sources_json,
+        "provider": _import_run_line(rec.get("provider"), "provider", 200),
+        "model": _import_run_line(rec.get("model"), "model", 200),
+        "tokens_in": _import_run_int(rec.get("tokens_in"), "tokens_in"),
+        "tokens_out": _import_run_int(rec.get("tokens_out"), "tokens_out"),
+        "error_code": _import_run_line(rec.get("error_code"), "error_code", 100),
+    }
+    if note_id is None or note_id not in note_ids:
+        return None
+    row["note_id"] = note_ids[note_id]
+    return row
 
 
 def _producing_run(note_id: int) -> ProjectPurposeRun | None:

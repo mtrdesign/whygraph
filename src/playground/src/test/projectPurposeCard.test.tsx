@@ -217,4 +217,16 @@ describe("notes lib with the purpose kind", () => {
     expect(NOTE_KINDS).toEqual(["decision", "constraint", "gotcha", "convention"]);
     expect(NOTE_KINDS).not.toContain("purpose");
   });
+
+  it("shows an imported badge when the confirmer or proposer came from a bundle", async () => {
+    state.confirmed = note({ id: 1, status: "confirmed", confirmed_by_imported: true });
+    await mount();
+    expect(screen.getByTestId("imported-badge")).toBeInTheDocument();
+  });
+
+  it("shows no imported badge for a native note", async () => {
+    state.confirmed = note({ id: 1, status: "confirmed" });
+    await mount();
+    expect(screen.queryByTestId("imported-badge")).toBeNull();
+  });
 });

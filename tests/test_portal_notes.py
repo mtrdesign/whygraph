@@ -257,6 +257,62 @@ def test_display_names_and_the_former_member(api: SimpleNamespace) -> None:
     assert done["proposed_by_name"] == "Finn"
 
 
+def _seed_actor(t: SimpleNamespace, uid: str, name: str) -> None:
+    from whygraph.db.models.imported_actor import ImportedActor
+    from whygraph.db.models.project_import import ProjectImport
+
+    with use_project(manual_ctx(t.root, "api", "acme")), project_session() as session:
+        imp = ProjectImport(
+            bundle_sha256="0" * 64,
+            imported_by=t.uids["ben"],
+            imported_at="2026-10-30T10:00:00+00:00",
+            source_mode="local",
+            source_label="me/src",
+            whygraph_version="2.2.1",
+            counts="{}",
+        )
+        session.add(imp)
+        session.commit()
+        session.refresh(imp)
+        session.add(ImportedActor(uid=uid, display_name=name, import_id=imp.id))
+        session.commit()
+
+
+def test_an_imported_uid_never_resolves_to_a_member(api: SimpleNamespace) -> None:
+    t = api
+    fake = "imported:" + t.uids["cy"]
+    _seed_actor(t, fake, "Source Person")
+    (nid,) = seed_rows(
+        t,
+        {
+            "kind": "purpose",
+            "status": "confirmed",
+            "proposed_by": "imported:nobody",
+            "confirmed_by": fake,
+            "confirmed_at": "2026-10-30T11:00:00+00:00",
+        },
+    )
+    listed = {n["id"]: n for n in call(t, "ben", "GET", N).json()}
+    note = listed[nid]
+    assert note["confirmed_by_name"] == "Source Person"
+    assert note["confirmed_by_imported"] is True
+    # No imported_actor row: the same fallback as an unknown member uid.
+    assert note["proposed_by_name"] == "Former member"
+    assert note["proposed_by_imported"] is True
+    purpose = call(t, "ben", "GET", "/api/projects/api/purpose").json()
+    assert purpose["confirmed"]["confirmed_by_name"] == "Source Person"
+    assert purpose["confirmed"]["confirmed_by_imported"] is True
+
+
+def test_a_member_uid_is_not_flagged_imported(api: SimpleNamespace) -> None:
+    t = api
+    (nid,) = seed_rows(t, {"proposed_by": t.uids["finn"]})
+    note = {n["id"]: n for n in call(t, "ben", "GET", N).json()}[nid]
+    assert note["proposed_by_name"] == "Finn"
+    assert note["proposed_by_imported"] is False
+    assert note["confirmed_by_imported"] is False
+
+
 # ---------------------------------------------------------------------------
 # Wide notes need a second confirmer
 # ---------------------------------------------------------------------------

@@ -667,6 +667,8 @@ plus these GitHub, member, project and organization events:
 | `note_confirmed`, `note_reconfirmed`, `note_retired` | A member confirmed a project note, marked it still true, or retired it (with the note id, its source and anchor kind, and whether the confirmer was also the proposer; never the note text). |
 | `note_bulk_rejected` | A member rejected all of one person's pending agent proposals from one origin (with the proposer as the target, the origin and the count). |
 | `purpose_generated` | A project admin generated a project purpose and a model call was made (with the run id, its `status` - `ok` or `failed` - the model and the token counts; never the inputs or the text). |
+| `project_bundle_exported`, `project_bundle_imported` | A project admin exported a project bundle (with whether their chats were included, the file's size and sha256, and the rows per kind), or applied one (with the bundle's sha256, the mode that exported it, whether its settings were applied, the counts of notes, purpose runs, rationale cards, descriptions and chats added, and whether the rationale cards or descriptions were only partly imported; never any text). A dry run is not recorded. |
+| `imported_rationale_removed` | A project admin removed the rationale cards imports had added (with the count). |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
 | `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |

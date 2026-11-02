@@ -93,6 +93,7 @@ nav:
       - Usage & cost: portal/usage.md
       - Security model: portal/security.md
       - Backup and restore: portal/backup.md
+      - Export and import a project: portal/transfer.md
       - Upgrading: portal/upgrading.md
   - User Guide:
       - guide/index.md

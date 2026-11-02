@@ -41,17 +41,20 @@ import os
 import re
 import sqlite3
 import stat
-from collections.abc import Iterable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
 
 from mcp.server.fastmcp import FastMCP
-from sqlalchemy import and_, case, false, func, or_, update
+from sqlalchemy import and_, case, false, func, insert, or_, update
 from sqlmodel import Session, col, select
 
 from whygraph.core import get_config
+from whygraph.core.config import AREA_NAME_RE
 from whygraph.core.context import current_actor, current_project
+from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.core.utils import LIKE_ESCAPE_CHAR, like_escape
 from whygraph.db import get_session
@@ -158,6 +161,15 @@ _ANCHOR_KEYS: dict[str, frozenset[str]] = {
     "range": frozenset({"path", "line_start", "line_end"}),
 }
 """The fields each anchor kind takes, besides ``kind``."""
+
+_DUPLICATE_KEYS: dict[str, tuple[str, ...]] = {
+    "project": (),
+    "area": ("area",),
+    "path": ("anchor_path",),
+    "symbol": ("qualified_name", "anchor_path"),
+    "range": ("anchor_path", "line_start", "line_end"),
+}
+"""The stored anchor columns two notes must share to be duplicates."""
 
 _RETIRE_FROM = {"rejected": "proposed", "outdated": "confirmed", "wrong": "confirmed"}
 """A retire reason a caller may pass, and the status it retires from."""
@@ -1124,14 +1136,7 @@ def _find_duplicate(
         col(ProjectNote.status) != "retired",
         col(ProjectNote.anchor_kind) == kind,
     ]
-    keys: tuple[str, ...] = {
-        "project": (),
-        "area": ("area",),
-        "path": ("anchor_path",),
-        "symbol": ("qualified_name", "anchor_path"),
-        "range": ("anchor_path", "line_start", "line_end"),
-    }[kind]
-    for key in keys:
+    for key in _DUPLICATE_KEYS[kind]:
         value = fields.get(key)
         column = col(getattr(ProjectNote, key))
         conditions.append(column.is_(None) if value is None else column == value)
@@ -2069,6 +2074,775 @@ def render_note_line(note: NoteView) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Import from a project-transfer bundle (plan 42 section 5.3)
+# ---------------------------------------------------------------------------
+
+IMPORTED_UID_PREFIX = "imported:"
+"""Prefix of every uid an imported note carries (plan 42 D12).
+
+A bundle's uids are stored as ``imported:<uid>`` and resolved only through
+``imported_actor``, so an imported note never reads as proposed or confirmed
+by a real member of the target project.
+"""
+
+IMPORT_MAX_LINE = 10_000_000
+"""Largest line number an imported anchor may name; beyond it the note is skipped."""
+
+_IMPORT_QUALIFIED_NAME_MAX = 1_000
+_IMPORT_UID_MAX = 200
+_IMPORT_PATH_MAX = 4_096
+_IMPORT_FUTURE_SLACK = timedelta(minutes=5)
+_IMPORT_REF_RE = re.compile(r"[0-9a-f]{40}|#[1-9][0-9]{0,8}")
+_CONTENT_HASH_RE = re.compile(r"[0-9a-f]{64}")
+_IN_CHUNK = 500
+
+_STORED_ANCHOR_COLUMNS: dict[str, tuple[str, ...]] = {
+    "project": (),
+    "area": ("area",),
+    "path": ("anchor_path",),
+    "symbol": (
+        "qualified_name",
+        "anchor_path",
+        "line_start",
+        "line_end",
+        "content_hash",
+    ),
+    "range": ("anchor_path", "line_start", "line_end", "content_hash"),
+}
+"""The ``project_note`` columns each anchor kind stores (not the API keys of
+:data:`_ANCHOR_KEYS`). Every other anchor column must be null."""
+
+_ANCHOR_COLUMNS = (
+    "anchor_path",
+    "line_start",
+    "line_end",
+    "qualified_name",
+    "area",
+    "content_hash",
+)
+
+_PROVENANCE_KEYS: dict[str, tuple[str, ...]] = {
+    "project": (),
+    "area": ("area",),
+    "path": ("anchor_path",),
+    "symbol": ("qualified_name",),
+    "range": ("anchor_path", "line_start", "line_end"),
+}
+"""The anchor columns of the provenance key (plan 42 D13): the ones a
+re-confirmation never rewrites (a symbol's file, lines and hash move)."""
+
+_LIFECYCLE = (
+    ("confirmed_by", "confirmed_at"),
+    ("reconfirmed_by", "reconfirmed_at"),
+    ("retired_by", "retired_at"),
+)
+
+_LIVE_STATUSES = ("proposed", "confirmed")
+
+
+@dataclass
+class NotesImportResult:
+    """What :func:`import_notes` did, with the id maps the caller needs.
+
+    Attributes
+    ----------
+    inserted : dict of str to int
+        New notes per stored status (``proposed``, ``confirmed``,
+        ``retired``).
+    skipped_duplicate : int
+        Records that matched a target note (by provenance, or as a
+        :func:`propose` duplicate) and were mapped to it.
+    skipped_purpose : int
+        ``purpose`` notes skipped because the target already has a live one
+        (plan 42 D11).
+    skipped_oversize : int
+        Records skipped for an over-long body or name, or a line past
+        :data:`IMPORT_MAX_LINE`.
+    skipped_denied : int
+        Records whose anchor path is deny-listed.
+    refs_unresolved : int
+        Refs of inserted notes with no commit, pull request or issue row on
+        the target (kept, plan 42 D14).
+    revision_unlinked : int
+        Inserted notes whose ``supersedes_id`` was set to null: the revised
+        note was skipped, or a proposed revision's mapped note is not
+        confirmed on the target.
+    downgraded : int
+        Inserted notes stored ``proposed`` although the bundle had them
+        ``confirmed`` (``keep_status=False``).
+    id_map : dict of int to int
+        Source note id -> target note id, for every record that was
+        inserted **or** matched an existing note.
+    inserted_ids : dict of int to int
+        The subset of ``id_map`` for the notes this call inserted. Purpose
+        runs remap through it, so a re-import never adds a run twice.
+    confirmed_ids : list of int
+        Target ids of the confirmed notes this call inserted, in insert
+        order; the caller decides which are wide (plan 42 Q5).
+    """
+
+    inserted: dict[str, int] = field(
+        default_factory=lambda: {status: 0 for status in STATUSES}
+    )
+    skipped_duplicate: int = 0
+    skipped_purpose: int = 0
+    skipped_oversize: int = 0
+    skipped_denied: int = 0
+    refs_unresolved: int = 0
+    revision_unlinked: int = 0
+    downgraded: int = 0
+    id_map: dict[int, int] = field(default_factory=dict)
+    inserted_ids: dict[int, int] = field(default_factory=dict)
+    confirmed_ids: list[int] = field(default_factory=list)
+
+    def counts(self) -> dict[str, Any]:
+        """The ``notes`` block of the transfer ``ImportResult`` (plan 42 section 7.2).
+
+        Returns
+        -------
+        dict
+            ``inserted`` (per status) and the skip / ref / revision /
+            downgrade counters; no ids.
+        """
+        return {
+            "inserted": dict(self.inserted),
+            "skipped_duplicate": self.skipped_duplicate,
+            "skipped_purpose": self.skipped_purpose,
+            "skipped_oversize": self.skipped_oversize,
+            "skipped_denied": self.skipped_denied,
+            "refs_unresolved": self.refs_unresolved,
+            "revision_unlinked": self.revision_unlinked,
+            "downgraded": self.downgraded,
+        }
+
+
+@dataclass
+class _ImportedNote:
+    """One checked bundle record, ready to dedupe and insert."""
+
+    index: int
+    source_id: int
+    source_status: str
+    values: dict[str, Any]
+    refs: list[str]
+    supersedes: int | None
+    skip: str | None
+    downgraded: bool
+
+    @property
+    def is_purpose(self) -> bool:
+        """A ``purpose`` note."""
+        return self.values["kind"] == PURPOSE_KIND
+
+
+def _note_body(value: object, max_chars: int) -> str | None:
+    """An imported body under :func:`_clean_body`'s rules; ``None`` when too long."""
+    if not isinstance(value, str):
+        raise ImportFormatError("body", "must be text")
+    text = value.strip()
+    if not text:
+        raise ImportFormatError("body", "must not be empty")
+    if any(ch != "\n" and _is_control(ch) for ch in text):
+        raise ImportFormatError(
+            "body", "must not contain control characters other than newlines"
+        )
+    if any("\ud800" <= ch <= "\udfff" for ch in text):
+        raise ImportFormatError("body", "must not hold a lone surrogate")
+    if len(text) > max_chars:
+        return None
+    return text
+
+
+def _lexical_path(path: object, *, field: str = "path") -> str | None:
+    """Check an imported repo path without touching the file system (plan 42 D10).
+
+    Parameters
+    ----------
+    path : object
+        A repo-relative POSIX path from a bundle.
+    field : str, optional
+        The field name used in an :class:`ImportFormatError`.
+
+    Returns
+    -------
+    str or None
+        The path unchanged, or ``None`` when Chat's deny-list refuses it in
+        any letter case (``.ENV``, ``.Git/config``): the caller skips the
+        record (``skipped_denied``).
+
+    Raises
+    ------
+    ImportFormatError
+        Not text; empty; longer than 4,096 characters; a NUL, another
+        control or a bidi character; absolute; a backslash; a ``.``,
+        ``..`` or empty segment (so also the root and a trailing ``/``).
+    """
+    if not isinstance(path, str) or not path:
+        raise ImportFormatError(field, "must be a repository path")
+    if len(path) > _IMPORT_PATH_MAX:
+        raise ImportFormatError(field, f"must be at most {_IMPORT_PATH_MAX} characters")
+    if "\x00" in path or "\\" in path:
+        raise ImportFormatError(field, "must not contain NUL or a backslash")
+    clean_text(path, multiline=False, max_chars=_IMPORT_PATH_MAX, field=field)
+    if path.startswith("/"):
+        raise ImportFormatError(field, "must be relative to the repository root")
+    if any(part in ("", ".", "..") for part in path.split("/")):
+        raise ImportFormatError(
+            field, "must not hold an empty, '.' or '..' segment or end with '/'"
+        )
+    # Function-local: chat/__init__ -> chat.tools -> mcp.rationale -> mcp.notes.
+    from whygraph.chat.files import _is_denied
+
+    if (
+        _is_denied(Path(path)) is not None
+        or _is_denied(Path(path.casefold())) is not None
+    ):
+        return None
+    return path
+
+
+def _import_uid(value: object, name: str) -> str | None:
+    """A bundle uid stored under :data:`IMPORTED_UID_PREFIX`, or ``None``."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ImportFormatError(name, "must be a non-empty uid")
+    if value.startswith(IMPORTED_UID_PREFIX):
+        raise ImportFormatError(name, "must not carry the imported: prefix")
+    if (
+        clean_text(value, multiline=False, max_chars=_IMPORT_UID_MAX, field=name)
+        is None
+    ):
+        raise ImportFormatError(name, f"must be at most {_IMPORT_UID_MAX} characters")
+    return IMPORTED_UID_PREFIX + value
+
+
+def _import_time(value: object, name: str, latest: datetime) -> str | None:
+    """An ISO-8601 timestamp no later than ``latest``, kept verbatim, or ``None``."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.isascii() or len(value) > 40:
+        raise ImportFormatError(name, "must be an ISO-8601 timestamp")
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise ImportFormatError(name, "must be an ISO-8601 timestamp") from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    if moment > latest:
+        raise ImportFormatError(name, "must not be in the future")
+    return value
+
+
+def _import_refs(value: object) -> list[str]:
+    """Format-valid refs in stored form (full SHAs, ``#N``), de-duplicated."""
+    if value is None:
+        return []
+    if not isinstance(value, list | tuple):
+        raise ImportFormatError("refs", "must be a list")
+    if len(value) > MAX_REFS:
+        raise ImportFormatError("refs", f"must hold at most {MAX_REFS} entries")
+    out: list[str] = []
+    for ref in value:
+        if not isinstance(ref, str) or not _IMPORT_REF_RE.fullmatch(ref):
+            raise ImportFormatError("refs", "must be full lowercase SHAs or #N")
+        if ref not in out:
+            out.append(ref)
+    return out
+
+
+def _import_origin(value: object, chat_ids: Mapping[int, int]) -> str | None:
+    """An origin, with ``chat:<n>`` remapped to the imported session or nulled."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _ORIGIN_RE.fullmatch(value):
+        raise ImportFormatError("origin", "must be ui, mcp or chat:<session id>")
+    if not value.startswith("chat:"):
+        return value
+    target = chat_ids.get(int(value.removeprefix("chat:")))
+    return f"chat:{target}" if target is not None else None
+
+
+def _import_line(value: object, name: str) -> int:
+    """A line number of at least 1 (the upper bound is the caller's skip)."""
+    if not _is_int(value) or value < 1:  # type: ignore[operator]
+        raise ImportFormatError(name, "must be a line number of at least 1")
+    return int(value)  # type: ignore[arg-type]
+
+
+def _import_anchor(
+    record: Mapping[str, Any], anchor_kind: str
+) -> tuple[dict, str | None]:
+    """The stored anchor columns of a record, and a skip reason or ``None``."""
+    allowed = _STORED_ANCHOR_COLUMNS[anchor_kind]
+    for name in _ANCHOR_COLUMNS:
+        if name not in allowed and record.get(name) is not None:
+            raise ImportFormatError(name, f"must be null for a {anchor_kind} anchor")
+    values: dict[str, Any] = {name: None for name in _ANCHOR_COLUMNS}
+    skip: str | None = None
+    if "area" in allowed:
+        area = record.get("area")
+        if not isinstance(area, str) or not AREA_NAME_RE.fullmatch(area):
+            raise ImportFormatError("area", "must be an area name")
+        values["area"] = area
+    if "qualified_name" in allowed:
+        name = clean_text(
+            record.get("qualified_name"),
+            multiline=False,
+            max_chars=_IMPORT_QUALIFIED_NAME_MAX,
+            field="qualified_name",
+        )
+        if name is None:
+            skip = "oversize"
+        elif not name.strip():
+            raise ImportFormatError("qualified_name", "must not be empty")
+        values["qualified_name"] = name
+    if "line_start" in allowed:
+        start = _import_line(record.get("line_start"), "line_start")
+        end = _import_line(record.get("line_end"), "line_end")
+        if end < start:
+            raise ImportFormatError("line_end", "must not be before line_start")
+        if end > IMPORT_MAX_LINE:
+            skip = "oversize"
+        values["line_start"], values["line_end"] = start, end
+    if "content_hash" in allowed:
+        content_hash = record.get("content_hash")
+        if content_hash is not None and (
+            not isinstance(content_hash, str)
+            or not _CONTENT_HASH_RE.fullmatch(content_hash)
+        ):
+            raise ImportFormatError("content_hash", "must be 64 lowercase hex digits")
+        values["content_hash"] = content_hash
+    if "anchor_path" in allowed:
+        path = _lexical_path(record.get("anchor_path"), field="anchor_path")
+        if path is None:
+            skip = "denied"
+        values["anchor_path"] = path if path is not None else record.get("anchor_path")
+    return values, skip
+
+
+def _choice(record: Mapping[str, Any], name: str, allowed: tuple[str, ...]) -> str:
+    """A field whose value must be one of ``allowed``."""
+    value = record.get(name)
+    if value not in allowed:
+        raise ImportFormatError(name, f"must be one of {', '.join(allowed)}")
+    return str(value)
+
+
+def _import_lifecycle(record: Mapping[str, Any], status: str, latest: datetime) -> dict:
+    """The actor and time columns of a record, checked against its status."""
+    values: dict[str, Any] = {
+        "proposed_by": _import_uid(record.get("proposed_by"), "proposed_by"),
+        "proposed_at": _import_time(record.get("proposed_at"), "proposed_at", latest),
+    }
+    if values["proposed_by"] is None or values["proposed_at"] is None:
+        raise ImportFormatError("proposed_by", "a note needs its proposer and time")
+    for by, at in _LIFECYCLE:
+        values[by] = _import_uid(record.get(by), by)
+        values[at] = _import_time(record.get(at), at, latest)
+        if (values[by] is None) != (values[at] is None):
+            raise ImportFormatError(by, f"is set exactly when {at} is")
+    reason = record.get("retire_reason")
+    if reason is not None and reason not in RETIRE_REASONS:
+        raise ImportFormatError(
+            "retire_reason", f"must be one of {', '.join(RETIRE_REASONS)}"
+        )
+    values["retire_reason"] = reason
+    retired = values["retired_by"] is not None
+    if retired != (reason is not None):
+        raise ImportFormatError("retire_reason", "is set exactly when retired_by is")
+    if retired != (status == "retired"):
+        raise ImportFormatError("retired_by", "is set exactly on a retired note")
+    confirmed = values["confirmed_by"] is not None
+    if status == "confirmed" and not confirmed:
+        raise ImportFormatError("confirmed_by", "a confirmed note needs its confirmer")
+    if status == "proposed" and confirmed:
+        raise ImportFormatError("confirmed_by", "must be null on a proposed note")
+    if values["reconfirmed_by"] is not None and not confirmed:
+        raise ImportFormatError("reconfirmed_by", "needs a confirmed note")
+    return values
+
+
+def _check_import_record(
+    raw: object,
+    index: int,
+    *,
+    keep_status: bool,
+    chat_ids: Mapping[int, int],
+    latest: datetime,
+) -> _ImportedNote:
+    """Check one bundle record into an :class:`_ImportedNote` (pass one)."""
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+    if not isinstance(raw, Mapping):
+        raise ImportFormatError("record", "must be an object")
+    record: Mapping[str, Any] = raw
+    source_id = record.get("id")
+    if not _is_int(source_id) or not 0 <= source_id <= 2**31:  # type: ignore[operator]
+        raise ImportFormatError("id", "must be a note id")
+    kind = _choice(record, "kind", NOTE_KINDS)
+    anchor_kind = _choice(record, "anchor_kind", ANCHOR_KINDS)
+    source = _choice(record, "source", SOURCES)
+    status = _choice(record, "status", STATUSES)
+    if source == PURPOSE_SOURCE and kind != PURPOSE_KIND:
+        raise ImportFormatError("source", "analysis is only the purpose note's source")
+    if kind == PURPOSE_KIND and (anchor_kind != "project" or source != PURPOSE_SOURCE):
+        raise ImportFormatError(
+            "kind", "a purpose note has a project anchor and source analysis"
+        )
+    lifecycle = _import_lifecycle(record, status, latest)
+    edited = record.get("edited_on_confirm", False)
+    if not isinstance(edited, bool):
+        raise ImportFormatError("edited_on_confirm", "must be true or false")
+    supersedes = record.get("supersedes_id")
+    if supersedes is not None and not _is_int(supersedes):
+        raise ImportFormatError("supersedes_id", "must be a note id")
+    refs = _import_refs(record.get("refs"))
+    origin = _import_origin(record.get("origin"), chat_ids)
+    anchor, skip = _import_anchor(record, anchor_kind)
+    downgraded = status == "confirmed" and not keep_status
+    stored_status = "proposed" if downgraded else status
+    if downgraded:
+        for by, at in _LIFECYCLE[:2]:
+            lifecycle[by] = lifecycle[at] = None
+    cap = (
+        PURPOSE_BODY_MAX_CHARS
+        if kind == PURPOSE_KIND and stored_status == "proposed"
+        else BODY_MAX_CHARS
+    )
+    body = _note_body(record.get("body"), cap)
+    if body is None and skip is None:
+        skip = "oversize"
+    values: dict[str, Any] = {
+        "kind": kind,
+        "body": body if body is not None else "",
+        "proposed_body": "" if edited and stored_status != "proposed" else None,
+        "status": stored_status,
+        "anchor_kind": anchor_kind,
+        **anchor,
+        "source": source,
+        "origin": origin,
+        "refs": json.dumps(refs) if refs else None,
+        **lifecycle,
+    }
+    return _ImportedNote(
+        index=index,
+        source_id=int(source_id),  # type: ignore[arg-type]
+        source_status=status,
+        values=values,
+        refs=refs,
+        supersedes=supersedes,  # type: ignore[arg-type]
+        skip=skip,
+        downgraded=downgraded,
+    )
+
+
+def _check_import_bundle(records: list[_ImportedNote], *, keep_status: bool) -> None:
+    """The bundle-level rules: unique ids, one live purpose per status, no forward revision.
+
+    Without ``keep_status`` a confirmed purpose would be stored proposed
+    beside the bundle's pending purpose; it is marked skipped instead, so the
+    target never holds two proposed purposes.
+    """
+    seen: set[int] = set()
+    for rec in records:
+        if rec.source_id in seen:
+            raise ImportFormatError("id", "repeats another note's id", index=rec.index)
+        seen.add(rec.source_id)
+    live_purpose: dict[str, _ImportedNote] = {}
+    for rec in records:
+        if not rec.is_purpose or rec.source_status not in _LIVE_STATUSES:
+            continue
+        if rec.source_status in live_purpose:
+            raise ImportFormatError(
+                "kind",
+                f"the bundle holds more than one {rec.source_status} purpose note",
+                index=rec.index,
+            )
+        live_purpose[rec.source_status] = rec
+    for rec in records:
+        if rec.supersedes is not None and not (
+            rec.supersedes < rec.source_id and rec.supersedes in seen
+        ):
+            raise ImportFormatError(
+                "supersedes_id",
+                "must name an earlier note of the bundle",
+                index=rec.index,
+            )
+    if not keep_status and len(live_purpose) == 2:
+        # Both would be stored proposed; keep the pending revision only.
+        live_purpose["confirmed"].skip = "purpose"
+
+
+def _provenance_key(values: Mapping[str, Any]) -> tuple:
+    """Plan 42 D13: kind, anchor, normalised body, ``proposed_at``, proposer."""
+    kind = values["anchor_kind"]
+    return (
+        values["kind"],
+        kind,
+        tuple(values[name] for name in _PROVENANCE_KEYS[kind]),
+        _normalise(values["body"]),
+        values["proposed_at"],
+        str(values["proposed_by"]).removeprefix(IMPORTED_UID_PREFIX),
+    )
+
+
+def _duplicate_key(values: Mapping[str, Any]) -> tuple:
+    """The in-memory form of :func:`_find_duplicate`'s match."""
+    kind = values["anchor_kind"]
+    return (
+        kind,
+        tuple(values[name] for name in _DUPLICATE_KEYS[kind]),
+        _normalise(values["body"]),
+    )
+
+
+def _known_refs(session: Session, refs: set[str]) -> set[str]:
+    """The refs that name a commit, pull request or issue row of this project."""
+    shas = sorted(r for r in refs if not r.startswith("#"))
+    numbers = sorted({int(r[1:]) for r in refs if r.startswith("#")})
+    known: set[str] = set()
+    for start in range(0, len(shas), _IN_CHUNK):
+        chunk = shas[start : start + _IN_CHUNK]
+        known.update(
+            session.exec(select(Commit.sha).where(col(Commit.sha).in_(chunk))).all()
+        )
+    for model in (PullRequest, Issue):
+        for start in range(0, len(numbers), _IN_CHUNK):
+            chunk = numbers[start : start + _IN_CHUNK]
+            found = session.exec(
+                select(model.number).where(col(model.number).in_(chunk))
+            ).all()
+            known.update(f"#{n}" for n in found)
+    return known
+
+
+def _check_import_records(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    keep_status: bool,
+    chat_ids: Mapping[int, int],
+) -> list[_ImportedNote]:
+    """Pass one of :func:`import_notes`: every record, then the bundle-level rules."""
+    latest = _utcnow() + _IMPORT_FUTURE_SLACK
+    checked: list[_ImportedNote] = []
+    for index, raw in enumerate(records):
+        try:
+            checked.append(
+                _check_import_record(
+                    raw,
+                    index,
+                    keep_status=keep_status,
+                    chat_ids=chat_ids,
+                    latest=latest,
+                )
+            )
+        except ImportFormatError as exc:
+            exc.index = index
+            raise
+    _check_import_bundle(checked, keep_status=keep_status)
+    return checked
+
+
+def check_import_notes(
+    records: Sequence[Mapping[str, Any]], *, keep_status: bool
+) -> None:
+    """Format-check a bundle's notes without touching the database (plan 42 Q11).
+
+    The first pass of :func:`import_notes` on its own, so the transfer import
+    can refuse a bundle before it writes anything. A ``chat:<n>`` origin is
+    only checked for its form here; :func:`import_notes` remaps it.
+
+    Parameters
+    ----------
+    records : sequence of Mapping
+        ``notes.jsonl`` records, as :func:`import_notes` takes them.
+    keep_status : bool
+        As for :func:`import_notes` (the bundle-level purpose rule uses it).
+
+    Raises
+    ------
+    ImportFormatError
+        As :func:`import_notes`.
+    """
+    _check_import_records(records, keep_status=keep_status, chat_ids={})
+
+
+def import_notes(
+    session: Session,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    keep_status: bool,
+    actor: str | None,
+    chat_ids: Mapping[int, int],
+    purpose_allowed: bool,
+) -> NotesImportResult:
+    """Insert a transfer bundle's notes (plan 42 section 5.3).
+
+    A separate entry point from :func:`propose`: it recreates history
+    (statuses, authors, times, supersede chains) that the propose path never
+    writes, and it checks anchors lexically only (plan 42 D10). The target's
+    data always wins: a record that matches a target note is mapped to it,
+    never written over it, so a re-import adds nothing (D3, D6).
+
+    Two passes. The first checks every record and the bundle as a whole and
+    raises :class:`~whygraph.core.import_checks.ImportFormatError` on a
+    format violation, before anything is written. The second walks the
+    records in source-id order: purpose notes are skipped unless
+    ``purpose_allowed``, over-long and deny-listed records are skipped and
+    counted, a record matching a target note by provenance (any status) or
+    as a :func:`propose` duplicate (non-retired) is mapped to it, and every
+    other record is inserted. A confirmed revision of a note that is still
+    confirmed here (the source confirmed it after an earlier import) goes
+    in as a proposed revision and counts as ``downgraded``, so two
+    confirmed versions never coexist; a purpose note in that position is
+    skipped. The match runs on one in-memory index of the
+    target's notes, which new inserts join, so the cost is linear.
+
+    Parameters
+    ----------
+    session : Session
+        The caller's project-DB session, inside its write transaction. This
+        function never commits, rolls back or opens another session.
+    records : sequence of Mapping
+        ``notes.jsonl`` records in wire form: the ``project_note`` columns
+        with ``refs`` as a list and ``edited_on_confirm`` instead of
+        ``proposed_body``, uids unprefixed. Objects with a ``model_dump()``
+        (the bundle's wire models) are accepted too.
+    keep_status : bool
+        ``True`` keeps statuses (an importer who may configure the project,
+        plan 42 Q2). ``False`` stores a ``confirmed`` record as ``proposed``
+        without its confirm and reconfirm fields; ``retired`` stays.
+    actor : str or None
+        The importer; required, but stored on no note (the authors are the
+        bundle's, under :data:`IMPORTED_UID_PREFIX`).
+    chat_ids : Mapping of int to int
+        Source chat session id -> target session id for every session the
+        chat import inserted or matched; ``chat:<n>`` origins of any other
+        session become null.
+    purpose_allowed : bool
+        Whether ``purpose`` notes may be inserted: ``False`` when the target
+        already has a live purpose note (plan 42 D11, decided by the caller
+        once, before any insert).
+
+    Returns
+    -------
+    NotesImportResult
+        The counts (:meth:`NotesImportResult.counts`), the source -> target
+        id maps and the ids of the confirmed notes inserted.
+
+    Raises
+    ------
+    ImportFormatError
+        A format violation; ``index`` is the record's position in
+        ``records`` (or ``None`` for a check of the whole call).
+    WhyGraphError
+        ``note_linked`` on a linked project; ``note_no_actor`` without an
+        ``actor``.
+
+    Notes
+    -----
+    No agent cap applies: the uids are namespaced, so they never charge a
+    real member's daily cap, and pending agent proposals do not travel.
+    """
+    _refuse_linked()
+    _require_actor(actor)
+    checked = _check_import_records(records, keep_status=keep_status, chat_ids=chat_ids)
+
+    result = NotesImportResult()
+    statuses: dict[int, str] = {}
+    by_provenance: dict[tuple, int] = {}
+    by_duplicate: dict[tuple, int] = {}
+    columns = (
+        ProjectNote.id,
+        ProjectNote.kind,
+        ProjectNote.status,
+        ProjectNote.anchor_kind,
+        *(getattr(ProjectNote, name) for name in _ANCHOR_COLUMNS),
+        ProjectNote.body,
+        ProjectNote.proposed_at,
+        ProjectNote.proposed_by,
+    )
+    rows = session.exec(select(*columns).order_by(col(ProjectNote.id))).all()
+    for row in rows:
+        values = row._asdict()
+        note_id = int(values["id"])
+        statuses[note_id] = values["status"]
+        by_provenance.setdefault(_provenance_key(values), note_id)
+        if values["status"] != "retired":
+            by_duplicate.setdefault(_duplicate_key(values), note_id)
+    known = _known_refs(session, {ref for rec in checked for ref in rec.refs})
+    connection = session.connection()
+    statement = insert(ProjectNote)
+
+    for rec in sorted(checked, key=lambda r: r.source_id):
+        if rec.is_purpose and (not purpose_allowed or rec.skip == "purpose"):
+            result.skipped_purpose += 1
+            continue
+        if rec.skip == "denied":
+            result.skipped_denied += 1
+            continue
+        if rec.skip == "oversize":
+            result.skipped_oversize += 1
+            continue
+        values = rec.values
+        provenance = _provenance_key(values)
+        duplicate = _duplicate_key(values)
+        hit = by_provenance.get(provenance)
+        if hit is None and values["status"] != "retired":
+            hit = by_duplicate.get(duplicate)
+        if hit is not None:
+            result.id_map[rec.source_id] = hit
+            result.skipped_duplicate += 1
+            continue
+        supersedes: int | None = None
+        downgraded = rec.downgraded
+        if rec.supersedes is not None:
+            mapped = result.id_map.get(rec.supersedes)
+            if mapped is None or (
+                values["status"] == "proposed" and statuses.get(mapped) != "confirmed"
+            ):
+                result.revision_unlinked += 1
+            else:
+                supersedes = mapped
+            if values["status"] == "confirmed" and statuses.get(mapped) == "confirmed":
+                # The note it revises is still confirmed here (a dedupe hit
+                # on a target note; D3: never retired by an import), so the
+                # revision waits as a proposal; confirming it retires the
+                # target's version the normal way, never two confirmed.
+                if rec.is_purpose:
+                    # Only a crafted bundle gets here (D11 skips every
+                    # purpose when the target has a live one); never risk a
+                    # second proposed purpose.
+                    result.skipped_purpose += 1
+                    continue
+                values = {
+                    **values,
+                    "status": "proposed",
+                    "proposed_body": None,
+                    **{name: None for pair in _LIFECYCLE[:2] for name in pair},
+                }
+                downgraded = True
+        inserted = connection.execute(
+            statement, {**values, "supersedes_id": supersedes}
+        )
+        note_id = int(inserted.inserted_primary_key[0])
+        status = values["status"]
+        statuses[note_id] = status
+        by_provenance.setdefault(provenance, note_id)
+        if status != "retired":
+            by_duplicate.setdefault(duplicate, note_id)
+        result.id_map[rec.source_id] = note_id
+        result.inserted_ids[rec.source_id] = note_id
+        result.inserted[status] += 1
+        result.downgraded += downgraded
+        result.refs_unresolved += sum(ref not in known for ref in rec.refs)
+        if status == "confirmed":
+            result.confirmed_ids.append(note_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # MCP registration
 # ---------------------------------------------------------------------------
 
@@ -2252,6 +3026,8 @@ __all__ = [
     "ANCHOR_KINDS",
     "BODY_MAX_CHARS",
     "COMMITS_SINCE_CAP",
+    "IMPORTED_UID_PREFIX",
+    "IMPORT_MAX_LINE",
     "LIST_LIMIT_MAX",
     "MAX_AGENT_PROPOSALS_PER_DAY",
     "MAX_AGENT_PROPOSALS_PER_USER_PER_DAY",
@@ -2262,6 +3038,7 @@ __all__ = [
     "NOTES_PER_TARGET",
     "NOTE_KINDS",
     "NoteView",
+    "NotesImportResult",
     "ProposeNoteResult",
     "PROJECT_NOTES_BUDGET_CHARS",
     "PURPOSE_BODY_MAX_CHARS",
@@ -2270,8 +3047,10 @@ __all__ = [
     "RETIRE_REASONS",
     "SOURCES",
     "STATUSES",
+    "check_import_notes",
     "confirm",
     "get_note",
+    "import_notes",
     "is_wide_anchor",
     "list_notes",
     "notes_for_target",

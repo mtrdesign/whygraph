@@ -122,6 +122,11 @@ export function ProjectPurposeCard({ slug }: { slug: string }) {
           </h2>
           <p className="text-xs text-muted-foreground">What this project is for, drafted from its README and manifests.</p>
         </div>
+        {(confirmed?.proposed_by_imported || confirmed?.confirmed_by_imported || (!confirmed && proposed?.proposed_by_imported)) && (
+          <Badge variant="outline" data-testid="imported-badge">
+            imported
+          </Badge>
+        )}
         {confirmed && <Badge variant="success">Confirmed</Badge>}
         {!confirmed && proposed && <Badge variant="brand">Waiting for review</Badge>}
       </div>

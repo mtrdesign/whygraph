@@ -143,6 +143,7 @@ from .onboarding_routes import onboarding_router, welcome_router
 from .overview_routes import overview_router
 from .notes_routes import notes_read_router, notes_write_router
 from .purpose_routes import purpose_read_router, purpose_write_router
+from .transfer_routes import transfer_router
 from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
@@ -384,6 +385,21 @@ def create_portal_app(
                 )
             ],
         )
+    # Project transfer (plan 42): export, import and removing imported
+    # rationale cards are a project admin's (D2); a linked project's data
+    # lives on its platform.
+    app.include_router(
+        transfer_router,
+        prefix="/api/projects/{slug}/transfer",
+        dependencies=[
+            Depends(
+                project_db_access(
+                    Action.PROJECT_CONFIGURE,
+                    guard=linked_guard("Project transfer"),
+                )
+            )
+        ],
+    )
     # Claude Code hooks (plan 40 section 5.9): local mode only. FastAPI runs
     # these mount-level dependencies in list order, before any of the router's
     # own, so production answers 404 before any identity or project check.

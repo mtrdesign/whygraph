@@ -6,6 +6,13 @@
 
 ## What's new
 
+- **Export and import a project.** A project admin can export a project as one `.zip` - its notes and
+  purpose card, commit and file descriptions, rationale cards, your own chats if you tick a box, and a
+  few settings - and import it into another project of the same repository, on any portal, local or
+  production, in any direction. Import starts with a dry-run preview that lists every wide confirmed note
+  in full; the target's data always wins, imported notes carry an **imported** badge, imported rationale
+  cards can be removed in one step, and a backup is written first. See
+  [Export and import a project](../portal/transfer.md).
 - **Project notes.** A note is a short fact the code does not show - a decision, a constraint, a
   gotcha, a convention - anchored to a symbol, lines, a path, an area or the whole project. Members
   add and confirm notes in a new Notes page and the Explorer's Notes tab; the Chat assistant gets

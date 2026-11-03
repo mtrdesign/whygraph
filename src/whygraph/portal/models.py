@@ -168,6 +168,9 @@ class Setting(PortalBase, table=True):
         (:func:`whygraph.portal.orgs.ensure_builtin_org`); ``NULL`` in
         production. A singleton row makes "at most one built-in org" hold
         for free.
+    update_check : bool
+        Whether the portal's daily release check is on (local mode's
+        Settings switch; production uses the environment). Plan 43.
     """
 
     __tablename__ = "settings"
@@ -187,6 +190,7 @@ class Setting(PortalBase, table=True):
     created_at: str = Field(default_factory=_now, sa_type=Text)
     schema_version: str | None = Field(default=None, sa_type=Text)
     builtin_org_id: int | None = Field(default=None)
+    update_check: bool = Field(default=True, sa_column=Column(Boolean, nullable=False))
 
 
 class Organization(PortalBase, table=True):

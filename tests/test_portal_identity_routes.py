@@ -830,6 +830,7 @@ def test_the_admin_routes_refuse_a_non_admin_and_an_org_host(
     client = world.client
     paths = [
         ("GET", "/api/admin/settings"),
+        ("GET", "/api/admin/update"),
         ("GET", "/api/admin/orgs"),
         ("GET", "/api/admin/users"),
         ("PATCH", f"/api/admin/users/{world.ann}"),

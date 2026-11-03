@@ -913,6 +913,9 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         body=lambda w, o: {"config": {"llm": {"model": o.model}}},
         shows=lambda o: [o.model, o.hint("anthropic")],
     ),
+    ("PUT", "/api/portal/update-check"): Call(
+        200, body=lambda w, o: {"enabled": False}
+    ),
     # Key tests (M2f-3 section 4.13): openrouter has no key in any world, so
     # the sweep never reaches a provider (test_portal_keys.py tests for real)
     ("POST", "/api/portal/defaults/keys/{provider}/test"): Call(
@@ -1704,6 +1707,7 @@ def test_the_admin_routes_are_the_planned_ones() -> None:
         ("GET", "/api/portal/defaults/models/{provider}"),
         ("POST", "/api/portal/defaults/keys/{provider}/test"),
         ("PUT", "/api/portal/defaults"),
+        ("PUT", "/api/portal/update-check"),
     ]
     # The org admin's: adding and removing projects (removal is an org
     # action, M2f-1 plan section 0.2 #7), and the budgets (M2f-2 section

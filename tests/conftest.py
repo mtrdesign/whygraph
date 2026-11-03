@@ -129,10 +129,15 @@ class KeyTestNetwork:
         ``(owner, name, token) -> None``, raising as
         :func:`whygraph.services.github.check_repo_access` does (default:
         the token reads the repository).
+    update_requests : list[httpx.Request]
+        What reached a portal's ``update_transport`` (the release check,
+        plan 43). Must stay empty: :func:`key_test_network` fails at
+        teardown otherwise.
     """
 
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
+        self.update_requests: list[httpx.Request] = []
         self.respond = lambda request: httpx.Response(200, json={})
         self.repo_calls: list[tuple[str, str, str]] = []
         self.repo = lambda owner, name, token: None
@@ -141,32 +146,48 @@ class KeyTestNetwork:
         self.requests.append(request)
         return self.respond(request)
 
+    def handle_update(self, request: httpx.Request) -> httpx.Response:
+        self.update_requests.append(request)
+        return httpx.Response(599)
+
     def check_repo(self, owner: str, name: str, token: str, **_: object) -> None:
         self.repo_calls.append((owner, name, token))
         return self.repo(owner, name, token)
 
 
 @pytest.fixture(autouse=True)
-def key_test_network(monkeypatch: pytest.MonkeyPatch) -> KeyTestNetwork:
+def key_test_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[KeyTestNetwork]:
     """Plug :class:`KeyTestNetwork` into every portal built in a test (M2f-3 4.13).
 
     Each ``PortalState`` gets an ``httpx.MockTransport`` as its
     ``key_test_transport``, and the GitHub token test's repository probe is
     replaced, so no test - the tenancy sweeps store real-looking keys -
     reaches a provider or GitHub.
+
+    The release check (plan 43 section 4.6) is off for every test
+    (``WHYGRAPH_UPDATE_CHECK=0``, no ``DO_NOT_TRACK``), and each
+    ``PortalState``'s ``update_transport`` records and answers ``599``; the
+    fixture fails at teardown if any request reached it. A test that wants
+    the check deletes the variable and plugs its own transport in.
     """
     from whygraph.portal import deps as portal_deps
 
+    monkeypatch.setenv("WHYGRAPH_UPDATE_CHECK", "0")
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
     net = KeyTestNetwork()
     original = portal_deps.PortalState.__init__
 
     def init(self, *args, **kwargs) -> None:  # noqa: ANN001, ANN002, ANN003
         original(self, *args, **kwargs)
         self.key_test_transport = httpx.MockTransport(net.handle)
+        self.update_transport = httpx.MockTransport(net.handle_update)
 
     monkeypatch.setattr(portal_deps.PortalState, "__init__", init)
     monkeypatch.setattr("whygraph.portal.key_routes.check_repo_access", net.check_repo)
-    return net
+    yield net
+    assert not net.update_requests, (
+        f"the release check reached the network: {net.update_requests!r}"
+    )
 
 
 # An edge fixture row: (source, target, kind), or (source, target, kind, line)

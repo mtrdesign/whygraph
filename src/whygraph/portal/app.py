@@ -77,6 +77,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -102,7 +103,7 @@ from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 from whygraph.services.codegraph import configure_lock_dir
 from whygraph.services.codegraph.writer_lock import portal_lock_dir
-from . import agent_calls, audit_store, budgets, connections, usage_store
+from . import agent_calls, audit_store, budgets, connections, updates, usage_store
 from . import db as portal_db
 from .access_routes import access_router
 from .agent_hook_routes import agent_hooks_router
@@ -147,7 +148,13 @@ from .transfer_routes import transfer_router
 from .platform_routes import platform_router
 from .port_change import reconcile_port
 from .repos import SHARED_FOLDERS_ENV, parse_shared_folders
-from .routes import linked_guard, portal_router, projects_router, public_router
+from .routes import (
+    linked_guard,
+    portal_local_router,
+    portal_router,
+    projects_router,
+    public_router,
+)
 from .runner import ScanRunner
 from .security import (
     DEV_ORIGINS_ENV,
@@ -312,6 +319,7 @@ def create_portal_app(
     app.include_router(onboarding_router)  # both modes: first-run checklist (M2f-3)
     app.include_router(welcome_router)  # production-only: DELETE /api/org/welcome
     app.include_router(portal_router)
+    app.include_router(portal_local_router)  # local-only: the update-check switch
     app.include_router(projects_router)
     app.include_router(platform_router)  # local-only: connect and link (M2e)
     # A linked project's Explorer and Chat live on its platform (M2e plan
@@ -548,6 +556,7 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             watcher.start_soon(_prune_usage_events)  # the ledger exists in both modes
             watcher.start_soon(_flush_agent_calls, state.agent_calls)
             watcher.start_soon(_prune_agent_call_days)
+            watcher.start_soon(_check_for_updates, state)
         if state.mode == "production":
             watcher.start_soon(_check_base_url, state)
             if not state.degraded:
@@ -671,6 +680,38 @@ async def _prune_agent_call_days() -> None:
             if deleted:
                 _log.info("agent-call counter pruning: %d row(s) deleted", deleted)
         await anyio.sleep(agent_calls.PRUNE_EVERY_SEC)
+
+
+async def _check_for_updates(state: PortalState) -> None:
+    """Run the release check when it is due: every tick re-reads the switch; never fatal.
+
+    Plan 43 section 4.4. Wakes every :data:`updates.TICK_SEC` seconds; a
+    check is due at start, a day after a success and six hours after a
+    failure (:class:`~whygraph.portal.updates.UpdateBook`). The fetch runs
+    on a worker thread with ``abandon_on_cancel``, so GitHub not answering
+    cannot delay the portal's shutdown; it touches only the in-memory book.
+    """
+    while True:
+        try:
+            epoch = state.updates.epoch()
+            switch = await anyio.to_thread.run_sync(updates.read_switch, state)
+            # A PUT that stored a switch while the setting was being read wins;
+            # this tick then does nothing and the next one re-reads.
+            stored = state.updates.set_switch(switch, if_epoch=epoch)
+            if stored and switch[0] and state.updates.due(time.monotonic()):
+                gen = state.updates.begin()
+                await anyio.to_thread.run_sync(
+                    partial(
+                        updates.fetch_into_book,
+                        state.updates,
+                        gen,
+                        state.update_transport,
+                    ),
+                    abandon_on_cancel=True,
+                )
+        except Exception:  # noqa: BLE001 -- a failed check is retried next tick
+            _log.exception("update check failed")
+        await anyio.sleep(updates.TICK_SEC)
 
 
 async def _refresh_link_statuses(state: PortalState) -> None:

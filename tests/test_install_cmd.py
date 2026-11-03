@@ -41,8 +41,8 @@ def test_defaults_to_latest_without_the_env(monkeypatch) -> None:
 def test_render_installer_carries_the_shim_and_the_mcp_stub() -> None:
     script = render_installer(f"{IMAGE_REPO}:1.2.3")
     # Writes the shim and the whygraph-mcp stub onto PATH...
-    assert 'cat > "$BIN_DIR/whygraph"' in script
-    assert 'cat > "$BIN_DIR/whygraph-mcp"' in script
+    assert 'mv -f "$BIN_DIR/whygraph.tmp.$$" "$BIN_DIR/whygraph"' in script
+    assert 'mv -f "$BIN_DIR/whygraph-mcp.tmp.$$" "$BIN_DIR/whygraph-mcp"' in script
     # ...the shim baking the ref as an overridable default (the stub has none)...
     assert script.count(f'IMAGE="${{WHYGRAPH_IMAGE:-{IMAGE_REPO}:1.2.3}}"') == 1
     # ...and running the image ephemerally against the cwd, with no key or
@@ -78,6 +78,16 @@ def test_emitted_installer_writes_a_valid_shim_and_stub(tmp_path: Path) -> None:
         assert os.access(shim, os.X_OK), name
         assert subprocess.run(["sh", "-n", str(shim)]).returncode == 0, name
     assert f"{IMAGE_REPO}:1.2.3" in (bin_dir / "whygraph").read_text()
+
+
+def test_emitted_installer_leaves_no_temp_files(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    _install(bin_dir)
+
+    assert not [p.name for p in bin_dir.iterdir() if ".tmp." in p.name]
+    for name in ("whygraph", "whygraph-mcp"):
+        assert (bin_dir / name).exists(), name
+        assert os.access(bin_dir / name, os.X_OK), name
 
 
 def _no_docker_path(tmp_path: Path) -> str:

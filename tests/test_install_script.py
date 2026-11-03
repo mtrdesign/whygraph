@@ -60,7 +60,7 @@ def _default_version() -> str:
     return match.group(1)
 
 
-_NEEDED_TOOLS = ("sh", "mktemp", "rm", "mkdir", "cat", "chmod")
+_NEEDED_TOOLS = ("sh", "mktemp", "rm", "mkdir", "cat", "chmod", "mv")
 """Externals the script (and the installer it generates) shell out to.
 
 These are symlinked into the stub directory so ``PATH`` can be **only** that

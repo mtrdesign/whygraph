@@ -5,8 +5,9 @@ installer to **stdout**; running it writes the ``whygraph`` shim onto ``PATH``.
 The shim runs the image ephemerally against the current directory (``docker run
 --rm -v "$PWD:/workspace" …``), so every command is a fresh process reading that
 repo's own ``whygraph.toml`` / ``.whygraph`` / ``.codegraph`` - except the portal
-verbs (``up`` / ``down`` / ``status`` / ``logs`` / ``folders`` / ``backup``), which
-manage the long-lived portal container and its database container. It also
+verbs (``up`` / ``down`` / ``status`` / ``logs`` / ``folders`` / ``backup`` /
+``update``), which manage the long-lived portal container and its database
+container (``update`` installs a newer release's shim, then recreates them). It also
 writes a host ``whygraph-mcp`` **stub** in place of the 1.x shim: the stdio MCP server was removed in 2.0.0, and every 1.x
 agent config still runs ``whygraph-mcp``, so the stub prints the removal message
 to stderr and exits ``2`` without calling ``docker``. It stays for the 2.x line.
@@ -71,7 +72,7 @@ exit __EXIT__
 """
 
 _PORTAL_VERBS = r"""
-# --- portal verbs: up / down / status / logs / folders / backup ------------
+# --- portal verbs: up / down / status / logs / folders / backup / update ---
 # `whygraph up` runs the portal in ONE named, long-lived container, plus its
 # Postgres in a second one ($PORTAL-postgres, no published port). Nothing from
 # the host environment reaches either (keys live in the portal DB), so no `-e`
@@ -486,6 +487,205 @@ portal_folders() {
     esac
 }
 
+# True when $1 is X.Y.Z, each field 0 or digits without a leading zero.
+# Pattern checks only: the shim never does arithmetic on a version.
+portal_valid_version() {
+    case "$1" in *.*.*.*) return 1 ;; *.*.*) ;; *) return 1 ;; esac
+    pv_b="${1#*.}"
+    for pv_f in "${1%%.*}" "${pv_b%.*}" "${1##*.}"; do
+        case "$pv_f" in
+            0) ;;
+            [123456789]*) case "$pv_f" in *[!0123456789]*) return 1 ;; esac ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+# The status of a --force target ($1) that the release check could not
+# compare with this shim's pin ($2): current, downgrade or update. Field by
+# field with [ ], never $(( )); a pin that is not X.Y.Z (a local build) gives
+# "update", since there is nothing to compare.
+portal_forced_status() {
+    portal_valid_version "$2" || { echo update; return 0; }
+    [ "$1" != "$2" ] || { echo current; return 0; }
+    pf_a="$1"; pf_b="$2"
+    for pf_i in 1 2 3; do
+        pf_x="${pf_a%%.*}"; pf_y="${pf_b%%.*}"
+        if [ "$pf_x" -lt "$pf_y" ]; then echo downgrade; return 0; fi
+        if [ "$pf_x" -gt "$pf_y" ]; then echo update; return 0; fi
+        pf_a="${pf_a#*.}"; pf_b="${pf_b#*.}"
+    done
+    echo update
+}
+
+# `whygraph update`: resolve the release inside the current image, download
+# its installer, back up the database, then hand off to a fresh `sh` that
+# runs the installer (which renames a new shim over this file) and the new
+# shim's `up`. Nothing changes before the download has succeeded.
+portal_update() {
+    up_version=""
+    up_version_given=""
+    up_check=""
+    up_force=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --version) [ $# -ge 2 ] || portal_die "--version needs a value"; up_version="$2"; up_version_given=1; shift 2 ;;
+            --version=*) up_version="${1#--version=}"; up_version_given=1; shift ;;
+            --check) up_check=1; shift ;;
+            --force) up_force=1; shift ;;
+            -h|--help) echo "usage: whygraph update [--version X.Y.Z] [--check] [--force]"; exit 0 ;;
+            *) portal_die "whygraph update: unknown arg '$1'" ;;
+        esac
+    done
+    if [ -n "$up_version_given" ]; then
+        portal_valid_version "$up_version" || portal_die "invalid --version '$up_version': expected X.Y.Z"
+    fi
+
+    if [ -n "${WHYGRAPH_PORTAL_NAME:-}" ] || [ -n "${WHYGRAPH_DEV_SRC:-}" ]; then
+        portal_die "update is not available in a dev portal"
+    fi
+    [ -z "${WHYGRAPH_IMAGE:-}" ] || portal_die "WHYGRAPH_IMAGE is set; update manages the pinned release only"
+    command -v curl >/dev/null 2>&1 || portal_die "update needs curl"
+
+    up_current="${IMAGE##*:}"
+    up_resolve_hint="try again later, or pass --version X.Y.Z --force"
+    if [ -n "$up_version" ]; then
+        up_out=$(docker run --rm "$IMAGE" whygraph release-check --target "$up_version") || up_out=""
+    else
+        up_out=$(docker run --rm "$IMAGE" whygraph release-check) || up_out=""
+    fi
+    if [ -z "$up_out" ]; then
+        [ -n "$up_version" ] || portal_die "could not check for a newer release (see above); $up_resolve_hint"
+        [ -n "$up_force" ] || portal_die "could not check for a newer release (see above); $up_resolve_hint"
+        echo "whygraph: could not check the releases in between; continuing with --force" >&2
+        up_status=$(portal_forced_status "$up_version" "$up_current")
+        up_target="$up_version"; up_manual=1; up_verified=0
+    else
+        up_status=$(printf '%s\n' "$up_out" | sed -n 's/^status=//p')
+        up_target=$(printf '%s\n' "$up_out" | sed -n 's/^target=//p')
+        up_manual=$(printf '%s\n' "$up_out" | sed -n 's/^manual=//p')
+        up_verified=$(printf '%s\n' "$up_out" | sed -n 's/^verified=//p')
+        case "$up_status" in update|current|downgrade|ahead|unknown) ;; *) up_status="" ;; esac
+        case "$up_manual" in 0|1) ;; *) up_status="" ;; esac
+        case "$up_verified" in 0|1) ;; *) up_status="" ;; esac
+        if [ -n "$up_target" ] && ! portal_valid_version "$up_target"; then up_status=""; fi
+        [ -n "$up_status" ] || portal_die "unexpected answer from the release check; $up_resolve_hint"
+    fi
+
+    case "$up_status" in
+        unknown)
+            if [ -n "$up_target" ]; then
+                # This build's own version is not X.Y.Z, so nothing can be
+                # compared; verified=0 sends it through the manual gate.
+                up_status=update
+            elif [ -z "$up_version" ]; then
+                portal_die "could not find a release to update to"
+            elif [ -n "$up_force" ]; then
+                echo "whygraph: $up_version is not among the published releases checked; continuing with --force" >&2
+                up_status=$(portal_forced_status "$up_version" "$up_current")
+                up_target="$up_version"; up_manual=1; up_verified=0
+            else
+                portal_die "$up_version is not a published release (or is older than the last 30); check the version, or pass --force"
+            fi ;;
+    esac
+    [ -n "$up_target" ] || portal_die "unexpected answer from the release check; $up_resolve_hint"
+    case "$up_status" in
+        current)
+            echo "whygraph is already on $up_target"
+            up_label=$(portal_label whygraph.image)
+            if [ -n "$up_label" ] && [ "$up_label" != "$IMAGE" ]; then
+                echo "the portal still runs $up_label; run: whygraph up"
+            fi
+            return 0 ;;
+        downgrade)
+            portal_die "$up_target is older than the installed release; downgrades are not supported - restore a backup instead: https://mtrdesign.github.io/whygraph/portal/backup/#restore" ;;
+        ahead)
+            echo "this build ($up_current) is newer than the latest release $up_target"
+            return 0 ;;
+    esac
+
+    up_notes="https://mtrdesign.github.io/whygraph/releases/$up_target/"
+    up_upgrading="https://mtrdesign.github.io/whygraph/portal/upgrading/"
+    up_manual_steps=""
+    if [ "$up_manual" = 1 ] || [ "$up_verified" = 0 ]; then up_manual_steps=1; fi
+    if [ -n "$up_check" ]; then
+        echo "current: $up_current"
+        echo "latest: $up_target"
+        [ -z "$up_manual_steps" ] || echo "needs manual steps: $up_notes and $up_upgrading"
+        return 0
+    fi
+    if [ -n "$up_manual_steps" ] && [ -z "$up_force" ]; then
+        if [ "$up_manual" = 1 ]; then
+            echo "whygraph: updating to $up_target needs manual steps. Read:" >&2
+        else
+            echo "whygraph: could not confirm that no release between $up_current and $up_target needs manual steps. Read:" >&2
+        fi
+        echo "  $up_notes" >&2
+        echo "  $up_upgrading" >&2
+        portal_die "re-run with --force once you have followed them"
+    fi
+
+    # Download first: a typo or an offline host leaves no extra dump behind.
+    up_tmp=$(mktemp "${TMPDIR:-/tmp}/whygraph-update.XXXXXX") || portal_die "cannot create a temporary file"
+    trap 'rm -f "$up_tmp"' EXIT
+    trap 'exit 130' INT TERM
+    if ! curl -fsSL -o "$up_tmp" "https://raw.githubusercontent.com/mtrdesign/whygraph/v$up_target/scripts/install.sh" \
+        || [ ! -s "$up_tmp" ]; then
+        portal_die "could not download the $up_target installer"
+    fi
+
+    if [ "$(portal_pg_state)" = "running" ]; then
+        if [ "${WHYGRAPH_SKIP_BACKUP:-}" = "1" ]; then
+            echo "whygraph: WHYGRAPH_SKIP_BACKUP=1 - updating without a backup of the portal database" >&2
+        else
+            echo "whygraph update: backing up the database before updating" >&2
+            BACKUP_HINT=" - nothing was changed; to update without a backup: WHYGRAPH_SKIP_BACKUP=1 whygraph update"
+            portal_backup
+            BACKUP_HINT=""
+        fi
+    fi
+
+    case "$(portal_state)" in running|restarting) up_was_running=1 ;; *) up_was_running=0 ;; esac
+
+    # The installer renames the new shim over this one. A symlinked shim
+    # becomes a regular file in the link's directory.
+    if [ -f "$SELF" ] && grep -q 'Generated by `whygraph install`' "$SELF"; then
+        up_self_dir=$(dirname "$SELF")
+        up_self_dir=$(cd -- "$up_self_dir" && pwd) || portal_die "cannot resolve the directory of $SELF"
+    else
+        up_self_dir="${WHYGRAPH_BIN_DIR:-$HOME/.local/bin}"
+    fi
+    up_pinned="${IMAGE%:*}:$up_target"
+    # A non-release build has no installer to go back to.
+    up_back="$up_current"
+    portal_valid_version "$up_back" || up_back=""
+
+    # Hand off to a new shell before anything rewrites this file. `up` is not
+    # exec'ed, so its failure can still be explained.
+    trap - EXIT INT TERM
+    exec env WHYGRAPH_VERSION="$up_target" WHYGRAPH_BIN_DIR="$up_self_dir" sh -c '
+        if ! sh "$1"; then
+            rm -f "$1"
+            echo "whygraph update: the $6 installer failed (see above). If it says this version does not exist and $6 was released under an hour ago, its image may still be building - try again shortly." >&2
+            exit 1
+        fi
+        rm -f "$1"
+        if ! docker image inspect "$5" >/dev/null 2>&1; then
+            echo "whygraph update: installed whygraph $6, but $5 is not on this machine. If you use a mirror, run: docker tag <mirror>/whygraph:$6 $5 - then: whygraph up" >&2
+            exit 1
+        fi
+        if [ "$2" != 1 ]; then
+            echo "installed whygraph $6. Start the portal: whygraph up"
+            exit 0
+        fi
+        if ! "$3/whygraph" up; then
+            echo "whygraph update: installed $6, but whygraph up failed (see above). Check: whygraph status" >&2
+            [ -z "$4" ] || echo "To go back to $4: curl -fsSL https://raw.githubusercontent.com/mtrdesign/whygraph/v$4/scripts/install.sh | sh" >&2
+            exit 1
+        fi
+    ' _ "$up_tmp" "$up_was_running" "$up_self_dir" "$up_back" "$up_pinned" "$up_target"
+}
+
 portal_main() {
     verb="$1"; shift
     # WHYGRAPH_PORTAL_NAME is for development (`make dev-docker` / `prod` and
@@ -511,11 +711,12 @@ portal_main() {
         logs) portal_logs "$@" ;;
         folders) mkdir -p "$CONF"; touch "$FOLDERS_FILE"; portal_folders "$@" ;;
         backup) [ $# -eq 0 ] || portal_die "whygraph backup takes no arguments"; portal_backup ;;
+        update) portal_update "$@" ;;
     esac
 }
 
 case "${1:-}" in
-    up|down|status|logs|folders|backup) portal_main "$@"; exit 0 ;;
+    up|down|status|logs|folders|backup|update) portal_main "$@"; exit 0 ;;
 esac
 # --- end portal verbs ------------------------------------------------------
 """
@@ -528,11 +729,14 @@ _WHYGRAPH_SHIM_TEMPLATE = """\
 #!/usr/bin/env sh
 # WhyGraph shim. Every command runs ephemerally in the container EXCEPT
 # `whygraph up|down|status|logs|folders|backup`, which manage the long-lived
-# portal container and its database container (and `whygraph serve`, removed
-# in 2.0.0, which only says so).
+# portal container and its database container, `whygraph update`, which
+# installs a newer release of this shim and recreates the portal (and
+# `whygraph serve`, removed in 2.0.0, which only says so).
 # Generated by `whygraph install`; safe to re-generate.
 set -eu
 IMAGE="${WHYGRAPH_IMAGE:-__IMAGE__}"
+# This file's path, for `update` ($0 inside a function is not it under zsh).
+SELF="$0"
 __PORTAL_VERBS__
 if [ "${1:-}" = "serve" ]; then
     if [ "${2:-}" = "--stop" ]; then
@@ -561,17 +765,22 @@ set -eu
 
 BIN_DIR="${WHYGRAPH_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN_DIR"
+# Each file is written beside its target and renamed over it, so a shell that
+# is running the old shim keeps reading the old file (plan 43, D7).
+trap 'rm -f "$BIN_DIR/whygraph.tmp.$$" "$BIN_DIR/whygraph-mcp.tmp.$$"' EXIT INT TERM
 
-cat > "$BIN_DIR/whygraph" <<'WHYGRAPH_SHIM'
+cat > "$BIN_DIR/whygraph.tmp.$$" <<'WHYGRAPH_SHIM'
 __WHYGRAPH_SHIM__
 WHYGRAPH_SHIM
-chmod +x "$BIN_DIR/whygraph"
+chmod +x "$BIN_DIR/whygraph.tmp.$$"
+mv -f "$BIN_DIR/whygraph.tmp.$$" "$BIN_DIR/whygraph"
 echo "installed $BIN_DIR/whygraph"
 
-cat > "$BIN_DIR/whygraph-mcp" <<'WHYGRAPH_MCP_STUB'
+cat > "$BIN_DIR/whygraph-mcp.tmp.$$" <<'WHYGRAPH_MCP_STUB'
 __WHYGRAPH_MCP_STUB__
 WHYGRAPH_MCP_STUB
-chmod +x "$BIN_DIR/whygraph-mcp"
+chmod +x "$BIN_DIR/whygraph-mcp.tmp.$$"
+mv -f "$BIN_DIR/whygraph-mcp.tmp.$$" "$BIN_DIR/whygraph-mcp"
 echo "installed $BIN_DIR/whygraph-mcp"
 
 case ":$PATH:" in

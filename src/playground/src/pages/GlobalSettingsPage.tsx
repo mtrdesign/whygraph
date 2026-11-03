@@ -2,13 +2,14 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Link, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { membersApi, orgSettingsApi, orgsApi, portalApi, portalKey, type Member } from "../api";
+import { membersApi, orgSettingsApi, orgsApi, portalApi, portalKey, type Member, type UpdateInfo } from "../api";
 import { ConfigForm, configSections } from "../components/portal/ConfigForm";
 import { Field, nativeSelectClass } from "../components/portal/Field";
 import { TypedConfirmDialog } from "../components/portal/TypedConfirmDialog";
 import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Switch } from "../components/ui/switch";
 import { PathText } from "../components/layout/PathText";
 import { DisabledReason } from "../components/state/DisabledReason";
 import { ErrorState } from "../components/state/ErrorState";
@@ -16,6 +17,8 @@ import { ReadOnlyNotice } from "../components/settings/ReadOnlyNotice";
 import { SectionForm } from "../components/settings/SectionForm";
 import { SettingsLayout, SettingsSection, type SettingsNavItem } from "../components/settings/SettingsLayout";
 import { authMessage } from "../lib/authErrors";
+import { timeAgo } from "../lib/format";
+import { errorLabel, sourceLabel } from "../lib/updates";
 import { providerLabel } from "../lib/labels";
 import type { OrgSettingsSearch } from "../lib/routeSearch";
 import { canOwn, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
@@ -262,6 +265,7 @@ function GeneralInfo() {
   return (
     <dl className="flex flex-col gap-2 text-sm" data-testid="portal-general">
       {state?.version && <InfoRow label="Version">{state.version}</InfoRow>}
+      {state?.update && <UpdatesRow update={state.update} />}
       {state?.port && <InfoRow label="Port">{state.port}</InfoRow>}
       <InfoRow label="Shared folders">
         {state?.shared_folders?.length ? (
@@ -277,6 +281,40 @@ function GeneralInfo() {
         )}
       </InfoRow>
     </dl>
+  );
+}
+
+/** The local portal's update-check switch and the result of its last check. */
+function UpdatesRow({ update }: { update: UpdateInfo }) {
+  const queryClient = useQueryClient();
+  const set = useMutation({
+    mutationFn: (enabled: boolean) => portalApi.setUpdateCheck(enabled),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: portalKey("state") }),
+    onError: (err) => toast.error(authMessage(err)),
+  });
+  const locked = update.source === "do_not_track" || update.source === "env";
+  const why = sourceLabel(update.source);
+  const checked = timeAgo(update.checked_at);
+  return (
+    <InfoRow label="Updates">
+      <div className="flex flex-col gap-1" data-testid="update-check-row">
+        <label className="flex items-center gap-2">
+          <Switch
+            aria-label="Check for updates"
+            checked={!!update.enabled}
+            disabled={locked || set.isPending}
+            onCheckedChange={(v) => set.mutate(v)}
+          />
+          <span>{update.enabled ? "Check for updates" : "Update check is off"}</span>
+        </label>
+        {locked && why && <span className="text-xs text-muted-foreground">{why}</span>}
+        {update.error ? (
+          <span className="text-xs text-muted-foreground">Last check failed: {errorLabel(update.error)}</span>
+        ) : (
+          checked && <span className="text-xs text-muted-foreground">Last checked {checked}</span>
+        )}
+      </div>
+    </InfoRow>
   );
 }
 

@@ -5,6 +5,7 @@ import { projectKey, type ProjectSummary } from "../../api";
 import { WelcomeBanner } from "../onboarding/WelcomeBanner";
 import { BudgetBanner, ProjectStopBanner } from "./BudgetBanner";
 import { ReaderBanner } from "./ReaderBanner";
+import { UpdateBanner } from "./UpdateBanner";
 
 /** The project the layout has already loaded (this reads the cache and never fetches). */
 function useCachedProject(slug: string | undefined): ProjectSummary | undefined {
@@ -17,7 +18,7 @@ function useCachedProject(slug: string | undefined): ProjectSummary | undefined 
 
 /**
  * The one banner slot above every page (USE-1), in a fixed order: Welcome, Reader,
- * Budget. On a project page the Budget group also carries that project's hard-stop
+ * Budget, Update. On a project page the Budget group also carries that project's hard-stop
  * notice, except in Chat, which says it in place of its composer (USE-3).
  */
 export function BannerStack({ slug }: { slug?: string }) {
@@ -32,6 +33,7 @@ export function BannerStack({ slug }: { slug?: string }) {
       <ReaderBanner />
       {stopped && page !== "chat" && <ProjectStopBanner scope={project.llm_block_scope} />}
       <BudgetBanner projectStopped={stopped} />
+      <UpdateBanner />
     </>
   );
 }

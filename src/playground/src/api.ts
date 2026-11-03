@@ -303,6 +303,20 @@ export interface PortalUser {
   has_password?: boolean;
 }
 
+// The update-notice block (local `state.update`, `PUT /portal/update-check`, `GET /admin/update`).
+export interface UpdateInfo {
+  enabled: boolean | null;
+  source: "do_not_track" | "env" | "setting" | "default" | null;
+  current: string | null;
+  latest: string | null;
+  available: boolean;
+  manual_steps: boolean;
+  notes_url: string | null;
+  upgrading_url: string;
+  checked_at: string | null;
+  error: "network" | "rate_limited" | "bad_response" | null;
+}
+
 // `GET /api/portal/state` is public. In degraded mode (the portal DB failed to
 // migrate) the body is just `{ error }`.
 export interface PortalState {
@@ -315,6 +329,8 @@ export interface PortalState {
   version?: string | null;
   // What the portal did when it started on a new port (computed once at start).
   port_change?: PortChange | null;
+  // Local mode after setup: the update notice (null otherwise).
+  update?: UpdateInfo | null;
   // Local mode: is CodeGraph hosted and running (counts only; the route is public).
   codegraph?: { available: boolean; live: number };
   // Production, org host: set while the caller's membership in this org still shows
@@ -1097,6 +1113,7 @@ export const portalApi = {
   // Model-id suggestions for the organization layer's key (owners; always 200).
   defaultsModels: (provider: string) =>
     get<ModelListResponse>(`/portal/defaults/models/${encodeURIComponent(provider)}`),
+  setUpdateCheck: (enabled: boolean) => send<UpdateInfo>("PUT", "/portal/update-check", { enabled }),
   putDefaults: (body: ConfigPut) => send<DefaultsView>("PUT", "/portal/defaults", body),
   addProject: (body: AddProjectBody) => send<AddProjectResult>("POST", "/projects", body),
 };
@@ -1434,6 +1451,7 @@ export const githubApi = {
 
 export const adminApi = {
   settings: () => get<AdminSettings>("/admin/settings"),
+  update: () => get<UpdateInfo>("/admin/update"),
   orgs: () => get<AdminOrg[]>("/admin/orgs"),
   users: () => get<AdminUser[]>("/admin/users"),
   setAdmin: (uid: string, is_instance_admin: boolean) =>

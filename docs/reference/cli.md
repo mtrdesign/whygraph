@@ -27,12 +27,15 @@ runs. They manage the portal's two long-lived containers, `whygraph-portal` and 
 | `whygraph logs` | Follow the portal container's logs. For the database: `docker logs whygraph-portal-postgres`. |
 | `whygraph folders [--remove DIR]` | List the shared folders, or remove one and recreate the portal container. |
 | `whygraph backup` | Dump the running portal database (`pg_dump -Fc`, run inside the database container) to `backups/portal-<UTC time>.dump` in the data directory, keeping the newest 10 such dumps; other files there are never touched. Fails if the database is not running. Restore needs the data directory's `secret.key` too. See [Backup and restore](../portal/backup.md). |
+| `whygraph update [--version X.Y.Z] [--check] [--force]` | Update to the newest release, or to `--version`: resolve it, download that release's installer, dump the database, install, and recreate the portal with `up`. `--check` prints the current and latest versions and changes nothing. A release (or one in between) that needs manual steps stops with exit code 2 until `--force`. Downgrades are refused. See [Upgrading](../portal/upgrading.md). |
 
 Any other argument to these verbs is rejected with exit code 2, as is every refusal: a database
 that does not become ready, a failed pre-recreate dump (`WHYGRAPH_SKIP_BACKUP=1` skips it), a
 database created by another Postgres major version (see
 [the recipe](../portal/upgrading.md#postgres-major)), or a missing `postgres.password` when the
-database already exists. Port precedence for `up` is the remembered `--port`, then `WHYGRAPH_PORT`,
+database already exists. `update` also refuses a downgrade, a release that needs manual steps
+(without `--force`), a dev portal (`WHYGRAPH_PORTAL_NAME` or `WHYGRAPH_DEV_SRC` set), a
+`WHYGRAPH_IMAGE` override and a host without `curl`. Port precedence for `up` is the remembered `--port`, then `WHYGRAPH_PORT`,
 then `8765`. `up` never passes your environment into the
 container, and on the first run that sees a credential variable set it prints its name once, as a
 reminder to enter the key under Settings.

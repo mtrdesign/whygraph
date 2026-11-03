@@ -1,7 +1,44 @@
 # Upgrading
 
-To upgrade, re-run the [installer](../getting-started/installation.md), then `whygraph up`. What else
-happens depends on where you come from:
+To upgrade, run `whygraph update`. It checks GitHub for the newest release, downloads that release's
+installer, dumps the database, installs the new `whygraph` command and image, and recreates the portal
+with `whygraph up`, in that order:
+
+```bash
+whygraph update             # update to the newest release
+whygraph update --check     # only say whether there is one
+whygraph update --version X.Y.Z   # a specific release
+```
+
+- **Nothing is changed until the installer has downloaded.** A typo in `--version`, or a host that is
+  offline, stops before the backup, so it never pushes a real dump out of the
+  [newest-10 retention](backup.md#make-a-backup).
+- **The dump comes first.** If it fails, nothing was installed; `WHYGRAPH_SKIP_BACKUP=1 whygraph update`
+  goes on without it. See [Backup and restore](backup.md#the-automatic-dump-before-an-upgrade).
+- **No downgrades.** Database migrations only go forward, so an older release is refused; restore a
+  [backup](backup.md#restore) instead.
+- **A release that needs manual steps stops here.** If the target, or any release between yours and the
+  target, is marked as needing them (a Postgres major bump, for instance), `update` prints the release
+  notes and this page and exits with status `2`. Follow them, then re-run with `--force`. When the
+  releases in between cannot all be checked, `update` treats the release the same way.
+- **A release published less than an hour ago may not have its image yet.** If the install fails with a
+  message that the version does not exist, wait a few minutes and run `whygraph update` again.
+- **With a registry mirror,** the new `whygraph` command pins `ghcr.io/mtrdesign/whygraph:<version>`.
+  If that image is not on the machine, `update` installs but does not start the portal, and prints the
+  `docker tag` command that names your mirror's image as the pinned one; then run `whygraph up`.
+- **A symlinked `whygraph` command** is replaced by a regular file in the link's directory.
+- **Dev portals and overrides are refused.** `update` does nothing when `WHYGRAPH_IMAGE`,
+  `WHYGRAPH_PORTAL_NAME` or `WHYGRAPH_DEV_SRC` is set, and it needs `curl`.
+
+!!! note "An install from before `whygraph update` existed"
+    A `whygraph` command installed before this release has no `update` verb: it answers
+    `No such command 'update'`. Upgrade that one time with the manual path below; from then on
+    `whygraph update` works.
+
+The portal itself never updates anything: it can only tell you a release is out, see
+[The update notice](#update-notice). The manual path still works: re-run the
+[installer](../getting-started/installation.md), then `whygraph up`. What else happens depends on where
+you come from:
 
 - **From 1.x**, you add your repositories to the portal; each starts with empty history. See
   [From 1.x](#from-1x).
@@ -25,6 +62,26 @@ happens depends on where you come from:
   [security model](security.md#symbolic-links).
 - **A release that moves the pinned Postgres major version** needs a dump and a restore. See
   [Postgres major versions](#postgres-major).
+
+## The update notice { #update-notice }
+
+A local portal checks once a day whether a newer release exists, and shows a banner with the version,
+a link to its release notes and the command to run, `whygraph update`. It checks when it starts, then
+every 24 hours (6 hours after a failed check). A failed check never shows a banner; Settings says
+"Last check failed".
+
+- **A release is announced an hour after it is published,** because its image is built after the
+  release appears.
+- **The banner changes when a release needs manual steps.** It then points at these notes and this page,
+  and `whygraph update` asks for `--force`. A portal that is many releases behind cannot verify the
+  releases in between, and says the same.
+- **Switch it off in Settings.** The toggle is under the portal's global Settings. Turning it off and
+  on again makes a check due within 15 minutes. `whygraph update --check` answers on demand.
+- **Production** shows the notice to instance admins only, as an Updates card on the Admin page; see
+  [Upgrading](../deploy/production.md#upgrading).
+
+What the check sends, and the other ways to turn it off, are in
+[The update check](security.md#update-check).
 
 ## Postgres major versions { #postgres-major }
 

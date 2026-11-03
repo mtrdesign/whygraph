@@ -51,6 +51,10 @@ dump), say so explicitly:
 WHYGRAPH_SKIP_BACKUP=1 whygraph up
 ```
 
+`whygraph update` writes a dump before it installs anything, and it counts in the same retention. When
+the release also moves the Postgres image, `whygraph up` dumps again as it recreates the database, so
+such an update leaves two dumps.
+
 The automatic dumps share the newest-10 retention with the ones you make.
 
 ## Back up `secret.key` with the dumps

@@ -57,7 +57,8 @@ That starts both containers, the database first; `up` waits for it to be ready b
 portal. Then add the target repository in the portal and run its first scan
 ([Adding projects](../portal/projects.md)). Both containers restart with Docker, so the endpoint is
 there whenever the machine is. Back the portal's database up with `whygraph backup`
-([Backup and restore](../portal/backup.md)).
+([Backup and restore](../portal/backup.md)). To move to a newer release, run `whygraph update`; on a
+production deploy see [Upgrading](production.md#upgrading).
 
 !!! warning "An uninitialized or unscanned project returns nothing useful"
     The endpoint answers `409` until the project is initialized in the portal. On an initialized but

@@ -51,6 +51,7 @@ services:
       WHYGRAPH_GITHUB_APP_CLIENT_SECRET_FILE: /run/secrets/github_app_client_secret
       WHYGRAPH_GITHUB_APP_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
       WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE: /run/secrets/github_app_webhook_secret
+      # WHYGRAPH_UPDATE_CHECK: "0"   # turn off the daily release check
     secrets:
       - postgres_password
       - github_oauth_client_secret

@@ -341,6 +341,8 @@ its start. None is a `whygraph.toml` key either.
 | `WHYGRAPH_GITHUB_APP_WEBHOOK_SECRET_FILE` | **Required in production.** A file holding the app's webhook secret, at least 32 characters. A missing app variable, an unreadable or empty file, a key that is not RSA or a short webhook secret stops the start with exit code `2`, naming the variable. |
 | `WHYGRAPH_GITHUB_URL` | The GitHub web address, default `https://github.com`; set it for GitHub Enterprise Server. `https` only, except `http` for `localhost` and loopback addresses. Git clones and fetches production projects from it too; the pull request and issue crawl works only for `github.com`. |
 | `WHYGRAPH_GITHUB_API_URL` | The GitHub API address, default `https://api.github.com`; on Enterprise Server `<WHYGRAPH_GITHUB_URL>/api/v3`. Same scheme rule. |
+| `WHYGRAPH_UPDATE_CHECK` | Set to `0` to turn off the portal's daily [release check](../portal/security.md#update-check). Read only by a portal that is started with it - the production compose bundle, or `whygraph portal` run directly - **not** by one started with `whygraph up`, which passes none of your environment; there the switch is the Settings toggle. |
+| `DO_NOT_TRACK` | `1`, `true`, `yes` or `on` (any case) turns the release check off, ahead of `WHYGRAPH_UPDATE_CHECK` and the Settings toggle; other values are ignored. The same reach as `WHYGRAPH_UPDATE_CHECK`: a portal started with it, not one started by `whygraph up`. |
 | `WHYGRAPH_TRUSTED_PROXIES` | Comma-separated IPs or CIDRs of the reverse proxies whose `X-Forwarded-For` the portal believes (it is uvicorn's `forwarded_allow_ips`). Unset trusts none. A bad entry exits with status `2`. |
 
 !!! tip "Provider keys degrade gracefully - for scan and rationale"

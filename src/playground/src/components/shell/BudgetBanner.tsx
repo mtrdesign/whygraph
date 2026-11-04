@@ -42,6 +42,7 @@ export function BannerStrip({
   scope,
   action,
   onDismiss,
+  dismissLabel = "Dismiss for this month",
   children,
 }: {
   tone: "info" | "warning";
@@ -51,6 +52,8 @@ export function BannerStrip({
   action?: ReactNode;
   /** Present when the strip can be dismissed for the month. */
   onDismiss?: () => void;
+  /** The dismiss button's accessible name. */
+  dismissLabel?: string;
   children: ReactNode;
 }) {
   return (
@@ -70,7 +73,7 @@ export function BannerStrip({
         {action}
       </div>
       {onDismiss && (
-        <Button variant="ghost" size="icon-sm" aria-label="Dismiss for this month" onClick={onDismiss}>
+        <Button variant="ghost" size="icon-sm" aria-label={dismissLabel} onClick={onDismiss}>
           <XIcon />
         </Button>
       )}

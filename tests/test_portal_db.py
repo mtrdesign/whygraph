@@ -246,7 +246,8 @@ UX = "a7c3e91f5b20"
 CHAT_TOOLS = "f2b8d4a60c13"
 FORGE_TRIGGER = "c9d4e2f7a815"
 TOOL_OUTCOME = "b5e1a7d93c42"
-HEAD = TOOL_OUTCOME
+UPDATE_CHECK = "496953df26b4"
+HEAD = UPDATE_CHECK
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -483,8 +484,8 @@ def test_identity_downgrade_refuses_in_production(empty_portal_database: str) ->
     with portal_db.get_engine().begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO settings (id, mode, created_at) "
-                "VALUES (1, 'production', 'now') "
+                "INSERT INTO settings (id, mode, created_at, update_check) "
+                "VALUES (1, 'production', 'now', true) "
                 "ON CONFLICT (id) DO UPDATE SET mode = 'production'"
             )
         )

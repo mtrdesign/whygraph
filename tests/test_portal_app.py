@@ -702,6 +702,10 @@ def initialized_repo(client: TestClient, env: SimpleNamespace, name: str) -> Pat
 
 def test_setup_flow(client: TestClient, env: SimpleNamespace) -> None:
     state = client.get("/api/portal/state").json()
+    # Checks are off in tests: the block is null until the loop ticks, then
+    # the disabled block; either way, never an enabled one.
+    update = state.pop("update")
+    assert update is None or update["enabled"] is False
     assert state == {
         "mode": "local",
         "setup_complete": False,
@@ -1349,6 +1353,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/portal/check-path", "POST"): "org.add_project",
     ("/api/portal/defaults", "GET"): "org.read",
     ("/api/portal/defaults", "PUT"): "org.configure",
+    ("/api/portal/update-check", "PUT"): "org.configure",
     # Key tests (M2f-3 section 4.13): the org key is the owner's, a project's
     # keys its admins'; the GitHub token test is local-only
     ("/api/portal/defaults/keys/{provider}/test", "POST"): "org.configure",
@@ -1540,6 +1545,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/connect/tokens/{uid}", "DELETE"): "user.self",
     # Production's admin page: instance_access()
     ("/api/admin/settings", "GET"): "instance.admin",
+    ("/api/admin/update", "GET"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
     ("/api/admin/users", "GET"): "instance.admin",
     ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
@@ -1557,6 +1563,8 @@ NON_ORG_ROUTES = {
 
 LOCAL_ONLY_ROUTES = {
     ("/api/platform/connect", "POST"),
+    # The update-check switch (plan 43): production's check is env-only
+    ("/api/portal/update-check", "PUT"),
     ("/api/platform/callback", "POST"),
     ("/api/platform/pending/{link_id}", "GET"),
     ("/api/platform/pending/{link_id}", "DELETE"),

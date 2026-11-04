@@ -410,10 +410,29 @@ Invitations that closed in the last 30 days (accepted or revoked) are listed too
   neither demoted nor disabled. A scan-event stream a person is following ends when their access is
   removed.
 
+## Upgrading { #upgrading }
+
+The portal never updates itself, and `whygraph update` is for the local install. In production you
+update through your own deploy:
+
+1. Check the release's notes (the Updates card below links them; every release is also listed on
+   [GitHub](https://github.com/mtrdesign/whygraph/releases)) and [Upgrading](../portal/upgrading.md)
+   for manual steps. A Postgres major bump needs a dump and a restore.
+2. [Back up](#backups) the database and `secret.key`.
+3. Change the image tag of the `portal` service in `compose.yml` to `ghcr.io/mtrdesign/whygraph:<version>`
+   with the release you are moving to.
+4. Run `docker compose pull && docker compose up -d`.
+
+The **Updates** card on the [Admin page](#instance-admins) tells instance admins when a newer release is
+out (an hour after it is published), whether it needs manual steps, and links its notes. It is
+shown to instance admins only. The portal checks once a day by asking `api.github.com` for the release
+list; see [The update check](../portal/security.md#update-check). To turn it off, uncomment
+`WHYGRAPH_UPDATE_CHECK: "0"` under the portal's `environment` in `compose.yml` (or set `DO_NOT_TRACK`).
+
 ## Instance admins
 
 An instance admin manages the instance from `/admin` on the base host: users, who is an admin, the
-list of organizations and the [self-check](#the-self-check).
+list of organizations, the [self-check](#the-self-check) and the [Updates card](#upgrading).
 
 - **Settings check.** A card at the top shows the base URL and what the self-check found: "no
   problems", the missing DNS records it names, or "not run yet".

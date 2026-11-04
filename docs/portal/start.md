@@ -55,6 +55,7 @@ These run on your host, through the shim, not inside a container of their own.
 | `whygraph logs` | Follow the portal container's logs. The database has its own: `docker logs whygraph-portal-postgres`. |
 | `whygraph folders [--remove DIR]` | List the shared folders, or remove one (which recreates the portal container). |
 | `whygraph backup` | Dump the portal database into the data directory. See [Backup and restore](backup.md). |
+| `whygraph update [--version X.Y.Z] [--check] [--force]` | Update to the newest release (or a given one): download its installer, dump the database, install, recreate the portal. `--check` only reports. See [Upgrading](upgrading.md). |
 
 Stopping the portal never touches your repositories or the data directory. Start it again and
 everything is where you left it.
@@ -104,9 +105,10 @@ or sits inside it.
 
 ## Stopping and upgrading
 
-`whygraph down` stops the portal and its database; the data stays in the data directory. Installing a
-newer version (re-running the installer) changes the image the shim uses; the next `whygraph up`
-notices the new image and recreates the portal container, with the same data. When a release also
+`whygraph down` stops the portal and its database; the data stays in the data directory. To upgrade,
+run `whygraph update`, which dumps the database, installs the newer version and runs `whygraph up` for
+you. Re-running the installer by hand also works: it changes the image the shim uses, and the next
+`whygraph up` notices the new image and recreates the portal container, with the same data. When a release also
 moves the pinned Postgres image, `up` first dumps the running database into `backups/`, then recreates
 the database container too. See [Upgrading](upgrading.md).
 

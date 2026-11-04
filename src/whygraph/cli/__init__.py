@@ -18,6 +18,7 @@ from .commands.install import install_cmd
 from .commands.portal import portal_cmd
 from .commands.scan import scan_cmd
 from .commands.serve import serve_cmd
+from .commands.release_check import release_check_cmd
 from .commands.version import version_cmd
 
 
@@ -29,6 +30,7 @@ def main() -> None:
 
 
 main.add_command(version_cmd)
+main.add_command(release_check_cmd)
 main.add_command(init_cmd)
 main.add_command(scan_cmd)
 main.add_command(serve_cmd)

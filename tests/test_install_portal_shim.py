@@ -6,7 +6,13 @@ container store on disk, logs every call, and mimics the real-docker
 behaviours the shim depends on: ``--mount`` errors on a missing source,
 ``docker rm`` refuses a running container without ``-f``, a health status per
 container (a file of states, one popped per poll), and ``docker exec`` printing
-a fixed payload (or failing) so ``backup`` is testable.
+a fixed payload (or failing) so ``backup`` is testable. For ``update`` it
+also answers ``run --rm <image> whygraph release-check`` from a per-test
+fixture and ``image inspect`` (present, or missing with
+``FAKE_IMAGE_MISSING``); a fake ``curl`` serves a stub ``install.sh`` that
+installs a shim with a **different** pin (:data:`IMAGE2`) and logs the
+``WHYGRAPH_VERSION`` it was given. ``curl`` and the stub log into the same
+call log as ``docker``, so the order of every step is visible.
 
 The shim itself comes out of :func:`render_installer` exactly as a user would
 get it (installer run into a temp bin dir), so what is tested is what ships.
@@ -32,6 +38,7 @@ from whygraph.cli.commands.install import (
 )
 
 IMAGE = f"{IMAGE_REPO}:1.2.3"
+IMAGE2 = f"{IMAGE_REPO}:1.3.0"
 PORTAL = "whygraph-portal"
 PG = "whygraph-portal-postgres"
 PG_IMAGE = POSTGRES_IMAGE
@@ -65,6 +72,10 @@ _TOOLS = (
     "ls",
     "sort",
     "tail",
+    "sed",
+    "mktemp",
+    "env",
+    "dirname",
 )
 """Externals the portal verbs use; ``PATH`` is only these plus the fake docker."""
 
@@ -101,7 +112,18 @@ case "$cmd" in
       *whygraph.hostname*) cat "$S/c/$name/host_name" 2>/dev/null || true ;;
     esac
     ;;
+  image)
+    # `docker image inspect <ref>`: present unless the test says otherwise.
+    [ -z "${FAKE_IMAGE_MISSING:-}" ] || { echo "No such image: $2" >&2; exit 1; }
+    ;;
   run)
+    case " $* " in
+      *" whygraph release-check "*)
+        if [ -f "$S/release_check.fail" ]; then
+          echo "could not reach GitHub Releases (network)" >&2; exit 1
+        fi
+        cat "$S/release_check"; exit 0 ;;
+    esac
     name=""; folders=""; port=""; image=""; dev_src=""; pg_image=""; host_name=""
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -165,6 +187,37 @@ case "$cmd" in
   network) exit 0 ;;
   *) exit 0 ;;
 esac
+"""
+
+
+_FAKE_CURL = r"""#!/bin/sh
+S="$FAKE_DOCKER_STATE"
+( IFS='|'; echo "curl|$*" >> "$S/argv.log" )
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "$url" in
+  https://raw.githubusercontent.com/mtrdesign/whygraph/v*/scripts/install.sh)
+    if [ -f "$S/curl.404" ]; then
+      echo "curl: (22) The requested URL returned error: 404" >&2; exit 22
+    fi
+    if [ -n "$out" ]; then cat "$S/stub_install.sh" > "$out"; else cat "$S/stub_install.sh"; fi ;;
+  *) echo "curl: (6) unexpected URL $url" >&2; exit 6 ;;
+esac
+"""
+
+_STUB_INSTALL_SH = r"""#!/bin/sh
+# Stands in for a release's scripts/install.sh: logs the version it was asked
+# for, then runs the real installer rendered with IMAGE2.
+set -eu
+echo "installer|${WHYGRAPH_VERSION-unset}" >> "$FAKE_DOCKER_STATE/argv.log"
+if [ -n "${FAKE_INSTALL_FAIL:-}" ]; then echo "manifest unknown" >&2; exit 1; fi
+sh "$FAKE_DOCKER_STATE/installer2.sh"
 """
 
 
@@ -241,6 +294,29 @@ class Shim:
             (d / key).write_text(labels.get(key, ""))
         (d / "host_name").write_text(labels.get("hostname", HOST_NAME))
 
+    def release_check(
+        self, status: str, target: str, manual: int = 0, verified: int = 1
+    ) -> None:
+        """What the fake ``whygraph release-check`` prints for this test."""
+        (self.state / "release_check").write_text(
+            f"status={status}\ntarget={target}\nmanual={manual}\nverified={verified}\n"
+        )
+
+    def release_check_fails(self) -> None:
+        (self.state / "release_check.fail").write_text("")
+
+    @property
+    def tmpdir(self) -> Path:
+        return self.tmp / "tmpdir"
+
+    def update(self, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+        """``whygraph update`` on the baked pin (``WHYGRAPH_IMAGE`` empty)."""
+        return self.run(
+            "update",
+            *args,
+            **{"WHYGRAPH_IMAGE": "", "TMPDIR": str(self.tmpdir), **env},
+        )
+
     def make_pg_container(
         self,
         status: str = "running",
@@ -289,10 +365,16 @@ def shim(tmp_path: Path) -> Shim:
     host_name = path_dir / "hostname"
     host_name.write_text(_FAKE_HOSTNAME)
     host_name.chmod(host_name.stat().st_mode | stat.S_IEXEC)
+    curl = path_dir / "curl"
+    curl.write_text(_FAKE_CURL)
+    curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
     home = tmp_path / "home"
     home.mkdir()
     state = tmp_path / "state"
     (state / "c").mkdir(parents=True)
+    (state / "stub_install.sh").write_text(_STUB_INSTALL_SH)
+    (state / "installer2.sh").write_text(render_installer(IMAGE2))
+    (tmp_path / "tmpdir").mkdir()
     return Shim(tmp_path, bin_dir / "whygraph", home, state, path_dir)
 
 
@@ -1409,3 +1491,463 @@ def test_dev_src_is_validated(shim: Shim, kind: str) -> None:
     assert result.returncode == 2, result.stdout
     assert "WHYGRAPH_DEV_SRC" in result.stderr
     assert "run" not in shim.verbs()
+
+
+# --- update -------------------------------------------------------------------
+
+NOTES_URL = "https://mtrdesign.github.io/whygraph/releases/1.3.0/"
+UPGRADING_URL = "https://mtrdesign.github.io/whygraph/portal/upgrading/"
+INSTALLER_URL = (
+    "https://raw.githubusercontent.com/mtrdesign/whygraph/v1.3.0/scripts/install.sh"
+)
+
+
+def _release_checks(shim: Shim) -> list[list[str]]:
+    return [c for c in shim.runs() if "release-check" in c]
+
+
+def _curls(shim: Shim) -> list[list[str]]:
+    return [c for c in shim.calls() if c[0] == "curl"]
+
+
+def _installed(shim: Shim) -> list[str]:
+    """The ``WHYGRAPH_VERSION`` of every stub installer run."""
+    return [c[1] for c in shim.calls() if c[0] == "installer"]
+
+
+def _pin(shim: Shim) -> str:
+    match = re.search(r'IMAGE="\$\{WHYGRAPH_IMAGE:-([^}]*)\}"', shim.shim.read_text())
+    assert match
+    return match.group(1)
+
+
+def test_update_help_and_shape(shim: Shim) -> None:
+    result = shim.update("--help")
+    assert result.returncode == 0
+    assert "usage: whygraph update [--version X.Y.Z] [--check] [--force]" in (
+        result.stdout
+    )
+    assert shim.calls() == []
+    text = shim.shim.read_text()
+    # $0 is read at top level, beside IMAGE (inside a function zsh names the
+    # function instead).
+    head = text.split("# --- portal verbs", 1)[0]
+    assert 'SELF="$0"' in head
+    assert "up|down|status|logs|folders|backup|update) portal_main" in text
+    assert "$((" not in _portal_block(shim).split("portal_update()", 1)[1]
+
+
+def test_update_resolves_inside_the_pinned_image(shim: Shim) -> None:
+    shim.release_check("update", "1.3.0")
+    assert shim.update("--check").returncode == 0
+    assert _release_checks(shim) == [
+        ["run", "--rm", IMAGE, "whygraph", "release-check"]
+    ]
+    shim.clear_log()
+    assert shim.update("--check", "--version", "1.3.0").returncode == 0
+    assert _release_checks(shim) == [
+        ["run", "--rm", IMAGE, "whygraph", "release-check", "--target", "1.3.0"]
+    ]
+
+
+@pytest.mark.parametrize(("manual", "verified"), [(0, 1), (1, 1), (0, 0)])
+def test_update_check_prints_versions(shim: Shim, manual: int, verified: int) -> None:
+    shim.release_check("update", "1.3.0", manual=manual, verified=verified)
+    result = shim.update("--check")
+    assert result.returncode == 0, result.stderr
+    assert "current: 1.2.3" in result.stdout
+    assert "latest: 1.3.0" in result.stdout
+    if manual or not verified:
+        assert f"needs manual steps: {NOTES_URL} and {UPGRADING_URL}" in result.stdout
+    else:
+        assert "manual" not in result.stdout
+    assert shim.verbs() == ["run"]  # the release check only
+
+
+def test_update_already_current(shim: Shim) -> None:
+    shim.release_check("current", "1.2.3")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    assert "whygraph is already on 1.2.3" in result.stdout
+    assert "whygraph up" not in result.stdout
+    assert shim.verbs() == ["run"]
+
+
+def test_update_already_current_hints_at_up_for_an_old_portal(shim: Shim) -> None:
+    old = f"{IMAGE_REPO}:1.1.0"
+    shim.make_container(PORTAL, "running", port="8765", image=old)
+    shim.release_check("current", "1.2.3")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    assert f"the portal still runs {old}; run: whygraph up" in result.stdout
+    assert shim.verbs() == ["run"]
+
+
+def test_update_refuses_a_downgrade(shim: Shim) -> None:
+    shim.release_check("downgrade", "1.1.0")
+    result = shim.update("--version", "1.1.0")
+    assert result.returncode == 2
+    assert "downgrades are not supported" in result.stderr
+    assert "https://mtrdesign.github.io/whygraph/portal/backup/#restore" in (
+        result.stderr
+    )
+    assert shim.verbs() == ["run"]
+
+
+def test_update_on_a_build_ahead_of_the_latest_release(shim: Shim) -> None:
+    shim.release_check("ahead", "1.1.0")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    assert "this build (1.2.3) is newer than the latest release 1.1.0" in (
+        result.stdout
+    )
+    assert shim.verbs() == ["run"]
+
+
+@pytest.mark.parametrize(("manual", "verified"), [(1, 1), (0, 0)])
+def test_update_stops_at_manual_steps(shim: Shim, manual: int, verified: int) -> None:
+    shim.release_check("update", "1.3.0", manual=manual, verified=verified)
+    result = shim.update()
+    assert result.returncode == 2
+    assert NOTES_URL in result.stderr
+    assert UPGRADING_URL in result.stderr
+    assert "re-run with --force" in result.stderr
+    assert shim.verbs() == ["run"]
+
+    shim.clear_log()
+    forced = shim.update("--force")
+    assert forced.returncode == 0, forced.stderr
+    assert _installed(shim) == ["1.3.0"]
+    assert _pin(shim) == IMAGE2
+
+
+@pytest.mark.parametrize(
+    ("args", "env", "message"),
+    [
+        ((), {"WHYGRAPH_IMAGE": IMAGE}, "WHYGRAPH_IMAGE is set"),
+        ((), {"WHYGRAPH_PORTAL_NAME": "whygraph-portal-dev"}, "dev portal"),
+        ((), {"WHYGRAPH_DEV_SRC": "/somewhere"}, "dev portal"),
+        (("--nope",), {}, "unknown arg '--nope'"),
+        (("--version",), {}, "--version needs a value"),
+        (("--version", "2.3"), {}, "invalid --version '2.3'"),
+        (("--version", "02.3.0"), {}, "invalid --version '02.3.0'"),
+        (("--version", "1.2.3.4"), {}, "invalid --version"),
+        (("--version", "v1.3.0"), {}, "invalid --version"),
+        (("--version", "1.3.0 "), {}, "invalid --version"),
+        (("--version", ""), {}, "invalid --version"),
+        (("--version=1.x.0",), {}, "invalid --version"),
+    ],
+)
+def test_update_refusals(
+    shim: Shim, args: tuple[str, ...], env: dict[str, str], message: str
+) -> None:
+    shim.release_check("update", "1.3.0")
+    result = shim.update(*args, **env)
+    assert result.returncode == 2, result.stdout
+    assert message in result.stderr
+    assert shim.calls() == []  # refused before anything ran
+
+
+def test_update_needs_curl(shim: Shim) -> None:
+    (shim.path_dir / "curl").unlink()
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 2
+    assert "update needs curl" in result.stderr
+    assert shim.calls() == []
+
+
+def test_update_failed_resolve(shim: Shim) -> None:
+    shim.release_check_fails()
+    for args in ((), ("--version", "1.3.0")):
+        result = shim.update(*args)
+        assert result.returncode == 2
+        assert "could not check for a newer release" in result.stderr
+        assert "--version X.Y.Z --force" in result.stderr
+    assert not _curls(shim)
+
+    shim.clear_log()
+    forced = shim.update("--version", "1.3.0", "--force")
+    assert forced.returncode == 0, forced.stderr
+    assert "could not check the releases in between" in forced.stderr
+    assert _installed(shim) == ["1.3.0"]
+    assert _pin(shim) == IMAGE2
+
+
+def test_update_failed_resolve_needs_a_version_even_with_force(shim: Shim) -> None:
+    shim.release_check_fails()
+    result = shim.update("--force")
+    assert result.returncode == 2
+    assert "could not check for a newer release" in result.stderr
+    assert not _curls(shim)
+
+
+def test_update_unknown_release(shim: Shim) -> None:
+    shim.release_check("unknown", "", verified=0)
+    result = shim.update()
+    assert result.returncode == 2
+    assert "could not find a release to update to" in result.stderr
+
+    result = shim.update("--version", "1.3.0")
+    assert result.returncode == 2
+    assert "1.3.0 is not a published release" in result.stderr
+    assert "--force" in result.stderr
+    assert not _curls(shim)
+
+    shim.clear_log()
+    forced = shim.update("--version", "1.3.0", "--force")
+    assert forced.returncode == 0, forced.stderr
+    assert _installed(shim) == ["1.3.0"]
+
+
+@pytest.mark.parametrize("unchecked", ["fails", "unlisted"])
+@pytest.mark.parametrize(
+    ("version", "code", "message"),
+    [
+        ("1.0.0", 2, "downgrades are not supported"),  # older major-minor-patch
+        ("1.2.0", 2, "downgrades are not supported"),  # older patch line
+        ("0.9.9", 2, "downgrades are not supported"),
+        ("1.2.3", 0, "already on 1.2.3"),  # the shim's own pin
+    ],
+)
+def test_update_force_never_downgrades_an_unchecked_target(
+    shim: Shim, unchecked: str, version: str, code: int, message: str
+) -> None:
+    # --force skips the manual gate, never the version comparison: when the
+    # release check could not compare (GitHub unreachable, or the target is
+    # not in the fetched list), the shim compares with its own pin (1.2.3).
+    if unchecked == "fails":
+        shim.release_check_fails()
+    else:
+        shim.release_check("unknown", "", verified=0)
+    result = shim.update("--version", version, "--force")
+    assert result.returncode == code, result.stderr
+    assert message in (result.stdout + result.stderr)
+    assert not _curls(shim)
+    assert _installed(shim) == []
+
+
+def test_update_force_still_goes_up_when_unchecked(shim: Shim) -> None:
+    # 1.10.0 > 1.2.3 field by field (not as a string).
+    shim.release_check_fails()
+    result = shim.update("--version", "1.10.0", "--force")
+    assert result.returncode == 0, result.stderr
+    assert _installed(shim) == ["1.10.0"]
+
+
+def test_update_from_a_non_release_build_goes_through_the_manual_gate(
+    shim: Shim,
+) -> None:
+    # release-check says `unknown` but names a target when this build's own
+    # version is not X.Y.Z; nothing in between is verified.
+    shim.release_check("unknown", "1.3.0", verified=0)
+    result = shim.update()
+    assert result.returncode == 2
+    assert "re-run with --force" in result.stderr
+    assert not _curls(shim)
+    assert shim.update("--force").returncode == 0
+    assert _installed(shim) == ["1.3.0"]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "garbage\n",
+        "status=update\ntarget=1.3\nmanual=0\nverified=1\n",
+        "status=update\ntarget=1.3.0\nmanual=yes\nverified=1\n",
+        "status=maybe\ntarget=1.3.0\nmanual=0\nverified=1\n",
+        "status=update\ntarget=\nmanual=0\nverified=1\n",
+    ],
+)
+def test_update_refuses_an_unexpected_answer(shim: Shim, answer: str) -> None:
+    (shim.state / "release_check").write_text(answer)
+    result = shim.update("--force")
+    assert result.returncode == 2
+    assert "unexpected answer" in result.stderr
+    assert not _curls(shim)
+
+
+def test_update_failed_download_changes_nothing(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    (shim.state / "curl.404").write_text("")
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 2
+    assert "could not download the 1.3.0 installer" in result.stderr
+    [curl] = _curls(shim)
+    assert curl[-1] == INSTALLER_URL
+    tmp = Path(curl[curl.index("-o") + 1])
+    assert tmp.parent == shim.tmpdir
+    assert not tmp.exists()
+    assert list(shim.tmpdir.iterdir()) == []
+    # Downloaded before the backup: no dump, nothing installed, same pin.
+    assert shim.verbs() == ["run", "curl"]
+    assert not (shim.data / "backups").exists()
+    assert _pin(shim) == IMAGE
+
+
+def test_update_with_the_portal_running(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    # resolve, download, dump, install, check the pin, recreate on the new image
+    assert shim.verbs() == [
+        "run",
+        "curl",
+        "exec",
+        "installer",
+        "image",
+        "stop",
+        "rm",
+        "network",
+        "run",
+    ]
+    [curl] = _curls(shim)
+    assert curl[1:3] == ["-fsSL", "-o"]
+    assert curl[-1] == INSTALLER_URL
+    assert _installed(shim) == ["1.3.0"]
+    assert ["image", "inspect", IMAGE2] in shim.calls()
+    assert f"whygraph.image={IMAGE2}" in shim.run_call()
+    assert "changed: image" in result.stderr
+    assert _pin(shim) == IMAGE2
+    assert len(list((shim.data / "backups").glob("portal-*.dump"))) == 1
+    assert list(shim.tmpdir.iterdir()) == []
+    # The new shim replaced the old one in place, through a rename.
+    assert sorted(p.name for p in shim.shim.parent.iterdir()) == [
+        "whygraph",
+        "whygraph-mcp",
+    ]
+
+
+def test_update_treats_a_restarting_portal_as_running(shim: Shim) -> None:
+    shim.make_container(PORTAL, "restarting", port="8765", image=IMAGE)
+    shim.make_pg_container()
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    assert f"whygraph.image={IMAGE2}" in shim.run_call()
+
+
+def test_update_without_a_portal_installs_and_says_how_to_start(shim: Shim) -> None:
+    shim.make_pg_container()
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    assert "installed whygraph 1.3.0. Start the portal: whygraph up" in result.stdout
+    assert shim.verbs() == ["run", "curl", "exec", "installer", "image"]
+    assert shim.run_names() == []
+    assert _pin(shim) == IMAGE2
+
+
+def test_update_without_any_container_skips_the_backup(shim: Shim) -> None:
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 0, result.stderr
+    assert "exec" not in shim.verbs()
+    assert "Start the portal: whygraph up" in result.stdout
+
+
+def test_update_stops_when_the_pinned_image_is_missing(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    shim.release_check("update", "1.3.0")
+    result = shim.update(FAKE_IMAGE_MISSING="1")
+    assert result.returncode == 1
+    assert f"installed whygraph 1.3.0, but {IMAGE2} is not on this machine" in (
+        result.stderr
+    )
+    assert f"docker tag <mirror>/whygraph:1.3.0 {IMAGE2}" in result.stderr
+    assert _installed(shim) == ["1.3.0"]
+    # No `up`: the old portal keeps running.
+    assert "stop" not in shim.verbs()
+    assert (shim.state / "c" / PORTAL / "status").read_text() == "running"
+
+
+def test_update_explains_a_failed_installer(shim: Shim) -> None:
+    shim.release_check("update", "1.3.0")
+    result = shim.update(FAKE_INSTALL_FAIL="1")
+    assert result.returncode == 1
+    assert "the 1.3.0 installer failed" in result.stderr
+    assert "image may still be building" in result.stderr
+    assert "image" not in shim.verbs()
+    assert _pin(shim) == IMAGE
+    assert list(shim.tmpdir.iterdir()) == []
+
+
+def test_update_explains_a_failed_up(shim: Shim) -> None:
+    shim.make_container(PORTAL, "running", port="8765", image=IMAGE)
+    shim.make_pg_container(health="unhealthy")
+    shim.release_check("update", "1.3.0")
+    result = shim.update()
+    assert result.returncode == 1
+    assert "did not become ready" in result.stderr
+    assert "installed 1.3.0, but whygraph up failed" in result.stderr
+    assert "Check: whygraph status" in result.stderr
+    assert (
+        "To go back to 1.2.3: curl -fsSL "
+        "https://raw.githubusercontent.com/mtrdesign/whygraph/v1.2.3/scripts/install.sh | sh"
+    ) in result.stderr
+
+
+def test_update_failed_dump_installs_nothing(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    shim.release_check("update", "1.3.0")
+    result = shim.update(FAKE_EXEC_FAIL="1")
+    assert result.returncode == 2
+    assert "backup failed" in result.stderr
+    assert "WHYGRAPH_SKIP_BACKUP=1 whygraph update" in result.stderr
+    assert shim.verbs() == ["run", "curl", "exec"]
+    assert _pin(shim) == IMAGE
+    assert list(shim.tmpdir.iterdir()) == []  # the download is cleaned up
+
+
+def test_update_skip_backup(shim: Shim) -> None:
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    shim.release_check("update", "1.3.0")
+    result = shim.update(WHYGRAPH_SKIP_BACKUP="1", FAKE_EXEC_FAIL="1")
+    assert result.returncode == 0, result.stderr
+    assert "without a backup" in result.stderr
+    assert "exec" not in shim.verbs()
+    assert _pin(shim) == IMAGE2
+
+
+def test_update_through_a_symlink_writes_beside_the_link(shim: Shim) -> None:
+    link_dir = _dir(shim, "linkbin")
+    (link_dir / "whygraph").symlink_to(shim.shim)
+    shim.release_check("update", "1.3.0")
+    result = subprocess.run(
+        ["sh", str(link_dir / "whygraph"), "update"],
+        env=shim.env(WHYGRAPH_IMAGE="", TMPDIR=str(shim.tmpdir)),
+        capture_output=True,
+        text=True,
+        cwd=shim.tmp,
+    )
+    assert result.returncode == 0, result.stderr
+    link = link_dir / "whygraph"
+    assert not link.is_symlink()
+    assert IMAGE2 in link.read_text()
+    assert _pin(shim) == IMAGE  # the link's target is left alone
+
+
+@pytest.mark.parametrize("shell", ["dash", "bash", "ksh"])
+def test_update_runs_under_other_posix_shells(shim: Shim, shell: str) -> None:
+    found = shutil.which(shell)
+    if not found:
+        pytest.skip(f"{shell} not installed")
+    assert shim.run("up").returncode == 0
+    shim.clear_log()
+    shim.release_check("update", "1.3.0")
+    result = subprocess.run(
+        [found, str(shim.shim), "update"],
+        env=shim.env(WHYGRAPH_IMAGE="", TMPDIR=str(shim.tmpdir)),
+        capture_output=True,
+        text=True,
+        cwd=shim.tmp,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"whygraph.image={IMAGE2}" in shim.run_call()

@@ -88,7 +88,7 @@ dev:
 
 dev-local: node-check dev-fixtures dev-db  ## Develop natively: portal :8777 (auto-restart) + Vite HMR :5174 - open :5174
 	@set -e; $(DEV_SHARED); echo "shared folders: $$folders"; \
-	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" \
+	WHYGRAPH_DATABASE_URL="$(DEV_DATABASE_URL)" WHYGRAPH_UPDATE_CHECK=0 \
 	WHYGRAPH_SHARED_FOLDERS="$$folders" WHYGRAPH_DEV_ORIGINS=http://localhost:5174,http://127.0.0.1:5174 \
 	WHYGRAPH_DEV_PLATFORM_HTTP=1 NO_PROXY=.localhost \
 		$(UV_RUN) python scripts/dev_portal.py -- --data "$(DEV_LOCAL_DATA)" --port $(DEV_PORT)
@@ -132,7 +132,7 @@ dev-production: dev-github-check node-check dev-fixtures dev-db  ## Develop in p
 	fi; \
 	env -u WHYGRAPH_SHARED_FOLDERS -u WHYGRAPH_DEV_ORIGINS \
 	WHYGRAPH_MODE=production WHYGRAPH_BASE_URL=http://whygraph.localhost:5173 \
-	WHYGRAPH_DATABASE_URL="$(DEV_PROD_DATABASE_URL)" \
+	WHYGRAPH_DATABASE_URL="$(DEV_PROD_DATABASE_URL)" WHYGRAPH_UPDATE_CHECK=0 \
 		$(UV_RUN) python scripts/dev_portal.py --preserve-host --vite-port 5173 -- --data "$(DEV)/production/data" --port $(DEV_PROD_PORT)
 
 dev-docker: dev-fixtures dev-image  ## Develop in Docker: the same, inside the image via the real shim - open :5174

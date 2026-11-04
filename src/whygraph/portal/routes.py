@@ -44,7 +44,7 @@ from typing import Annotated, Any, Literal
 import anyio
 import anyio.from_thread
 from fastapi import APIRouter, Body, Depends, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import and_, case, cast, false, func, not_, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
@@ -94,7 +94,7 @@ from whygraph.services.github import (
     remote_identity,
 )
 
-from . import connections, sessions
+from . import connections, sessions, updates
 from .audit import audit
 from .budgets import reload_org_budgets
 from .clones import production_initialize, remove_clone
@@ -133,6 +133,7 @@ from .deps import (
     project_db_access,
     project_role_for,
     require_initialized,
+    require_local,
     unsafe_path_error,
 )
 from .github_app import (
@@ -157,6 +158,7 @@ from .models import (
     PlatformLink,
     Project,
     ProjectAgent,
+    Setting,
     ProjectGrant,
     ScanRun,
     Secret,
@@ -1268,6 +1270,12 @@ def get_state(request: Request) -> dict:
         # Month-to-date spend against the budgets, for the banners (M2f-2
         # plan section 4.12); null before setup and without an org.
         "usage": state_usage(state, access),
+        # The update notice (plan 43): local mode after setup only.
+        "update": (
+            updates.update_block(state)
+            if state.mode == "local" and principal is not None
+            else None
+        ),
     }
     if state.mode == "local":
         # The machine name the link page prefills (M2e section 4.8).
@@ -1432,6 +1440,44 @@ def get_defaults(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> di
             access.org_id,
             configurer=allowed(access.role, Action.ORG_CONFIGURE),
         )
+
+
+portal_local_router = APIRouter(
+    prefix="/api/portal",
+    dependencies=[Depends(require_local), Depends(current_user)],
+)
+"""Local-only portal routes: ``404`` in production, before ``current_user``."""
+
+
+class UpdateCheckBody(BaseModel):
+    """Body of ``PUT /api/portal/update-check``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool
+
+
+@portal_local_router.put("/update-check")
+def put_update_check(
+    body: UpdateCheckBody,
+    request: Request,
+    access: OrgAccess = Depends(org_access(Action.ORG_CONFIGURE)),
+) -> dict | None:
+    """Turn the daily update check on or off (local mode; not audited).
+
+    Writes ``settings.update_check`` in one session, re-resolves the switch
+    (the environment can still force it off) and answers the update block.
+    """
+    state = portal_state(request)
+    with get_session() as session:
+        setting = session.get(Setting, 1)
+        if setting is None:
+            raise ApiError(409, "portal not initialised")
+        setting.update_check = body.enabled
+        session.add(setting)
+        session.commit()
+    state.updates.set_switch(updates.read_switch(state))
+    return updates.update_block(state)
 
 
 @portal_router.put("/defaults")
@@ -3732,6 +3778,7 @@ def suggest_project_areas(
 
 __all__ = [
     "linked_guard",
+    "portal_local_router",
     "portal_router",
     "projects_router",
     "public_router",

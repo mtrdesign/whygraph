@@ -6,6 +6,16 @@
 
 ## What's new
 
+- **Update notice and `whygraph update`.** A local portal now tells you when a newer release is out, with
+  a banner that links its notes (production shows an Updates card to instance admins), and `whygraph
+  update` does the upgrade on the host: it downloads the new installer, dumps the database, installs and
+  recreates the portal, and stops at a release that needs manual steps unless you pass `--force`. The
+  portal makes one new call a day to `api.github.com` for the public release list and sends nothing about
+  you or your projects; turn it off with the Settings toggle, or `WHYGRAPH_UPDATE_CHECK=0` /
+  `DO_NOT_TRACK=1` in a production or directly run portal. See [Upgrading](../portal/upgrading.md),
+  [The update check](../portal/security.md#update-check) and
+  [Production upgrades](../deploy/production.md#upgrading). Upgrading *to* this release is the last
+  manual one: re-run the installer, then `whygraph up`.
 - **Export and import a project.** A project admin can export a project as one `.zip` - its notes and
   purpose card, commit and file descriptions, rationale cards, your own chats if you tick a box, and a
   few settings - and import it into another project of the same repository, on any portal, local or

@@ -369,6 +369,39 @@ data. A clone made by an earlier version is fixed by its next sync, which rewrit
 disk as a plain file and drops the cached rationale cards of those files; at start the portal queues
 one such sync, with a scan, for every clone that does not have `core.symlinks=false` yet.
 
+## The update check { #update-check }
+
+The portal looks for a newer release once a day. This is the only thing it fetches that has nothing
+to do with your projects, and what it sends is one request:
+
+```text
+GET https://api.github.com/repos/mtrdesign/whygraph/releases?per_page=30
+User-Agent: whygraph-portal
+Accept: application/vnd.github+json
+X-GitHub-Api-Version: 2022-11-28
+```
+
+plus the HTTP client's standard `Accept-Encoding` and `Connection` headers. No version, identifier,
+cookie, token or project name goes with it; GitHub sees the machine's IP address, as with any
+`git fetch`. `whygraph update` makes the same request when you run it, from a short-lived container of
+the current image, with `User-Agent: whygraph-cli`. From the
+answer the portal keeps only version numbers, publish times and whether a release is marked as needing
+manual steps. The link to the release notes is built by the portal, so nothing from the response is
+shown as text or followed as a link. The check never runs as part of a scan, and a failure is shown only
+as "Last check failed".
+
+To turn it off:
+
+- **Local portal:** the toggle in the global Settings. The portal started by `whygraph up` gets none of
+  your shell's environment, so a variable set there has no effect.
+- **Production, or `whygraph portal` run directly:** `WHYGRAPH_UPDATE_CHECK=0` or `DO_NOT_TRACK=1` in
+  the portal's own environment. See [Configuration](../reference/configuration.md#environment-variables).
+
+The check is separate from CodeGraph, which makes no telemetry, no update check and no downloads
+(see [The CodeGraph endpoint](#the-codegraph-endpoint)). A local portal makes its first check the first
+time it starts after an update, before you can reach the toggle; production egress rules will see the
+call to `api.github.com`.
+
 ## Project notes { #project-notes }
 
 A [project note](../guide/notes.md) is text a member (or an agent, for a member to confirm) wrote and

@@ -148,6 +148,7 @@ loopback="127.0.0.1,localhost,.localhost"
   unset WHYGRAPH_MODE WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE
   export NO_PROXY="$loopback${NO_PROXY:+,$NO_PROXY}" no_proxy="$loopback${no_proxy:+,$no_proxy}"
   export WHYGRAPH_DEV_PLATFORM_HTTP=1
+  export WHYGRAPH_UPDATE_CHECK=0
   export WHYGRAPH_DATABASE_URL="$database_url"
   export WHYGRAPH_SHARED_FOLDERS="$root/shared"
   export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/control"
@@ -227,6 +228,7 @@ mkdir -p "$root/prod-control"
   unset WHYGRAPH_SHARED_FOLDERS WHYGRAPH_DEV_ORIGINS WHYGRAPH_CONFIG_JSON WHYGRAPH_DATABASE_PASSWORD_FILE
   export NO_PROXY="$loopback${NO_PROXY:+,$NO_PROXY}" no_proxy="$loopback${no_proxy:+,$no_proxy}"
   export WHYGRAPH_MODE=production
+  export WHYGRAPH_UPDATE_CHECK=0
   export WHYGRAPH_BASE_URL="http://whygraph.localhost:$prod_port"
   export WHYGRAPH_DATABASE_URL="$prod_database_url"
   export WHYGRAPH_SCAN_CMD="$scan_python $repo/tests/fixtures/e2e_scan.py --control $root/prod-control --real-git"

@@ -107,6 +107,7 @@ from .runner import ScanRunner
 from .security import PortalOrigins, Principal, _is_under
 from .throttle import InFlight, Throttle, ip_key
 from .usage import usage_sink_for
+from .updates import UpdateBook
 from .usage_store import PriceBook, SpendBook, UsageWriter
 from .webhook import DeliveryIds
 
@@ -565,6 +566,15 @@ class PortalState:
         (:func:`whygraph.portal.key_test.probe_llm_key`,
         :func:`whygraph.portal.model_list.list_llm_models`; tests plug an
         ``httpx.MockTransport`` in); ``None`` in a real run.
+    updates : UpdateBook
+        The release check's state (plan 43): the switch, the fetched
+        release list and the schedule, filled by the lifespan's
+        ``_check_for_updates`` loop and read by the routes through
+        :func:`whygraph.portal.updates.update_block`.
+    update_transport : httpx.BaseTransport or None
+        Replaces the network of the release check
+        (:func:`whygraph.portal.updates.fetch_into_book`; tests plug an
+        ``httpx.MockTransport`` in); ``None`` in a real run.
     """
 
     def __init__(self, *, port: int, data_dir: Path, runner: ScanRunner) -> None:
@@ -644,6 +654,8 @@ class PortalState:
         self.slug_check = Throttle(60, 60)
         self.github_listing: dict[int, tuple[float, bool]] = {}
         self.key_test_transport: Any = None
+        self.updates = UpdateBook()
+        self.update_transport: Any = None
         self._principal: Any = _UNSET
         self._principal_lock = threading.Lock()
         self._principal_generation = 0

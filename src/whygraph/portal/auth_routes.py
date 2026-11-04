@@ -36,7 +36,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
-from . import audit_store, connections
+from whygraph.core.releases import format_version, running_version
+
+from . import audit_store, connections, updates
 from .audit import audit, truncate_email
 from .authz import Role
 from .db import get_session
@@ -1008,6 +1010,29 @@ def get_admin_settings(
     """The base URL and what its DNS self-check found (read-only)."""
     state = portal_state(request)
     return {"base_url": _base(state).origin, "base_check": state.base_check}
+
+
+@auth_router.get("/api/admin/update")
+def get_admin_update(
+    request: Request, _: Principal = Depends(instance_access())
+) -> dict:
+    """The update-notice block; before the loop's first tick only ``current``."""
+    block = updates.update_block(portal_state(request))
+    if block is not None:
+        return block
+    current = running_version()
+    return {
+        "enabled": None,
+        "source": None,
+        "current": format_version(current) if current is not None else None,
+        "latest": None,
+        "available": False,
+        "manual_steps": False,
+        "notes_url": None,
+        "upgrading_url": updates.UPGRADING_URL,
+        "checked_at": None,
+        "error": None,
+    }
 
 
 @auth_router.get("/api/admin/orgs")

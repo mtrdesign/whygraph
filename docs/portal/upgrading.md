@@ -31,7 +31,7 @@ whygraph update --version X.Y.Z   # a specific release
   `WHYGRAPH_PORTAL_NAME` or `WHYGRAPH_DEV_SRC` is set, and it needs `curl`.
 
 !!! note "An install from before `whygraph update` existed"
-    A `whygraph` command installed before this release has no `update` verb: it answers
+    A `whygraph` command installed before 2.3.0 has no `update` verb: it answers
     `No such command 'update'`. Upgrade that one time with the manual path below; from then on
     `whygraph update` works.
 
@@ -50,6 +50,9 @@ you come from:
   [WhyGraph 2.2.0](../releases/2.2.0.md#fixes).
 - **From 2.2.0**, nothing to do: 2.2.1 changes only the portal's UI. See
   [WhyGraph 2.2.1](../releases/2.2.1.md).
+- **From 2.2.1**, re-run the installer and `whygraph up` this once (2.2.1 has no `whygraph update`);
+  each project's database and the portal's database are upgraded on first use. See
+  [WhyGraph 2.3.0](../releases/2.3.0.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

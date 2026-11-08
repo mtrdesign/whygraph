@@ -24,6 +24,8 @@ TERMS: <topic>; <topic>
 PARENT: <tasks.json path | none>
 CLARIFICATION: <text>
 OUT_PATH: <absolute path for the finished plan>
+CAPTURE_PATH: <repo-relative path>
+REFRESH_PROFILE: <yes | no>
 PLAN_PATH: <path of the plan to revise>
 ANSWERS:
 - Q<n>: <chosen option or the user's own text>
@@ -35,6 +37,8 @@ ANSWERS:
 - `TERMS`: 1 to 3 search topics, only when some consent is `yes`. They are the only text a consented source may send off this machine.
 - `PARENT`: `none`, or the `tasks.json` of a split when this task is one child of it.
 - `CLARIFICATION`: only after you replied `CLARIFY:`; it is the user's answer.
+- `CAPTURE_PATH`: the repo-relative path of the capture script. **2b'** runs it with `--probe` to learn whether capture works here.
+- `REFRESH_PROFILE`: `yes` makes the cached UI profile stale, so `ui-surface` derives it again (**1f**).
 - `PLAN_PATH` and `ANSWERS` come only with `MODE: revise` (**Phase 3**). `ANSWERS: defaults` on one line means every asked question takes its default.
 
 `OUT_PATH` is where you write the finished plan (see **Delivering the plan**). If it is absent, write no file and return the plan as your reply. In revise mode the plan to write is `PLAN_PATH`.
@@ -141,6 +145,17 @@ For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count
 
 **1d. Dependency order.** Order the working set callees before callers, from the 1b trail (leaves before roots, base classes before derived, schema before consumers), and list it in that order wherever you pass it. Mark a node on an external contract (public API, persisted schema, IPC boundary, exported symbol): its step needs a migration.
 
+**1f. UI relevance.** Run this after 1d, on the working set.
+1. Read `.whygraph/profiles/ui.md` if it exists. It is the **cached profile**.
+2. Decide whether the task is a **UI task**. It is one when the task text names a screen, page, view, component, form, layout, style or theme. It is also one when a working-set file sits under a `frontend_paths` entry of the cached profile. With no cached profile, the test is a directory whose `package.json` depends on react, vue, svelte, angular, solid-js, preact, next, nuxt or astro.
+3. When the task is not a UI task, drop `ui-surface` from the kept list and stop this step. Phase 0 keeps `ui-surface` without consent, because it is a bundled source.
+4. Decide whether the cached profile is **fresh**. It is fresh when all of these hold:
+   - `git ls-files --error-unmatch .whygraph/profiles/ui.md` exits non-zero, so git does not track the file;
+   - `REFRESH_PROFILE` is `no`;
+   - its `fingerprint` is not `none`, and it equals the fingerprint you compute now from its `derived_from` by the **2b'** rule.
+
+A fresh profile is reused: the `ui-surface` run gets its key lines as a `PROFILE:` block (**2a**), and skips the derivation.
+
 The **working set** is the table of these records - that's what you (single-pass) or the researchers (deep) build the plan from.
 
 ## Phase 2 - Branch on mode
@@ -154,9 +169,14 @@ The **working set** is the table of these records - that's what you (single-pass
 
 In single-pass:
 1. Read `SPINE_PATH` once. Follow it, and apply its `## Writing rules` to every `Change`, `Expected UI`, Acceptance statement and Open question.
-2. Read the body of the bundled `repo-tests.md` when it is kept, and apply it yourself within its `tools` and `budget`: it gives each step's Verify command, the Test first test for an uncovered symbol, and Acceptance item 1. Apply the bundled `ui-surface.md` the same way when it is kept and the task changes a screen. Read no other source body.
+2. Read the body of the bundled `repo-tests.md` when it is kept, and apply it yourself within its `tools` and `budget`: it gives each step's Verify command, the Test first test for an uncovered symbol, and Acceptance item 1. Apply the bundled `ui-surface.md` the same way when it is kept (**1f** keeps it only for a UI task). Use the fresh profile's key lines as its `PROFILE:` block, as **2a** describes. Then run **2b'** before you write the plan. Read no other source body.
 3. Never read the body of a kept source that needed consent. Hand off to one `whygraph-researcher` for each such source, all in one message, with the prompt of **2a**, and use its report as deep mode would (a `Prior art` report fills `## Prior art`). If delegation is unavailable, drop the source and add `<name>: skipped - single-pass mode has no researcher to run it` to the Confidence reason.
 4. Synthesise the plan yourself. Output format below. Sequence changes in the 1d dependency order. Quote constraints and risks **verbatim** from rationale cards - never paraphrase. Flag any step that appears to violate a constraint as a *Blocker*. Give each step a Verify, a Model and, from the 1d external-contract marks, Boundaries. List what the code cannot settle under `## Open questions`, each with 2 or 3 options and a default; at most 3 are `Plan-shaping: yes`. Report honest confidence.
+5. When the `ui-surface` result has key lines under `## UI profile`, do these four things, with `CAPTURE_STATUS` from **2b'**:
+   - Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
+   - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes.
+   - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3.
+   - Add the Acceptance item that `CAPTURE_STATUS` selects. For `available` or `unknown`, add `manual: open .whygraph/plans/<stem>/ui/index.html and compare before and after for each UI step`. For `unavailable: <reason>`, add one `manual:` item per Expected UI state instead, and name the reason in the Confidence reason. These items do not count toward the six-item cap.
 
 If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the plan with the matching notice:
 - *"Note: Auto-mode chose single-pass (impact set is small - fan-out would be ceremony)."*
@@ -193,13 +213,40 @@ WORKING SET:
 
 PARENT: <PARENT, or none>
 - t<N>: <sibling title> - files_hint: <paths>
+
+PROFILE:
+<key lines of the cached UI profile; only for ui-surface, only when the profile is fresh>
 ```
 
 Inline each card's `purpose` / `constraints` / `risks` verbatim (not `why` / `tradeoffs`); for an empty card write `purpose: (no rationale recorded)`, `constraints: []`, `risks: []`. Never inline a source's body: the researcher reads it. When `PARENT` is not `none`, list every other child of that `tasks.json` under it, with its `files_hint`. Researchers may fetch cards for symbols outside the working set.
 
+Give the `PROFILE:` block only to the `ui-surface` researcher, and only when **1f** found the cached profile fresh. Copy the profile's key lines into it, without its frontmatter and without its `capture:` line. Omit the block for every other researcher.
+
 If delegation is unavailable, switch to single-pass and prepend the plan with this notice: *Deep mode was unavailable (no subagent tool); this plan was written in single-pass mode.*
 
 **2b. Wait for all reports.** If a researcher fails or its output lacks `# Researcher report:`, do not re-run it; pass `=== <source name> ===` followed by the line `(unavailable: <one-line reason>)` to the synthesizer in its place.
+
+**2b'. Write the UI profile.** In deep mode, run this after **2b** and before **2c**. In single-pass, run it right after you apply `ui-surface.md`, before you write the plan. Run it only when the `ui-surface` report has key lines under `## UI profile`. Never write the profile from a report whose `## UI profile` is the single line `not a UI task`, or from an unavailable report. Without key lines, `CAPTURE_STATUS` is `none`.
+In VS Code no terminal is available to the planner: write the profile with `fingerprint: none` and `capture: unknown`, and skip the tracked check; the capture script refuses a tracked profile itself.
+1. Run `git ls-files --error-unmatch .whygraph/profiles/ui.md`. Exit 0 means git tracks the profile. Then write nothing and keep the report. Set `CAPTURE_STATUS` to `unavailable: profile is tracked by git`, and skip the steps below.
+2. Compute the fingerprint. `derived_from` is a `; `-separated list of repo-relative paths. For each path, in its order, build one line `<hash> <path>`. `<hash>` is the output of `git hash-object '<path>'`, or `missing` when the file does not exist. A path is unsafe when it starts with `/` or `-`, has a `..` component, or has a character outside `[A-Za-z0-9._/-]`. Write `missing` for an unsafe path, and do not run git on it. Feed the lines to `git hash-object --stdin`, one line each. Its output is the fingerprint.
+3. Write `.whygraph/profiles/ui.md`. Create its directory first. Take `generated` from `date -u +%Y-%m-%d`. Move `derived_from` from the key lines into the frontmatter. Copy every other key line in the report's order:
+
+```text
+---
+fingerprint: <fingerprint>
+derived_from: <path>; <path>
+generated: <YYYY-MM-DD>
+---
+<key>: <value>
+capture: <the probe result>
+```
+
+4. Probe capture, then write the `capture:` line last.
+   - When the key lines say `auth: required`, do not probe. Write `capture: unavailable: auth required`.
+   - When `CAPTURE_PATH` is absent, do not probe. Write `capture: unknown`.
+   - Otherwise run `node <CAPTURE_PATH> --probe`. On exit 0 or 3, write the `capture:` line the script printed. On exit 127, or a "command not found" error, write `capture: unavailable: node not found`. On any other exit, or with no `capture:` line printed, write `capture: unavailable: probe failed (<code>)`.
+5. `CAPTURE_STATUS` is the text after `capture: ` on that line.
 
 **2c. Hand off to the synthesizer.** Single handoff to `whygraph-synthesizer` with this prompt:
 
@@ -208,6 +255,8 @@ TASK: <user's task verbatim>
 
 SPINE_PATH: <SPINE_PATH>
 PARENT: <PARENT, or none>
+OUT_PATH: <OUT_PATH, or none>
+CAPTURE_STATUS: <none | available | unknown | unavailable: <reason>>
 ANSWERS: <the ANSWERS lines, or none>
 
 WORKING SET SUMMARY: <N cards, M truncated>
@@ -227,7 +276,7 @@ RESEARCHER REPORTS:
 <verbatim report>
 ```
 
-Pass one `=== <source name> ===` block per kept source, in the kept-list order.
+Pass one `=== <source name> ===` block per kept source, in the kept-list order. Pass the `CAPTURE_STATUS` that **2b'** set, or `none` when **2b'** did not run.
 
 **2c'. Write the research sidecar.** When `OUT_PATH` is given, write `.whygraph/plans/<stem>.research.md`: the working set and every report, verbatim, in this shape. It always goes under `.whygraph/plans/`, whatever `OUT_PATH` says. A revise pass re-synthesizes from it without running the researchers again.
 
@@ -260,7 +309,7 @@ The user answered the questions of an earlier reply. Fold the answers into the p
 3. Move each answered question to `## Resolved decisions`, as `| Q<n> | <question> | <answer> |`, or `default: <x>` when the answer is the default. Remove `## Open questions` when no question is left in it.
 4. When every answer equals its default, the steps already assume them: write the plan and reply.
 5. Otherwise rebuild the plan:
-   - **Deep** (the sidecar exists): hand off to the synthesizer with the **2c** prompt. Take the working set and the reports from the sidecar. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Deliver its output verbatim, with one exception: change each remaining `Plan-shaping: yes` to `Plan-shaping: no`.
+   - **Deep** (the sidecar exists): hand off to the synthesizer with the **2c** prompt. Take the working set and the reports from the sidecar. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Pass `PLAN_PATH` as `OUT_PATH`. Pass `CAPTURE_STATUS: none` when the plan has no `## UI profile`. Otherwise take it from the `capture:` line of `.whygraph/profiles/ui.md`: `unknown` when the file or the line is missing, and `unavailable: profile is tracked by git` when `git ls-files --error-unmatch` exits 0 for it. Deliver its output verbatim, with one exception: change each remaining `Plan-shaping: yes` to `Plan-shaping: no`.
    - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Read `SPINE_PATH` and follow its `## Writing rules`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it.
 6. Revise never adds a `Plan-shaping: yes` question. Its reply always ends `QUESTIONS: none`.
 
@@ -336,7 +385,7 @@ The user answered the questions of an earlier reply. Fold the answers into the p
 
 ## Delivering the plan
 
-You may write only: the plan at `OUT_PATH`; the sidecar `.whygraph/plans/<stem>.research.md`; and, in a split, `.whygraph/plans/<stem>.tasks.json`. Create the parent directory first. In revise mode the plan is written to `PLAN_PATH`.
+You may write only: the plan at `OUT_PATH`; the sidecar `.whygraph/plans/<stem>.research.md`; in a split, `.whygraph/plans/<stem>.tasks.json`; and, in **2b'**, `.whygraph/profiles/ui.md`. Create the parent directory first. In revise mode the plan is written to `PLAN_PATH`.
 
 When `OUT_PATH` is given and you produced a plan (a `# Plan:` line), write it there verbatim - the single-pass plan, or the synthesizer's output, with any notice prepended. Then reply in this shape:
 
@@ -357,8 +406,8 @@ If the write fails, return the whole plan as your reply, say why, and end with t
 ## What you must NOT do
 
 - **Don't write code.** You produce a plan; the user (or a future worker agent) executes.
-- **Don't write any file but the three above.**
-- **Don't run interactive or destructive commands.** Use file reads for grounding only.
+- **Don't write any file but the four above.**
+- **Don't run interactive or destructive commands.** Use file reads for grounding only. The commands **1e**, **1f**, **2b'** and **Phase 3** name are the exception.
 - **Don't read the body of a source that needed consent,** and read no source body in deep mode. Researchers read them.
 - **Don't ask the user.** Reply `CLARIFY:` or `QUESTIONS:` and let the slash prompt ask.
 - **Don't paraphrase rationale.** Quote constraints and risks verbatim.

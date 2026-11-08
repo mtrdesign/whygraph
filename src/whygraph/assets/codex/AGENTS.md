@@ -31,35 +31,53 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to three researchers (verification, constraints+risks, prior art) and a synthesizer.
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README).
 
-Pass the task description in the planner's expected prompt shape:
+The planner never asks the user anything. You do, in chat, before and after it runs:
+
+1. **Paths.** Pick `OUT_PATH` yourself: slugify the task (lowercase, runs of non-alphanumerics to `-`, at most 60 characters) under `.whygraph/plans/` in the repo root, and never overwrite an existing file. `SOURCES_DIR` is `<repo root>/.codex/whygraph/sources/` and `SPINE_PATH` is `<repo root>/.codex/whygraph/plan-spine.md`.
+2. **Consent.** A source file is repo content, so you decide which sources need the owner's OK; a source file can force the question, never suppress it. Read only the frontmatter (the first 15 lines) of each `SOURCES_DIR/*.md` except `README.md`, never a body. Keep a source when its `enabled` is not `false` (or the user named it) and every tool in its `requires` is callable in this session (a bare name matches a tool whose name equals it or ends in `__<name>` or `/<name>`; an empty `requires` always matches). A kept source needs consent when its `requires` or `tools` names an MCP tool other than the `whygraph_*` and `codegraph_*` tools, when its file name is not one of the six bundled sources (`code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`), or when it says `consent: true`. If any does, derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `, never a project, client, company, product, file or symbol name. Then ask in one chat message, at most 4 consent questions: each names the source, says what it reaches (an external service, or "added to this repo, not shipped with WhyGraph" plus its `description`), shows `Search terms: <TERMS>`, and offers `No (default)` then `Yes`. Only a clear yes counts.
+3. **Dispatch** with this prompt shape:
 
 ```
 TASK: <task description>
 MODE: <shallow | deep | auto>
-SCOPING: skipped       # or "- <axis>: <answer>" lines
-OUT_PATH: <absolute path>   # .whygraph/plans/<slug>.md under the repo root
+SPLIT: <auto | yes | no>
+SOURCES_DIR: <absolute path>
+SPINE_PATH: <absolute path>
+SOURCES: all              # or the comma-separated source names the user asked for
+CONSENT: <name>=<yes | no> # one line per source that needed consent, or "CONSENT: none"
+TERMS: <topic>; <topic>   # only when some CONSENT is yes
+PARENT: none
+OUT_PATH: <absolute path>
 ```
 
-Pick `OUT_PATH` yourself: slugify the task (lowercase, runs of non-alphanumerics to `-`, at most 60 characters) and never overwrite an existing file. The planner writes the plan there and replies with the path plus its Blockers and Confidence lines.
+4. **Clarify.** A reply `CLARIFY: <question> | options: <a>; <b>` means no plan was written. Ask the question in chat, then delegate again with the same prompt plus `CLARIFICATION: <answer>`. Ask once per plan.
+5. **Split.** A reply `SPLIT: <path>` followed by lines `t<N> (wave <W>): <title>` means the planner wrote a `tasks.json` and no plan. Validate it: it is under `.whygraph/plans/` and not tracked by git (`git ls-files -- <path>` prints nothing), has `version: 1`, 1 to 6 children with ids `t1`-`t6`, every `plan` matching `^\.whygraph/plans/[a-z0-9-]+-t[1-6]\.md$`, and every `depends_on` naming an existing id with no cycle; refuse with the reason otherwise. Then delegate one fresh `whygraph-planner` per child, wave by wave, with `TASK: <the child's task>`, `SPLIT: no`, `PARENT: <the tasks.json path>`, `OUT_PATH: <repo root>/<the child's plan>`, and the `CONSENT` / `TERMS` lines for `t1` only (every other child gets `CONSENT: none`).
+6. **Questions.** A plan reply is `Saved plan to <path>` plus its Blockers and Confidence lines, and ends with a `QUESTIONS:` block: `QUESTIONS: none`, or lines `Q<n>. <question> | options: <default>; <alt> | default: <default> | why: <one line>`. Ask at most 3 in one chat message, the default option first and labelled `(default)`; the user may answer in their own words. Then delegate again with the same prompt, `MODE: revise` in place of its mode, plus `PLAN_PATH: <the plan>` and `ANSWERS:` followed by `- Q<n>: <answer>` lines. If the user asked for no questions, delegate the revise with `ANSWERS: defaults` instead. A revise reply ends `QUESTIONS: none`; never ask again for the same plan.
 
-Don't draft a parallel plan yourself — that defeats the cost gate. Either invoke `whygraph-planner` or plan inline without WhyGraph.
+Print each planner reply verbatim. Don't draft a parallel plan yourself - that defeats the cost gate. Either invoke `whygraph-planner` or plan inline without WhyGraph.
 
-**Skip when**: trivial change (1–3 lines, single file), the user already has a plan and wants execution, or the `codegraph_*` tools aren't available in this session.
+**Skip when**: trivial change (1-3 lines, single file), the user already has a plan and wants execution, or the `codegraph_*` tools aren't available in this session.
 
 ## Executing a reviewed plan
 
-If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` agent (ask Codex to delegate to it by name). It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, and logs progress back into the plan.
+If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` agent (ask Codex to delegate to it by name). It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, walks the plan's `## Acceptance` list at the end, and logs progress back into the plan. Refuse a plan with unresolved blockers or a `**Plan-shaping:** yes` open question.
 
 Pass the implementor's expected prompt shape:
 
 ```
 PLAN_PATH: <absolute path>
-FROM_STEP: <integer or "auto">
+STEP_RANGE: auto      # or "<N>-" to start at step N
+ACCEPTANCE: inline
 COMMIT_EACH_STEP: <true | false>
 FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 0
+TASKS_PATH: none      # or the tasks.json path, for one child of a split
+TASK_ID: none         # or that child's id
+CAPTURE: none
 ```
+
+Given a `tasks.json`, validate it as in planning, then delegate one implementor per child, one child at a time in `wave` then `id` order, with `TASKS_PATH` and `TASK_ID` set and `PLAN_PATH` the child's plan. Skip a child whose `status` is `done`; stop when a child's `depends_on` are not all `done`. Re-read the `tasks.json` after each child, because its acceptance run writes the child's `status`. The per-step review gate needs Claude Code.
 
 After the implementor reports, propose each entry of its `## Decisions worth a note` with `whygraph_propose_note` (`kind` and `body` from the entry; the anchor as `qualified_name`, or `path` with `line_start` / `line_end`) and print the note ids and review links.
 

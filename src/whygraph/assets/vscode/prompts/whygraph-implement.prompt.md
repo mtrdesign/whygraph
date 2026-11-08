@@ -1,61 +1,94 @@
 ---
-description: Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure.
+description: Execute a reviewed WhyGraph plan (or one child of a split's tasks.json). Reads the plan as a strict contract, runs Verify after each step, halts on first failure, then walks the plan's Acceptance list.
 name: whygraph-implement
-argument-hint: <plan.md> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]
+argument-hint: <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]
 agent: whygraph-implementor
 ---
 
-# /whygraph-implement — execute a reviewed WhyGraph plan
+# /whygraph-implement - execute a reviewed WhyGraph plan
 
-Execute a reviewed WhyGraph plan markdown step by step. Reads the plan as a strict contract, runs Verify after each step, halts on first failure, appends an Implementation log to the plan.
+Execute a reviewed WhyGraph plan (or one child of a split's `tasks.json`). Reads the plan as a strict contract, runs Verify after each step, halts on the first failure, walks the plan's `## Acceptance` list at the end, and appends an Implementation log to the plan.
 
-**Argument shape:** `<plan.md> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]`
+This prompt runs **as** the implementor, so every step runs in this one conversation. The per-step review gate needs Claude Code: run `/whygraph-review` there when you want the step's diff checked against the recorded rationale.
 
-## Step 1 — Parse arguments
+**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]`
+
+## Step 1 - Parse arguments
 
 Strip and remember these flags if present (any order, anywhere in the user's input):
 
-- `--from-step <N>` → integer ≥ 1 (consume the next token as `N`). Default: `auto` — the implementor picks the first step not marked `[x]` in the plan's `## Implementation log`, or `1` if no log exists.
-- `--commit-each-step` → boolean flag (default `false`).
-- `--fix-attempts <N>` → integer 0-2 (consume the next token; default `0`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
-- `--model <model-id>` → optional override (consume the next token). Default: the implementor subagent's inherited model.
+- `--from-step <N>` -> integer >= 1 (consume the next token as `N`). Run step N through the last step. Default: the implementor picks the first step not marked `[x]` in the plan's `## Implementation log`, or step 1 if no log exists.
+- `--commit-each-step` -> boolean flag (default `false`).
+- `--fix-attempts <N>` -> integer 0-2 (consume the next token; default `0`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
+- `--model <model-id>` -> optional override (consume the next token). Default: the implementor subagent's inherited model.
 
-The first non-flag positional token is the **plan path**. If empty, respond with:
-`Usage: /whygraph-implement <plan.md> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]` and stop.
+The first non-flag positional token is the **path**: a plan (`.md`) or a split's `.tasks.json`. If it is empty, respond with:
+`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]` and stop.
 
-## Step 2 — Pre-flight validation (read-only)
+If the path ends in `.tasks.json` and `--from-step` is passed, respond with `--from-step takes a plan; pass the child's plan file instead of the tasks.json.` and stop.
 
-1. Resolve the plan path (relative paths against the current working directory). Read the file.
-   - If the file doesn't exist, respond with the error verbatim and stop.
-2. Confirm the file contains a line matching `^# Plan: (.+)$`. If not, respond:
+## Step 2 - Pre-flight validation (read-only)
+
+Resolve the path against the current working directory and make it absolute. Read it. If the file does not exist, respond with the error verbatim and stop.
+
+**A tasks.json.** Implement one child per run. Check each rule below. On a failed check, respond with `Refusing <path>: <reason>.` and stop.
+
+1. The path ends in `/.whygraph/plans/<stem>.tasks.json`. The repo root is the directory that holds `.whygraph/`.
+2. The file parses as JSON and has `version: 1`.
+3. `children` has 1 to 6 entries. Each `id` is one of `t1`-`t6`, and no `id` repeats.
+4. Every `plan` matches `^\.whygraph/plans/[a-z0-9-]+-t[1-6]\.md$`.
+5. Every `depends_on` entry names an existing `id`, and the dependencies have no cycle.
+
+Then pick the child: the first one, in ascending `wave` and then `id` order, whose `status` is not `done`.
+
+- No such child -> print `Every child of <path> is done.` and stop.
+- Any id in its `depends_on` is not `done` -> stop with `Stopped at <id>: it depends on <ids>, which are not done.`
+- Its plan at `<repo root>/<plan>` is missing -> stop with `<id> has no plan at <plan>; run /whygraph-plan <path> again.`
+
+Print `### <id>: <title>`. The child's plan is the plan for the checks below; `TASKS_PATH` is the tasks.json's absolute path and `TASK_ID` is the child's `id`. When this run finishes, run the prompt again for the next child. The implementor refuses a `tasks.json` that git tracks.
+
+**A plan** (the given plan, or the child's plan):
+
+1. Confirm the file contains a line matching `^# Plan: (.+)$`. If not, respond:
    `<path> doesn't look like a WhyGraph plan (no '# Plan:' line).` and stop.
-3. Look for a `## Blockers` section. If it exists **and contains at least one bullet**, refuse:
+2. Look for a `## Blockers` section. If it exists **and contains at least one bullet**, refuse:
    ```
    Plan has unresolved blockers. Resolve them in the plan file first, or remove the section, then re-run.
    ```
    Print the blocker bullets verbatim under that line, then stop. Do not dispatch.
+3. Look for a `## Open questions` section. If any bullet in it says `**Plan-shaping:** yes`, refuse:
+   ```
+   Plan has an unanswered plan-shaping question. Answer it (run the plan command again) or edit the plan.
+   ```
+   Print those question bullets verbatim under that line, then stop. Do not dispatch.
 
-If validation passes, do not summarise the plan — the subagent will read it itself.
+If validation passes, do not summarise the plan - the implementor reads it itself.
 
-## Step 3 — Dispatch to the implementor subagent
+## Step 3 - Dispatch to the implementor subagent
 
 This prompt runs as the `whygraph-implementor` custom agent (`.github/agents/implementor.agent.md`). Its input is exactly:
 
 ```
 PLAN_PATH: <absolute path to the plan>
-FROM_STEP: <integer or "auto">
+STEP_RANGE: auto
+ACCEPTANCE: inline
 COMMIT_EACH_STEP: <true | false>
 FIX_ATTEMPTS: <0-2>
+TASKS_PATH: <absolute path to the tasks.json | none>
+TASK_ID: <the child's id | none>
+CAPTURE: none
 ```
 
-The implementor has its own system prompt covering plan parsing, step iteration, verify cadence, and log mutation — do not inline implementation instructions here.
+With `--from-step N`, the second line is `STEP_RANGE: <N>-` instead. `ACCEPTANCE: inline` means the run walks the plan's `## Acceptance` list once its range reaches the last step, and for a split child writes that child's `status` in the tasks.json.
 
-## Step 4 — Print the result
+The implementor has its own system prompt covering plan parsing, step trees, Verify, fix attempts and log mutation - do not inline implementation instructions here.
+
+## Step 4 - Print the result
 
 When the implementor returns, print its output **verbatim** to the user. Do not summarise, paraphrase, re-format, or comment. The implementor is the source of truth.
 
-Do not edit the plan file from this prompt — the subagent owns all log mutations.
+Do not edit the plan file or the tasks.json from this prompt - the implementor owns all log and status writes.
 
 If the report has a `## Decisions worth a note` section, end by telling the user to run `/whygraph-note` once for each listed entry (this prompt has no WhyGraph tools, so it cannot record them itself).
 
-This prompt's only job is: parse → validate → dispatch → print. Do not edit other files, run other tools, or improvise.
+This prompt's only job is: parse -> validate -> dispatch -> print. Do not edit other files, run other tools, or improvise.

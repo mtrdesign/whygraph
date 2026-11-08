@@ -24,3 +24,7 @@ The WhyGraph portal serves this project's CodeGraph index through the `codegraph
 - `codegraph_callers` / `codegraph_callees` are not available here; `codegraph_node`'s trail replaces them.
 - Never run the `codegraph` CLI; never pass `projectPath`; the portal owns the index.
 - Tools missing or "no code index": ask the user to open the WhyGraph portal, run Update agent files if the `codegraph` entry is absent, run a scan, then reload the agent's MCP servers.
+
+## Planning sources
+
+Research for a plan comes from the files under `.cursor/skills/whygraph-plan/sources/`; add a knowledge source by adding a file there (see its README).

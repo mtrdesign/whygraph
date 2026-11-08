@@ -32,6 +32,13 @@ def test_packaged_claude_assets_present() -> None:
         "agents/implementor.md",
         "agents/whygraph-reviewer.md",
         "skills/whygraph-plan/SKILL.md",
+        "skills/whygraph-plan/plan-spine.md",
+        "skills/whygraph-plan/sources/README.md",
+        "skills/whygraph-plan/sources/code-structure.md",
+        "skills/whygraph-plan/sources/whygraph-rationale.md",
+        "skills/whygraph-plan/sources/repo-tests.md",
+        "skills/whygraph-plan/sources/repo-history.md",
+        "skills/whygraph-plan/sources/medium.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-review/SKILL.md",
         "skills/whygraph-note/SKILL.md",
@@ -60,6 +67,13 @@ def test_packaged_cursor_assets_present() -> None:
         "rules/whygraph-implement-plan.mdc",
         "skills/rationale/SKILL.md",
         "skills/whygraph-plan/SKILL.md",
+        "skills/whygraph-plan/plan-spine.md",
+        "skills/whygraph-plan/sources/README.md",
+        "skills/whygraph-plan/sources/code-structure.md",
+        "skills/whygraph-plan/sources/whygraph-rationale.md",
+        "skills/whygraph-plan/sources/repo-tests.md",
+        "skills/whygraph-plan/sources/repo-history.md",
+        "skills/whygraph-plan/sources/medium.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-note/SKILL.md",
         "rules/whygraph-codegraph.mdc",
@@ -88,6 +102,13 @@ def test_packaged_codex_assets_present() -> None:
     root = assets.packaged_assets_for(agents.resolve_agent("codex"))
     expected = (
         "AGENTS.md",
+        ".codex/whygraph/plan-spine.md",
+        ".codex/whygraph/sources/README.md",
+        ".codex/whygraph/sources/code-structure.md",
+        ".codex/whygraph/sources/whygraph-rationale.md",
+        ".codex/whygraph/sources/repo-tests.md",
+        ".codex/whygraph/sources/repo-history.md",
+        ".codex/whygraph/sources/medium.md",
         ".codex/agents/planner.toml",
         ".codex/agents/researcher.toml",
         ".codex/agents/synthesizer.toml",
@@ -120,6 +141,13 @@ def test_packaged_vscode_assets_present() -> None:
         "prompts/whygraph-plan.prompt.md",
         "prompts/whygraph-implement.prompt.md",
         "prompts/whygraph-note.prompt.md",
+        "whygraph/plan-spine.md",
+        "whygraph/sources/README.md",
+        "whygraph/sources/code-structure.md",
+        "whygraph/sources/whygraph-rationale.md",
+        "whygraph/sources/repo-tests.md",
+        "whygraph/sources/repo-history.md",
+        "whygraph/sources/medium.md",
         "agents/planner.agent.md",
         "agents/researcher.agent.md",
         "agents/synthesizer.agent.md",
@@ -274,8 +302,9 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "agents" / "planner.md").is_file()
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    # 5 agents + 6 skills + CLAUDE.md (merge file, written fresh) = 12 files.
-    assert len(result.written) == 12
+    # 5 agents + 6 skills + CLAUDE.md (merge file, written fresh) = 12 files,
+    # plus the plan skill's spine, sources README and 5 sources = 19 files.
+    assert len(result.written) == 19
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -670,6 +699,8 @@ def test_frontmatter_allowlist() -> None:
         for path in (_ASSET_ROOT / tree).rglob("*"):
             if path.suffix not in {".md", ".mdc"}:
                 continue
+            if "sources" in path.parts:  # own key set: test_source_frontmatter_contract
+                continue
             fm = _frontmatter(path)
             assert set(fm) <= keys, (path, set(fm) - keys)
             if "model" in fm:
@@ -685,6 +716,10 @@ def test_frontmatter_allowlist() -> None:
 def test_harness_frontmatter_wiring() -> None:
     cc = _ASSET_ROOT / "claude-code"
     assert _frontmatter(cc / "agents/researcher.md")["disallowedTools"] == "Agent"
+    assert _frontmatter(cc / "agents/researcher.md")["tools"] == (
+        "Read, Grep, Glob, ToolSearch, mcp__whygraph__*, mcp__codegraph__*, "
+        "mcp__medium__*"
+    )
     assert _frontmatter(cc / "agents/researcher.md")["model"] == "sonnet"
     assert _frontmatter(cc / "agents/synthesizer.md")["tools"] == (
         "Read, Grep, Glob, Bash"
@@ -847,11 +882,39 @@ def test_pipeline_streamlining_texts_in_every_tree() -> None:
         assert "(unavailable:" in planner, tree
         researcher = "\n".join(_agent_body(tree, "researcher"))
         assert "budget_exceeded" in researcher, tree
-        assert "cached_only=True" in researcher, tree
         assert "(unavailable:" in "\n".join(_agent_body(tree, "synthesizer")), tree
         implementor = "\n".join(_agent_body(tree, "implementor"))
         assert "FIX_ATTEMPTS" in implementor and "git add -A" not in implementor, tree
         assert "Decisions worth a note" in implementor, tree
+        for phrase in (
+            "STEP_RANGE",
+            "ACCEPTANCE:",
+            "Baseline:",
+            "out of scope:",
+            "pre-existing at baseline",
+            "**Step trees:**",
+            "- Step <N>: <t0> <t1>",
+            "steps/<N>.t0",
+            "FINDINGS:",
+            "## Escalated findings",
+            "CAPTURE:",
+            "--tag before",
+            "invalid route",
+            "capture error",
+            "steps/<N>.diff",
+            "## Acceptance",
+            "at most 20 words",
+        ):
+            assert phrase in implementor, (tree, phrase)
+    for tree in _SOURCE_DIRS:
+        for name in ("whygraph-rationale.md", "repo-history.md"):
+            lens = (_ASSET_ROOT / _SOURCE_DIRS[tree] / "sources" / name).read_text()
+            assert "cached_only=True" in lens, (tree, name)
+    for rel in (
+        "claude-code/skills/whygraph-implement/SKILL.md",
+        "cursor/skills/whygraph-implement/SKILL.md",
+    ):
+        assert "- Step <N>: <t0> <t1>" in (_ASSET_ROOT / rel).read_text(), rel
     for rel in (
         "claude-code/skills/pre-edit/SKILL.md",
         "cursor/rules/whygraph-pre-edit.mdc",
@@ -881,23 +944,134 @@ def _line_starting(lines: list[str], prefix: str) -> str:
     return found[0]
 
 
-def test_verification_lens_replaces_impact() -> None:
-    """`verification` replaces `impact` in every tree and every enumeration."""
-    dims = "<verification | constraints_risks | prior_art>"
+# Per tree: the directory (under the asset root) that holds ``sources/`` and
+# ``plan-spine.md``. The plan entry point passes them as SOURCES_DIR / SPINE_PATH.
+_SOURCE_DIRS = {
+    "claude-code": "claude-code/skills/whygraph-plan",
+    "cursor": "cursor/skills/whygraph-plan",
+    "vscode": "vscode/whygraph",
+    "codex": "codex/.codex/whygraph",
+}
+_PLAN_ENTRY = {
+    "claude-code": "claude-code/skills/whygraph-plan/SKILL.md",
+    "cursor": "cursor/skills/whygraph-plan/SKILL.md",
+    "vscode": "vscode/prompts/whygraph-plan.prompt.md",
+    "codex": "codex/AGENTS.md",
+}
+_IMPLEMENT_ENTRY = {
+    "claude-code": "claude-code/skills/whygraph-implement/SKILL.md",
+    "cursor": "cursor/skills/whygraph-implement/SKILL.md",
+    "vscode": "vscode/prompts/whygraph-implement.prompt.md",
+    "codex": "codex/AGENTS.md",
+}
+_BUNDLED_SOURCES = (
+    "code-structure.md",
+    "whygraph-rationale.md",
+    "repo-tests.md",
+    "repo-history.md",
+    "medium.md",
+    "ui-surface.md",
+)
+
+
+def _source_files(tree: str) -> dict[str, Path]:
+    """Return a tree's ``sources/*.md`` files by name (README included)."""
+    directory = _ASSET_ROOT / _SOURCE_DIRS[tree] / "sources"
+    return {p.name: p for p in sorted(directory.glob("*.md"))}
+
+
+def _real_sources(tree: str) -> dict[str, Path]:
+    return {n: p for n, p in _source_files(tree).items() if n != "README.md"}
+
+
+def test_sources_and_spine_identical_across_trees() -> None:
+    """Sources, their README and the spine are byte-identical in all four trees."""
+    base = _source_files("claude-code")
+    assert "README.md" in base and len(base) > 1, sorted(base)
+    spine = _ASSET_ROOT / _SOURCE_DIRS["claude-code"] / "plan-spine.md"
+    assert spine.is_file()
+    for tree in _SOURCE_DIRS:
+        other = _source_files(tree)
+        assert set(other) == set(base), (tree, sorted(other), sorted(base))
+        for name, path in base.items():
+            assert other[name].read_bytes() == path.read_bytes(), (tree, name)
+        other_spine = _ASSET_ROOT / _SOURCE_DIRS[tree] / "plan-spine.md"
+        assert other_spine.read_bytes() == spine.read_bytes(), tree
+    text = spine.read_text()
+    assert "## Writing rules" in text
+    section = text.split("## Writing rules", 1)[1].split("\n## ", 1)[0]
+    assert "verbatim" in section
+
+
+_SOURCE_KEYS = {
+    "name",
+    "description",
+    "requires",
+    "tools",
+    "section",
+    "enabled",
+    "budget",
+    "consent",
+}
+_BANNED_SOURCE_TOOLS = {"bash", "write", "edit", "websearch", "webfetch"}
+
+
+def test_source_frontmatter_contract() -> None:
+    """Every source has the eight keys and a tool list that can never widen."""
+    for tree in _SOURCE_DIRS:
+        sections: list[str] = []
+        for name, path in _real_sources(tree).items():
+            fm = _frontmatter(path)
+            assert set(fm) == _SOURCE_KEYS, (tree, name, set(fm) ^ _SOURCE_KEYS)
+            assert re.fullmatch(r"\d+", fm["budget"]), (tree, name, fm["budget"])
+            for tool in (t.strip() for t in fm["tools"].split(",")):
+                assert tool == "read" or re.fullmatch(r"[a-z][a-z0-9_]*", tool), (
+                    tree,
+                    name,
+                    tool,
+                )
+                assert tool.lower() not in _BANNED_SOURCE_TOOLS, (tree, name, tool)
+            assert fm["consent"] in {"true", "false"}, (tree, name)
+            if fm["consent"] == "true":
+                assert name == "medium.md", (tree, name)
+            sections.append(fm["section"])
+        assert sections and len(sections) == len(set(sections)), (tree, sections)
+        shared = list(_source_files(tree).values())
+        shared.append(_ASSET_ROOT / _SOURCE_DIRS[tree] / "plan-spine.md")
+        for path in shared:
+            assert "ToolSearch" not in path.read_text(), path
+
+
+def test_lenses_live_in_sources() -> None:
+    """The three researcher lenses moved into source files; bodies are generic."""
     for tree in _AGENT_PATHS:
-        researcher = _agent_body(tree, "researcher")
-        planner = _agent_body(tree, "planner")
-        synthesizer = _agent_body(tree, "synthesizer")
-        assert "### `verification`" in researcher and "### `impact`" not in researcher
-        assert f"DIMENSION: {dims}" in researcher and f"DIMENSION: {dims}" in planner
-        for body in (planner, synthesizer):
-            assert "=== verification ===" in body and "=== impact ===" not in body
-        assert any(line.startswith("**1d. Dependency order.**") for line in planner)
-        assert not any("file's role" in line for line in synthesizer), tree
-    for path, text in _asset_texts().items():
-        assert not re.search(
-            r"\(impact(?:,| /)|`impact` (?:researcher|report)", text
-        ), path
+        sources = _real_sources(tree)
+        tests = sources["repo-tests.md"].read_text()
+        assert "3. For each working-set symbol" in tests, tree
+        rationale = sources["whygraph-rationale.md"].read_text()
+        assert "cached_only=True" in rationale, tree
+        assert "budget_exceeded" in rationale, tree
+        history = sources["repo-history.md"].read_text()
+        assert "whygraph_area_history" in history, tree
+        assert "cached_only=True" in history, tree
+
+        researcher = "\n".join(_agent_body(tree, "researcher"))
+        assert "### `verification`" not in researcher, tree
+        assert "DIMENSION:" not in researcher, tree
+        planner = "\n".join(_agent_body(tree, "planner"))
+        for phrase in (
+            "SOURCES_DIR",
+            "SPINE_PATH",
+            "QUESTIONS:",
+            "CLARIFY:",
+            "SPLIT:",
+            "MODE: revise",
+            "Writing rules",
+        ):
+            assert phrase in planner, (tree, phrase)
+        synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+        for phrase in ("## Boundaries", "Plan-shaping", "Writing rules"):
+            assert phrase in synthesizer, (tree, phrase)
 
 
 def test_verify_lines_are_literal_commands() -> None:
@@ -906,17 +1080,23 @@ def test_verify_lines_are_literal_commands() -> None:
     A fixture report filled in from the lens's own output contract yields a
     Verify line per symbol that is a backticked runner command, never prose.
     """
+    lens_lines = (
+        (_ASSET_ROOT / _SOURCE_DIRS["claude-code"] / "sources" / "repo-tests.md")
+        .read_text()
+        .splitlines()
+    )
+    lens = _line_starting(lens_lines, "3. For each working-set symbol")
+    assert "literal commands in backticks" in lens and "Never write prose" in lens
+    assert _LITERAL_COMMAND.search(lens)
     for tree in _AGENT_PATHS:
         researcher = _agent_body(tree, "researcher")
-        lens = _line_starting(researcher, "3. For each working-set symbol")
-        assert "literal commands in backticks" in lens and "Never write prose" in lens
-        assert _LITERAL_COMMAND.search(lens), tree
         contract = researcher[researcher.index("## Verify candidates") :]
         assert all("`<literal command>`" in line for line in contract[3:5])
 
         synthesizer = _agent_body(tree, "synthesizer")
         verify = _line_starting(synthesizer, "- **Verify**")
-        assert "`verification` report" in verify and "verbatim in backticks" in verify
+        assert "`Verify candidates` section" in verify, tree
+        assert "verbatim in backticks" in verify, tree
         assert "Never write a prose Verify" in verify
         assert _LITERAL_COMMAND.search(verify), tree
 
@@ -1184,6 +1364,7 @@ def test_reviewer_wiring() -> None:
     assert 'subagent_type: "whygraph-reviewer"' in skill_text
     assert "GENERATE: <true | false>" in skill_text
     assert "GENERATE: <true | false>" in body
+    assert "DIFF: <t0> <t1>" in body and "^[0-9a-f]{40}$" in body
     assert f"`{_BASE_PATTERN}`" in skill_text and f"`{_BASE_PATTERN}`" in body
     base = re.compile(_BASE_PATTERN)
     for ok in ("main", "origin/main", "HEAD~3", "v2.0.0", "a1b2c3d"):
@@ -1194,6 +1375,126 @@ def test_reviewer_wiring() -> None:
     # Claude Code first: the other trees get a reviewer after Step 9.
     for tree in ("cursor", "vscode", "codex"):
         assert not [p for p in (_ASSET_ROOT / tree).rglob("*review*")], tree
+
+
+# ---- planning harness v2: entry points, reply shapes, researcher limits -----
+
+
+def _text(rel: str) -> str:
+    return (_ASSET_ROOT / rel).read_text()
+
+
+def test_implement_entry_points() -> None:
+    """The implement entry points drive the step-range executor."""
+    cc = _text(_IMPLEMENT_ENTRY["claude-code"])
+    for phrase in (
+        "STEP_RANGE: <N>",
+        "STEP_RANGE: acceptance",
+        "whygraph-reviewer",
+        "DIFF:",
+        "GENERATE: false",
+        "--no-review",
+        "Plan-shaping",
+    ):
+        assert phrase in cc, phrase
+    assert "the gate is skipped" in _text(_IMPLEMENT_ENTRY["cursor"])
+    for tree in ("vscode", "codex"):
+        text = _text(_IMPLEMENT_ENTRY[tree])
+        assert "STEP_RANGE: auto" in text and "ACCEPTANCE: inline" in text, tree
+        assert "FROM_STEP" not in text, tree
+
+
+def test_tasks_json_example_parses() -> None:
+    """The planner's tasks.json example is valid JSON with the documented keys."""
+    plan_path = re.compile(r"^\.whygraph/plans/[a-z0-9-]+-t[1-6]\.md$")
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "planner"))
+        found = re.findall(r"```jsonc\n(.*?)\n```", body, re.S)
+        assert len(found) == 1, tree
+        stripped = "\n".join(
+            re.sub(r"\s+//.*$", "", ln) for ln in found[0].splitlines()
+        )
+        data = json.loads(stripped)
+        assert {"version", "task", "children"} <= set(data), tree
+        assert data["version"] == 1, tree
+        assert data["children"], tree
+        for child in data["children"]:
+            assert {
+                "id",
+                "title",
+                "task",
+                "wave",
+                "depends_on",
+                "status",
+                "plan",
+                "files_hint",
+            } <= set(child), (tree, child)
+            assert plan_path.match(child["plan"]), (tree, child["plan"])
+
+
+def _vscode_tool_list(value: str) -> set[str]:
+    return set(re.findall(r"""['"]([^'"]+)['"]""", value))
+
+
+def test_researchers_cannot_write_or_run() -> None:
+    """The researcher's tools are an allowlist with no shell, write or web."""
+    cc = _frontmatter(_ASSET_ROOT / "claude-code/agents/researcher.md")
+    granted = {t.strip() for t in cc["tools"].split(",")}
+    assert not granted & {"Bash", "Write", "Edit", "WebFetch", "WebSearch"}
+    assert _frontmatter(_ASSET_ROOT / "cursor/agents/researcher.md")["readonly"] == (
+        "true"
+    )
+    vs = _frontmatter(_ASSET_ROOT / "vscode/agents/researcher.agent.md")
+    assert _vscode_tool_list(vs["tools"]) <= {
+        "read",
+        "search",
+        "whygraph/*",
+        "codegraph/*",
+    }
+    for tree in _AGENT_PATHS:
+        for line in _agent_body(tree, "researcher"):
+            if "**File tools**" in line:
+                assert not re.search(r"(?i)\b(?:bash|shell)\b", line), (tree, line)
+
+
+def test_reply_shapes_match() -> None:
+    """The planner's reply templates and the plan skill's parse rules agree."""
+    shared = (
+        "QUESTIONS: none",
+        "| options: ",
+        "| default: ",
+        "| why: ",
+        "CLARIFY: ",
+        "SPLIT: ",
+        "(wave ",
+        "ANSWERS: defaults",
+    )
+    skill = _text(_PLAN_ENTRY["claude-code"])
+    for tree in _AGENT_PATHS:
+        planner = "\n".join(_agent_body(tree, "planner"))
+        for phrase in shared:
+            assert phrase in planner, (tree, "planner", phrase)
+    for phrase in shared:
+        assert phrase in skill, ("skill", phrase)
+    assert "at most 3 questions" in skill
+    assert "at most 4 consent questions" in skill
+
+
+def test_plan_entry_points() -> None:
+    """All four plan entry points carry the sources, consent and split inputs."""
+    for tree, rel in _PLAN_ENTRY.items():
+        text = _text(rel)
+        for phrase in (
+            "SOURCES_DIR",
+            "SPINE_PATH",
+            "CONSENT",
+            "TERMS",
+            "SPLIT",
+            "QUESTIONS",
+            "OUT_PATH",
+            *_BUNDLED_SOURCES,
+        ):
+            assert phrase in text, (tree, phrase)
 
 
 # ---- retired assets: files WhyGraph no longer ships -----------------------

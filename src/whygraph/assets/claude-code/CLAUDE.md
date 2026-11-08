@@ -34,4 +34,4 @@ lists as additional and did not show."
 
 ## WhyGraph
 
-Before editing existing code, the `pre-edit` skill applies. For a multi-file change, suggest `/whygraph-plan <task>` once (do not run it unasked - it spends LLM budget); for a reviewed plan under `.whygraph/plans/`, `/whygraph-implement <path>`; to check a diff against the recorded rationale, `/whygraph-review`.
+Before editing existing code, the `pre-edit` skill applies. For a multi-file change, suggest `/whygraph-plan <task>` once (do not run it unasked - it spends LLM budget); for a reviewed plan under `.whygraph/plans/`, `/whygraph-implement <path>`; to check a diff against the recorded rationale, `/whygraph-review`. Research for a plan comes from the files under `.claude/skills/whygraph-plan/sources/`; add a knowledge source by adding a file there (see its README).

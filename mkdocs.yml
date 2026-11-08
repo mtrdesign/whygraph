@@ -101,6 +101,7 @@ nav:
       - Scanning your repo: guide/scanning.md
       - Wiring your editor: guide/editors.md
       - Using WhyGraph (MCP): guide/mcp-usage.md
+      - Planning a change: guide/planning.md
       - The Explorer: guide/playground.md
       - The Chat assistant: guide/chat.md
       - Project notes: guide/notes.md

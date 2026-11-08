@@ -34,7 +34,8 @@ pair. The Codex timeout is there because a CodeGraph call may wait for the index
 [Freshness](../guide/mcp-usage.md#freshness)).
 
 Each agent also gets its bundled assets - skills, commands and subagents that teach it when to call
-WhyGraph - copied into `.claude/`, `.cursor/`, `.github/` or the repo root and `.codex/agents/`, and a
+WhyGraph - copied into `.claude/`, `.cursor/`, `.github/` (with the planning files in `.github/whygraph/`)
+or the repo root and `.codex/agents/` (with the planning files in `.codex/whygraph/`), and a
 CodeGraph usage-guidance block appended to its always-on instructions (`CLAUDE.md`, `AGENTS.md`,
 `.github/copilot-instructions.md`, or an always-apply rule for Cursor). The guidance tells the agent to
 prefer the portal's `codegraph_*` tools over grep, and not to run the `codegraph` command itself.
@@ -79,6 +80,12 @@ every teammate, because it carries no path and no machine name:
 The slug in the URL comes from the repository's name, so teammates normally end up with the same one.
 If another project already had that name on your portal, the slug gets a numeric suffix and the entry
 is specific to your machine; the preview tells you when that happens.
+
+The planning command's research sources are files in your repository (`.claude/skills/whygraph-plan/sources/`
+and the matching folder for each agent), so a clone may carry one you did not write. The command asks
+before it runs any source that was added to the repository or reaches an outside service, but review
+`sources/` after cloning. Codex has no per-agent tool limit, so there the rules in the researcher's own
+text are the only control; see [Planning a change](../guide/planning.md#differences-between-editors).
 
 If an agent file is already tracked by git, the portal shows a diff first and writes it only after you
 confirm. If it cannot parse the file safely - JSONC with comments, or TOML with comments - it leaves the
@@ -180,6 +187,12 @@ gets none.
   the helper still refuses any answer that is not the fixed shape (see
   [Claude Code hook output](security.md#hook-output)).
 
+## Planning a change { #planning }
+
+`/whygraph-plan <task>` writes a plan from research over your code graph and rationale, and
+`/whygraph-implement <plan>` carries it out. See [Planning a change](../guide/planning.md) for the
+pipeline, the flags and the research sources.
+
 ## Writing a decision down { #whygraph-note }
 
 `/whygraph-note <what to remember>` proposes a [project note](../guide/notes.md) from your editor. It
@@ -190,7 +203,9 @@ whole project) when the context does not make it obvious, calls `whygraph_propos
 review link. The note then waits for a member to confirm it on the project's Notes page; nothing reads
 it before.
 
-The implementor subagent stays free of MCP tools, but its final report now ends with a
+The implementor subagent stays free of MCP tools. It runs one step at a time, each in a fresh run at the
+step's own model, with a [review gate](../guide/planning.md#the-pipeline) after each verified step (Claude
+Code) and a separate acceptance run at the end. Its final report now ends with a
 **`## Decisions worth a note`** list: at most three decisions it made that deviate from the plan or
 that a future reader needs and the code does not show, each as a kind, an anchor and a short
 paragraph. `/whygraph-implement` in Claude Code and Cursor then proposes each one with

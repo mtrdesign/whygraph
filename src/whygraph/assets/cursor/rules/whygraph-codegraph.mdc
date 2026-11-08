@@ -27,4 +27,4 @@ The WhyGraph portal serves this project's CodeGraph index through the `codegraph
 
 ## Planning sources
 
-Research for a plan comes from the files under `.cursor/skills/whygraph-plan/sources/`; add a knowledge source by adding a file there (see its README).
+Research for a plan comes from the files under `.cursor/skills/whygraph-plan/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.

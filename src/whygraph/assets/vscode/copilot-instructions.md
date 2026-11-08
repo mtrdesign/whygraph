@@ -10,7 +10,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning and executing
 
-For multi-file changes, use the `/whygraph-plan` prompt (never draft a parallel plan yourself); to apply a reviewed plan under `.whygraph/plans/`, use `/whygraph-implement`. Skip both for trivial changes (1-3 lines, single file). Research for a plan comes from the files under `.github/whygraph/sources/`; add a knowledge source by adding a file there (see its README).
+For multi-file changes, use the `/whygraph-plan` prompt (never draft a parallel plan yourself); to apply a reviewed plan under `.whygraph/plans/`, use `/whygraph-implement`. Skip both for trivial changes (1-3 lines, single file). Research for a plan comes from the files under `.github/whygraph/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.
 
 Copilot also reads `AGENTS.md` at the repo root when WhyGraph installed it for Codex; the two blocks overlap, and this file keeps only the Copilot-specific parts.
 

@@ -53,6 +53,7 @@ cause, and never edits a file that the step's **Boundaries** names.
 | `--sources <a,b>` | Run only these sources. A source with `enabled: false` is turned on for this run. |
 | `--no-questions` | Take every default. Every consent question is answered No. |
 | `--out <path>` | Save the plan at `<path>` instead of `.whygraph/plans/<name>.md`. |
+| `--refresh-profile` | Derive the [UI profile](#ui-evidence) again instead of reusing the cached one. |
 
 `/whygraph-implement <plan.md | tasks.json> [flags]`
 
@@ -64,6 +65,9 @@ cause, and never edits a file that the step's **Boundaries** names.
 | `--fix-attempts N` | How many fix attempts a failing `Verify` gets. |
 | `--model sonnet\|opus\|haiku` | Use this model for every step instead of each step's own. |
 | `--no-review` | Skip the review gate. |
+| `--no-eval` | Skip the [evaluator](#evaluation). |
+| `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
+| `--eval-fix-attempts N` | How many times a failed spec evaluation sends the step back to the implementor, 0 to 2. Default 1. |
 
 The implementor refuses a plan that has open Blockers or an unanswered plan-shaping question.
 
@@ -204,9 +208,133 @@ Every stage runs in your editor, against your own model account.
 | Implement | One implementor per step, each at the model the plan names for it. A fresh context per step keeps the runs small, and a cheap step can run on a cheap model. |
 | Review gate | One reviewer run per step. It reads cached cards only, so it adds no WhyGraph LLM spend. `--no-review` skips it. |
 | Acceptance | One more implementor run. |
+| Evaluation | One short evaluator run per step on a fast model, then one run each for quality and UI on a stronger model. `--no-eval` skips it. |
+| UI evidence | No model run for the capture itself. The UI stage reads the screenshots, and only that stage costs tokens. |
 
 Rationale cards are read from the cache. A card that is missing may be generated on read, one LLM call
 charged to the project's [budget](../portal/usage.md).
+
+## Evaluation
+
+Claude Code and Cursor add a separate evaluator, the `whygraph-evaluator` subagent. It is read-only,
+runs after the implementor and judges the work against the plan, never against its own opinion of the
+code. It runs in three stages:
+
+1. **Spec**, after each step (and after its review gate in Claude Code). It checks that the diff
+   touches only the step's **Files**, does what **Change** says and nothing more, leaves the
+   **Boundaries** alone, and that the step's `Verify` command really exercises the changed symbol.
+   The verdict is `pass`, `fix` or `escalate`. On `fix` the implementor is sent back with the findings,
+   at most `--eval-fix-attempts` times (default 1), and then the loop halts. On `escalate` the plan
+   itself is wrong, and the loop halts at once.
+2. **Quality**, once, after the acceptance run. It reads every step's diff against your conventions
+   file (when the plan names one) and a fixed list of six checks: surgical changes, no abstraction
+   without a second case, names that match their neighbours, errors handled the way the file does,
+   comments in the file's style, and no secret in code or tests.
+3. **UI**, once, only when a step has **Expected UI** and [UI evidence](#ui-evidence) was captured. It
+   checks each expected state against the screenshots and the page snapshots, then the screen's
+   purpose, hierarchy, empty, loading and error states, the way back, and that untouched routes did not
+   change.
+
+Each stage prints a short report ending with a `## Confidence` line, and prints it in full only when it
+has findings. `--no-eval` skips all three and runs the loop as before. VS Code and Codex have no
+evaluator, because nested subagents are not available there; run `/whygraph-implement` from Claude Code
+or Cursor to get it.
+
+!!! warning "The model provider sees the evidence"
+    The evaluator runs in your editor, against your own model account. What it reads goes to that
+    provider: the diffs, and for the UI stage the screenshots and page snapshots. Do not capture a
+    screen that shows data you may not send there. Use a fixture or a demo account, and `mask` in the
+    profile for values that change on every load.
+
+## UI evidence
+
+A plan that changes a screen can capture the affected routes before and after each step, so you
+compare pictures instead of trusting a green test run. WhyGraph installs no browser tooling and
+fetches nothing: a small script, `capture.mjs`, drives the Playwright **you** installed in your
+project.
+
+### The UI profile
+
+When a task touches a UI, the planner derives a profile of your front end and caches it in
+`.whygraph/profiles/ui.md`: the stack, the command that starts the app and the directory to run it
+in, the base URL, the routes and the theme mechanism, a login requirement, your browser tests, and
+patterns for console and request noise. A second plan in the same project reuses it. The profile is
+derived again when one of the files it came from changes, and `--refresh-profile` forces it.
+
+The profile is read from an untracked file on purpose. It carries the start command the script runs,
+so the planner and the script both refuse it when git tracks it. Keep it out of version control, and
+do not copy one from a repository you do not trust.
+
+| Key | Meaning |
+|---|---|
+| `start` and `start_dir` | The command that starts the app, and the directory to run it in. The script starts the server itself, reuses one that already answers, and stops the one it started. |
+| `fixture` | A demo or fixture command to use instead of `start`, or `none`. |
+| `allow_hosts` | Extra hosts the capture may visit. Loopback hosts are always allowed. |
+| `mask` | Patterns for text that changes on every load, such as a clock. Matches are replaced before snapshots are compared. |
+| `ignore_console` and `ignore_requests` | Known noise, such as a dev server's reload socket, that is not a defect. |
+| `capture` | `available`, `unknown` or `unavailable: <reason>`, from a probe the planner runs. |
+
+### Your UI standards
+
+Write your team's UI standards under a `## UI conventions` heading in an always-on file the planner
+already reads: `CLAUDE.md`, `.claude/CLAUDE.md`, `AGENTS.md` or `.github/copilot-instructions.md`.
+The planner records where the heading is and never copies the text into a plan. In Cursor, put the
+section in your own rule file, `.cursor/rules/ui-conventions.mdc`. Do not edit WhyGraph's bundled
+rule files: they are tracked by hash, and an edit would show as **Edited** on every update.
+
+### Installing Playwright
+
+Capture needs Node 18 or newer and the Playwright library at a recent version in your repository or in
+a front-end directory, with its Chromium browser installed. That is yours to install. WhyGraph never
+runs `npm install` or `playwright install`. When something is missing the script stops, names what it
+looked for and prints the exact command to run, for example in the front-end directory:
+
+```bash
+npm i -D playwright
+npx playwright install chromium
+```
+
+### What it captures
+
+For each route, the script takes a full-page screenshot and a page snapshot (the accessibility tree
+as text) in a desktop and a phone viewport, in a light and a dark theme when the profile names a
+theme mechanism, with animations switched off. It records console errors, failed requests, horizontal
+overflow, and controls with no accessible name. Routes must be plain paths on your own app. A route
+that tries another host, and a server redirect that leaves the allowed hosts, ends the capture with
+no evidence for it.
+
+```text
+.whygraph/plans/<plan>/ui/
+  index.html                 one contact sheet over every step
+  <N>/before/  <N>/after/    screenshots and page snapshots
+  <N>/signals.json           console errors, failed requests, overflow, unnamed controls
+  <N>/diff.json              which routes changed
+  <N>/sheet.html             the step's before and after sheet
+```
+
+Open `index.html` to compare. The sheets are static pages with no script, and all text from your
+pages is escaped. The before capture runs once and is kept. After a step, a new console error,
+failed request, phone-width overflow or unnamed control that shows up on two runs in a row halts the
+loop, with the signal quoted. You can also run it by hand in Claude Code and Cursor:
+`/whygraph-ui-check <route...> [--tag before|after] [--out DIR]` prints the path of the sheet.
+`--no-capture` skips capture for a run.
+
+### Without Node
+
+When the planner's probe cannot find Node, the profile, Playwright or the browser, it writes
+`capture: unavailable` with the reason, and nothing fails. The plan gets one `manual:` Acceptance
+item per expected UI state instead of the contact-sheet item, the implement command passes no capture
+command, and the UI evaluation stage does not run. Spec and quality evaluation still run. Plain
+screenshots are the only thing lost: the plan, the implementation and the tests are unchanged.
+
+### Limits
+
+A full-page screenshot misses content in an inner scroll container, so the sheet says so and the page
+snapshot still covers that content. Codex and VS Code run the capture script when the profile says it
+is available, but they have no evaluator to judge the result, and the VS Code planner has no terminal,
+so it writes the profile with `capture: unknown` and the script checks for itself. An edited
+`capture.mjs` in a cloned repository is code that an agent runs, like any committed script: read it
+after a clone, as you would the `sources/` folder.
 
 ## Differences between editors
 
@@ -217,6 +345,9 @@ charged to the project's [budget](../portal/usage.md).
 | Medium source | Yes | Yes | No | Yes, unenforced |
 | One implementor per step, at the step's model | Yes | Yes, but every step on one model unless you pass `--model <model-id>` | No, one run | No, one run |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
+| Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |
+| UI evidence capture | Yes | Yes | Yes | Yes |
+| `/whygraph-ui-check` by hand | Yes | Yes | No | No |
 | Acceptance | Separate run | Separate run | At the end of the run | At the end of the run |
 | Questions | Dialog | Asked in chat | Asked in chat | Asked in chat |
 | Splitting | Child plans started for you | Child plans started for you | Run the prompt once per child | The main agent runs one implementor per child |

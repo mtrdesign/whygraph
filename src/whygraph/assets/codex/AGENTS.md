@@ -31,7 +31,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README).
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.
 
 The planner never asks the user anything. You do, in chat, before and after it runs:
 

@@ -14,7 +14,10 @@ Your prompt has this shape:
 ```
 BASE: <a git ref | auto>
 GENERATE: <true | false>
+DIFF: <t0> <t1>
 ```
+
+`DIFF` is optional: two 40-hex tree ids, a step's start and end trees. When it is present, `BASE` is ignored.
 
 ## Tools
 
@@ -29,12 +32,13 @@ A WhyGraph or CodeGraph error is an `isError` result whose text begins `[WhyGrap
 
 Every diff uses the flags `-U0 --inter-hunk-context=3 --no-color --no-ext-diff` (written `<flags>` below):
 
+- **DIFF is given.** If either id does not match `^[0-9a-f]{40}$`, reply `Unknown diff: <DIFF>` and stop. Otherwise run `git diff <flags> <t0> <t1>`.
 - **BASE is a ref.** If it does not match `^[A-Za-z0-9][A-Za-z0-9._/^~-]*$`, reply `Unknown base: <BASE>` and stop. Otherwise run `git diff <flags> --merge-base <BASE>`: the working tree against the commit where `HEAD` left `BASE` (git 2.30 or newer). If git rejects the ref, reply `Unknown base: <BASE>` and stop.
 - **BASE is `auto`.** Run `git diff HEAD --stat`. If it prints anything, review `git diff <flags> HEAD` (uncommitted work, staged or not). Otherwise review the branch: `git diff <flags> --merge-base <ref>` with the first of `origin/HEAD`, `main`, `master` that git accepts.
 
 If the diff is empty, reply with `# Review: 0 hunks` and a Confidence line naming the diff you ran, and stop.
 
-Untracked files are not in the diff: they are new code, which has no rationale. Skip binary files and deleted files (`+++ /dev/null`; a card describes code that still exists) and count what you skipped for the Confidence line.
+Untracked files are not in a `BASE` diff: they are new code, which has no rationale. With `DIFF`, both trees include untracked files, so a new file is reviewed; it has no card and comes out **No rationale**. Skip binary files and deleted files (`+++ /dev/null`; a card describes code that still exists) and count what you skipped for the Confidence line.
 
 Each `@@ -a,b +c,d @@` header is one hunk. Its range is the new side: `<start>` = `c`, `<end>` = `c + d - 1` (a missing `,d` means 1). A deletion-only hunk (`d` = 0) has `<start>` = `<end>` = `c`, the line above the removed ones (`1` when `c` is 0). Review at most 40 hunks, in diff order; name how many you left out in the Confidence reason.
 

@@ -5,7 +5,7 @@ alwaysApply: false
 
 # Suggest /whygraph-plan for non-trivial changes
 
-The user is gesturing at a multi-file change, feature addition, migration, or deletion that ripples. WhyGraph has a planner subagent (`/whygraph-plan`) that grounds plans in CodeGraph (structural impact) and WhyGraph (rationale, constraints, risks). It produces an ordered, verifiable plan with verbatim rationale quotes, optionally fanning out to three parallel researchers (verification / constraints+risks / prior art) for richer changes.
+The user is gesturing at a multi-file change, feature addition, migration, or deletion that ripples. WhyGraph has a planner subagent (`/whygraph-plan`) that grounds plans in CodeGraph (structural impact) and WhyGraph (rationale, constraints, risks). It produces an ordered, verifiable plan with verbatim rationale quotes, optionally fanning out to one researcher per knowledge source for richer changes.
 
 ## What to do
 
@@ -17,7 +17,7 @@ The user is gesturing at a multi-file change, feature addition, migration, or de
    - "How should I approach <multi-file change>?"
    - "Design a migration for <Y>"
 2. Suggest: `` `/whygraph-plan <one-line restatement of the task>` ``.
-3. Mention `--deep` only if the user explicitly asks about exhaustive analysis (forces the 3-researcher fan-out path). Mention `--shallow` only if the user explicitly asks for a quick single-pass plan. Default (no flag) lets the planner choose.
+3. Mention `--deep` only if the user explicitly asks about exhaustive analysis (forces the fan-out to one researcher per knowledge source). Mention `--shallow` only if the user explicitly asks for a quick single-pass plan. Default (no flag) lets the planner choose.
 4. **Do not run the command yourself.** Planning runs CodeGraph impact queries + rationale fetches + a planner subagent (and optionally researchers + synthesizer) — real tokens and latency. The slash command is the user's opt-in cost gate.
 
 ## When NOT to suggest /whygraph-plan

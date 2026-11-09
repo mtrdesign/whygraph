@@ -252,7 +252,7 @@ horizontally (except an element marked `data-scroll-x`, an opted-in scroller) an
 
 ## Writing harness prompts
 
-The agent, skill and rule files under `src/whygraph/assets/` are prompts that a model reads and follows. They follow a small subset of ASD-STE100 (Simplified Technical English), so that a model has one way to read each instruction.
+The agent, skill and rule files under `src/whygraph/assets/` are prompts that a model reads and follows. New and changed prompt text should follow the small subset of ASD-STE100 (Simplified Technical English) below, so that a model has one way to read each instruction. Existing prompts were not rewritten to it: `plan-tool.sh check` applies the sentence rules to plan text, and a test enforces the glossary across the prompts.
 
 - **One action per sentence.** Do not join two actions with "and then", "and also" or "then".
 - **At most 20 words per sentence.** A backticked span counts as one word.

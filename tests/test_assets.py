@@ -741,7 +741,8 @@ def test_harness_frontmatter_wiring() -> None:
     )
     assert "Write" not in _frontmatter(cc / "agents/planner.md")["disallowedTools"]
     assert _frontmatter(cc / "skills/whygraph-implement/SKILL.md")["allowed-tools"] == (
-        "Agent, Read, mcp__whygraph__whygraph_propose_note"
+        "Agent, Read, mcp__whygraph__whygraph_propose_note, "
+        "Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe)"
     )
     assert _frontmatter(_ASSET_ROOT / "cursor/agents/planner.md")["readonly"] == "false"
     for name in ("rationale", "whygraph-plan", "whygraph-implement", "whygraph-note"):
@@ -1850,6 +1851,20 @@ def test_ui_surface_body() -> None:
             assert phrase in text, (tree, phrase)
         researcher = "\n".join(_agent_body(tree, "researcher"))
         assert "PROFILE:" in researcher, tree
+
+
+def test_implement_probes_again_before_trusting_a_cached_unavailable() -> None:
+    """A cached `capture: unavailable` cannot turn capture off for good.
+
+    The planner writes that line once; the cause (no Node, no browser) may be
+    gone by implement time. Only `auth required` stands, since the probe cannot
+    see it.
+    """
+    for tree, rel in _IMPLEMENT_ENTRY.items():
+        text = _text(rel)
+        assert f"node {_CAPTURE_PATHS[tree]} --probe" in text, tree
+        assert "`capture: unavailable: auth required`" in text, tree
+        assert "prints `capture: available`" in text, tree
 
 
 def test_ui_wiring_in_entry_points() -> None:

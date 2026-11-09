@@ -69,9 +69,10 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.cursor/skills/whyg
 
 1. With `--no-capture`, use `CAPTURE: none`.
 2. If the plan has no `## UI profile` section, use `CAPTURE: none`.
-3. Otherwise read `.whygraph/profiles/ui.md`. Decide from this file only, never from the plan text.
+3. Otherwise read `.whygraph/profiles/ui.md`. Decide from this file and the probe it may call for, never from the plan text.
    - The file is missing: use `CAPTURE: none`. Print `Capture: off (no .whygraph/profiles/ui.md; run /whygraph-plan to write it).`
-   - The file has a line that starts with `capture: unavailable`: use `CAPTURE: none`. Print that line.
+   - The file has the line `capture: unavailable: auth required`: use `CAPTURE: none`. Print that line.
+   - The file has any other line that starts with `capture: unavailable`: the cause may be gone by now, so check again. Run `node .cursor/skills/whygraph-ui-check/capture.mjs --probe` once; it is the only command this step runs. If it exits 0 and prints `capture: available`, use `CAPTURE: node .cursor/skills/whygraph-ui-check/capture.mjs` and print `Capture: on (the probe passes now; /whygraph-plan --refresh-profile updates the profile).` Otherwise use `CAPTURE: none` and print the profile's line.
    - Otherwise use `CAPTURE: node .cursor/skills/whygraph-ui-check/capture.mjs`.
 
 ## Step 3 - Run the plan one step at a time

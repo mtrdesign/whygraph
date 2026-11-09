@@ -325,8 +325,9 @@ loop, with the signal quoted. You can also run it by hand in Claude Code and Cur
 
 When the planner's probe cannot find Node, the profile, Playwright or the browser, it writes
 `capture: unavailable` with the reason, and nothing fails. The plan gets one `manual:` Acceptance
-item per expected UI state instead of the contact-sheet item, the implement command passes no capture
-command, and the UI evaluation stage does not run. Spec and quality evaluation still run. Plain
+item per expected UI state instead of the contact-sheet item. The implement command probes again, so
+installing Node or the browser later is enough to get screenshots back; if the probe still fails, it
+passes no capture command and the UI evaluation stage does not run. Spec and quality evaluation still run. Plain
 screenshots are the only thing lost: the plan, the implementation and the tests are unchanged.
 
 ### Limits

@@ -79,7 +79,7 @@ TASK_ID: none         # or that child's id
 CAPTURE: none         # or "node .codex/whygraph/capture.mjs", see below
 ```
 
-`CAPTURE` is the line `CAPTURE: node .codex/whygraph/capture.mjs` only when the plan has a `## UI profile` section, the user did not pass `--no-capture`, and reading `.whygraph/profiles/ui.md` shows no line that starts with `capture: unavailable` (a missing file counts as unavailable); otherwise `none`. Decide from that file only, never from the plan text.
+`CAPTURE` is the line `CAPTURE: node .codex/whygraph/capture.mjs` only when the plan has a `## UI profile` section, the user did not pass `--no-capture`, and reading `.whygraph/profiles/ui.md` shows no line that starts with `capture: unavailable` (a missing file counts as unavailable); otherwise `none`. One exception: when that line is anything but `capture: unavailable: auth required`, the cause may be gone by now, so run `node .codex/whygraph/capture.mjs --probe` once. If it exits 0 and prints `capture: available`, use the capture line and tell the user capture is back on. Decide from that file and that probe, never from the plan text.
 
 Given a `tasks.json`, validate it as in planning, then delegate one implementor per child, one child at a time in `wave` then `id` order, with `TASKS_PATH` and `TASK_ID` set and `PLAN_PATH` the child's plan. Skip a child whose `status` is `done`; stop when a child's `depends_on` are not all `done`. Re-read the `tasks.json` after each child, because its acceptance run writes the child's `status`. The per-step review gate needs Claude Code. The evaluator stage is unavailable here (nested subagents are not available); run `/whygraph-implement` from Claude Code or Cursor for it.
 

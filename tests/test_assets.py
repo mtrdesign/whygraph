@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -31,6 +33,7 @@ def test_packaged_claude_assets_present() -> None:
         "agents/synthesizer.md",
         "agents/implementor.md",
         "agents/whygraph-reviewer.md",
+        "agents/evaluator.md",
         "skills/whygraph-plan/SKILL.md",
         "skills/whygraph-plan/plan-spine.md",
         "skills/whygraph-plan/sources/README.md",
@@ -39,8 +42,11 @@ def test_packaged_claude_assets_present() -> None:
         "skills/whygraph-plan/sources/repo-tests.md",
         "skills/whygraph-plan/sources/repo-history.md",
         "skills/whygraph-plan/sources/medium.md",
+        "skills/whygraph-plan/sources/ui-surface.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-review/SKILL.md",
+        "skills/whygraph-ui-check/SKILL.md",
+        "skills/whygraph-ui-check/capture.mjs",
         "skills/whygraph-note/SKILL.md",
         "skills/rationale/SKILL.md",
         "skills/pre-edit/SKILL.md",
@@ -74,13 +80,17 @@ def test_packaged_cursor_assets_present() -> None:
         "skills/whygraph-plan/sources/repo-tests.md",
         "skills/whygraph-plan/sources/repo-history.md",
         "skills/whygraph-plan/sources/medium.md",
+        "skills/whygraph-plan/sources/ui-surface.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-note/SKILL.md",
+        "skills/whygraph-ui-check/SKILL.md",
+        "skills/whygraph-ui-check/capture.mjs",
         "rules/whygraph-codegraph.mdc",
         "agents/planner.md",
         "agents/researcher.md",
         "agents/synthesizer.md",
         "agents/implementor.md",
+        "agents/evaluator.md",
     )
     for rel in expected:
         leaf = root
@@ -109,6 +119,8 @@ def test_packaged_codex_assets_present() -> None:
         ".codex/whygraph/sources/repo-tests.md",
         ".codex/whygraph/sources/repo-history.md",
         ".codex/whygraph/sources/medium.md",
+        ".codex/whygraph/sources/ui-surface.md",
+        ".codex/whygraph/capture.mjs",
         ".codex/agents/planner.toml",
         ".codex/agents/researcher.toml",
         ".codex/agents/synthesizer.toml",
@@ -148,6 +160,8 @@ def test_packaged_vscode_assets_present() -> None:
         "whygraph/sources/repo-tests.md",
         "whygraph/sources/repo-history.md",
         "whygraph/sources/medium.md",
+        "whygraph/sources/ui-surface.md",
+        "whygraph/capture.mjs",
         "agents/planner.agent.md",
         "agents/researcher.agent.md",
         "agents/synthesizer.agent.md",
@@ -302,9 +316,10 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "agents" / "planner.md").is_file()
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    # 5 agents + 6 skills + CLAUDE.md (merge file, written fresh) = 12 files,
-    # plus the plan skill's spine, sources README and 5 sources = 19 files.
-    assert len(result.written) == 19
+    # 6 agents + 7 skills + CLAUDE.md (merge file, written fresh) = 14 files,
+    # plus the plan skill's spine, sources README and 6 sources = 8, plus the
+    # UI check skill's capture script = 23 files.
+    assert len(result.written) == 23
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -726,7 +741,8 @@ def test_harness_frontmatter_wiring() -> None:
     )
     assert "Write" not in _frontmatter(cc / "agents/planner.md")["disallowedTools"]
     assert _frontmatter(cc / "skills/whygraph-implement/SKILL.md")["allowed-tools"] == (
-        "Agent, Read, mcp__whygraph__whygraph_propose_note"
+        "Agent, Read, mcp__whygraph__whygraph_propose_note, "
+        "Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe)"
     )
     assert _frontmatter(_ASSET_ROOT / "cursor/agents/planner.md")["readonly"] == "false"
     for name in ("rationale", "whygraph-plan", "whygraph-implement", "whygraph-note"):
@@ -749,6 +765,22 @@ def test_harness_frontmatter_wiring() -> None:
         assert 'model_reasoning_effort = "medium"' in toml
     assert "/agent " not in (_ASSET_ROOT / "codex/AGENTS.md").read_text()
     assert "## WhyGraph" in (cc / "CLAUDE.md").read_text()
+    evaluator = _frontmatter(cc / "agents/evaluator.md")
+    assert evaluator["tools"] == "Read, Grep, Glob"
+    assert evaluator["model"] == "sonnet" and evaluator["maxTurns"] == "25"
+    assert _frontmatter(cc / "skills/whygraph-ui-check/SKILL.md")["allowed-tools"] == (
+        "Bash(node .claude/skills/whygraph-ui-check/capture.mjs *), Read"
+    )
+    cursor_evaluator = _frontmatter(_ASSET_ROOT / "cursor/agents/evaluator.md")
+    assert cursor_evaluator["readonly"] == "true"
+    assert cursor_evaluator["model"] == "inherit"
+    assert set(
+        _frontmatter(_ASSET_ROOT / "cursor/skills/whygraph-ui-check/SKILL.md")
+    ) == {
+        "name",
+        "description",
+        "disable-model-invocation",
+    }
 
 
 # ---- pipeline parity (plan 6.2, 6.5) --------------------------------------
@@ -813,7 +845,10 @@ _PARITY_PLATFORM = (
     r"^Your prompt has this shape:$|then to the synthesizer"
 )
 # Lines only one tree has: its own fallback note for missing nested delegation.
-_PARITY_TREE_ONLY = r"(?i)<DISPATCH> is unavailable|nested (?:subagents|<DISPATCH>)"
+_PARITY_TREE_ONLY = (
+    r"(?i)<DISPATCH> is unavailable|nested (?:subagents|<DISPATCH>)"
+    r"|no terminal is available"
+)
 _PARITY_TOOLS = {"Read", "Edit", "Write", "Grep", "Glob", "Bash"}
 
 
@@ -1495,6 +1530,375 @@ def test_plan_entry_points() -> None:
             *_BUNDLED_SOURCES,
         ):
             assert phrase in text, (tree, phrase)
+
+
+# ---- evaluation and UI evidence (plan 45) ----------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_EVALUATOR_TREES = ("claude-code", "cursor")
+_CAPTURE_COPIES = (
+    "claude-code/skills/whygraph-ui-check/capture.mjs",
+    "cursor/skills/whygraph-ui-check/capture.mjs",
+    "vscode/whygraph/capture.mjs",
+    "codex/.codex/whygraph/capture.mjs",
+)
+_CAPTURE_PATHS = {
+    "claude-code": ".claude/skills/whygraph-ui-check/capture.mjs",
+    "cursor": ".cursor/skills/whygraph-ui-check/capture.mjs",
+    "vscode": ".github/whygraph/capture.mjs",
+    "codex": ".codex/whygraph/capture.mjs",
+}
+_STAGES = ("spec", "quality", "ui")
+# Each verdict slot in a template, and the real word a fixture puts there.
+_VERDICT_SLOTS = (
+    ("pass | fix | escalate", "pass"),
+    ("high | medium | low", "high"),
+    ("present | matches | does not match", "matches"),
+)
+_SEVERITY = r"\*\*(?:high|medium|low)\*\*"
+
+
+def test_evaluator_parity() -> None:
+    """The Claude Code and Cursor evaluator bodies are equal after normalisation."""
+    claude = [_parity_norm(line) for line in _agent_body("claude-code", "evaluator")]
+    cursor = [_parity_norm(line) for line in _agent_body("cursor", "evaluator")]
+    assert claude == cursor
+
+
+def _evaluation_templates(tree: str) -> dict[str, list[str]]:
+    """The evaluator's three fenced output templates, by stage, as lines."""
+    body = "\n".join(_agent_body(tree, "evaluator"))
+    found = re.findall(r"```markdown\n(# Evaluation: (\w+) - .*?)\n```", body, re.S)
+    assert [stage for _, stage in found] == list(_STAGES), tree
+    return {stage: text.splitlines() for text, stage in found}
+
+
+def _concrete(template: str, /, **slots: str) -> str:
+    """Put real verdict words and the named slots in a template line, fill the rest."""
+    for options, word in _VERDICT_SLOTS:
+        template = template.replace(f"<{options}>", word)
+    for name, value in slots.items():
+        template = template.replace(f"<{name}>", value)
+    return _fill(template)
+
+
+def _list_problems(heading: str, items: list[str], pattern: str) -> list[str]:
+    """An empty list is exactly ``- none``; any other list is all findings."""
+    if not items:
+        return [f"{heading}: an empty list must be '- none'"]
+    if items == ["- none"]:
+        return []
+    return [
+        f"{heading}: not a finding line: {item}"
+        for item in items
+        if not re.fullmatch(pattern, item)
+    ]
+
+
+def _evaluation_problems(review: str, stage: str) -> list[str]:
+    """Check an evaluation against the stage's template; return what is wrong."""
+    lines = review.strip().splitlines()
+    if not lines or not re.fullmatch(rf"# Evaluation: {stage} - \S.*", lines[0]):
+        return [f"the first line is not '# Evaluation: {stage} - <plan title>'"]
+    problems: list[str] = []
+    body = lines[1:]
+    if re.fullmatch(r"## Confidence: (?:high|medium|low) - \S.*", lines[-1]):
+        body = lines[1:-1]
+    else:
+        problems.append("the last line is not the Confidence line")
+    sections: list[tuple[str, list[str]]] = []
+    for line in body:
+        if line.startswith("## "):
+            sections.append((line, []))
+        elif line.strip():
+            if not sections:
+                problems.append(f"text before the first section: {line}")
+            else:
+                sections[-1][1].append(line)
+    finding = r"- \S+:\d+ - \S.* - \S.*"
+    if stage == "spec":
+        steps: list[str] = []
+        for heading, items in sections:
+            match = re.fullmatch(r"## Step (\d+): (\S.*) - (\S.*)", heading)
+            if match is None:
+                problems.append(f"bad heading: {heading}")
+                continue
+            if match.group(3) not in {"pass", "fix", "escalate"}:
+                problems.append(f"{heading}: unknown verdict {match.group(3)}")
+            if match.group(1) in steps:
+                problems.append(
+                    f"{heading}: a second verdict for step {match.group(1)}"
+                )
+            steps.append(match.group(1))
+            problems += _list_problems(heading, items, finding)
+        if not steps:
+            problems.append("no step sections")
+        return problems
+    quality = rf"- {_SEVERITY} \S+:\d+ - \S.* - \S.*"
+    wanted = {
+        "quality": [("## Findings", quality)],
+        "ui": [
+            (
+                "## Expected UI",
+                r"- Step \d+, \S+, \S.*: (?:present|matches|does not match) - \S.*",
+            ),
+            ("## Findings", rf"- {_SEVERITY} \S+ - \S.* - \S.*"),
+        ],
+    }[stage]
+    if [heading for heading, _ in sections] != [heading for heading, _ in wanted]:
+        problems.append(f"sections {[h for h, _ in sections]} are not the stage's")
+        return problems
+    for (heading, items), (_, pattern) in zip(sections, wanted, strict=True):
+        problems += _list_problems(heading, items, pattern)
+    return problems
+
+
+def _evaluation_fixture(stage: str, template: list[str]) -> tuple[str, str]:
+    """Build a valid evaluation from a stage's own template lines.
+
+    Returns the review and the one list line a test may remove to empty a list.
+    """
+
+    def line(prefix: str, **slots: str) -> str:
+        return _concrete(_line_starting(template, prefix), **slots)
+
+    title = _concrete(template[0])
+    confidence = _concrete(_line_starting(template, "## Confidence:"))
+    slots = {"file": "src/a.py", "line": "3", "route": "/settings", "N": "1"}
+    if stage == "spec":
+        first = line("## Step <N>:", **slots)
+        second = line("## Step <N>:", **{**slots, "N": "2"})
+        second = second.rsplit(" - ", 1)[0] + " - fix"
+        parts = [first, "- none", "", second, line("- <file>:<line>", **slots)]
+        removable = "- none"
+    elif stage == "quality":
+        parts = ["## Findings", line("- **<", **slots)]
+        removable = parts[-1]
+    else:
+        parts = [
+            "## Expected UI",
+            line("- Step <N>,", **slots),
+            "",
+            "## Findings",
+            "- none",
+        ]
+        removable = "- none"
+    return "\n".join([title, "", *parts, "", confidence]), removable
+
+
+def test_spec_evaluator_treats_a_path_outside_files_as_a_finding() -> None:
+    """Spec check 1 agrees with the implementor's scope check, and one reply decides.
+
+    The implementor logs every path outside Files as out of scope, so the
+    evaluator may not accept one because Change asks for it: that plan
+    contradicts itself and escalates. The verdict is settled before the reply
+    starts, and a reply that gives one step two verdicts halts the run.
+    """
+    for tree in _EVALUATOR_TREES:
+        body = "\n".join(_agent_body(tree, "evaluator"))
+        assert "unless **Change** requires" not in body, tree
+        assert "Any other path is a finding, even when **Change** asks" in body, tree
+        assert "the plan contradicts itself: the verdict is `escalate`" in body, tree
+        assert "before you write the `# Evaluation:` line" in body, tree
+        assert "no finding line that says there is no finding" in body, tree
+
+        skill = (_ASSET_ROOT / tree / "skills/whygraph-implement/SKILL.md").read_text()
+        assert "that heading more than once counts as `escalate`" in skill, tree
+
+
+def test_implementor_saves_both_step_trees() -> None:
+    """A step's end tree is on disk, so a report that drops it cannot skip the gate."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "implementor"))
+        assert "write it to `.whygraph/plans/<stem>/steps/<N>.t1`" in body, tree
+        assert "A `complete` step always lists both trees" in body, tree
+    skill = (_ASSET_ROOT / "claude-code/skills/whygraph-implement/SKILL.md").read_text()
+    assert "If the line is missing or has no `<t1>`, read the trees" in skill
+
+
+def test_acceptance_with_only_manual_items_is_not_logged_as_passed() -> None:
+    """Nothing was checked, so the log and the status do not say passed."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "implementor"))
+        assert "- Acceptance: manual only: <item numbers> (<timestamp>)" in body, tree
+        assert "| acceptance manual only |" in body, tree
+        assert "`done` (acceptance passed or manual only)" in body, tree
+
+
+def test_review_reply_starts_at_its_heading() -> None:
+    """Reasoning ahead of the report never reaches the user."""
+    body = "\n".join(_agent_body("claude-code", "whygraph-reviewer"))
+    assert "before you write the `# Review:` line" in body
+    skill = (_ASSET_ROOT / "claude-code/skills/whygraph-review/SKILL.md").read_text()
+    assert "starting at its first `# Review:` line" in skill
+
+
+def test_no_questions_prints_only_the_revise_reply() -> None:
+    """With --no-questions the revise reply replaces the plan reply before it."""
+    for entry in (
+        "claude-code/skills/whygraph-plan/SKILL.md",
+        "cursor/skills/whygraph-plan/SKILL.md",
+        "vscode/prompts/whygraph-plan.prompt.md",
+        "codex/AGENTS.md",
+    ):
+        text = (_ASSET_ROOT / entry).read_text()
+        assert "because its revise reply replaces it" in text, entry
+
+
+def test_auto_mode_keeps_a_mechanical_edit_single_pass() -> None:
+    """A rename does not pay for a research fan-out unless a contract is at stake."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "planner"))
+        assert "one mechanical edit repeated at every site" in body, tree
+        assert "no working-set node is on an external contract" in body, tree
+        assert "Auto-mode chose single-pass (mechanical edit" in body, tree
+
+
+def test_evaluator_output_contract_on_a_fixture() -> None:
+    """A review built from the evaluator's own templates passes the checker.
+
+    Each stage's fixture takes real verdict words in the verdict slots (as the
+    reviewer's test does for Confidence) and fills the rest; a second verdict
+    on one step, a missing Confidence line, an unknown word, an empty list,
+    an extra section or the wrong stage each fail it.
+    """
+    for tree in _EVALUATOR_TREES:
+        body = "\n".join(_agent_body(tree, "evaluator"))
+        assert "at most 20 words" in body, tree
+        templates = _evaluation_templates(tree)
+        for stage in _STAGES:
+            template = templates[stage]
+            assert template[0] == f"# Evaluation: {stage} - <plan title>", (tree, stage)
+            confidence = _line_starting(template, "## Confidence:")
+            assert confidence == "## Confidence: <high | medium | low> - <reason>"
+            assert template[-1] == confidence, (tree, stage)
+
+            review, removable = _evaluation_fixture(stage, template)
+            assert _evaluation_problems(review, stage) == [], (tree, stage)
+
+            broken = {
+                "no confidence": review.rsplit("\n## Confidence", 1)[0],
+                "extra section": review.replace(
+                    "\n## Confidence", "\n## Notes\n- it may\n\n## Confidence"
+                ),
+                "wrong stage": review.replace(
+                    f"# Evaluation: {stage}", "# Evaluation: other", 1
+                ),
+                "empty list": review.replace(removable + "\n", "", 1),
+                "text after confidence": review + "\nDone.",
+            }
+            if stage == "spec":
+                broken["second verdict"] = review.replace("## Step 2:", "## Step 1:")
+                broken["unknown verdict"] = review.replace(
+                    "it may - fix", "it may - maybe"
+                )
+            elif stage == "quality":
+                broken["unknown severity"] = review.replace("**high**", "**critical**")
+            else:
+                broken["unknown state"] = review.replace(
+                    ": matches -", ": looks fine -"
+                )
+            for name, text in broken.items():
+                assert _evaluation_problems(text, stage), (tree, stage, name)
+
+        none_only = "\n".join(
+            [
+                "# Evaluation: quality - a plan",
+                "",
+                "## Findings",
+                "- none",
+                "",
+                "## Confidence: high - the diff is small",
+            ]
+        )
+        assert _evaluation_problems(none_only, "quality") == [], tree
+
+
+def test_capture_script_identical_and_tested() -> None:
+    """The four capture scripts are one file, and its pure functions pass in Node."""
+    copies = {rel: (_ASSET_ROOT / rel).read_bytes() for rel in _CAPTURE_COPIES}
+    assert len(set(copies.values())) == 1, sorted(copies)
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("CI"):
+            pytest.fail("node is not on PATH: the capture script's tests need it in CI")
+        pytest.skip("node is not on PATH")
+    run = subprocess.run(
+        [node, "--test", "tests/js/capture.test.mjs"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_ui_surface_body() -> None:
+    """The UI source reports routes and states, takes a cached profile, and can opt out."""
+    for tree in _SOURCE_DIRS:
+        path = _ASSET_ROOT / _SOURCE_DIRS[tree] / "sources" / "ui-surface.md"
+        fm = _frontmatter(path)
+        assert fm["name"] == "ui-surface", tree
+        assert fm["section"] == "UI profile", tree
+        assert fm["requires"] == "" and fm["consent"] == "false", tree
+        text = path.read_text()
+        for phrase in (
+            "### Routes",
+            "### Proposed states",
+            "not a UI task",
+            "PROFILE:",
+        ):
+            assert phrase in text, (tree, phrase)
+        researcher = "\n".join(_agent_body(tree, "researcher"))
+        assert "PROFILE:" in researcher, tree
+
+
+def test_implement_probes_again_before_trusting_a_cached_unavailable() -> None:
+    """A cached `capture: unavailable` cannot turn capture off for good.
+
+    The planner writes that line once; the cause (no Node, no browser) may be
+    gone by implement time. Only `auth required` stands, since the probe cannot
+    see it.
+    """
+    for tree, rel in _IMPLEMENT_ENTRY.items():
+        text = _text(rel)
+        assert f"node {_CAPTURE_PATHS[tree]} --probe" in text, tree
+        assert "`capture: unavailable: auth required`" in text, tree
+        assert "prints `capture: available`" in text, tree
+
+
+def test_ui_wiring_in_entry_points() -> None:
+    """The plan and implement entry points, planners and synthesizers carry plan 45."""
+    for tree, rel in _IMPLEMENT_ENTRY.items():
+        text = _text(rel)
+        for phrase in ("--no-capture", "CAPTURE: node", _CAPTURE_PATHS[tree]):
+            assert phrase in text, (tree, phrase)
+    for tree in _EVALUATOR_TREES:
+        text = _text(_IMPLEMENT_ENTRY[tree])
+        for phrase in (
+            "STAGE: spec",
+            "FINDINGS:",
+            "--no-eval",
+            "--eval-fix-attempts",
+            "## Escalated findings",
+        ):
+            assert phrase in text, (tree, phrase)
+    for tree in ("vscode", "codex"):
+        assert "evaluator stage is unavailable" in _text(_IMPLEMENT_ENTRY[tree]), tree
+    for tree, rel in _PLAN_ENTRY.items():
+        text = _text(rel)
+        for phrase in ("CAPTURE_PATH", "--refresh-profile", _CAPTURE_PATHS[tree]):
+            assert phrase in text, (tree, phrase)
+    for tree in _AGENT_PATHS:
+        planner = "\n".join(_agent_body(tree, "planner"))
+        for phrase in (
+            ".whygraph/profiles/ui.md",
+            "git hash-object",
+            "--probe",
+            "CAPTURE_STATUS",
+        ):
+            assert phrase in planner, (tree, phrase)
+        assert "CAPTURE_STATUS" in "\n".join(_agent_body(tree, "synthesizer")), tree
 
 
 # ---- retired assets: files WhyGraph no longer ships -----------------------

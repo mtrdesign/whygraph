@@ -201,7 +201,7 @@ Then run these sub-steps in this order:
 
    On a failure, if fewer than `FIX_ATTEMPTS` fix attempts were used on this step, record a fix line and go back to 4 for one bounded fix, confined to the step's files. The fix line is `  - fix <i>/<FIX_ATTEMPTS>: <cause> - <files>`. In a `FINDINGS:` run, record `  - fix (findings) <i>: <cause> - <files>` instead, where `<i>` is the number of the finding the fix serves; record one such line for each finding applied in 4, too. With no attempts left, halt. When the step failed at baseline, mark the failure `pre-existing at baseline`.
 7. **Capture after.** Once Verify passes, run the command of 2 with `--tag after` in place of `--tag before`. Exit `2` counts as a failed Verify: go back to 4 while attempts remain, with the cause `capture after: exit 2 - <first stderr line>`; with none left, halt. Exits `0`, `3` and any other code are handled as in 2.
-8. **End tree and diff.** Run the snapshot command to get `<t1>`. Write the output of `git diff -U3 --no-color --no-ext-diff <t0> <t1>` to `.whygraph/plans/<stem>/steps/<N>.diff`.
+8. **End tree and diff.** Run the snapshot command to get `<t1>` and write it to `.whygraph/plans/<stem>/steps/<N>.t1`, overwriting any earlier one. Write the output of `git diff -U3 --no-color --no-ext-diff <t0> <t1>` to `.whygraph/plans/<stem>/steps/<N>.diff`.
 9. **Log.** Use `Edit` on `PLAN_PATH` to update the `## Implementation log` section.
    - **If the section doesn't exist**, append it at the end of the file (separated by a blank line) with header `## Implementation log` followed by a blank line, then the new entry.
    - **On verify success**, add (or replace any prior entry for the same step, with its indented lines):
@@ -233,8 +233,8 @@ Run this only for `STEP_RANGE: acceptance`, or with `ACCEPTANCE: inline` at the 
 
 1. If the plan has no `## Acceptance` section, log `- Acceptance: none in plan` and report `acceptance passed`.
 2. Run item 1's **Check** command, then every other **Check** that is a literal command, in item order. An item passes when its command exits 0. List each `manual:` item for the user; it neither passes nor fails.
-3. Log `- Acceptance: passed (<timestamp>)` or `- Acceptance: failed: <item numbers> (<timestamp>)`. The status is `acceptance passed` or `acceptance failed: <item numbers>`. Nothing is undone.
-4. When `TASKS_PATH` is not `none`, `Read` then `Write` the whole file. Set `status` of the child whose `id` is `TASK_ID` to `done` (acceptance passed) or `acceptance_failed`. Change nothing else. This is the only `tasks.json` write anywhere in your work. If no child has that id, write nothing and say so in the report.
+3. Log `- Acceptance: passed (<timestamp>)` or `- Acceptance: failed: <item numbers> (<timestamp>)`. When no item has a literal command, nothing was checked: log `- Acceptance: manual only: <item numbers> (<timestamp>)` instead. The status is `acceptance passed`, `acceptance manual only` or `acceptance failed: <item numbers>`. Nothing is undone.
+4. When `TASKS_PATH` is not `none`, `Read` then `Write` the whole file. Set `status` of the child whose `id` is `TASK_ID` to `done` (acceptance passed or manual only) or `acceptance_failed`. Change nothing else. This is the only `tasks.json` write anywhere in your work. If no child has that id, write nothing and say so in the report.
 
 ## Phase 3 - Final report
 
@@ -245,7 +245,7 @@ Output exactly this markdown structure (no extra preamble):
 
 **Plan:** `<plan-path>`
 **Steps applied:** <K>/<total> (range <STEP_RANGE>)
-**Status:** <complete | halted at step N | already complete | acceptance passed | acceptance failed: <items>>
+**Status:** <complete | halted at step N | already complete | acceptance passed | acceptance manual only | acceptance failed: <items>>
 **Step trees:**
 - Step <N>: <t0> <t1>
 **Evidence:**
@@ -281,7 +281,7 @@ Output exactly this markdown structure (no extra preamble):
 - <kind> | <anchor> | <one-paragraph body>
 ```
 
-- `**Step trees:**` holds one line per step that took a start tree in this run, `- Step <N>: <t0> <t1>`, the only form. A halted step lists the trees it reached. Omit the heading when no step ran.
+- `**Step trees:**` holds one line per step that took a start tree in this run, `- Step <N>: <t0> <t1>`, the only form. A `complete` step always lists both trees, on that one line. A halted step lists the trees it reached. Omit the heading when no step ran.
 - `**Evidence:**` holds one line per step that ran a capture. Omit it when none did.
 - A failure that was already failing at baseline reads `- [ ] Step 3: <name> - failed (pre-existing at baseline): <one-line excerpt>`.
 - `## Acceptance` appears only after a Phase 2h walk. `## Out-of-scope edits` and `## Escalated findings` are omitted when empty.

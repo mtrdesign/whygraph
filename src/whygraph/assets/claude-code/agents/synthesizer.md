@@ -16,6 +16,8 @@ TASK: <the user's English task description>
 
 SPINE_PATH: <absolute path of plan-spine.md>
 PARENT: <tasks.json path | none>
+OUT_PATH: <absolute path of the plan | none>
+CAPTURE_STATUS: <none | available | unknown | unavailable: <reason>>
 ANSWERS: <none | defaults | the answer lines below>
 - Q<n>: <question> => <the chosen option, or the owner's own text>
 
@@ -35,6 +37,8 @@ RESEARCHER REPORTS:
 === <source name> ===
 ...
 ```
+
+`OUT_PATH` names the plan file. Derive `<stem>` from it: its file name without `.md`, lowercased, each run of characters outside `[a-z0-9]` replaced by one `-`, leading and trailing `-` trimmed. With `OUT_PATH: none`, keep `<stem>` as written. `CAPTURE_STATUS` says whether UI capture works in this repository; `none` means the plan has no UI profile.
 
 You do not have access to MCP tools. Researchers grounded their reports already; trust their evidence. Read/Grep/Glob/Bash are available for spot-checking only - you should not need them for routine work.
 
@@ -64,7 +68,7 @@ Read, Grep, Glob, Bash - for spot-checking only. No MCP tools, no Agent tool. Yo
 - **Risks** - verbatim quotes from the `## Constraints / risks cited verbatim` section; "none recorded" if absent.
 - **Test first** - for a step symbol that the `## Verify candidates` section flags **uncovered**, the `<test file>::<test name>` that entry names; "none" otherwise. Never take Test first from a covered entry.
 - **Model** - `haiku`, `sonnet` or `opus` by the spine's `## Model per step` ladder, lowercase, with a one-line why.
-- **Routes** and **Expected UI** - only on a step that changes a screen, and only when a report describes the frontend surface; omit both lines otherwise, and omit `## UI profile` unless that report fills it.
+- **Routes** and **Expected UI** - only on the steps that step 3g names; omit both lines otherwise.
 - **Verify** - the literal command(s) the `Verify candidates` section lists for this step's symbols, copied verbatim in backticks (e.g. `uv run pytest tests/test_cache.py::test_key_is_content_addressable -q`). For a Test first step, Verify runs the named test with the command the uncovered entry gives. Never write a prose Verify such as "run the tests". If the `Verify candidates` section is missing or its report is unavailable, use the narrowest command the repo's test setup supports and say so in the confidence reason.
 
 **3b. Prior art.** Fill `## Prior art` from every report section whose heading starts with `## Prior art` (for example `Prior art` and `Prior art (external)`): one line per entry, its title or PR number and its URL or path copied verbatim, then a one-line takeaway in your own words. Never paste article text. A directly relevant entry may also be cited in the step it informs. Omit the section when no report has an entry.
@@ -76,6 +80,12 @@ Read, Grep, Glob, Bash - for spot-checking only. No MCP tools, no Agent tool. Yo
 **3e. Never drop a section.** The generic sections (`## Findings`, `## Per-symbol notes`, `## Limitations`, `## Confidence:`) feed the steps and step 5. A report section that no rule above names is never dropped: put each of its bullets under **Change** in the step it names by symbol or file, else into the Risks roll-up, and name its source in the confidence reason.
 
 **3f. Writing rules.** Apply the spine's `## Writing rules` to every `Change`, `Expected UI`, Acceptance statement and Open question. Never apply them to a verbatim quote.
+
+**3g. UI.** Apply this step only when a report has key lines under `## UI profile`. A report whose `## UI profile` is the single line `not a UI task` has none. Without key lines, omit `## UI profile`, Routes and Expected UI, and add no UI Acceptance item.
+- Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
+- Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes. When `ANSWERS` answers the states question, shape Expected UI by that answer.
+- Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3 in step 3d.
+- Add the Acceptance item that `CAPTURE_STATUS` selects. For `available` or `unknown`, add `manual: open .whygraph/plans/<stem>/ui/index.html and compare before and after for each UI step`. For `unavailable: <reason>`, add one `manual:` item per Expected UI state instead, and name the reason in the confidence reason. For `none`, add no UI item. These items do not count toward the six-item cap of step 3c.
 
 **4. Roll up risks.** The bottom-of-plan **Risks called out across the change** section is the deduplicated union of the risks in the `## Constraints / risks cited verbatim` section and the symbols the `## Verify candidates` section flags as **uncovered** (a change no existing test exercises). If two reports raised the same concern, fold them into one bullet, preserving verbatim quotes.
 

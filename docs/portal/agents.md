@@ -40,6 +40,11 @@ CodeGraph usage-guidance block appended to its always-on instructions (`CLAUDE.m
 `.github/copilot-instructions.md`, or an always-apply rule for Cursor). The guidance tells the agent to
 prefer the portal's `codegraph_*` tools over grep, and not to run the `codegraph` command itself.
 
+Claude Code and Cursor also get `skills/whygraph-ui-check/` (`.claude/skills/` and `.cursor/skills/`): a
+slash command and the `capture.mjs` script behind the planning command's
+[UI evidence](../guide/planning.md#ui-evidence). VS Code and Codex get the script beside their
+planning files, in `.github/whygraph/` and `.codex/whygraph/`.
+
 ### Keeping the agent files up to date { #agent-files-upgrade }
 
 The portal records what it installed in `.whygraph/assets.json` (gitignored with the rest of
@@ -251,6 +256,15 @@ symbol's rationale card, and reports exactly one verdict - **Constraint at risk*
 - **Other agents.** Cursor, VS Code and Codex do not get the reviewer yet. Cursor also loads
   `.claude/skills/`, so with Claude Code selected `/whygraph-review` shows up in Cursor's slash menu too;
   it is untested there.
+
+## Evaluating an implementation { #whygraph-evaluator }
+
+Claude Code and Cursor also get `whygraph-evaluator`, a read-only subagent that `/whygraph-implement`
+starts beside the reviewer. The reviewer checks a diff against recorded rationale; the evaluator checks
+the work against the plan: each step's scope and `Verify` command, then the quality of the whole change,
+then the screens when [UI evidence](../guide/planning.md#ui-evidence) was captured. Skip it with
+`--no-eval`. See [Evaluation](../guide/planning.md#evaluation) for the stages and for what your model
+provider sees.
 
 ## Connecting from the Projects page { #connect-your-agent-outside-a-project }
 

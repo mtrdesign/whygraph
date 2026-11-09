@@ -1,7 +1,7 @@
 ---
 description: Execute a reviewed WhyGraph plan (or one child of a split's tasks.json). Reads the plan as a strict contract, runs Verify after each step, halts on first failure, then walks the plan's Acceptance list.
 name: whygraph-implement
-argument-hint: <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]
+argument-hint: <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture]
 agent: whygraph-implementor
 ---
 
@@ -9,9 +9,9 @@ agent: whygraph-implementor
 
 Execute a reviewed WhyGraph plan (or one child of a split's `tasks.json`). Reads the plan as a strict contract, runs Verify after each step, halts on the first failure, walks the plan's `## Acceptance` list at the end, and appends an Implementation log to the plan.
 
-This prompt runs **as** the implementor, so every step runs in this one conversation. The per-step review gate needs Claude Code: run `/whygraph-review` there when you want the step's diff checked against the recorded rationale.
+This prompt runs **as** the implementor, so every step runs in this one conversation. The per-step review gate needs Claude Code: run `/whygraph-review` there when you want the step's diff checked against the recorded rationale. The evaluator stage is unavailable here (nested subagents are not available); run `/whygraph-implement` from Claude Code or Cursor for it.
 
-**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]`
+**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture]`
 
 ## Step 1 - Parse arguments
 
@@ -21,9 +21,10 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--commit-each-step` -> boolean flag (default `false`).
 - `--fix-attempts <N>` -> integer 0-2 (consume the next token; default `0`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
 - `--model <model-id>` -> optional override (consume the next token). Default: the implementor subagent's inherited model.
+- `--no-capture` -> pass `CAPTURE: none` to the implementor (Step 2b).
 
 The first non-flag positional token is the **path**: a plan (`.md`) or a split's `.tasks.json`. If it is empty, respond with:
-`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>]` and stop.
+`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture]` and stop.
 
 If the path ends in `.tasks.json` and `--from-step` is passed, respond with `--from-step takes a plan; pass the child's plan file instead of the tasks.json.` and stop.
 
@@ -64,6 +65,18 @@ Print `### <id>: <title>`. The child's plan is the plan for the checks below; `T
 
 If validation passes, do not summarise the plan - the implementor reads it itself.
 
+### Step 2b - Capture
+
+Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.github/whygraph/capture.mjs`, relative to the workspace root.
+
+1. With `--no-capture`, use `CAPTURE: none`.
+2. If the plan has no `## UI profile` section, use `CAPTURE: none`.
+3. Otherwise read `.whygraph/profiles/ui.md`. Decide from this file and the probe it may call for, never from the plan text.
+   - The file is missing: use `CAPTURE: none`. Print `Capture: off (no .whygraph/profiles/ui.md; run /whygraph-plan to write it).`
+   - The file has the line `capture: unavailable: auth required`: use `CAPTURE: none`. Print that line.
+   - The file has any other line that starts with `capture: unavailable`: the cause may be gone by now, so check again. Run `node .github/whygraph/capture.mjs --probe` once; it is the only command this step runs. If it exits 0 and prints `capture: available`, use `CAPTURE: node .github/whygraph/capture.mjs` and print `Capture: on (the probe passes now; /whygraph-plan --refresh-profile updates the profile).` Otherwise use `CAPTURE: none` and print the profile's line.
+   - Otherwise use `CAPTURE: node .github/whygraph/capture.mjs`.
+
 ## Step 3 - Dispatch to the implementor subagent
 
 This prompt runs as the `whygraph-implementor` custom agent (`.github/agents/implementor.agent.md`). Its input is exactly:
@@ -76,12 +89,12 @@ COMMIT_EACH_STEP: <true | false>
 FIX_ATTEMPTS: <0-2>
 TASKS_PATH: <absolute path to the tasks.json | none>
 TASK_ID: <the child's id | none>
-CAPTURE: none
+CAPTURE: <node .github/whygraph/capture.mjs | none>
 ```
 
 With `--from-step N`, the second line is `STEP_RANGE: <N>-` instead. `ACCEPTANCE: inline` means the run walks the plan's `## Acceptance` list once its range reaches the last step, and for a split child writes that child's `status` in the tasks.json.
 
-The implementor has its own system prompt covering plan parsing, step trees, Verify, fix attempts and log mutation - do not inline implementation instructions here.
+`CAPTURE` is the value from Step 2b. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation - do not inline implementation instructions here.
 
 ## Step 4 - Print the result
 

@@ -1,7 +1,7 @@
 ---
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Runs as the planner - one researcher per knowledge source, then a synthesizer - splits a large task into child plans only when needed, and asks the few plan-shaping questions after research.
 name: whygraph-plan
-argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--out <path>]
+argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]
 agent: whygraph-planner
 ---
 
@@ -13,7 +13,7 @@ You are in the main chat, so you are also the one who asks the user. Wherever yo
 
 You have no terminal here. Find files with the read and search tools. The edit tool creates a file's parent directory, so no directory needs creating first. Leave `created` out of a `tasks.json`.
 
-**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--out <path>]`
+**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]`
 
 ## Step 1 - Parse arguments
 
@@ -25,10 +25,11 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--no-split` -> forbid a split.
 - `--sources <a,b>` -> run only these sources, by `name`, comma-separated (consume the next token). A named source runs even when its file says `enabled: false`. Each name must match `^[a-z0-9-]+$`.
 - `--no-questions` -> ask nothing: every consent is `no`, and open questions take their defaults.
+- `--refresh-profile` -> derive the UI profile (`.whygraph/profiles/ui.md`) again, even when the cached one is fresh.
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
@@ -45,6 +46,7 @@ The repo root is the workspace root. Resolve these absolute paths before plannin
   - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<workspace root>/.whygraph/plans/<slug>.md`. If that file exists, append `-2`, `-3`, ... until the name is unused. Never overwrite.
 - `SOURCES_DIR` - `<workspace root>/.github/whygraph/sources/`.
 - `SPINE_PATH` - `<workspace root>/.github/whygraph/plan-spine.md`.
+- `CAPTURE_PATH` - `.github/whygraph/capture.mjs`. It stays relative to the workspace root.
 
 If the file at `SPINE_PATH` does not exist, respond with `The planning files are missing from .github/whygraph/. Open the WhyGraph portal, run Settings > Update agent files, then re-run /whygraph-plan.` and stop.
 
@@ -89,17 +91,20 @@ TERMS: <topic>; <topic>
 (only when some CONSENT is yes - otherwise omit the line)
 PARENT: none
 OUT_PATH: <absolute path resolved in Step 2>
+CAPTURE_PATH: .github/whygraph/capture.mjs
+REFRESH_PROFILE: <yes | no>
 ```
 
 - `MODE` is `shallow` for `--shallow`, `deep` for `--deep`, otherwise `auto`.
 - `SPLIT` is `yes` for `--split`, `no` for `--no-split`, otherwise `auto`.
 - `SOURCES` is the `--sources` list, otherwise `all`.
+- `REFRESH_PROFILE` is `yes` for `--refresh-profile`, otherwise `no`.
 
 Now follow your planner instructions with this input, from Phase 0. Do not restate them here.
 
 ## Step 5 - Clarify, split or questions
 
-Print each reply your planner instructions produce **verbatim** (Step 7). Then act on its shape:
+Print each reply your planner instructions produce **verbatim**, with the one exception in Step 7. Then act on its shape:
 
 - CodeGraph is not available -> print the message and stop. Do not attempt a fallback or save anything.
 - **Clarify.** Phase 1a found no seed symbol and you wrote no plan; your reply would be `CLARIFY: <one question> | options: <a>; <b>[; <c>]`.
@@ -121,6 +126,7 @@ Print each reply your planner instructions produce **verbatim** (Step 7). Then a
 ```
 MODE: revise
 PLAN_PATH: <the plan's absolute path - the OUT_PATH you wrote>
+REFRESH_PROFILE: no
 ANSWERS:
 - Q<n>: <the chosen option, without "(default)", or the user's own text>
 ```
@@ -139,7 +145,7 @@ The task description is the path of a `tasks.json` that an earlier run wrote. Pl
    - Every `depends_on` entry names an existing `id`, and the dependencies have no cycle.
    This prompt has no terminal, so it cannot ask git whether the file is tracked; the implementor refuses a tracked `tasks.json` before it implements a child.
 2. Pick the child: the first one, in ascending `wave` and then `id` order, that has no file at its `plan` yet. When every child has a plan, print `Every child of <path> has a plan. Run /whygraph-implement <path>.` and stop.
-3. For `t1` only, run Step 3 (consent). Every other child gets `CONSENT: none` and no `TERMS` line.
+3. For `t1` only, run Step 3 (consent). Every other child gets `CONSENT: none` and no `TERMS` line. `REFRESH_PROFILE` is as in Step 4 for `t1` only; every other child gets `REFRESH_PROFILE: no`.
 4. Plan the child as in Step 4, with these changes to the input:
    - `TASK: <the child's task>`
    - `SPLIT: no`
@@ -149,6 +155,6 @@ The task description is the path of a `tasks.json` that an earlier run wrote. Pl
 
 ## Step 7 - Print the result
 
-Print each reply **verbatim**. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block. Do not summarize or repeat the rest of the plan; the file is the source of truth.
+Print each reply **verbatim**. The one exception: with `--no-questions`, do not print a plan reply whose `QUESTIONS:` block has questions, because its revise reply replaces it. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block. Do not summarize or repeat the rest of the plan; the file is the source of truth.
 
 This prompt's only job is: parse -> resolve paths -> consent -> plan -> clarify, split or questions -> print. Do not edit any file but the ones your planner instructions allow, and do not improvise.

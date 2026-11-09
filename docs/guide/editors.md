@@ -40,10 +40,11 @@ agent files** in the project's Settings overwrites them.
 
 The planning commands take flags: `/whygraph-plan` accepts `--shallow`, `--deep`, `--split`,
 `--no-split`, `--sources <a,b>`, `--no-questions` and `--out <path>`; `/whygraph-implement` accepts
-`--from-step N`, `--step N`, `--commit-each-step`, `--fix-attempts N`, `--model` and `--no-review`. See
+`--from-step N`, `--step N`, `--commit-each-step`, `--fix-attempts N`, `--model`, `--no-review`,
+`--no-eval`, `--no-capture` and `--eval-fix-attempts N`. See
 [Planning a change](planning.md).
 
-Cursor's slash commands (`/rationale`, `/whygraph-plan`, `/whygraph-implement`, `/whygraph-note`) are installed as skills under
+Cursor's slash commands (`/rationale`, `/whygraph-plan`, `/whygraph-implement`, `/whygraph-ui-check`, `/whygraph-note`) are installed as skills under
 `.cursor/skills/`. Cursor also loads `.claude/skills/`, so with both Claude Code and Cursor selected each
 command shows up twice in Cursor's slash menu. A project initialized by an earlier build has old
 `.cursor/commands/` files: **Update agent files** removes them (it asks first if you edited one). Copilot also reads

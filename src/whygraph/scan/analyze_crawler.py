@@ -157,9 +157,10 @@ class AnalyzeCrawler(Crawler):
 
         Opens its own DB session — sessions are not shareable across
         threads. *Bulk* commits (more files than
-        ``large_commit_file_count``) skip the whole-diff LLM call and get
-        a cheap stub instead; their real per-file descriptions are filled
-        in lazily on read. Commits with an empty diff are skipped
+        ``large_commit_file_count``; a merge counts the files of its
+        first-parent diff) skip the whole-diff LLM call and get a cheap
+        stub instead; their real per-file descriptions are filled in
+        lazily on read. Commits with an empty diff are skipped
         silently; any other failure propagates and is collected by
         :meth:`work`.
 
@@ -170,7 +171,13 @@ class AnalyzeCrawler(Crawler):
             (empty diff, skipped), or ``"described"`` (LLM description
             written) — tallied by :meth:`work` for its summary.
         """
-        if commit.stats.files_changed > self._large_commit_file_count:
+        files_changed = commit.stats.files_changed
+        if len(commit.parent_shas) > 1:
+            # A merge's walk stats are zero (``git log --shortstat`` prints
+            # none), but its diff is the whole first-parent diff.
+            counts = self._repository.first_parent_file_counts([commit.sha])
+            files_changed = counts[commit.sha]
+        if files_changed > self._large_commit_file_count:
             with get_session() as session:
                 row = session.get(CommitRow, commit.sha)
                 if row is not None:
@@ -178,7 +185,7 @@ class AnalyzeCrawler(Crawler):
                     # LLM-generated, and a NULL model is the signal the
                     # lazy read path uses to know a real per-file
                     # description still needs generating.
-                    row.llm_description = bulk_commit_stub(commit.stats.files_changed)
+                    row.llm_description = bulk_commit_stub(files_changed)
             return "bulk"
         diff = self._repository.diff(commit)
         if not diff.strip():

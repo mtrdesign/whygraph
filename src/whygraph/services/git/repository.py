@@ -29,6 +29,7 @@ from .commands import (
     GitFastForwardCmd,
     GitFetchDefaultCmd,
     GitFetchRefsCmd,
+    GitFirstParentNumstatCmd,
     GitHasCommitCmd,
     GitHeadShaCmd,
     GitIsAncestorCmd,
@@ -83,6 +84,10 @@ _BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
 # ARG_MAX on every platform even for a repository with thousands of
 # distinct identities; the results are concatenated in input order.
 _MAILMAP_CHUNK = 500
+
+# SHAs per ``git log --no-walk`` of :meth:`Repository.first_parent_numstat`;
+# 500 full SHAs is about 20 KB of argv.
+_FIRST_PARENT_CHUNK = 500
 
 # Paths per ``git checkout -- <paths>`` of :meth:`Repository.neutralize_symlinks`.
 _PATHS_CHUNK = 500
@@ -509,8 +514,10 @@ class Repository:
 
         Root commits (no parents) are diffed against git's empty-tree
         object, so the result is exactly what the commit introduced.
-        Merge commits diff against their first parent, matching the
-        convention already in use for :attr:`Commit.stats`.
+        Merge commits diff against their first parent. Note that
+        :attr:`Commit.stats` is zero for a merge (``git log --shortstat``
+        prints no stat line for one); :meth:`first_parent_numstat` gives
+        the size of the diff this method returns.
 
         Parameters
         ----------
@@ -1340,6 +1347,78 @@ class Repository:
                     f"failed to check-mailmap {len(chunk)} contact(s) at {self.root}"
                 ) from exc
         return tuple(lines)
+
+    def first_parent_numstat(self, shas: Sequence[str]) -> dict[str, tuple[int, ...]]:
+        """Changed lines per file of each commit against its first parent.
+
+        The size of what :meth:`diff` would return, file by file and in
+        diff order, read without producing the diff; merges included.
+        Batched via argv - one subprocess per :data:`_FIRST_PARENT_CHUNK`
+        SHAs. Diffing every file of a huge merge is slow (seconds for a
+        few thousand files): ask :meth:`first_parent_file_counts` first
+        when only the small ones need line counts.
+
+        Parameters
+        ----------
+        shas : Sequence[str]
+            Full commit SHAs. An empty sequence is a no-op - no ``git``
+            is invoked.
+
+        Returns
+        -------
+        dict[str, tuple[int, ...]]
+            One entry per SHA ``git`` printed: insertions plus deletions
+            of each touched file (``0`` for a binary file). A merge whose
+            first-parent diff is empty maps to ``()``.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails (an unknown SHA, a broken repository).
+        """
+        return self._first_parent(shas, names_only=False)
+
+    def first_parent_file_counts(self, shas: Sequence[str]) -> dict[str, int]:
+        """How many files each commit touches against its first parent.
+
+        The file count of :meth:`first_parent_numstat` without its
+        per-file line diff, so cheap even for a huge merge.
+
+        Parameters
+        ----------
+        shas : Sequence[str]
+            Full commit SHAs. An empty sequence is a no-op.
+
+        Returns
+        -------
+        dict[str, int]
+            One entry per SHA ``git`` printed (``0`` for an empty diff).
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails (an unknown SHA, a broken repository).
+        """
+        return {
+            sha: len(files)
+            for sha, files in self._first_parent(shas, names_only=True).items()
+        }
+
+    def _first_parent(
+        self, shas: Sequence[str], *, names_only: bool
+    ) -> dict[str, tuple[int, ...]]:
+        """Run :class:`GitFirstParentNumstatCmd` over ``shas`` in argv batches."""
+        files: dict[str, tuple[int, ...]] = {}
+        for start in range(0, len(shas), _FIRST_PARENT_CHUNK):
+            chunk = tuple(shas[start : start + _FIRST_PARENT_CHUNK])
+            cmd = GitFirstParentNumstatCmd(chunk, names_only=names_only)
+            try:
+                files.update(self._shell.run(cmd, cwd=self.root))
+            except ShellError as exc:
+                raise GitError(
+                    f"failed to read first-parent stats of {len(chunk)} commit(s)"
+                ) from exc
+        return files
 
     def commit_metadata(self, ref: str) -> Commit:
         """Full :class:`Commit` value object for a single commit-ish.

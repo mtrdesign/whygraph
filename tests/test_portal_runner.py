@@ -53,17 +53,29 @@ from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
-from whygraph.db.models import Commit
+from whygraph.db.models import Commit, CommitFileChange
+from whygraph.services.git import Repository
 from whygraph.portal import db as portal_db
+from whygraph.portal import estimate as estimate_mod
 from whygraph.portal.app import PortalServer, create_portal_app
 from whygraph.portal.estimate import (
+    BASELINE_PROFILE,
+    CHARS_PER_FILE,
     CHARS_PER_LINE,
     CHARS_PER_TOKEN,
-    OUTPUT_TOKENS_PER_COMMIT,
-    SYNTHESIS_INPUT_TOKENS,
+    DESCRIBE_OVERHEAD_TOKENS,
+    MODEL_PROFILES,
+    OUTPUT_TOKENS_BASE,
+    OUTPUT_TOKENS_PER_1K_CHARS,
+    RANGE_FACTOR,
+    SYNTHESIS_OUTPUT_PER_CHUNK,
+    SYNTHESIS_OUTPUT_TOKENS,
+    SYNTHESIS_OVERHEAD_TOKENS,
     CommitSize,
     estimate_tokens,
+    model_profile,
     render_estimate,
+    waiting_commit_sizes,
 )
 from whygraph.portal import routes as routes_mod
 from whygraph.portal import runner as runner_mod
@@ -513,36 +525,158 @@ def test_leftover_token_files_are_swept_at_start(
         assert sorted(p.name for p in runs_dir.iterdir()) == ["4.jsonl", "4.log"]
 
 
+def _describe_call(chars: int) -> tuple[float, float]:
+    """One describe call's (input, output) tokens, from the constants."""
+    return (
+        chars / CHARS_PER_TOKEN + DESCRIBE_OVERHEAD_TOKENS,
+        OUTPUT_TOKENS_BASE + chars * OUTPUT_TOKENS_PER_1K_CHARS / 1_000,
+    )
+
+
 def test_estimate_arithmetic() -> None:
     sizes = [
-        CommitSize(files_changed=1, insertions=10, deletions=5),  # small single file
-        CommitSize(files_changed=1, insertions=5000, deletions=0),  # capped
-        CommitSize(files_changed=3, insertions=2000, deletions=0),  # chunked
-        CommitSize(files_changed=2, insertions=10, deletions=10),  # small multi
-        CommitSize(files_changed=50, insertions=9000, deletions=9000),  # bulk stub
+        CommitSize(1, (15,)),  # small single file
+        CommitSize(1, (5_000,)),  # one file over the cap: one truncated call
+        CommitSize(3, (800, 800, 800)),  # 3 chunks + synthesis
+        CommitSize(2, (10, 10)),  # small multi
+        CommitSize(50, (100,) * 50),  # bulk stub
     ]
     result = estimate_tokens(sizes, max_diff_chars=50_000, large_commit_file_count=30)
-    chars = 15 * CHARS_PER_LINE + 50_000 + 2000 * CHARS_PER_LINE + 20 * CHARS_PER_LINE
     assert result.commits == 4
     assert result.large_commits == 1
     assert result.synthesis_calls == 1
-    assert result.input_tokens == chars // CHARS_PER_TOKEN + SYNTHESIS_INPUT_TOKENS
-    assert result.output_tokens == 4 * OUTPUT_TOKENS_PER_COMMIT
-    # Pin the constants too, so a silent change shows up here.
-    assert (CHARS_PER_LINE, CHARS_PER_TOKEN) == (60, 4)
-    assert (OUTPUT_TOKENS_PER_COMMIT, SYNTHESIS_INPUT_TOKENS) == (300, 1_500)
-    assert result.input_tokens == 44_525
+    assert result.calls == 1 + 1 + (3 + 1) + 1
+    # Pin the constants too, so a silent change shows up here (and in
+    # test_estimate_contains_a_measured_run, which they were calibrated on).
+    assert (CHARS_PER_FILE, CHARS_PER_LINE, CHARS_PER_TOKEN) == (900, 40, 2.31)
+    assert (DESCRIBE_OVERHEAD_TOKENS, SYNTHESIS_OVERHEAD_TOKENS) == (500, 150)
+    assert (OUTPUT_TOKENS_BASE, OUTPUT_TOKENS_PER_1K_CHARS) == (400, 23.4)
+    assert (SYNTHESIS_OUTPUT_TOKENS, SYNTHESIS_OUTPUT_PER_CHUNK) == (500, 840)
+    chunk = 900 + 800 * 40  # 32,900 chars: two never fit in one 50,000 chunk
+    calls = [
+        _describe_call(900 + 15 * 40),
+        _describe_call(50_000),  # 200,900 chars, truncated
+        *[_describe_call(chunk)] * 3,
+        _describe_call(2 * (900 + 10 * 40)),
+    ]
+    synthesis = (150 + 3 * _describe_call(chunk)[1], 500 + 3 * 840)
+    expected_in = sum(c[0] for c in calls) + synthesis[0]
+    expected_out = sum(c[1] for c in calls) + synthesis[1]
+    assert result.input_tokens == round(expected_in) == 72_807
+    assert result.output_tokens == round(expected_out) == 8_996
 
     priced = render_estimate(result, provider="anthropic", model="claude-opus-4-7")
-    usd = (44_525 * 5.0 + 1_200 * 25.0) / 1_000_000
+    usd = (72_807 * 5.0 + 8_996 * 25.0) / 1_000_000
     assert priced["cost"]["usd"] == round(usd, 4)
     assert priced["cost"]["low"] == round(usd * 0.5, 4)
     assert priced["cost"]["high"] == round(usd * 1.5, 4)
     assert priced["cost"]["prices_as_of"] == BUNDLED_AS_OF
-    assert priced["tokens"]["input_range"] == {"low": 22262.5, "high": 66787.5}
+    assert priced["tokens"]["input_range"] == {"low": 36403.5, "high": 109210.5}
     assert priced["upper_bound"] is True
     unpriced = render_estimate(result, provider="ollama", model="llama3")
-    assert unpriced["cost"] is None and unpriced["tokens"]["input"] == 44_525
+    assert unpriced["cost"] is None and unpriced["tokens"]["input"] == 72_807
+
+    # A measured model scales the same calls by its profile.
+    haiku = estimate_tokens(
+        sizes,
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile("claude-haiku-4-5"),
+    )
+    assert haiku.calls == result.calls
+    # Synthesis reads the chunks' (scaled) output, so input is not just 0.78x.
+    assert haiku.input_tokens == 55_175
+    assert haiku.output_tokens == round(0.32 * expected_out) == 2_879
+
+
+def test_estimate_packs_files_like_the_splitter() -> None:
+    """Files fill a chunk in order until the next one would overflow it."""
+    # 24,900 chars each: the first two share a 49,800-char chunk.
+    result = estimate_tokens(
+        [CommitSize(3, (600, 600, 600))],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+    )
+    assert (result.calls, result.synthesis_calls) == (3, 1)
+    two, one = _describe_call(49_800), _describe_call(24_900)
+    expected_in = two[0] + one[0] + 150 + two[1] + one[1]
+    assert result.input_tokens == round(expected_in)
+
+
+def test_estimate_contains_a_measured_run() -> None:
+    """The estimate's range holds the usage of a real Describe-now run (#86)."""
+    run = json.loads(
+        (Path(__file__).parent / "fixtures" / "estimate_calibration.json").read_text()
+    )
+    result = estimate_tokens(
+        [CommitSize(files, tuple(lines)) for files, lines in run["commits"]],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+    )
+    assert result.large_commits == 2  # merges over 30 files, now stubbed
+    price = run["price_per_mtok"]
+
+    def usd(input_tokens: int, output_tokens: int) -> float:
+        return (input_tokens * price["input"] + output_tokens * price["output"]) / 1e6
+
+    estimated = usd(result.input_tokens, result.output_tokens)
+    low, high = estimated * (1 - RANGE_FACTOR), estimated * (1 + RANGE_FACTOR)
+    for measured in (run["measured"], run["measured_without_large_merges"]):
+        assert low <= usd(measured["input_tokens"], measured["output_tokens"]) <= high
+    # Tighter than the displayed range: the constants were fitted on this run
+    # and a Biome sample, so cost, input and calls stay within 5 %. Output
+    # alone differs by repository (-13 % here, +14 % on Biome).
+    like = run["measured_without_large_merges"]
+    for key, tolerance in (("input_tokens", 0.05), ("calls", 0.05)):
+        assert abs(getattr(result, key) / like[key] - 1) < tolerance, key
+    assert abs(result.output_tokens / like["output_tokens"] - 1) < 0.15
+    measured = usd(like["input_tokens"], like["output_tokens"])
+    assert abs(estimated / measured - 1) < 0.05
+
+
+@pytest.mark.parametrize(
+    ("model", "price"),
+    [
+        ("claude-sonnet-5-5", (2, 10)),
+        ("claude-haiku-4-5", (1, 5)),
+        ("claude-opus-4-7", (5, 25)),
+    ],
+)
+def test_estimate_matches_each_measured_model(model: str, price: tuple) -> None:
+    """Each profiled model's estimate is within 5 % of its measured Biome sample."""
+    sample = json.loads(
+        (
+            Path(__file__).parent / "fixtures" / "estimate_calibration_biome.json"
+        ).read_text()
+    )
+    commits = [c for c in sample["commits"] if model in c["calls"]]
+    result = estimate_tokens(
+        [CommitSize(c["files_changed"], tuple(c["file_lines"])) for c in commits],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile(model),
+    )
+    calls = [call for c in commits for call in c["calls"][model]]
+    measured_in = sum(call[0] for call in calls)
+    measured_out = sum(call[1] for call in calls)
+
+    def usd(input_tokens: float, output_tokens: float) -> float:
+        return (input_tokens * price[0] + output_tokens * price[1]) / 1e6
+
+    assert abs(result.calls / len(calls) - 1) < 0.1
+    assert abs(result.input_tokens / measured_in - 1) < 0.05
+    estimated = usd(result.input_tokens, result.output_tokens)
+    assert abs(estimated / usd(measured_in, measured_out) - 1) < 0.05
+
+
+def test_model_profile_lookup() -> None:
+    assert model_profile("claude-haiku-4-5") == MODEL_PROFILES["claude-haiku-4-5"]
+    # OpenRouter writes the vendor in front of the same model id.
+    assert (
+        model_profile("anthropic/claude-opus-4-7") == MODEL_PROFILES["claude-opus-4-7"]
+    )
+    assert model_profile("gpt-4o") is BASELINE_PROFILE  # not measured yet
+    assert model_profile(None) is BASELINE_PROFILE
 
 
 # ---------------------------------------------------------------------------
@@ -1504,23 +1638,77 @@ def test_stale_reports_commits_behind(
     assert portal.get("/api/projects/demo").json()["stale"] == {"commits_behind": 3}
 
 
+def _merge_branch(root: Path, branch: str, files: int, *, strategy: str = "") -> str:
+    """Merge a side branch adding ``files`` three-line files (``--no-ff``); the merge's SHA."""
+    main = _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    _git(root, "checkout", "-q", "-b", branch)
+    names = [f"{branch}-{n}.txt" for n in range(files)]
+    for name in names:
+        (root / name).write_text("a\nb\nc\n")
+    _git(root, "add", *names)
+    _git(root, "commit", "-q", "-m", f"side {branch}")
+    _git(root, "checkout", "-q", main)
+    commit(root, f"main before {branch}\n")
+    args = ["-s", strategy] if strategy else []
+    _git(root, "merge", "-q", "--no-ff", *args, "-m", f"merge {branch}", branch)
+    return _git(root, "rev-parse", "HEAD").strip()
+
+
+def test_merge_sizes_are_remembered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A merge is read from git once; a higher threshold re-reads only its lines."""
+    root = make_repo(tmp_path, "merges")
+    small, huge = _merge_branch(root, "small", 1), _merge_branch(root, "huge", 3)
+
+    first = estimate_mod._merge_sizes(root, [small, huge], 2)
+
+    assert first == {small: CommitSize(1, (3,)), huge: CommitSize(3, (0, 0, 0))}
+    reads: list[list[str]] = []
+    real_counts = Repository.first_parent_file_counts
+
+    def counting(self: Repository, shas: list[str]) -> dict[str, int]:
+        reads.append(list(shas))
+        return real_counts(self, shas)
+
+    monkeypatch.setattr(Repository, "first_parent_file_counts", counting)
+    assert estimate_mod._merge_sizes(root, [small, huge], 2) == first
+    assert reads == []  # both remembered
+    raised = estimate_mod._merge_sizes(root, [small, huge], 5)
+    assert raised == {small: CommitSize(1, (3,)), huge: CommitSize(3, (3, 3, 3))}
+    assert reads == [[huge]]  # only the merge whose lines were never read
+
+
 def test_scan_estimate_endpoint(portal: TestClient, env: SimpleNamespace) -> None:
     root = local_project(portal, env, "demo")
+    merges = {
+        sha: _git(root, "rev-parse", f"{sha}^1").strip() + f" {sha}"
+        for sha in (
+            _merge_branch(root, "small", 1),  # 1 file, 3 lines vs its first parent
+            _merge_branch(root, "huge", 31),  # over large_commit_file_count
+            _merge_branch(root, "ours", 1, strategy="ours"),  # empty: never described
+        )
+    }
+    small, huge, ours = merges
     rows = [
         ("a" * 40, 1, 10, 5, None, None),
-        ("b" * 40, 2, 10, 10, None, None),
+        ("b" * 40, 2, 2_000, 0, None, None),  # 81,800 chars: may split
         ("c" * 40, 40, 100, 100, None, None),  # over large_commit_file_count
         ("d" * 40, 1, 10, 0, "already described", None),
         ("e" * 40, 0, 0, 0, None, None),  # empty: never described
         ("f" * 40, 1, 10, 0, None, "refs/pull/7/head"),  # PR-origin: never described
         ("0" * 40, 1, 10, 0, None, "feature/x"),  # a local branch still counts
+        # A merge's walk stats are zero; the estimate sizes it from git.
+        (small, 0, 0, 0, None, None),
+        (huge, 0, 0, 0, None, None),
+        (ours, 0, 0, 0, None, None),
     ]
     with use_project(manual_ctx(root, "demo")), project_session() as session:
         for sha, files, ins, dels, desc, ref in rows:
             session.add(
                 Commit(
                     sha=sha,
-                    parent_shas="",
+                    parent_shas=merges.get(sha, ""),
                     author_name="T",
                     author_email="t@example.com",
                     authored_at="2026-01-01T00:00:00+00:00",
@@ -1535,10 +1723,42 @@ def test_scan_estimate_endpoint(portal: TestClient, env: SimpleNamespace) -> Non
                     first_seen_ref=ref,
                 )
             )
+        session.flush()
+        # "b" may split, so its per-file rows are read: 1,900 + 100 lines, not
+        # spread 1,000 + 1,000 (which would pack as two chunks).
+        for path, added in (("x.py", 1_900), ("y.py", 100)):
+            session.add(
+                CommitFileChange(
+                    commit_sha="b" * 40,
+                    path=path,
+                    change_type="M",
+                    lines_added=added,
+                    lines_deleted=0,
+                )
+            )
     body = portal.get("/api/projects/demo/scan-estimate").json()
-    assert body["commits"] == 3 and body["large_commits"] == 1
+    assert body["commits"] == 4 and body["large_commits"] == 2
     assert body["upper_bound"] is True
-    assert body["tokens"]["input"] == (15 + 20 + 10) * CHARS_PER_LINE // CHARS_PER_TOKEN
+    # A commit without commit_file_change rows spreads its lines over its
+    # files; the merge's come from git (one file, three lines).
+    expected = estimate_tokens(
+        [CommitSize(1, (15,)), CommitSize(2, (1_900, 100)), CommitSize(1, (10,))]
+        + [CommitSize(1, (3,))],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile(body["model"]["model"]),
+    )
+    assert body["tokens"]["input"] == expected.input_tokens
+    assert body["tokens"]["output"] == expected.output_tokens
+    with use_project(manual_ctx(root, "demo")):
+        sizes = waiting_commit_sizes(
+            root, max_diff_chars=50_000, large_commit_file_count=30
+        )
+    assert CommitSize(2, (1_900, 100)) in sizes  # per-file rows, in order
+    assert CommitSize(1, (15,)) in sizes  # no rows: spread
+    assert CommitSize(1, (3,)) in sizes  # the small merge, from git
+    assert CommitSize(31, (0,) * 31) in sizes  # the huge merge: counted only
+    assert len(sizes) == 6  # c, the huge merge and the four described
     assert body["model"]["provider"] == "anthropic"
     assert body["missing_key"] == "anthropic"
 

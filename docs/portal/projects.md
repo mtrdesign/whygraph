@@ -91,7 +91,11 @@ The last step is one screen you can read while the first scan runs:
   describe, with which model, the tokens and an estimated cost. The cost is priced for every provider
   that has a price (Anthropic and OpenAI out of the box, any other model once your organization adds
   a price), at the bundled prices or your organization's own; a model with no price shows tokens
-  only. Someone without access to the project's spend sees the number of commits without a price.
+  only. The cost is a point estimate with a range of plus or minus 50 %; a merge commit counts with
+  its changes against its first parent, which is what gets described. The estimate is measured for
+  `claude-sonnet-5-5`, `claude-haiku-4-5` and `claude-opus-4-7`; another model is estimated as
+  `claude-sonnet-5-5`, so a model that writes less costs less than shown. Someone without access to
+  the project's spend sees the number of commits without a price.
   An empty history says "No commits yet".
 
 ### Moving from another portal { #moving-from-another-portal }

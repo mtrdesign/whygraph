@@ -36,25 +36,25 @@ consent: false
 
 ## Tool names
 
-Write a tool by its bare name, for example `codegraph_search`, `whygraph_area_history` or `search_medium`. A bare name matches a session tool whose name is equal to it, or ends in `__<name>` or `/<name>`. The word `read` means reading and searching files: `Read`, `Grep` and `Glob` in Claude Code, and the matching tools in the other editors.
+Write a tool by its bare name, for example `codegraph_search`, `whygraph_area_history` or `search_docs`. A bare name matches a session tool whose name is equal to it, or ends in `__<name>` or `/<name>`. The word `read` means reading and searching files: `Read`, `Grep` and `Glob` in Claude Code, and the matching tools in the other editors.
 
 ## When the user is asked
 
 The slash command asks once per run, with the default No, before it starts a kept source that:
 
 - names an MCP tool other than a `whygraph_*` or `codegraph_*` tool in `requires` or `tools`;
-- is not one of the six bundled files (`code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`);
+- is not one of the five bundled files (`code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`);
 - says `consent: true`.
 
 A file you add always triggers the question. A file cannot switch the question off.
 
-## Worked example: `medium.md`
+## Worked example: a source that reaches an outside service
 
-`medium.md` is the one bundled source that uses an outside service. Read it as a model:
+WhyGraph bundles no such source. Suppose you have an MCP server named `docs` with a tool `search_docs`. A source file for it would set:
 
-- `requires: search_medium` keeps it out of any project without the Medium MCP server.
+- `requires: search_docs` keeps it out of any project without that server.
 - `consent: true` makes the slash command ask, and show the search terms, before any search runs.
-- `tools` lists only the four Medium tools.
+- `tools` lists only that server's tools.
 - The body gives the order of calls, the budget, the rule to stop early, and the rule to cite and paraphrase.
 
-A source that needs another MCP server also needs that server in the `tools:` line of the `whygraph-researcher-external` agent file. Add it there by hand.
+The `whygraph-researcher-external` agent ships with no outside server. Add your server to the `tools:` line of that agent file by hand.

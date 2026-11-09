@@ -728,8 +728,8 @@ def agent_dispatched(agent_type: str, prompt_text: str) -> Check:
     return Check(f"{agent_type} for {prompt_text}", fn)
 
 
-def medium_reaches_synthesizer(stem: str) -> Check:
-    """Pass when the research a synthesizer got holds a ``medium`` report.
+def external_reaches_synthesizer(stem: str) -> Check:
+    """Pass when the research a synthesizer got holds an ``external`` report.
 
     The research is the sidecar ``.whygraph/plans/<stem>.research.md``, or, when
     that file is gone, what a synthesizer's ``Read`` of it returned. A report or
@@ -749,15 +749,17 @@ def medium_reaches_synthesizer(stem: str) -> Check:
             ]
             where = "synthesizer Read result"
         ok = any(
-            re.search(r"=== medium ===\s*\n\s*(# Researcher report:|\(unavailable:)", p)
+            re.search(
+                r"=== external ===\s*\n\s*(# Researcher report:|\(unavailable:)", p
+            )
             for p in texts
         )
         return (
             ok,
-            f"{len(texts)} {where}(s); medium {'reached' if ok else 'absent'}",
+            f"{len(texts)} {where}(s); external {'reached' if ok else 'absent'}",
         )
 
-    return Check("medium reaches synthesizer", fn)
+    return Check("external reaches synthesizer", fn)
 
 
 def reviewer_codegraph_node(path_text: str) -> Check:

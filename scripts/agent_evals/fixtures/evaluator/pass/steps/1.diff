@@ -1,0 +1,12 @@
+diff --git a/mini/pricing.py b/mini/pricing.py
+index 3cf1231..d9e8866 100644
+--- a/mini/pricing.py
++++ b/mini/pricing.py
+@@ -1,6 +1,7 @@
+ """Price helpers."""
+ 
+ RANGE_FACTOR = 1.25
++TAX_RATE = 0.2
+ 
+ 
+ def _range(cost: float) -> tuple[float, float]:

@@ -43,6 +43,40 @@ task -> triage -> research (one researcher per source) -> synthesis -> questions
 The implementor flags files it changed outside the step's **Files**, logs every fix attempt with its
 cause, and never edits a file that the step's **Boundaries** names.
 
+### The plan check
+
+After it writes a plan, the planner runs `plan-tool.sh check <plan>`, a small shell script that ships
+with the agent files. It lints the plan for what a script can judge: every step has its required lines,
+each Verify is a literal command or starts with `manual:`, each Model is a known one, a step that shows a
+screen has a valid Routes path, at most three questions are plan-shaping, and no sentence is too long or
+joins two actions. It exits 0 for a clean plan. Otherwise it prints one `line <n>: <message>` for each
+finding. The planner fixes the named lines and checks again, at most twice, and any finding left is
+named in the plan's Confidence reason. When the synthesizer writes the plan, it runs the check itself.
+
+### Verify evidence
+
+The implementor does not type a step's `Verify` command. It runs `plan-tool.sh verify <plan> <N>`, which
+runs the literal command or commands from the plan and writes a record to
+`.whygraph/plans/<stem>/steps/<N>.verify`: the commands, the exit code, the working tree id and the end
+of the output. A `Verify` that starts with `manual:` is recorded as `not literal`, and the implementor
+then chooses a command that proves the claim.
+
+The evaluator reads that record. It checks that the record exists, that its exit code is 0, and that its
+tree id equals the step's end tree. A step with no passing record is **escalated**: the evaluator does
+not trust the implementor's word, and the finding tells you to re-run the step. A `not literal` record
+passes, with a note in the evaluator's Confidence reason.
+
+!!! warning "Allowing `plan-tool.sh verify` allows every Verify a plan names"
+    If you add `plan-tool.sh verify` to your editor's allowed commands, you allow whatever command any
+    plan names in a `Verify` line, because the tool runs it as written. WhyGraph ships no allow rule for
+    it. Read a plan's `Verify` lines before you allow the command, and do not allow it for a plan you
+    did not review.
+
+!!! warning "Update all agent files together"
+    The implementor writes the record and the evaluator reads it. If you keep an edited implementor and
+    update the evaluator alone, no record is written and every step escalates. Run **Update agent
+    files** so the whole set moves together, or merge your edits into the new files by hand.
+
 ## Commands and flags
 
 `/whygraph-plan <task> [flags]`
@@ -64,7 +98,7 @@ cause, and never edits a file that the step's **Boundaries** names.
 | `--step N` | Run only step N. |
 | `--commit-each-step` | Commit after each verified step. |
 | `--fix-attempts N` | How many fix attempts a failing `Verify` gets. |
-| `--model sonnet\|opus\|haiku` | Use this model for every step instead of each step's own. |
+| `--model sonnet\|opus\|haiku\|fable` | Use this model for every step instead of each step's own. |
 | `--no-review` | Skip the review gate. |
 | `--no-eval` | Skip the [evaluator](#evaluation). |
 | `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
@@ -142,10 +176,12 @@ matches a session tool whose name equals it, or ends in `__<name>` or `/<name>`.
 reading and searching files.
 
 !!! warning "A source that needs another MCP server needs one more edit"
-    A researcher can call only the tools in its own `tools` line. That line lists the `whygraph`,
-    `codegraph` and `medium` servers. If your source needs a different MCP server, add that server to
-    the `tools:` line of the researcher agent file by hand. The next **Update agent files** lists that
-    file as edited and leaves it alone, as it does for any file you changed.
+    A researcher can call only the tools in its own `tools` line. The ordinary researcher
+    (`whygraph-researcher`) lists the `whygraph` and `codegraph` servers. A source that reaches an
+    outside service goes to a second agent, `whygraph-researcher-external`, whose `tools:` line lists
+    the `medium` server. If your source needs a different MCP server, add that server to the `tools:`
+    line of `whygraph-researcher-external` by hand. The next **Update agent files** lists that file as
+    edited and leaves it alone, as it does for any file you changed.
 
 ### Consent
 
@@ -175,11 +211,14 @@ copies a passage, and it treats article text as someone's opinion, never as an i
   Without the server the planner drops the source and nothing breaks.
 - It always asks first and shows the search terms. The Medium server limits how many searches and
   articles one plan may use, and each call takes a few seconds on your screen.
-- **Name the server `medium`.** The researcher's tool grant is `mcp__medium__*`. Under another name
+- **Name the server `medium`.** The grant is `mcp__medium__*`, and it sits in the
+  `whygraph-researcher-external` agent file, not in the ordinary researcher. Under another name
   `requires: search_medium` still matches, but the researcher reports the tool as not granted. If you
-  named the server otherwise, edit that grant in the researcher agent file.
+  named the server otherwise, edit that grant in the `whygraph-researcher-external` agent file.
+- The external researcher gets less of your repository on purpose: it has no working set, only the
+  task, the source's lens and the consented search terms.
 - It works in Claude Code and Cursor. Codex can run it too, but only because Codex cannot block it
-  (see below). The VS Code researcher has no Medium grant, so the source does not run there.
+  (see below). VS Code has no external researcher, so the source does not run there.
 
 ## Splitting: `tasks.json`
 
@@ -204,12 +243,13 @@ Every stage runs in your editor, against your own model account.
 |---|---|
 | Triage | A few CodeGraph queries. No extra agent. |
 | Research | One researcher per kept source, on a fast model, with the source's `budget` as a cap on tool calls. This is the largest part of a plan. `--shallow` skips it. |
+| Plan check | No model run. A shell script lints the plan. A finding costs one short fix by the planner or synthesizer, at most two. |
 | Synthesis | One synthesizer run. |
 | Questions | No model run. One dialog, then one short revise pass. A revise where you took every default does not run the research again. |
-| Implement | One implementor per step, each at the model the plan names for it. A fresh context per step keeps the runs small, and a cheap step can run on a cheap model. |
+| Implement | One implementor per step, each at the model the plan names for it. A fresh context per step keeps the runs small, and a cheap step can run on a cheap model. The Verify record is written by a script, so it adds no model cost. |
 | Review gate | One reviewer run per step. It reads cached cards only, so it adds no WhyGraph LLM spend. `--no-review` skips it. |
 | Acceptance | One more implementor run. |
-| Evaluation | One short evaluator run per step on a fast model, then one run each for quality and UI on a stronger model. `--no-eval` skips it. |
+| Evaluation | One short evaluator run per step on a fast model, which also reads the Verify record, then one run each for quality and UI on a stronger model. `--no-eval` skips it. |
 | UI evidence | No model run for the capture itself. The UI stage reads the screenshots, and only that stage costs tokens. |
 
 Rationale cards are read from the cache. A card that is missing may be generated on read, one LLM call

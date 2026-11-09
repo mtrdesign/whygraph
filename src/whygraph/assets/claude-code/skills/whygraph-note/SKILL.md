@@ -15,4 +15,6 @@ The arguments are the text of the note. If empty, respond with: `Usage: /whygrap
 3. Call the MCP tool `whygraph_propose_note` with `body` (the text, tightened to one paragraph), `kind` and that anchor. Give exactly one anchor mode.
 4. Print the note id and the review link the tool returns (a portal page path). A person must confirm the note there before it counts; say so in one line.
 
+If the `whygraph_*` tools are missing from this session, say that the WhyGraph portal is not connected (start it with `whygraph up`) and stop.
+
 If the tool returns `isError: true`, print the error message verbatim and stop. Do not edit files or run other tools.

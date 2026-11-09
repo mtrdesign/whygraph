@@ -65,6 +65,10 @@ Print `### <id>: <title>`. The child's plan is the plan for the checks below; `T
 
 If validation passes, do not summarise the plan - the implementor reads it itself.
 
+### Step 2a - Plan tool
+
+Read `.github/whygraph/plan-tool.sh` with `limit` 1. If the file is missing, respond with `The plan tool is missing from .github/whygraph/. Open the WhyGraph portal, run Settings > Update agent files, then re-run /whygraph-implement.` and stop. The `PLAN_TOOL` value of every implementor prompt is `sh .github/whygraph/plan-tool.sh`.
+
 ### Step 2b - Capture
 
 Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.github/whygraph/capture.mjs`, relative to the workspace root.
@@ -90,11 +94,12 @@ FIX_ATTEMPTS: <0-2>
 TASKS_PATH: <absolute path to the tasks.json | none>
 TASK_ID: <the child's id | none>
 CAPTURE: <node .github/whygraph/capture.mjs | none>
+PLAN_TOOL: sh .github/whygraph/plan-tool.sh
 ```
 
 With `--from-step N`, the second line is `STEP_RANGE: <N>-` instead. `ACCEPTANCE: inline` means the run walks the plan's `## Acceptance` list once its range reaches the last step, and for a split child writes that child's `status` in the tasks.json.
 
-`CAPTURE` is the value from Step 2b. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation - do not inline implementation instructions here.
+`CAPTURE` is the value from Step 2b. `PLAN_TOOL` is the line shown, as written. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation - do not inline implementation instructions here.
 
 ## Step 4 - Print the result
 

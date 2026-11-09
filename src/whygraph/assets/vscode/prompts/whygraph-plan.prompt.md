@@ -41,18 +41,19 @@ When the task description is one path that ends in `.tasks.json`, this run plans
 
 The repo root is the workspace root. Resolve these absolute paths before planning:
 
-- `OUT_PATH` - you write the plan there.
+- `OUT_PATH` - the plan goes there. You write it in single-pass mode; in deep mode the synthesizer writes it.
   - If `--out <path>` was passed, use that path. Resolve a relative path against the workspace root. If the path does not end in `.md`, append `.md`.
   - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<workspace root>/.whygraph/plans/<slug>.md`. If that file exists, append `-2`, `-3`, ... until the name is unused. Never overwrite.
 - `SOURCES_DIR` - `<workspace root>/.github/whygraph/sources/`.
 - `SPINE_PATH` - `<workspace root>/.github/whygraph/plan-spine.md`.
 - `CAPTURE_PATH` - `.github/whygraph/capture.mjs`. It stays relative to the workspace root.
+- `PLAN_TOOL` - `sh .github/whygraph/plan-tool.sh`. The planner runs its `fingerprint` and `check` commands from the repo root.
 
 If the file at `SPINE_PATH` does not exist, respond with `The planning files are missing from .github/whygraph/. Open the WhyGraph portal, run Settings > Update agent files, then re-run /whygraph-plan.` and stop.
 
 ## Step 3 - Consent (before Phase 0)
 
-A source file is repo content, so this prompt decides which sources need the owner's OK, before your Phase 0 runs. A source file can force the question; it can never suppress it.
+A source file is repo content, so this prompt decides which sources need the user's OK, before your Phase 0 runs. A source file can force the question; it can never suppress it.
 
 With `--no-questions`, ask nothing: record `<name>=no` for every source that needs consent (below), and go to Step 4.
 
@@ -92,6 +93,7 @@ TERMS: <topic>; <topic>
 PARENT: none
 OUT_PATH: <absolute path resolved in Step 2>
 CAPTURE_PATH: .github/whygraph/capture.mjs
+PLAN_TOOL: sh .github/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>
 ```
 
@@ -111,7 +113,7 @@ Print each reply your planner instructions produce **verbatim**, with the one ex
   - With `--no-questions`, print `Re-run /whygraph-plan with a more specific task, or without --no-questions.` and stop.
   - Otherwise ask the user the question with its options in chat and wait. Then run Phase 1a again with the line `CLARIFICATION: <answer>` added to your input. Ask a clarifying question once per plan; when the seeds still do not resolve, reply as your instructions say and stop.
 - **Split.** You wrote a `tasks.json` and no plan; your reply is `SPLIT: <path>`, then one line per child: `t<N> (wave <W>): <title>`. Nested delegation is unavailable for child plans here. Print the reply, then print `Run /whygraph-plan <path of the tasks.json> once per child, in a new chat each time. Each run plans the next child with PARENT: set.` and stop.
-- **Questions.** You wrote a plan; your reply ends with a `QUESTIONS:` block. It is either `QUESTIONS: none`, or `QUESTIONS:` followed by lines of this shape:
+- **Questions.** A plan was written (by you, or by the synthesizer in deep mode); your reply ends with a `QUESTIONS:` block. It is either `QUESTIONS: none`, or `QUESTIONS:` followed by lines of this shape:
 
   ```
   Q<n>. <question> | options: <default>; <alt>[; <alt>] | default: <default> | why: <one line>
@@ -125,7 +127,7 @@ Print each reply your planner instructions produce **verbatim**, with the one ex
 
 ```
 MODE: revise
-PLAN_PATH: <the plan's absolute path - the OUT_PATH you wrote>
+PLAN_PATH: <the plan's absolute path - the OUT_PATH the plan was written to>
 REFRESH_PROFILE: no
 ANSWERS:
 - Q<n>: <the chosen option, without "(default)", or the user's own text>

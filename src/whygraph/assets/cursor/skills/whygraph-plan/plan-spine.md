@@ -1,6 +1,8 @@
 # Plan spine
 
-Read this file once before you write a plan. It says what a good plan holds. The plan format is in your own instructions.
+Read this file once before you write a plan. It says what a good plan holds. The plan format is the `## Plan format` section of this file.
+
+Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Acceptance, Self-review checklist, Plan format.
 
 ## Why a plan is a contract
 
@@ -88,3 +90,73 @@ Check each box before you hand the plan over.
 - [ ] Each question has options and a default.
 - [ ] No em dash or en dash appears. Use a plain hyphen.
 - [ ] The writing rules hold in each `Change` line.
+
+## Plan format
+
+```markdown
+# Plan: <one-line restatement of the task>
+
+**Status:** PROPOSAL - nothing implemented yet; review the steps, then run the implement command on this file.
+**Objective:** <one sentence: what changes for the user or the system>
+**Non-goals:** <what this plan deliberately leaves alone, or "none">
+
+## Resolved decisions
+*(only after the user answered questions - otherwise omit this section entirely)*
+
+| # | Question | Decision |
+|---|---|---|
+| Q1 | <question> | <answer, or "default: <x>"> |
+
+## Working set
+<N> symbols analyzed (<M> truncated from impact set, if any).
+
+| Symbol | Location | Evidence |
+|---|---|---|
+| `qualified.name` | path/to/file.py:LN-LN | 12 commits, 3 PRs |
+| ... | ... | ... |
+
+## Prior art
+*(only when a source reported it - otherwise omit this section entirely)*
+- <title or PR #N> (<url or path>) - <what was taken from it, one line>
+
+## UI profile
+*(only when a source reported a frontend surface - otherwise omit this section entirely)*
+- **Start:** `<command>` → <base URL> · **Fixture mode:** <command or "none"> · **Browser tests:** <runner and path, or "none">
+- **Stack:** <framework, component library, theme mechanism> · **Conventions:** <path to the always-on file's `## UI conventions` heading, or "none">
+
+## Blockers
+*(only include if a constraint is at risk - otherwise omit this section entirely)*
+
+- **Constraint at risk:** <verbatim quote>
+- **Why it's a blocker:** <one-line>
+- **Resolution needed:** <what the user has to confirm before proceeding>
+
+## Steps
+
+1. **<short step name>**
+   - **Files:** path/to/file.py:LN-LN, ...
+   - **Change:** <one-paragraph description>
+   - **Boundaries:** <files or behaviours this step must not touch, or "none">
+   - **Constraints to preserve:** <verbatim quotes, or "none recorded">
+   - **Risks:** <verbatim quotes, or "none recorded">
+   - **Test first:** <`<test file>::<test name>` to add before the change, run by this step's Verify, or "none">
+   - **Model:** <haiku | sonnet | opus> - <one-line why>
+   - **Routes:** <backticked paths relative to the app's base URL, space-separated, e.g. `/settings` - UI steps only, omit otherwise>
+   - **Expected UI:** <what the user sees, per state: empty, loading, error, phone width, dark - UI steps only, omit otherwise>
+   - **Verify:** <specific test, assertion, or manual check>
+2. ...
+
+## Risks called out across the change
+- <each major risk, deduplicated, verbatim quotes preserved>
+
+## Acceptance
+1. <verifiable statement of what "done" means for the whole plan> - **Check:** `<literal command>` or `manual: <what to look at>`
+2. ...
+
+## Open questions
+*(forks the user may override; omit the section when there are none)*
+- **Q1.** <question> **Options:** <default> / <alternative>[ / <alternative>] **Default:** <the option the steps assume> **Plan-shaping:** <yes | no> - <why it matters, one line>
+
+## Confidence: <low | medium | high>
+<one-line reason - e.g. "rationale was rich and consistent" or "5 of 8 nodes had no usable rationale">
+```

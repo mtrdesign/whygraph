@@ -63,6 +63,10 @@ The "not tracked by git" check is the implementor's: it refuses a tracked `TASKS
 
 If validation passes, do not summarise the plan - each subagent reads it itself.
 
+### Step 2a - Plan tool
+
+`Read` `.cursor/skills/whygraph-plan/plan-tool.sh` with `limit` 1. If the file is missing, respond with `The plan tool is missing from .cursor/skills/whygraph-plan/. Open the WhyGraph portal, run Settings > Update agent files, then re-run /whygraph-implement.` and stop. The `PLAN_TOOL` value of every implementor prompt is `sh .cursor/skills/whygraph-plan/plan-tool.sh`.
+
 ### Step 2b - Capture
 
 Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.cursor/skills/whygraph-ui-check/capture.mjs`.
@@ -94,9 +98,10 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.cursor/skills/whyg
    TASKS_PATH: <absolute path to the tasks.json | none>
    TASK_ID: <the child's id | none>
    CAPTURE: <node .cursor/skills/whygraph-ui-check/capture.mjs | none>
+   PLAN_TOOL: sh .cursor/skills/whygraph-plan/plan-tool.sh
    ```
 
-   `CAPTURE` is the value from Step 2b. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation. Do not inline implementation instructions here.
+   `CAPTURE` is the value from Step 2b. `PLAN_TOOL` is the line shown, as written. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation. Do not inline implementation instructions here.
 4. Read the report's `**Status:**` line.
    - `complete` and not the last step -> print one line: `Step <N>: complete (<t0> <t1>)`, with the trees from the report's `- Step <N>: <t0> <t1>` line under `**Step trees:**`. If that line has no `<t1>`, read it from `.whygraph/plans/<stem>/steps/<N>.t1`.
    - `complete` on the plan's last step -> print the report in full.

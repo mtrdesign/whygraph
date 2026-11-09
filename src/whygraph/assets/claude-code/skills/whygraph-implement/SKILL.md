@@ -1,7 +1,7 @@
 ---
 name: whygraph-implement
 description: Execute a reviewed WhyGraph plan (or a split's tasks.json) one step per fresh implementor at the step's model, with a cached-card review gate and a spec evaluation after each step, a separate acceptance run at the end, then quality and UI evaluations. Each run halts on the first failure and appends to the plan's Implementation log.
-argument-hint: <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku] [--no-review] [--no-eval] [--eval-fix-attempts N] [--no-capture]
+argument-hint: <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku|fable] [--no-review] [--no-eval] [--eval-fix-attempts N] [--no-capture]
 allowed-tools: Agent, Read, mcp__whygraph__whygraph_propose_note, Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe)
 disable-model-invocation: true
 ---
@@ -18,14 +18,14 @@ Strip and remember these flags if present (any order, anywhere in `$ARGUMENTS`):
 - `--step <N>` -> integer >= 1 (consume the next token as `N`). Run only step N, even if the log marks it done.
 - `--commit-each-step` -> boolean flag (default `false`).
 - `--fix-attempts <N>` -> integer 0-2 (consume the next token; default `0`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
-- `--model <sonnet|opus|haiku>` -> optional (consume the next token). It overrides every step's `**Model:**` tag.
+- `--model <sonnet|opus|haiku|fable>` -> optional (consume the next token). It overrides every step's `**Model:**` tag.
 - `--no-review` -> skip the review gate after each step (Step 3b).
 - `--no-eval` -> skip the three evaluations: spec (Step 3c), quality and UI (Step 3e).
 - `--eval-fix-attempts <N>` -> integer 0-2 (consume the next token; default `1`, values above 2 become 2). It caps the findings re-runs of one step after a spec `fix` verdict. It is separate from `--fix-attempts`.
 - `--no-capture` -> pass `CAPTURE: none` to every implementor (Step 2b).
 
 The first non-flag positional token is the **path**: a plan (`.md`) or a split's `.tasks.json`. If it is empty, respond with:
-`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku] [--no-review] [--no-eval] [--eval-fix-attempts N] [--no-capture]` and stop.
+`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku|fable] [--no-review] [--no-eval] [--eval-fix-attempts N] [--no-capture]` and stop.
 
 - If both `--from-step` and `--step` are passed, respond with `Pass --from-step OR --step, not both.` and stop.
 - If the path ends in `.tasks.json` and `--from-step` or `--step` is passed, respond with `--from-step and --step take a plan; pass the child's plan file instead of the tasks.json.` and stop.
@@ -63,6 +63,10 @@ The "not tracked by git" check is the implementor's: it refuses a tracked `TASKS
 
 If validation passes, do not summarise the plan - each subagent reads it itself.
 
+### Step 2a - Plan tool
+
+`Read` `.claude/skills/whygraph-plan/plan-tool.sh` with `limit` 1. If the file is missing, respond with `The plan tool is missing from .claude/skills/whygraph-plan/. Open the WhyGraph portal, run Settings > Update agent files, then re-run /whygraph-implement.` and stop. The `PLAN_TOOL` value of every implementor prompt is `sh .claude/skills/whygraph-plan/plan-tool.sh`.
+
 ### Step 2b - Capture
 
 Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.claude/skills/whygraph-ui-check/capture.mjs`.
@@ -78,7 +82,7 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.claude/skills/whyg
 ## Step 3 - Run the plan one step at a time
 
 1. From the plan, collect the step numbers under `## Steps` (lines `<N>. **<name>**`).
-2. For each step, take the first word of its `**Model:**` line, lowercased. Anything other than `haiku`, `sonnet` or `opus`, or no `**Model:**` line, becomes `sonnet`. `--model` replaces every step's value.
+2. For each step, take the first word of its `**Model:**` line, lowercased. No `**Model:**` line becomes `sonnet`. `--model` replaces every step's value. Without `--model`, a word other than `haiku`, `sonnet`, `opus` or `fable`: respond with `Step <N> has an unknown model tag: <word>.` and stop before any step runs.
 3. Pick the steps to run:
    - `--step N` -> only step N.
    - `--from-step N` -> step N through the last step.
@@ -95,9 +99,10 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.claude/skills/whyg
    TASKS_PATH: <absolute path to the tasks.json | none>
    TASK_ID: <the child's id | none>
    CAPTURE: <node .claude/skills/whygraph-ui-check/capture.mjs | none>
+   PLAN_TOOL: sh .claude/skills/whygraph-plan/plan-tool.sh
    ```
 
-   `CAPTURE` is the value from Step 2b. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation. Do not inline implementation instructions here.
+   `CAPTURE` is the value from Step 2b. `PLAN_TOOL` is the line shown, as written. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation. Do not inline implementation instructions here.
 5. Read the report's `**Status:**` line.
    - `complete` and not the last step -> print one line: `Step <N>: complete (<t0> <t1>)`, with the trees from the report's `- Step <N>: <t0> <t1>` line under `**Step trees:**`. If that line has no `<t1>`, read it from `.whygraph/plans/<stem>/steps/<N>.t1`.
    - `complete` on the plan's last step -> print the report in full.

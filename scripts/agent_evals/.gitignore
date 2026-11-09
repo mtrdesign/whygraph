@@ -1,0 +1,3 @@
+# The root .gitignore ignores every directory named plans/ (local plan scratch).
+# These plans are committed eval fixtures, so re-include them here.
+!fixtures/plans/

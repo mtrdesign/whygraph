@@ -1,0 +1,4 @@
+command: python3 -c "from mini import flags; assert flags.LEVELS == (1, 2)"
+exit: 0
+tree: 63a795cc1bcbcbbae03b81cb9fb42457e04286fb
+--- last 40 lines of output

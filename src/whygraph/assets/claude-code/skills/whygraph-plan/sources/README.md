@@ -32,7 +32,7 @@ consent: false
 | `section` | The heading of the report section this source fills. The synthesizer reads sections, not names. Each source needs a unique section. |
 | `enabled` | `false` keeps the file but never starts it. `--sources` turns it on for one run. |
 | `budget` | An integer. The researcher makes at most this many tool calls for this source. |
-| `consent` | `true` forces the consent question. It cannot switch off a question that the entry point computes. |
+| `consent` | `true` forces the consent question. It cannot switch off a question that the slash command computes. |
 
 ## Tool names
 
@@ -40,7 +40,7 @@ Write a tool by its bare name, for example `codegraph_search`, `whygraph_area_hi
 
 ## When the user is asked
 
-The entry point asks once per run, with the default No, before it starts a kept source that:
+The slash command asks once per run, with the default No, before it starts a kept source that:
 
 - names an MCP tool other than a `whygraph_*` or `codegraph_*` tool in `requires` or `tools`;
 - is not one of the six bundled files (`code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`);
@@ -53,8 +53,8 @@ A file you add always triggers the question. A file cannot switch the question o
 `medium.md` is the one bundled source that uses an outside service. Read it as a model:
 
 - `requires: search_medium` keeps it out of any project without the Medium MCP server.
-- `consent: true` makes the entry point ask, and show the search terms, before any search runs.
+- `consent: true` makes the slash command ask, and show the search terms, before any search runs.
 - `tools` lists only the four Medium tools.
 - The body gives the order of calls, the budget, the rule to stop early, and the rule to cite and paraphrase.
 
-A source that needs another MCP server also needs that server in the `tools:` line of the researcher agent file. Add it there by hand.
+A source that needs another MCP server also needs that server in the `tools:` line of the `whygraph-researcher-external` agent file. Add it there by hand.

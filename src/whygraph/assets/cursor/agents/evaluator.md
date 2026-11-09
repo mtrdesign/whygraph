@@ -44,7 +44,7 @@ Judge one step against its plan entry. Read `steps/<N>.diff`. If it is missing, 
 
 Run these four checks:
 
-1. **Scope.** List the paths in the diff (the `diff --git a/<path> b/<path>` lines). Each path is in **Files**, is the **Test first** file, is `PLAN_PATH`, or is a `.tasks.json` file under `.whygraph/plans/`. Any other path is a `fix` finding, unless **Change** requires that path.
+1. **Scope.** List the paths in the diff (the `diff --git a/<path> b/<path>` lines). Each path is in **Files**, is the **Test first** file, is `PLAN_PATH`, or is a `.tasks.json` file under `.whygraph/plans/`. Any other path is a finding, even when **Change** asks for it. If **Change** names that path, the plan contradicts itself: the verdict is `escalate`, with the finding `- <PLAN_PATH>:<line of **Files**> - **Change** needs <path>, which **Files** omits - add <path> to **Files** or drop it from **Change**`. Otherwise it is a `fix` finding.
 2. **Change.** The diff does what **Change** says, all of it, and nothing the step does not say. A missing part or an unrequested edit is a `fix` finding.
 3. **Boundaries.** The diff touches no path that **Boundaries** names. A touched path is a `fix` finding.
 4. **Verify exercises the change.** The step's symbol is the first symbol **Change** names, else the function or class around the first hunk of a non-test file. The check passes when the Verify command names that symbol. It also passes when Verify names a test file or node id whose file contains the symbol's name (`Grep`). A whole-suite command, one that names no test file, node id or symbol, passes with a note in the Confidence reason; so does a `manual:` Verify. A step whose diff changes no code symbol passes. Otherwise the finding is `- <file>:<line> - Verify does not exercise <symbol> - <fix>`, at the symbol's definition, with a fix that names the test file Verify runs.
@@ -52,7 +52,7 @@ Run these four checks:
 Give the step one verdict:
 
 - `pass` - all four checks pass. The list is `- none`.
-- `fix` - the plan is right and the work is not. Each finding is one the implementor can apply inside the step's **Files**.
+- `fix` - the plan is right and the work is not. Each finding is one the implementor can apply inside the step's **Files**. The exception is an extra path from check 1: the implementor reports it and the run halts.
 - `escalate` - the plan itself is wrong. Examples: the step cannot be done inside its Files and Boundaries, its Change contradicts another step, or its Verify cannot pass. An `escalate` finding reads `- <PLAN_PATH>:<line> - <what is wrong in the plan> - <what to change>`, with `<line>` the plan line at fault. When one finding needs a plan change, the verdict is `escalate` and the list keeps every finding.
 
 ## Stage quality
@@ -102,6 +102,8 @@ Each finding names the route, a severity and a concrete fix. Severity: `high` wh
 ## Output format
 
 Reply with exactly one of these three, the one for `STAGE`. Nothing before the `# Evaluation:` line, nothing after the Confidence line. An empty list is `- none`.
+
+Finish every check and settle every verdict before you write the `# Evaluation:` line. The reply is final: no correction, no second verdict for a step, no finding line that says there is no finding.
 
 ```markdown
 # Evaluation: spec - <plan title>

@@ -119,7 +119,7 @@ After a `complete` step, check the step against its plan entry.
    CONVENTIONS_PATH: none
    ```
 
-2. Find the verdict on the reply's `## Step <N>: <name> - <pass | fix | escalate>` line. The finding lines are the `- ` lines under that heading, except `- none`. A reply without that heading counts as `escalate`. A `fix` with no finding lines counts as `escalate`.
+2. Find the verdict on the reply's `## Step <N>: <name> - <pass | fix | escalate>` line. The finding lines are the `- ` lines under that heading, except `- none`. A reply without that heading counts as `escalate`. A reply with that heading more than once counts as `escalate`. A `fix` with no finding lines counts as `escalate`.
    - `pass` -> print one line: `Step <N>: spec evaluation passed.` Go on to the next step.
    - `fix` -> print the reply in full. Go to 3.
    - `escalate` -> print the reply in full. Stop with:

@@ -1685,6 +1685,26 @@ def _evaluation_fixture(stage: str, template: list[str]) -> tuple[str, str]:
     return "\n".join([title, "", *parts, "", confidence]), removable
 
 
+def test_spec_evaluator_treats_a_path_outside_files_as_a_finding() -> None:
+    """Spec check 1 agrees with the implementor's scope check, and one reply decides.
+
+    The implementor logs every path outside Files as out of scope, so the
+    evaluator may not accept one because Change asks for it: that plan
+    contradicts itself and escalates. The verdict is settled before the reply
+    starts, and a reply that gives one step two verdicts halts the run.
+    """
+    for tree in _EVALUATOR_TREES:
+        body = "\n".join(_agent_body(tree, "evaluator"))
+        assert "unless **Change** requires" not in body, tree
+        assert "Any other path is a finding, even when **Change** asks" in body, tree
+        assert "the plan contradicts itself: the verdict is `escalate`" in body, tree
+        assert "before you write the `# Evaluation:` line" in body, tree
+        assert "no finding line that says there is no finding" in body, tree
+
+        skill = (_ASSET_ROOT / tree / "skills/whygraph-implement/SKILL.md").read_text()
+        assert "that heading more than once counts as `escalate`" in skill, tree
+
+
 def test_evaluator_output_contract_on_a_fixture() -> None:
     """A review built from the evaluator's own templates passes the checker.
 

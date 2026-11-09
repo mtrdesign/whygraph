@@ -225,7 +225,8 @@ code. It runs in three stages:
    **Boundaries** alone, and that the step's `Verify` command really exercises the changed symbol.
    The verdict is `pass`, `fix` or `escalate`. On `fix` the implementor is sent back with the findings,
    at most `--eval-fix-attempts` times (default 1), and then the loop halts. On `escalate` the plan
-   itself is wrong, and the loop halts at once.
+   itself is wrong, for example a **Change** that needs a file its **Files** line omits, and the loop
+   halts at once.
 2. **Quality**, once, after the acceptance run. It reads every step's diff against your conventions
    file (when the plan names one) and a fixed list of six checks: surgical changes, no abstraction
    without a second case, names that match their neighbours, errors handled the way the file does,

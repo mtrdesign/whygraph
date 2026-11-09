@@ -165,7 +165,7 @@ The **working set** is the table of these records - that's what you (single-pass
 
 **Auto-mode heuristic for single-pass:**
 - `MODE: shallow` always picks single-pass.
-- `MODE: auto` picks single-pass when **working-set size < 5** OR **>60% of cards are empty or have `evidence_count.commits` < 3** OR **fewer than 2 sources were kept**. Any of these means fan-out would be ceremony - there isn't enough material for researchers to find distinct angles.
+- `MODE: auto` picks single-pass when **working-set size < 5** OR **>60% of cards are empty or have `evidence_count.commits` < 3** OR **fewer than 2 sources were kept** OR **the task is one mechanical edit repeated at every site (a rename, a moved import, a changed constant) and no working-set node is on an external contract**. Any of these means fan-out would be ceremony - there isn't enough material for researchers to find distinct angles.
 - `MODE: deep` always skips this branch (goes to fan-out below), unless delegation is unavailable (**2a**).
 
 In single-pass:
@@ -183,6 +183,7 @@ If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the pla
 - *"Note: Auto-mode chose single-pass (impact set is small - fan-out would be ceremony)."*
 - *"Note: Auto-mode chose single-pass (rationale is thin - researchers would have nothing to dig into)."*
 - *"Note: Auto-mode chose single-pass (fewer than 2 knowledge sources were kept)."*
+- *"Note: Auto-mode chose single-pass (mechanical edit - the same change at every site)."*
 
 ### Deep mode (`MODE: deep`, OR `MODE: auto` and the heuristic chooses fan-out)
 

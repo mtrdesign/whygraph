@@ -104,7 +104,7 @@ Now follow your planner instructions with this input, from Phase 0. Do not resta
 
 ## Step 5 - Clarify, split or questions
 
-Print each reply your planner instructions produce **verbatim** (Step 7). Then act on its shape:
+Print each reply your planner instructions produce **verbatim**, with the one exception in Step 7. Then act on its shape:
 
 - CodeGraph is not available -> print the message and stop. Do not attempt a fallback or save anything.
 - **Clarify.** Phase 1a found no seed symbol and you wrote no plan; your reply would be `CLARIFY: <one question> | options: <a>; <b>[; <c>]`.
@@ -155,6 +155,6 @@ The task description is the path of a `tasks.json` that an earlier run wrote. Pl
 
 ## Step 7 - Print the result
 
-Print each reply **verbatim**. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block. Do not summarize or repeat the rest of the plan; the file is the source of truth.
+Print each reply **verbatim**. The one exception: with `--no-questions`, do not print a plan reply whose `QUESTIONS:` block has questions, because its revise reply replaces it. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block. Do not summarize or repeat the rest of the plan; the file is the source of truth.
 
 This prompt's only job is: parse -> resolve paths -> consent -> plan -> clarify, split or questions -> print. Do not edit any file but the ones your planner instructions allow, and do not improvise.

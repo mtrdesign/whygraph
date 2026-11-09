@@ -34,6 +34,6 @@ The reviewer has its own system prompt covering the diff, the hunk-to-symbol map
 
 ## Step 3 - Print the result
 
-When the reviewer returns, print its output **verbatim** to the user. Do not summarise, paraphrase, re-format, or comment. The reviewer is the source of truth.
+When the reviewer returns, print its output **verbatim** to the user, starting at its first `# Review:` line when it has one. Do not summarise, paraphrase, re-format, or comment. The reviewer is the source of truth.
 
 This command's only job is: parse -> dispatch -> print. Do not edit files, run other tools, or improvise.

@@ -1705,6 +1705,54 @@ def test_spec_evaluator_treats_a_path_outside_files_as_a_finding() -> None:
         assert "that heading more than once counts as `escalate`" in skill, tree
 
 
+def test_implementor_saves_both_step_trees() -> None:
+    """A step's end tree is on disk, so a report that drops it cannot skip the gate."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "implementor"))
+        assert "write it to `.whygraph/plans/<stem>/steps/<N>.t1`" in body, tree
+        assert "A `complete` step always lists both trees" in body, tree
+    skill = (_ASSET_ROOT / "claude-code/skills/whygraph-implement/SKILL.md").read_text()
+    assert "If the line is missing or has no `<t1>`, read the trees" in skill
+
+
+def test_acceptance_with_only_manual_items_is_not_logged_as_passed() -> None:
+    """Nothing was checked, so the log and the status do not say passed."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "implementor"))
+        assert "- Acceptance: manual only: <item numbers> (<timestamp>)" in body, tree
+        assert "| acceptance manual only |" in body, tree
+        assert "`done` (acceptance passed or manual only)" in body, tree
+
+
+def test_review_reply_starts_at_its_heading() -> None:
+    """Reasoning ahead of the report never reaches the user."""
+    body = "\n".join(_agent_body("claude-code", "whygraph-reviewer"))
+    assert "before you write the `# Review:` line" in body
+    skill = (_ASSET_ROOT / "claude-code/skills/whygraph-review/SKILL.md").read_text()
+    assert "starting at its first `# Review:` line" in skill
+
+
+def test_no_questions_prints_only_the_revise_reply() -> None:
+    """With --no-questions the revise reply replaces the plan reply before it."""
+    for entry in (
+        "claude-code/skills/whygraph-plan/SKILL.md",
+        "cursor/skills/whygraph-plan/SKILL.md",
+        "vscode/prompts/whygraph-plan.prompt.md",
+        "codex/AGENTS.md",
+    ):
+        text = (_ASSET_ROOT / entry).read_text()
+        assert "because its revise reply replaces it" in text, entry
+
+
+def test_auto_mode_keeps_a_mechanical_edit_single_pass() -> None:
+    """A rename does not pay for a research fan-out unless a contract is at stake."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "planner"))
+        assert "one mechanical edit repeated at every site" in body, tree
+        assert "no working-set node is on an external contract" in body, tree
+        assert "Auto-mode chose single-pass (mechanical edit" in body, tree
+
+
 def test_evaluator_output_contract_on_a_fixture() -> None:
     """A review built from the evaluator's own templates passes the checker.
 

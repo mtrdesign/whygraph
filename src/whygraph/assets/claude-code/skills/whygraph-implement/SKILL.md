@@ -98,7 +98,7 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.claude/skills/whyg
 
    `CAPTURE` is the value from Step 2b. The implementor has its own system prompt covering plan parsing, step trees, Verify, capture, fix attempts and log mutation. Do not inline implementation instructions here.
 5. Read the report's `**Status:**` line.
-   - `complete` and not the last step -> print one line: `Step <N>: complete (<t0> <t1>)`, with the trees from the report's `- Step <N>: <t0> <t1>` line under `**Step trees:**`.
+   - `complete` and not the last step -> print one line: `Step <N>: complete (<t0> <t1>)`, with the trees from the report's `- Step <N>: <t0> <t1>` line under `**Step trees:**`. If that line has no `<t1>`, read it from `.whygraph/plans/<stem>/steps/<N>.t1`.
    - `complete` on the plan's last step -> print the report in full.
    - Anything else (`halted at step <N>`, a refusal) -> print the report in full, run Step 5 on it, and stop.
 6. Run Step 5 on the report, then Step 3b, then Step 3c, then the next step.
@@ -107,7 +107,7 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.claude/skills/whyg
 
 After a `complete` step, check the step's diff against the cached rationale cards.
 
-1. Take `<t0>` and `<t1>` from the report's `- Step <N>: <t0> <t1>` line under `**Step trees:**`. If the line is missing, print `Step <N>: no step trees in the report; review gate skipped.` and go on.
+1. Take `<t0>` and `<t1>` from the report's `- Step <N>: <t0> <t1>` line under `**Step trees:**`. If the line is missing or has no `<t1>`, read the trees from `.whygraph/plans/<stem>/steps/<N>.t0` and `.t1` (`<stem>` as in Step 3e). If either file is missing, print `Step <N>: no step trees in the report; review gate skipped.` and go on.
 2. Spawn the `whygraph-reviewer` subagent via the Agent tool with `subagent_type: "whygraph-reviewer"`. The prompt body must be exactly:
 
    ```

@@ -37,7 +37,8 @@ task -> triage -> research (one researcher per source) -> synthesis -> questions
    rationale cards already cached. A **Constraint at risk** verdict stops the loop so that you can fix
    it. The gate reads cached cards only and never generates one.
 7. **Acceptance.** A last, separate run walks the plan's `## Acceptance` list: first the project's full
-   test command, then each check. It reports what failed and undoes nothing.
+   test command, then each check. It reports what failed and undoes nothing. A list with only `manual:`
+   items is logged as `manual only`, never as passed, because nothing was checked.
 
 The implementor flags files it changed outside the step's **Files**, logs every fix attempt with its
 cause, and never edits a file that the step's **Boundaries** names.
@@ -48,7 +49,7 @@ cause, and never edits a file that the step's **Boundaries** names.
 
 | Flag | Effect |
 |---|---|
-| `--shallow` / `--deep` | Force a single pass, or force the research fan-out. Not both. |
+| `--shallow` / `--deep` | Force a single pass, or force the research fan-out. Not both. Without either, the planner chooses, and a small task or a plain rename gets a single pass. |
 | `--split` / `--no-split` | Force a split into child plans, or forbid one. |
 | `--sources <a,b>` | Run only these sources. A source with `enabled: false` is turned on for this run. |
 | `--no-questions` | Take every default. Every consent question is answered No. |

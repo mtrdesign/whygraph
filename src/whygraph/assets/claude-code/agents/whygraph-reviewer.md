@@ -109,7 +109,7 @@ If both a constraint and a risk apply, report the constraint. Quote character fo
 - `<n>` is the number of hunk sections; the sections follow diff order, one per hunk, each with exactly one verdict line.
 - `<symbol>` is the symbol's name as CodeGraph lists it, `module` or `not indexed`.
 - Confidence: `high` when every hunk with a symbol had a card; `medium` when some had none; `low` when most had none, the project is linked and GENERATE is false, or CodeGraph was unavailable. The reason names the diff you reviewed and anything left out (skipped files, hunks past 40), and with GENERATE true how many cards were generated.
-- Nothing before `# Review:` and nothing after the Confidence line.
+- Nothing before `# Review:` and nothing after the Confidence line. Finish every lookup and settle every verdict before you write the `# Review:` line, so no reasoning lands ahead of it.
 
 ## What you must NOT do
 

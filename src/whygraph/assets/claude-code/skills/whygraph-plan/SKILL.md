@@ -98,7 +98,7 @@ The planner has its own system prompt and the CodeGraph and WhyGraph MCP tools. 
 
 ## Step 5 - Read the reply
 
-Print every planner reply **verbatim** (Step 8). Then act on its shape:
+Print every planner reply **verbatim**, with the one exception in Step 8. Then act on its shape:
 
 - The reply says CodeGraph is not available -> print it and stop. Do not attempt a fallback or save anything. WhyGraph planning is meaningless without the graph.
 - The reply starts `CLARIFY: ` -> go to **Clarify** below.
@@ -130,7 +130,7 @@ The planner wrote a `tasks.json` and no plan. The reply has the shape `SPLIT: <p
    - `CONSENT` and `TERMS` lines as in Step 4 for `t1` only. Every other child gets `CONSENT: none` and no `TERMS` line.
    - `REFRESH_PROFILE` as in Step 4 for `t1` only. Every other child gets `REFRESH_PROFILE: no`.
    - `MODE`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES` and `CAPTURE_PATH` stay the same.
-3. Print each child's reply verbatim under a line `### <id>: <title>`. A child reply that starts `CLARIFY: ` follows **Clarify** for that child only.
+3. Print each child's reply verbatim under a line `### <id>: <title>`, with the one exception in Step 8. A child reply that starts `CLARIFY: ` follows **Clarify** for that child only.
 4. After every wave is planned, run Step 7 for each child's reply, one child at a time, in `id` order.
 
 ## Step 7 - Questions
@@ -158,10 +158,10 @@ ANSWERS:
 - Q<n>: <the chosen option, without "(default)", or the user's own text>
 ```
 
-(or `ANSWERS: defaults` with `--no-questions`). Print the revise reply verbatim. A revise reply always ends `QUESTIONS: none`; never ask again for the same plan.
+(or `ANSWERS: defaults` with `--no-questions`). Print the revise reply verbatim, under the child's `### <id>: <title>` line for a split child. A revise reply always ends `QUESTIONS: none`; never ask again for the same plan.
 
 ## Step 8 - Print the result
 
-Print each planner reply **verbatim** to the user. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block - the planner wrote the file itself. Do not summarize, paraphrase, re-format or comment on it, and do not write the file yourself. The planner is the source of truth.
+Print each planner reply **verbatim** to the user. The one exception: with `--no-questions`, do not print a plan reply whose `QUESTIONS:` block has questions, because its revise reply replaces it. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block - the planner wrote the file itself. Do not summarize, paraphrase, re-format or comment on it, and do not write the file yourself. The planner is the source of truth.
 
 This command's only job is: parse -> resolve paths -> consent -> dispatch -> clarify, split or questions -> print. Do not edit files, run other tools, or improvise.

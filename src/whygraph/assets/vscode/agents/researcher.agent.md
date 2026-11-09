@@ -23,7 +23,7 @@ SOURCE:
   path: <path of the source file>
   TERMS: <1 to 3 search topics; consent sources only>
 --- lens ---
-<the source file's body>
+(read the file at path: - its body is your lens)
 
 WORKING SET:
 - qualified_name: <qn>

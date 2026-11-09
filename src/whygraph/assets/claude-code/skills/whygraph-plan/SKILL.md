@@ -34,19 +34,20 @@ Whatever remains is the **task description**. If it is empty, respond with:
 
 Find the repo root with `git rev-parse --show-toplevel`. Resolve these absolute paths before dispatch:
 
-- `OUT_PATH` - the planner writes the plan there itself.
+- `OUT_PATH` - the plan goes there. The planner writes it in single-pass mode; in deep mode the synthesizer writes it.
   - If `--out <path>` was passed, use that path. Resolve a relative path against the current working directory. If the path does not end in `.md`, append `.md`.
   - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<repo root>/.whygraph/plans/<slug>.md`. If that file exists (`test -e`), append `-2`, `-3`, ... until the name is unused. Never overwrite.
   - Create its parent directory with `mkdir -p <parent>`.
 - `SOURCES_DIR` - `<repo root>/.claude/skills/whygraph-plan/sources/`.
 - `SPINE_PATH` - `<repo root>/.claude/skills/whygraph-plan/plan-spine.md`.
 - `CAPTURE_PATH` - `.claude/skills/whygraph-ui-check/capture.mjs`. It stays relative to the repo root: the planner runs `node <CAPTURE_PATH> --probe` from there.
+- `PLAN_TOOL` - `sh .claude/skills/whygraph-plan/plan-tool.sh`. The planner runs its `fingerprint` and `check` commands from the repo root.
 
 If `test -f <SPINE_PATH>` fails, respond with `The planning files are missing from .claude/skills/whygraph-plan/. Open the WhyGraph portal, run Settings > Update agent files, then re-run /whygraph-plan.` and stop.
 
 ## Step 3 - Consent
 
-A source file is repo content, so this command decides which sources need the owner's OK. A source file can force the question; it can never suppress it.
+A source file is repo content, so this command decides which sources need the user's OK. A source file can force the question; it can never suppress it.
 
 With `--no-questions`, ask nothing: record `<name>=no` for every source that needs consent (below), and go to Step 4.
 
@@ -86,6 +87,7 @@ TERMS: <topic>; <topic>
 PARENT: none
 OUT_PATH: <absolute path resolved in Step 2>
 CAPTURE_PATH: .claude/skills/whygraph-ui-check/capture.mjs
+PLAN_TOOL: sh .claude/skills/whygraph-plan/plan-tool.sh
 REFRESH_PROFILE: <yes | no>
 ```
 
@@ -103,7 +105,8 @@ Print every planner reply **verbatim**, with the one exception in Step 8. Then a
 - The reply says CodeGraph is not available -> print it and stop. Do not attempt a fallback or save anything. WhyGraph planning is meaningless without the graph.
 - The reply starts `CLARIFY: ` -> go to **Clarify** below.
 - The reply starts `SPLIT: ` -> go to Step 6.
-- Otherwise the planner wrote a plan. Go to Step 7 with its `QUESTIONS:` block.
+- The reply has no "Saved plan to" line and no "# Plan:" line -> print it and stop.
+- Otherwise a plan was written (by the planner, or by the synthesizer in deep mode). Go to Step 7 with its `QUESTIONS:` block.
 
 **Clarify.** The planner found no seed symbol and wrote no plan. The reply has the shape `CLARIFY: <one question> | options: <a>; <b>[; <c>]`.
 
@@ -129,7 +132,7 @@ The planner wrote a `tasks.json` and no plan. The reply has the shape `SPLIT: <p
    - `OUT_PATH: <repo root>/<the child's plan>`
    - `CONSENT` and `TERMS` lines as in Step 4 for `t1` only. Every other child gets `CONSENT: none` and no `TERMS` line.
    - `REFRESH_PROFILE` as in Step 4 for `t1` only. Every other child gets `REFRESH_PROFILE: no`.
-   - `MODE`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES` and `CAPTURE_PATH` stay the same.
+   - `MODE`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay the same.
 3. Print each child's reply verbatim under a line `### <id>: <title>`, with the one exception in Step 8. A child reply that starts `CLARIFY: ` follows **Clarify** for that child only.
 4. After every wave is planned, run Step 7 for each child's reply, one child at a time, in `id` order.
 

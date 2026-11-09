@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "task": "add a levels constant and a level count",
+  "created": "2026-11-09T00:00:00Z",
+  "children": [
+    {
+      "id": "t1",
+      "title": "Levels constant",
+      "task": "Add the LEVELS constant to mini/flags.py.",
+      "wave": 1,
+      "depends_on": [],
+      "status": "pending",
+      "plan": ".whygraph/plans/o9-t1.md",
+      "files_hint": ["mini/flags.py"]
+    },
+    {
+      "id": "t2",
+      "title": "Level count",
+      "task": "Add level_count to mini/report.py, reading the LEVELS constant.",
+      "wave": 2,
+      "depends_on": ["t1"],
+      "status": "pending",
+      "plan": ".whygraph/plans/o9-t2.md",
+      "files_hint": ["mini/report.py"]
+    }
+  ]
+}

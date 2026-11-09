@@ -73,7 +73,7 @@ CODEGRAPH_VERSION := $(shell sed -n "s/^ *CODEGRAPH_VERSION: *'\([^']*\)'.*/\1/p
 # What the image is built from besides src/: a change here means `dev-docker` rebuilds.
 DEPS_HASH = $(shell cat pyproject.toml uv.lock hatch_build.py docker/whygraph/Dockerfile src/playground/package-lock.json | git hash-object --stdin | cut -c1-16)
 
-.PHONY: help dev dev-local dev-production dev-docker prod check check-fast test test-fast e2e audit docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image dev-github-check
+.PHONY: help dev dev-local dev-production dev-docker prod check check-fast test test-fast e2e audit agent-eval docs docs-build db db-down dev-db dev-db-down inspect image sync playground node-check playground-deps dev-fixtures dev-image dev-github-check
 
 help:  ## List available targets
 	@echo "Run WhyGraph:"
@@ -164,6 +164,9 @@ e2e: playground  ## Playwright suite vs a throwaway portal + fake scanner (extra
 audit: playground  ## Screenshot audit of both portals, ~30 min, by hand, not in CI (extra args: ARGS="--project=local")
 	$$(command -v caffeinate >/dev/null && echo caffeinate -dimsu) sh src/playground/e2e/run.sh -c e2e/audit/playwright.config.ts $(ARGS)
 	@echo "audit output: $${AUDIT_OUT:-src/playground/e2e/.artifacts/audit} (gaps.md, manifest.json, shots/)"
+
+agent-eval:  ## Agent harness evals on the owner's login, paid, by hand, not in CI (extra args: ARGS="--cases O1 --stage 1")
+	$(UV_RUN) python scripts/agent_evals/run.py --ledger $${AGENT_EVAL_LEDGER:-plans/47-eval/spend.jsonl} --max-total-usd $${AGENT_EVAL_MAX_USD:-50} $(ARGS)
 
 image:  ## Build the image like the release does (pinned CodeGraph, real version); IMAGE=... to retag
 	docker build -f docker/whygraph/Dockerfile \

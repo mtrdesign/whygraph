@@ -1,0 +1,12 @@
+diff --git a/mini/report.py b/mini/report.py
+index efc7e6c..304dd2a 100644
+--- a/mini/report.py
++++ b/mini/report.py
+@@ -1,6 +1,7 @@
+ """A tiny report formatter."""
+ 
+ TITLE = "Items"
++MIN_ROWS = 1
+ 
+ 
+ def render(count: int) -> str:

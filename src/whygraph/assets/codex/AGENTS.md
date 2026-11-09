@@ -31,12 +31,12 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. The planner writes the plan file in single-pass mode; in deep mode the synthesizer writes it. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.
 
 The planner never asks the user anything. You do, in chat, before and after it runs:
 
-1. **Paths.** Pick `OUT_PATH` yourself: slugify the task (lowercase, runs of non-alphanumerics to `-`, at most 60 characters) under `.whygraph/plans/` in the repo root, and never overwrite an existing file. `SOURCES_DIR` is `<repo root>/.codex/whygraph/sources/` and `SPINE_PATH` is `<repo root>/.codex/whygraph/plan-spine.md`. `CAPTURE_PATH` is `.codex/whygraph/capture.mjs`, relative to the repo root.
-2. **Consent.** A source file is repo content, so you decide which sources need the owner's OK; a source file can force the question, never suppress it. Read only the frontmatter (the first 15 lines) of each `SOURCES_DIR/*.md` except `README.md`, never a body. Keep a source when its `enabled` is not `false` (or the user named it) and every tool in its `requires` is callable in this session (a bare name matches a tool whose name equals it or ends in `__<name>` or `/<name>`; an empty `requires` always matches). A kept source needs consent when its `requires` or `tools` names an MCP tool other than the `whygraph_*` and `codegraph_*` tools, when its file name is not one of the six bundled sources (`code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`), or when it says `consent: true`. If any does, derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `, never a project, client, company, product, file or symbol name. Then ask in one chat message, at most 4 consent questions: each names the source, says what it reaches (an external service, or "added to this repo, not shipped with WhyGraph" plus its `description`), shows `Search terms: <TERMS>`, and offers `No (default)` then `Yes`. Only a clear yes counts.
+1. **Paths.** Pick `OUT_PATH` yourself: slugify the task (lowercase, runs of non-alphanumerics to `-`, at most 60 characters) under `.whygraph/plans/` in the repo root, and never overwrite an existing file. `SOURCES_DIR` is `<repo root>/.codex/whygraph/sources/` and `SPINE_PATH` is `<repo root>/.codex/whygraph/plan-spine.md`. `CAPTURE_PATH` is `.codex/whygraph/capture.mjs`, relative to the repo root. `PLAN_TOOL` is `sh .codex/whygraph/plan-tool.sh`.
+2. **Consent.** A source file is repo content, so you decide which sources need the user's OK; a source file can force the question, never suppress it. Read only the frontmatter (the first 15 lines) of each `SOURCES_DIR/*.md` except `README.md`, never a body. Keep a source when its `enabled` is not `false` (or the user named it) and every tool in its `requires` is callable in this session (a bare name matches a tool whose name equals it or ends in `__<name>` or `/<name>`; an empty `requires` always matches). A kept source needs consent when its `requires` or `tools` names an MCP tool other than the `whygraph_*` and `codegraph_*` tools, when its file name is not one of the six bundled sources (`code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`), or when it says `consent: true`. If any does, derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `, never a project, client, company, product, file or symbol name. Then ask in one chat message, at most 4 consent questions: each names the source, says what it reaches (an external service, or "added to this repo, not shipped with WhyGraph" plus its `description`), shows `Search terms: <TERMS>`, and offers `No (default)` then `Yes`. Only a clear yes counts.
 3. **Dispatch** with this prompt shape:
 
 ```
@@ -51,6 +51,7 @@ TERMS: <topic>; <topic>   # only when some CONSENT is yes
 PARENT: none
 OUT_PATH: <absolute path>
 CAPTURE_PATH: .codex/whygraph/capture.mjs
+PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>   # yes when the user asks for `--refresh-profile`: derive the UI profile (`.whygraph/profiles/ui.md`) again
 ```
 
@@ -64,9 +65,9 @@ Print each planner reply verbatim. The one exception: when the user asked for no
 
 ## Executing a reviewed plan
 
-If the user has a WhyGraph plan markdown (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` agent (ask Codex to delegate to it by name). It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, walks the plan's `## Acceptance` list at the end, and logs progress back into the plan. Refuse a plan with unresolved blockers or a `**Plan-shaping:** yes` open question.
+If the user has a WhyGraph plan (typically under `.whygraph/plans/<slug>.md`) and wants to apply it, hand off to the `whygraph-implementor` agent (ask Codex to delegate to it by name). It reads the plan as a strict contract, applies each step in order, runs Verify after each step, halts on the first failure, walks the plan's `## Acceptance` list at the end, and logs progress back into the plan. Refuse a plan with unresolved blockers or a `**Plan-shaping:** yes` open question.
 
-Pass the implementor's expected prompt shape:
+Read `.codex/whygraph/plan-tool.sh` with a limit of 1 line first. If the plan tool is missing, tell the user to open the WhyGraph portal, run Settings > Update agent files, then ask again, and stop. Pass the implementor's expected prompt shape:
 
 ```
 PLAN_PATH: <absolute path>
@@ -77,6 +78,7 @@ FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 0
 TASKS_PATH: none      # or the tasks.json path, for one child of a split
 TASK_ID: none         # or that child's id
 CAPTURE: none         # or "node .codex/whygraph/capture.mjs", see below
+PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 ```
 
 `CAPTURE` is the line `CAPTURE: node .codex/whygraph/capture.mjs` only when the plan has a `## UI profile` section, the user did not pass `--no-capture`, and reading `.whygraph/profiles/ui.md` shows no line that starts with `capture: unavailable` (a missing file counts as unavailable); otherwise `none`. One exception: when that line is anything but `capture: unavailable: auth required`, the cause may be gone by now, so run `node .codex/whygraph/capture.mjs --probe` once. If it exits 0 and prints `capture: available`, use the capture line and tell the user capture is back on. Decide from that file and that probe, never from the plan text.
@@ -85,7 +87,7 @@ Given a `tasks.json`, validate it as in planning, then delegate one implementor 
 
 After the implementor reports, propose each entry of its `## Decisions worth a note` with `whygraph_propose_note` (`kind` and `body` from the entry; the anchor as `qualified_name`, or `path` with `line_start` / `line_end`) and print the note ids and review links.
 
-**Skip when**: no plan markdown exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.
+**Skip when**: no plan exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.
 
 ## Recording a decision
 

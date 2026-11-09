@@ -175,8 +175,8 @@ class AnalyzeCrawler(Crawler):
         if len(commit.parent_shas) > 1:
             # A merge's walk stats are zero (``git log --shortstat`` prints
             # none), but its diff is the whole first-parent diff.
-            stats = self._repository.first_parent_stats([commit.sha])
-            files_changed = stats[commit.sha].files_changed
+            counts = self._repository.first_parent_file_counts([commit.sha])
+            files_changed = counts[commit.sha]
         if files_changed > self._large_commit_file_count:
             with get_session() as session:
                 row = session.get(CommitRow, commit.sha)

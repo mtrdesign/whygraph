@@ -17,7 +17,7 @@ from subprocess import CompletedProcess
 from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
-from .commit import Commit, DiffStats, _parse_shortstat
+from .commit import Commit
 from .credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV, github_git_config
 from .file_change import FileChange
 from .tag import GitTag
@@ -1111,14 +1111,15 @@ class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
                 yield Commit.from_git_log(block)
 
 
-class GitFirstParentStatsCmd(ShellCommand[dict[str, DiffStats]]):
-    """``git log --no-walk=unsorted --diff-merges=first-parent --shortstat <sha>...``.
+class GitFirstParentNumstatCmd(ShellCommand[dict[str, tuple[int, ...]]]):
+    """``git log --no-walk=unsorted --diff-merges=first-parent --numstat <sha>...``.
 
-    Diff stats of each named commit against its **first parent**, merges
-    included. The history walk (:class:`GitLogShortstatCmd`) prints no
-    stat line for a merge, so a merge's stored stats are zero although
-    :meth:`Repository.diff` (and therefore an LLM description) sees its
-    whole first-parent diff; this command gives the size that diff has.
+    The changed lines of every file each named commit touches against its
+    **first parent**, merges included, in diff order. The history walk
+    (:class:`GitLogShortstatCmd`) prints no stat line for a merge, so a
+    merge's stored stats are zero although :meth:`Repository.diff` (and
+    therefore an LLM description) sees its whole first-parent diff; this
+    command gives the size of that diff, file by file.
 
     ``--no-ext-diff`` and ``--no-textconv`` keep a repository's own
     config from running a program: the repo is untrusted input.
@@ -1128,10 +1129,15 @@ class GitFirstParentStatsCmd(ShellCommand[dict[str, DiffStats]]):
     shas : Sequence[str]
         Full commit SHAs. An empty sequence must not be passed: ``git
         log --no-walk`` with no revision would show ``HEAD``.
+    names_only : bool, optional
+        List the files with ``--name-only`` instead: much faster on a
+        huge merge (no per-file line diff), every file counting ``0``
+        lines - for callers that need only the file count.
     """
 
-    def __init__(self, shas: Sequence[str]) -> None:
+    def __init__(self, shas: Sequence[str], *, names_only: bool = False) -> None:
         self.shas = tuple(shas)
+        self.names_only = names_only
 
     def argv(self) -> list[str]:
         return [
@@ -1141,16 +1147,23 @@ class GitFirstParentStatsCmd(ShellCommand[dict[str, DiffStats]]):
             "--diff-merges=first-parent",
             "--no-ext-diff",
             "--no-textconv",
-            "--shortstat",
+            "--name-only" if self.names_only else "--numstat",
             "--pretty=format:%x00%H",
             "--end-of-options",
             *self.shas,
         ]
 
-    def parse(self, result: CompletedProcess[str]) -> dict[str, DiffStats]:
-        stats: dict[str, DiffStats] = {}
+    def parse(self, result: CompletedProcess[str]) -> dict[str, tuple[int, ...]]:
+        count = (lambda line: 0) if self.names_only else _numstat_lines
+        files: dict[str, tuple[int, ...]] = {}
         for block in result.stdout.split("\x00"):
             sha, _, tail = block.strip().partition("\n")
             if sha:
-                stats[sha] = _parse_shortstat(tail)
-        return stats
+                files[sha] = tuple(count(line) for line in tail.splitlines() if line)
+        return files
+
+
+def _numstat_lines(line: str) -> int:
+    """Changed lines of one ``--numstat`` row (``-`` for a binary file counts 0)."""
+    added, deleted, _ = line.split("\t", 2)
+    return sum(int(n) for n in (added, deleted) if n.isdigit())

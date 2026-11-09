@@ -44,7 +44,6 @@ def test_packaged_claude_assets_present() -> None:
         "skills/whygraph-plan/sources/whygraph-rationale.md",
         "skills/whygraph-plan/sources/repo-tests.md",
         "skills/whygraph-plan/sources/repo-history.md",
-        "skills/whygraph-plan/sources/medium.md",
         "skills/whygraph-plan/sources/ui-surface.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-review/SKILL.md",
@@ -83,7 +82,6 @@ def test_packaged_cursor_assets_present() -> None:
         "skills/whygraph-plan/sources/whygraph-rationale.md",
         "skills/whygraph-plan/sources/repo-tests.md",
         "skills/whygraph-plan/sources/repo-history.md",
-        "skills/whygraph-plan/sources/medium.md",
         "skills/whygraph-plan/sources/ui-surface.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-note/SKILL.md",
@@ -124,7 +122,6 @@ def test_packaged_codex_assets_present() -> None:
         ".codex/whygraph/sources/whygraph-rationale.md",
         ".codex/whygraph/sources/repo-tests.md",
         ".codex/whygraph/sources/repo-history.md",
-        ".codex/whygraph/sources/medium.md",
         ".codex/whygraph/sources/ui-surface.md",
         ".codex/whygraph/capture.mjs",
         ".codex/agents/planner.toml",
@@ -167,7 +164,6 @@ def test_packaged_vscode_assets_present() -> None:
         "whygraph/sources/whygraph-rationale.md",
         "whygraph/sources/repo-tests.md",
         "whygraph/sources/repo-history.md",
-        "whygraph/sources/medium.md",
         "whygraph/sources/ui-surface.md",
         "whygraph/capture.mjs",
         "agents/planner.agent.md",
@@ -325,9 +321,9 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
     # 7 agents + 7 skills + CLAUDE.md (merge file, written fresh) = 15 files,
-    # plus the plan skill's spine, plan tool, guard, sources README and 6 sources = 10,
-    # plus the UI check skill's capture script = 26 files.
-    assert len(result.written) == 26
+    # plus the plan skill's spine, plan tool, guard, sources README and 5 sources = 9,
+    # plus the UI check skill's capture script = 25 files.
+    assert len(result.written) == 25
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -833,7 +829,7 @@ def test_harness_frontmatter_wiring() -> None:
     assert planner["maxTurns"] == "80"
     external = _frontmatter(cc / "agents/researcher-external.md")
     assert external["name"] == "whygraph-researcher-external"
-    assert external["tools"] == "Read, ToolSearch, mcp__medium__*"
+    assert external["tools"] == "Read, ToolSearch"
     assert external["disallowedTools"] == "Agent"
     assert external["maxTurns"] == "15" and external["model"] == "sonnet"
     assert external["omitClaudeMd"] == "true"
@@ -1125,7 +1121,6 @@ _BUNDLED_SOURCES = (
     "whygraph-rationale.md",
     "repo-tests.md",
     "repo-history.md",
-    "medium.md",
     "ui-surface.md",
 )
 
@@ -1188,8 +1183,7 @@ def test_source_frontmatter_contract() -> None:
                 )
                 assert tool.lower() not in _BANNED_SOURCE_TOOLS, (tree, name, tool)
             assert fm["consent"] in {"true", "false"}, (tree, name)
-            if fm["consent"] == "true":
-                assert name == "medium.md", (tree, name)
+            assert fm["consent"] == "false", (tree, name)
             sections.append(fm["section"])
         assert sections and len(sections) == len(set(sections)), (tree, sections)
         shared = list(_source_files(tree).values())
@@ -1592,13 +1586,20 @@ def _vscode_tool_list(value: str) -> set[str]:
     return set(re.findall(r"""['"]([^'"]+)['"]""", value))
 
 
+def _is_project_tool(tool: str) -> bool:
+    """Whether a granted tool is built in or from WhyGraph's own MCP servers."""
+    return not tool.startswith("mcp__") or tool.startswith(
+        ("mcp__whygraph__", "mcp__codegraph__")
+    )
+
+
 def test_researchers_cannot_write_or_run() -> None:
     """The researcher's tools are an allowlist with no shell, write or web."""
     cc = _frontmatter(_ASSET_ROOT / "claude-code/agents/researcher.md")
     granted = {t.strip() for t in cc["tools"].split(",")}
     banned = {"Bash", "Write", "Edit", "WebFetch", "WebSearch"}
     assert not granted & banned
-    assert not any(t.startswith("mcp__medium__") for t in granted)
+    assert all(_is_project_tool(t) for t in granted)
     external = _frontmatter(_ASSET_ROOT / "claude-code/agents/researcher-external.md")
     external_granted = {t.strip() for t in external["tools"].split(",")}
     assert not external_granted & banned
@@ -1654,7 +1655,7 @@ def test_external_researcher_parity() -> None:
 def test_planner_allowlist_has_no_external_tools() -> None:
     """The planner holds no outbound tool: a consented source runs on an agent."""
     tools = _frontmatter(_ASSET_ROOT / "claude-code/agents/planner.md")["tools"]
-    assert "mcp__medium__" not in tools
+    assert all(_is_project_tool(t.strip()) for t in tools.split(","))
     assert "ReadMcpResourceTool" in tools
 
 

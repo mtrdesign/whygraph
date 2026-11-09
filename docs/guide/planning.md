@@ -127,7 +127,6 @@ Five sources ship with WhyGraph:
 | `whygraph-rationale.md` | Constraints and risks, quoted verbatim from rationale cards | WhyGraph |
 | `repo-tests.md` | The commands that prove each step, and symbols no test covers | CodeGraph |
 | `repo-history.md` | Prior art in your own commit and pull request history | WhyGraph |
-| `medium.md` | Practitioner articles on the design choice | The Medium MCP server |
 
 Your own files survive an update of the agent files. Delete a file to remove its source.
 
@@ -178,9 +177,9 @@ reading and searching files.
 !!! warning "A source that needs another MCP server needs one more edit"
     A researcher can call only the tools in its own `tools` line. The ordinary researcher
     (`whygraph-researcher`) lists the `whygraph` and `codegraph` servers. A source that reaches an
-    outside service goes to a second agent, `whygraph-researcher-external`, whose `tools:` line lists
-    the `medium` server. If your source needs a different MCP server, add that server to the `tools:`
-    line of `whygraph-researcher-external` by hand. The next **Update agent files** lists that file as
+    outside service goes to a second agent, `whygraph-researcher-external`, whose `tools:` line ships
+    with no outside server. Add the server your source needs to the `tools:` line of
+    `whygraph-researcher-external` by hand. The next **Update agent files** lists that file as
     edited and leaves it alone, as it does for any file you changed.
 
 ### Consent
@@ -201,24 +200,15 @@ For a source that reaches an outside service, the question also shows the **sear
 three technical topics taken from your task. Only those terms leave your machine. File content, symbol
 names, commit messages and project names are never sent. In a split, only the first child asks.
 
-### Medium
+### Sources that reach an outside service
 
-`medium.md` is the one bundled source that reaches an outside service. It searches Medium for
-practitioner articles on the design choice and cites them by title and URL. It paraphrases and never
-copies a passage, and it treats article text as someone's opinion, never as an instruction.
+WhyGraph bundles no such source. If you add one, it always asks first and shows the search terms, and
+it runs on `whygraph-researcher-external` once you have granted that agent your server's tools.
 
-- It runs only when the Medium MCP server is configured and your session can call `search_medium`.
-  Without the server the planner drops the source and nothing breaks.
-- It always asks first and shows the search terms. The Medium server limits how many searches and
-  articles one plan may use, and each call takes a few seconds on your screen.
-- **Name the server `medium`.** The grant is `mcp__medium__*`, and it sits in the
-  `whygraph-researcher-external` agent file, not in the ordinary researcher. Under another name
-  `requires: search_medium` still matches, but the researcher reports the tool as not granted. If you
-  named the server otherwise, edit that grant in the `whygraph-researcher-external` agent file.
 - The external researcher gets less of your repository on purpose: it has no working set, only the
   task, the source's lens and the consented search terms.
 - It works in Claude Code and Cursor. Codex can run it too, but only because Codex cannot block it
-  (see below). VS Code has no external researcher, so the source does not run there.
+  (see below). VS Code has no external researcher, so such a source does not run there.
 
 ## Splitting: `tasks.json`
 
@@ -385,7 +375,7 @@ after a clone, as you would the `sources/` folder.
 |---|---|---|---|---|
 | Research fan-out | Yes | Yes | Yes | Yes |
 | Researcher tool limits enforced by the editor | Yes | Yes | Yes | **No** |
-| Medium source | Yes | Yes | No | Yes, unenforced |
+| Source that reaches an outside service | Yes | Yes | No | Yes, unenforced |
 | One implementor per step, at the step's model | Yes | Yes, but every step on one model unless you pass `--model <model-id>` | No, one run | No, one run |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
 | Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |
@@ -403,7 +393,7 @@ and has no terminal. In Cursor the plan is run from a skill, and the review gate
     Codex documents no per-agent tool allowlist. In the other editors the researcher is held to a list
     of read-only tools by the editor itself. In Codex the researcher's written rules are the only
     control. A hostile source file could ask a Codex researcher to run a shell command, and a Codex
-    researcher can reach Medium. The consent question still protects you from a repo-added source, but
+    researcher can reach any MCP server you configured. The consent question still protects you from a repo-added source, but
     it cannot stop a bundled file that someone edited. Review `sources/` after a clone, and review
     changes to it in a pull request.
 

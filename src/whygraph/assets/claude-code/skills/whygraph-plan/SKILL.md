@@ -58,7 +58,7 @@ With `--no-questions`, ask nothing: record `<name>=no` for every source that nee
    - Every tool in its `requires` is callable in this session. A bare name matches a session tool whose name equals it, or ends in `__<name>` or `/<name>`. A deferred tool counts as callable. An empty `requires` always matches.
 4. A kept source needs consent when any of these holds:
    - (a) Its `requires` or `tools` names an MCP tool other than the `whygraph_*` and `codegraph_*` tools. The word `read` is not an MCP tool.
-   - (b) Its file name is not one of the six bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`.
+   - (b) Its file name is not one of the five bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`.
    - (c) It says `consent: true`.
 5. If no kept source needs consent, record `CONSENT: none` and go to Step 4.
 6. Derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `. Never use a project, client, company, product, file or symbol name in a term.

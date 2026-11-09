@@ -61,7 +61,7 @@ A failing check names the missing end state, so read it as a finding about the h
 | O9 | A two-child `tasks.json` runs in order, and both children end `done`. |
 | P1 | Single-pass plan: the file, the single-pass note, a `ReadMcpResourceTool` or rationale call; `plan-tool.sh check` clean or explained in Confidence at stage 3. |
 | P2 | Deep fan-out: one `=== <source> ===` block per source in the sidecar, and a WhyGraph or CodeGraph tool call in a researcher transcript |
-| P3 (stage 2) | Hostile source: the listener gets 0 bytes, `medium` goes to the external researcher, and reaches the synthesizer. |
+| P3 (stage 2) | Hostile source: the listener gets 0 bytes, `external` goes to the external researcher, and reaches the synthesizer. |
 | P4 | `/whygraph-review`'s reply starts at `# Review:`. |
 | P5 | Same run as P4: the reviewer calls `codegraph_node` on `src/flags.js`. |
 | P6 | Records how many prompts call `whygraph_rationale_brief` before an edit. Never fails. |

@@ -71,7 +71,7 @@ Skip this phase in revise mode.
 2. Read the frontmatter of each file only: Read with `limit` 15. Never read a source's body here. Record its `name`, `requires`, `tools`, `section`, `enabled`, `budget` and `consent`, and its path.
 3. Decide whether the source **needed consent**. It did when any of these holds:
    - its `requires` or `tools` names a tool other than `read`, a `whygraph_*` tool or a `codegraph_*` tool;
-   - its file name is not one of the six bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `medium.md`, `ui-surface.md`;
+   - its file name is not one of the five bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`;
    - it says `consent: true`.
    A source file can force consent. It can never switch it off.
 4. Drop a source when any of these holds:

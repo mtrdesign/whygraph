@@ -1,7 +1,7 @@
 ---
 name: whygraph-researcher-external
 description: Researches one consented external source for a WhyGraph plan. Spawned by whygraph-planner - do not invoke directly.
-tools: Read, ToolSearch, mcp__medium__*
+tools: Read, ToolSearch
 disallowedTools: Agent
 maxTurns: 15
 model: sonnet

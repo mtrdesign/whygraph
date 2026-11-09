@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.services.git import GitError, Repository
+from whygraph.services.git import DiffStats, GitError, Repository
+from whygraph.services.git.commands import GitFirstParentStatsCmd
 from whygraph.services.git.commits import Commits
 
 
@@ -214,3 +215,89 @@ def test_diff_range_raises_git_error_for_unknown_ref(tmp_path: Path) -> None:
 
     with pytest.raises(GitError):
         repo.diff_range("0" * 40, real.sha)
+
+
+def _merge_feature(root: Path, files: dict[str, str], *, strategy: str = "") -> None:
+    """Merge a ``feature`` branch writing ``files`` into ``main`` (``--no-ff``)."""
+    _git(root, "checkout", "-q", "-b", "feature")
+    for name, text in files.items():
+        (root / name).write_text(text)
+    _git(root, "add", *files)
+    _git(root, "commit", "-q", "-m", "feature work")
+    _git(root, "checkout", "-q", "main")
+    args = ["-s", strategy] if strategy else []
+    _git(root, "merge", "--no-ff", "-q", *args, "-m", "merge feature", "feature")
+
+
+def test_first_parent_stats_sizes_a_merge(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    _merge_feature(root, {"c.txt": "one\ntwo\n", "d.txt": "three\n"})
+    by_subject = {c.subject: c for c in _commits_newest_first(root)}
+    merge, third = by_subject["merge feature"], by_subject["third"]
+    # The history walk prints no stat line for a merge.
+    assert merge.stats == DiffStats(0, 0, 0)
+
+    stats = Repository(root).first_parent_stats([merge.sha, third.sha])
+
+    assert stats == {merge.sha: DiffStats(2, 3, 0), third.sha: DiffStats(1, 1, 1)}
+
+
+def test_first_parent_stats_of_an_empty_merge_is_zero(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    _merge_feature(root, {"c.txt": "x\n"}, strategy="ours")
+    merge = _commits_newest_first(root)[0]
+
+    assert Repository(root).first_parent_stats([merge.sha]) == {
+        merge.sha: DiffStats(0, 0, 0)
+    }
+
+
+def test_first_parent_stats_counts_a_binary_file(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    (root / "blob.bin").write_bytes(b"\x00\x01\x02")
+    _git(root, "add", "blob.bin")
+    _git(root, "commit", "-q", "-m", "binary")
+    head = _commits_newest_first(root)[0]
+
+    assert Repository(root).first_parent_stats([head.sha]) == {
+        head.sha: DiffStats(1, 0, 0)
+    }
+
+
+def test_first_parent_stats_of_nothing_runs_no_git(tmp_path: Path) -> None:
+    assert Repository(tmp_path).first_parent_stats([]) == {}  # not even a repo
+
+
+def test_first_parent_stats_batches_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shas = [f"{n:040x}" for n in range(1200)]
+    calls: list[int] = []
+
+    def _fake_run(cmd: GitFirstParentStatsCmd, **_kw: object) -> dict:
+        calls.append(len(cmd.shas))
+        return {sha: DiffStats(1, 1, 0) for sha in cmd.shas}
+
+    repo = Repository(tmp_path)
+    monkeypatch.setattr(repo._shell, "run", _fake_run)
+
+    assert len(repo.first_parent_stats(shas)) == 1200
+    assert calls == [500, 500, 200]
+
+
+def test_first_parent_stats_raises_git_error_for_unknown_sha(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    with pytest.raises(GitError):
+        Repository(root).first_parent_stats(["0" * 40])
+
+
+def test_first_parent_stats_never_runs_an_external_diff(tmp_path: Path) -> None:
+    """A repo's ``diff.external`` must not run a program (untrusted input)."""
+    root = _make_repo(tmp_path)
+    marker = tmp_path / "ran"
+    _git(root, "config", "diff.external", f"touch {marker}")
+    head = _commits_newest_first(root)[0]
+
+    Repository(root).first_parent_stats([head.sha])
+
+    assert not marker.exists()

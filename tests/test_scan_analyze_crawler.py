@@ -199,6 +199,53 @@ def test_bulk_commits_get_stub_without_llm_call(
         assert model is None  # NULL model = "not LLM-generated"
 
 
+def _merge_feature(root: Path, files: int) -> None:
+    """Merge a ``feature`` branch adding ``files`` one-line files (``--no-ff``)."""
+    _git(root, "checkout", "-q", "-b", "feature")
+    names = [f"f{n}.txt" for n in range(files)]
+    for name in names:
+        (root / name).write_text("x\n")
+    _git(root, "add", *names)
+    _git(root, "commit", "-q", "-m", "feature work")
+    _git(root, "checkout", "-q", "main")
+    _git(root, "merge", "--no-ff", "-q", "-m", "merge feature", "feature")
+
+
+def test_large_merge_is_stubbed_by_its_first_parent_files(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    """A merge's walk stats are zero; its first-parent diff decides the stub."""
+    from whygraph.analyze import bulk_commit_stub
+
+    _merge_feature(repo_path, 3)
+    commits = _commits(repo_path)
+    merge = next(c for c in commits if len(c.parent_shas) > 1)
+    assert merge.stats.files_changed == 0
+    _insert(commits)
+    descriptor = _StubDescriptor()
+
+    crawler = _run(repo_path, descriptor, large_commit_file_count=2)
+
+    assert crawler.error is None
+    assert _descriptions()[merge.sha] == (bulk_commit_stub(3), None)
+    assert not any("f0.txt" in diff and "f2.txt" in diff for diff in descriptor.seen)
+    assert len(descriptor.seen) == len(commits) - 2  # the merge and feature work
+
+
+def test_small_merge_is_described(isolated_db: Path, repo_path: Path) -> None:
+    _merge_feature(repo_path, 1)
+    commits = _commits(repo_path)
+    merge = next(c for c in commits if len(c.parent_shas) > 1)
+    _insert(commits)
+    descriptor = _StubDescriptor()
+
+    crawler = _run(repo_path, descriptor, large_commit_file_count=2)
+
+    assert crawler.error is None
+    assert _descriptions()[merge.sha] == ("DESCRIPTION", "stub-provider:stub-model")
+    assert len(descriptor.seen) == len(commits)
+
+
 def test_skips_already_described_commits(isolated_db: Path, repo_path: Path) -> None:
     commits = _commits(repo_path)
     already = commits[0].sha

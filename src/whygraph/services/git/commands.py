@@ -17,7 +17,7 @@ from subprocess import CompletedProcess
 from whygraph.core import ShellCommand
 
 from .blame import BlameHunk
-from .commit import Commit
+from .commit import Commit, DiffStats, _parse_shortstat
 from .credentials import TOKEN_ENV_VAR, TOKEN_FILE_ENV, github_git_config
 from .file_change import FileChange
 from .tag import GitTag
@@ -1109,3 +1109,48 @@ class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
         for block in result.stdout.split("\x1e"):
             if block.strip():
                 yield Commit.from_git_log(block)
+
+
+class GitFirstParentStatsCmd(ShellCommand[dict[str, DiffStats]]):
+    """``git log --no-walk=unsorted --diff-merges=first-parent --shortstat <sha>...``.
+
+    Diff stats of each named commit against its **first parent**, merges
+    included. The history walk (:class:`GitLogShortstatCmd`) prints no
+    stat line for a merge, so a merge's stored stats are zero although
+    :meth:`Repository.diff` (and therefore an LLM description) sees its
+    whole first-parent diff; this command gives the size that diff has.
+
+    ``--no-ext-diff`` and ``--no-textconv`` keep a repository's own
+    config from running a program: the repo is untrusted input.
+
+    Parameters
+    ----------
+    shas : Sequence[str]
+        Full commit SHAs. An empty sequence must not be passed: ``git
+        log --no-walk`` with no revision would show ``HEAD``.
+    """
+
+    def __init__(self, shas: Sequence[str]) -> None:
+        self.shas = tuple(shas)
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "log",
+            "--no-walk=unsorted",
+            "--diff-merges=first-parent",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--shortstat",
+            "--pretty=format:%x00%H",
+            "--end-of-options",
+            *self.shas,
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> dict[str, DiffStats]:
+        stats: dict[str, DiffStats] = {}
+        for block in result.stdout.split("\x00"):
+            sha, _, tail = block.strip().partition("\n")
+            if sha:
+                stats[sha] = _parse_shortstat(tail)
+        return stats

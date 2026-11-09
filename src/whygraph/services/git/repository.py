@@ -29,6 +29,7 @@ from .commands import (
     GitFastForwardCmd,
     GitFetchDefaultCmd,
     GitFetchRefsCmd,
+    GitFirstParentStatsCmd,
     GitHasCommitCmd,
     GitHeadShaCmd,
     GitIsAncestorCmd,
@@ -50,7 +51,7 @@ from .commands import (
     GitTagsCmd,
     TreeEntry,
 )
-from .commit import Commit
+from .commit import Commit, DiffStats
 from .commits import Commits
 from .credentials import (
     TOKEN_ENV_VAR,
@@ -83,6 +84,10 @@ _BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
 # ARG_MAX on every platform even for a repository with thousands of
 # distinct identities; the results are concatenated in input order.
 _MAILMAP_CHUNK = 500
+
+# SHAs per ``git log --no-walk`` of :meth:`Repository.first_parent_stats`;
+# 500 full SHAs is about 20 KB of argv.
+_FIRST_PARENT_CHUNK = 500
 
 # Paths per ``git checkout -- <paths>`` of :meth:`Repository.neutralize_symlinks`.
 _PATHS_CHUNK = 500
@@ -509,8 +514,10 @@ class Repository:
 
         Root commits (no parents) are diffed against git's empty-tree
         object, so the result is exactly what the commit introduced.
-        Merge commits diff against their first parent, matching the
-        convention already in use for :attr:`Commit.stats`.
+        Merge commits diff against their first parent. Note that
+        :attr:`Commit.stats` is zero for a merge (``git log --shortstat``
+        prints no stat line for one); :meth:`first_parent_stats` gives
+        the size of the diff this method returns.
 
         Parameters
         ----------
@@ -1340,6 +1347,43 @@ class Repository:
                     f"failed to check-mailmap {len(chunk)} contact(s) at {self.root}"
                 ) from exc
         return tuple(lines)
+
+    def first_parent_stats(self, shas: Sequence[str]) -> dict[str, DiffStats]:
+        """Diff stats of each commit against its first parent, merges included.
+
+        The size of what :meth:`diff` would return, read without
+        producing the diff. Batched via argv - one subprocess per
+        :data:`_FIRST_PARENT_CHUNK` SHAs.
+
+        Parameters
+        ----------
+        shas : Sequence[str]
+            Full commit SHAs. An empty sequence is a no-op - no ``git``
+            is invoked.
+
+        Returns
+        -------
+        dict[str, DiffStats]
+            One entry per SHA ``git`` printed. A merge whose first-parent
+            diff is empty maps to ``DiffStats(0, 0, 0)``.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails (an unknown SHA, a broken repository).
+        """
+        stats: dict[str, DiffStats] = {}
+        for start in range(0, len(shas), _FIRST_PARENT_CHUNK):
+            chunk = tuple(shas[start : start + _FIRST_PARENT_CHUNK])
+            try:
+                stats.update(
+                    self._shell.run(GitFirstParentStatsCmd(chunk), cwd=self.root)
+                )
+            except ShellError as exc:
+                raise GitError(
+                    f"failed to read first-parent stats of {len(chunk)} commit(s)"
+                ) from exc
+        return stats
 
     def commit_metadata(self, ref: str) -> Commit:
         """Full :class:`Commit` value object for a single commit-ish.

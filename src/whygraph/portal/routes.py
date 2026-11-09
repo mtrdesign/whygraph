@@ -3276,7 +3276,9 @@ def _describe_estimate(state: PortalState, project: BoundProject) -> dict | None
     try:
         with use_project(project.ctx):
             body = _scan_estimate(
-                project.ctx.config, overrides=state.prices.for_org(project.org_id)
+                project.ctx.config,
+                root=project.ctx.root,
+                overrides=state.prices.for_org(project.org_id),
             )
     except Exception:  # best-effort: an estimate never blocks a scan
         _log.warning(
@@ -3750,7 +3752,9 @@ def get_scan_estimate(
     """
     _refuse_linked(project, "estimating this project's describe cost")
     overrides = portal_state(request).prices.for_org(project.org_id)
-    body = _scan_estimate(project.ctx.config, overrides=overrides)
+    body = _scan_estimate(
+        project.ctx.config, root=project.ctx.root, overrides=overrides
+    )
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
     if not project_allowed(project.role, Action.PROJECT_USAGE):
         body.update(cost=None, tokens=None, cost_hidden=True)

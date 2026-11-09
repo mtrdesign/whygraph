@@ -289,3 +289,22 @@ make agent-eval ARGS="--cases O1 --stage 1"
 - **The ledger** is one JSON line per run, with the case, the stage and the cost. `make agent-eval` writes it to `plans/47-eval/spend.jsonl` (`AGENT_EVAL_LEDGER` to change it) and caps the total at $50 (`AGENT_EVAL_MAX_USD`). Before each run, the sum of the ledger plus the run's budget is checked against the cap, and the run is refused when it would exceed it. A run with no cost in its result is charged its budget.
 
 `--dry-run` loads every case and prints what would run or be skipped, and calls no model.
+
+## Estimate calibration
+
+The Describe now estimate (`src/whygraph/portal/estimate.py`) replays how a scan splits each commit into model calls. Its constants are measured on `claude-sonnet-5-5`, and each other model it knows has a profile in `MODEL_PROFILES`: how many input tokens and how much output it produces per Sonnet token on the same diffs. A model without a profile is estimated as Sonnet.
+
+`scripts/estimate_calibration.py` measures a model. It samples waiting commits from a copy of a project's WhyGraph database, describes each one the way a scan does, and prints the estimate next to the real usage. It never writes a description, and its JSON output holds only counts.
+
+```sh
+SSL_CERT_FILE=/etc/ssl/cert.pem uv run python scripts/estimate_calibration.py \
+    --db ~/.local/state/whygraph-dev/local/data/projects/local/biome/whygraph.db \
+    --repo ~/.local/state/whygraph-dev/repos/biome \
+    --model anthropic:claude-sonnet-5-5 --model openai:gpt-4o \
+    --sample 60 --out /tmp/calibration.json
+```
+
+!!! warning "It costs money, and it never runs in CI"
+    Without `--yes` the script only prints the sample and what it would cost. With `--yes` it calls each model, about $1 to $2 per model for 60 commits at Sonnet prices. Keys come from the environment.
+
+To add a profile, run the new model and `claude-sonnet-5-5` on the same sample, and divide the model's input and output tokens by Sonnet's. Then add the factors to `MODEL_PROFILES` and the sample to `tests/fixtures/estimate_calibration_biome.json`, so `test_estimate_matches_each_measured_model` keeps them within 5 %.

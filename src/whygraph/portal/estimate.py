@@ -37,10 +37,15 @@ commit:
   chars * OUTPUT_TOKENS_PER_1K_CHARS / 1000``; a synthesis call reads
   :data:`SYNTHESIS_OVERHEAD_TOKENS` plus every chunk's output and writes
   ``SYNTHESIS_OUTPUT_TOKENS + chunks * SYNTHESIS_OUTPUT_PER_CHUNK``;
+* a model's own tokenizer and verbosity scale the input and output
+  (:data:`MODEL_PROFILES`; a model without a profile is estimated as
+  ``claude-sonnet-5-5``);
 * the range is +/-50 % (:data:`RANGE_FACTOR`), never a promise.
 
-The constants were calibrated on the usage ledger of a real *Describe
-now* run (issue #86: 188 commits, 291 calls, ``claude-sonnet-5-5``).
+The constants are fitted on ``claude-sonnet-5-5`` over two repositories:
+the usage ledger of a whole *Describe now* run of WhyGraph (issue #86,
+188 commits) and a 60-commit sample of Biome
+(``scripts/estimate_calibration.py``), within 5 % of both.
 """
 
 from __future__ import annotations
@@ -76,10 +81,10 @@ CHARS_PER_LINE = 40
 CHARS_PER_TOKEN = 2.31
 """Diff characters per input token (code tokenizes densely; prose is about 4)."""
 
-DESCRIBE_OVERHEAD_TOKENS = 270
+DESCRIBE_OVERHEAD_TOKENS = 500
 """Input of one describe call beyond the diff (system and task prompts)."""
 
-OUTPUT_TOKENS_BASE = 600
+OUTPUT_TOKENS_BASE = 400
 """Output of a describe call before it grows with the diff it describes."""
 
 OUTPUT_TOKENS_PER_1K_CHARS = 23.4
@@ -121,6 +126,55 @@ class CommitSize:
 
 
 @dataclass(frozen=True)
+class ModelProfile:
+    """How one model differs from the ``claude-sonnet-5-5`` the constants fit.
+
+    Attributes
+    ----------
+    input_factor : float
+        Its input tokens per Sonnet input token (its tokenizer).
+    output_factor : float
+        Its output tokens per Sonnet output token, on the same diffs (how
+        much it writes).
+    """
+
+    input_factor: float = 1.0
+    output_factor: float = 1.0
+
+
+BASELINE_PROFILE = ModelProfile()
+"""``claude-sonnet-5-5``'s profile, and every model's without a measured one."""
+
+MODEL_PROFILES: dict[str, ModelProfile] = {
+    "claude-sonnet-5-5": BASELINE_PROFILE,
+    "claude-haiku-4-5": ModelProfile(input_factor=0.78, output_factor=0.32),
+    "claude-opus-4-7": ModelProfile(input_factor=1.00, output_factor=0.75),
+}
+"""Measured profiles by model id: each model described the same Biome commits
+as ``claude-sonnet-5-5`` (``scripts/estimate_calibration.py``, 2026-11-09).
+Measure a model with that script before adding it here."""
+
+
+def model_profile(model: str | None) -> ModelProfile:
+    """The profile of ``model``, matched by id under any provider prefix.
+
+    Parameters
+    ----------
+    model : str or None
+        A model id, bare (``claude-haiku-4-5``) or with a vendor prefix as
+        OpenRouter writes it (``anthropic/claude-haiku-4-5``).
+
+    Returns
+    -------
+    ModelProfile
+        Its measured profile, or :data:`BASELINE_PROFILE`.
+    """
+    if not model:
+        return BASELINE_PROFILE
+    return MODEL_PROFILES.get(model.rsplit("/", 1)[-1], BASELINE_PROFILE)
+
+
+@dataclass(frozen=True)
 class TokenEstimate:
     """The token arithmetic's result.
 
@@ -147,7 +201,11 @@ class TokenEstimate:
 
 
 def estimate_tokens(
-    sizes: Iterable[CommitSize], *, max_diff_chars: int, large_commit_file_count: int
+    sizes: Iterable[CommitSize],
+    *,
+    max_diff_chars: int,
+    large_commit_file_count: int,
+    profile: ModelProfile = BASELINE_PROFILE,
 ) -> TokenEstimate:
     """Apply the descriptor's call arithmetic to the waiting commits.
 
@@ -161,6 +219,8 @@ def estimate_tokens(
         ``[analyze].max_diff_chars``.
     large_commit_file_count : int
         ``[analyze].large_commit_file_count``.
+    profile : ModelProfile, optional
+        The analyze model's profile (:func:`model_profile`).
 
     Returns
     -------
@@ -179,15 +239,19 @@ def estimate_tokens(
             or [CHARS_PER_FILE],
             max_diff_chars,
         )
-        described = [_describe_call(min(chars, max_diff_chars)) for chars in chunks]
+        described = [
+            _describe_call(min(chars, max_diff_chars), profile) for chars in chunks
+        ]
         calls += len(described)
         input_tokens += sum(tokens_in for tokens_in, _ in described)
         output_tokens += sum(tokens_out for _, tokens_out in described)
         if len(chunks) > 1:
             synth += 1
             calls += 1
-            input_tokens += SYNTHESIS_OVERHEAD_TOKENS + sum(o for _, o in described)
-            output_tokens += (
+            input_tokens += SYNTHESIS_OVERHEAD_TOKENS * profile.input_factor + sum(
+                tokens_out for _, tokens_out in described
+            )
+            output_tokens += profile.output_factor * (
                 SYNTHESIS_OUTPUT_TOKENS + len(chunks) * SYNTHESIS_OUTPUT_PER_CHUNK
             )
     return TokenEstimate(
@@ -214,11 +278,12 @@ def _pack(file_chars: list[int], max_chars: int) -> list[int]:
     return chunks
 
 
-def _describe_call(chars: int) -> tuple[float, float]:
+def _describe_call(chars: int, profile: ModelProfile) -> tuple[float, float]:
     """One describe call's (input, output) tokens for ``chars`` of diff."""
     return (
-        chars / CHARS_PER_TOKEN + DESCRIBE_OVERHEAD_TOKENS,
-        OUTPUT_TOKENS_BASE + chars * OUTPUT_TOKENS_PER_1K_CHARS / 1_000,
+        profile.input_factor * (chars / CHARS_PER_TOKEN + DESCRIBE_OVERHEAD_TOKENS),
+        profile.output_factor
+        * (OUTPUT_TOKENS_BASE + chars * OUTPUT_TOKENS_PER_1K_CHARS / 1_000),
     )
 
 
@@ -291,6 +356,32 @@ def render_estimate(
 def waiting_commit_sizes(
     root: Path, *, max_diff_chars: int, large_commit_file_count: int
 ) -> list[CommitSize]:
+    """The sizes of :func:`waiting_commits`, without their SHAs.
+
+    Parameters
+    ----------
+    root : Path
+        The project's repository.
+    max_diff_chars, large_commit_file_count : int
+        ``[analyze]``'s chunk cap and large-commit threshold.
+
+    Returns
+    -------
+    list[CommitSize]
+        One entry per waiting commit.
+    """
+    return list(
+        waiting_commits(
+            root,
+            max_diff_chars=max_diff_chars,
+            large_commit_file_count=large_commit_file_count,
+        ).values()
+    )
+
+
+def waiting_commits(
+    root: Path, *, max_diff_chars: int, large_commit_file_count: int
+) -> dict[str, CommitSize]:
     """Read the commits a full scan would describe from the bound project DB.
 
     Only a commit that may split into chunks needs its files' sizes (a
@@ -308,8 +399,8 @@ def waiting_commit_sizes(
 
     Returns
     -------
-    list[CommitSize]
-        Rows with a NULL ``llm_description`` and a ``first_seen_ref``
+    dict[str, CommitSize]
+        By SHA: rows with a NULL ``llm_description`` and a ``first_seen_ref``
         outside ``refs/pull/``: every merge with a non-empty first-parent
         diff, and every other row with ``files_changed > 0``. Where no
         per-file sizes were read, a commit's lines spread evenly over its
@@ -352,15 +443,15 @@ def waiting_commit_sizes(
             per_file.setdefault(sha, []).append(lines)
     merges = [sha for sha, parents, *_ in rows if len(parents.split()) > 1]
     merge_sizes = _merge_sizes(root, merges, large_commit_file_count)
-    sizes = []
+    sizes: dict[str, CommitSize] = {}
     for sha, _parents, files, ins, dels in rows:
         if sha in merge_sizes:
             if merge_sizes[sha].files_changed:  # an empty diff is never described
-                sizes.append(merge_sizes[sha])
+                sizes[sha] = merge_sizes[sha]
         elif sha in per_file:
-            sizes.append(CommitSize(files, tuple(per_file[sha])))
+            sizes[sha] = CommitSize(files, tuple(per_file[sha]))
         else:
-            sizes.append(CommitSize(files, _spread(ins + dels, files)))
+            sizes[sha] = CommitSize(files, _spread(ins + dels, files))
     return sizes
 
 
@@ -446,7 +537,9 @@ def scan_estimate(
         "max_diff_chars": config.analyze.max_diff_chars,
         "large_commit_file_count": config.analyze.large_commit_file_count,
     }
-    tokens = estimate_tokens(waiting_commit_sizes(root, **limits), **limits)
+    tokens = estimate_tokens(
+        waiting_commit_sizes(root, **limits), **limits, profile=model_profile(model)
+    )
     return render_estimate(
         tokens,
         provider=provider,
@@ -542,10 +635,12 @@ def compact_estimate(body: dict, missing_key: str | None) -> dict:
 
 
 __all__ = [
+    "BASELINE_PROFILE",
     "CHARS_PER_FILE",
     "CHARS_PER_LINE",
     "CHARS_PER_TOKEN",
     "DESCRIBE_OVERHEAD_TOKENS",
+    "MODEL_PROFILES",
     "ORG_PRICES_LABEL",
     "OUTPUT_TOKENS_BASE",
     "OUTPUT_TOKENS_PER_1K_CHARS",
@@ -556,11 +651,14 @@ __all__ = [
     "SYNTHESIS_OUTPUT_TOKENS",
     "SYNTHESIS_OVERHEAD_TOKENS",
     "CommitSize",
+    "ModelProfile",
     "TokenEstimate",
     "compact_estimate",
     "estimate_tokens",
+    "model_profile",
     "purpose_estimate",
     "render_estimate",
     "scan_estimate",
     "waiting_commit_sizes",
+    "waiting_commits",
 ]

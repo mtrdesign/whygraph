@@ -59,10 +59,12 @@ from whygraph.portal import db as portal_db
 from whygraph.portal import estimate as estimate_mod
 from whygraph.portal.app import PortalServer, create_portal_app
 from whygraph.portal.estimate import (
+    BASELINE_PROFILE,
     CHARS_PER_FILE,
     CHARS_PER_LINE,
     CHARS_PER_TOKEN,
     DESCRIBE_OVERHEAD_TOKENS,
+    MODEL_PROFILES,
     OUTPUT_TOKENS_BASE,
     OUTPUT_TOKENS_PER_1K_CHARS,
     RANGE_FACTOR,
@@ -71,6 +73,7 @@ from whygraph.portal.estimate import (
     SYNTHESIS_OVERHEAD_TOKENS,
     CommitSize,
     estimate_tokens,
+    model_profile,
     render_estimate,
     waiting_commit_sizes,
 )
@@ -546,8 +549,8 @@ def test_estimate_arithmetic() -> None:
     # Pin the constants too, so a silent change shows up here (and in
     # test_estimate_contains_a_measured_run, which they were calibrated on).
     assert (CHARS_PER_FILE, CHARS_PER_LINE, CHARS_PER_TOKEN) == (900, 40, 2.31)
-    assert (DESCRIBE_OVERHEAD_TOKENS, SYNTHESIS_OVERHEAD_TOKENS) == (270, 150)
-    assert (OUTPUT_TOKENS_BASE, OUTPUT_TOKENS_PER_1K_CHARS) == (600, 23.4)
+    assert (DESCRIBE_OVERHEAD_TOKENS, SYNTHESIS_OVERHEAD_TOKENS) == (500, 150)
+    assert (OUTPUT_TOKENS_BASE, OUTPUT_TOKENS_PER_1K_CHARS) == (400, 23.4)
     assert (SYNTHESIS_OUTPUT_TOKENS, SYNTHESIS_OUTPUT_PER_CHUNK) == (500, 840)
     chunk = 900 + 800 * 40  # 32,900 chars: two never fit in one 50,000 chunk
     calls = [
@@ -559,19 +562,31 @@ def test_estimate_arithmetic() -> None:
     synthesis = (150 + 3 * _describe_call(chunk)[1], 500 + 3 * 840)
     expected_in = sum(c[0] for c in calls) + synthesis[0]
     expected_out = sum(c[1] for c in calls) + synthesis[1]
-    assert result.input_tokens == round(expected_in) == 72_027
-    assert result.output_tokens == round(expected_out) == 10_196
+    assert result.input_tokens == round(expected_in) == 72_807
+    assert result.output_tokens == round(expected_out) == 8_996
 
     priced = render_estimate(result, provider="anthropic", model="claude-opus-4-7")
-    usd = (72_027 * 5.0 + 10_196 * 25.0) / 1_000_000
+    usd = (72_807 * 5.0 + 8_996 * 25.0) / 1_000_000
     assert priced["cost"]["usd"] == round(usd, 4)
     assert priced["cost"]["low"] == round(usd * 0.5, 4)
     assert priced["cost"]["high"] == round(usd * 1.5, 4)
     assert priced["cost"]["prices_as_of"] == BUNDLED_AS_OF
-    assert priced["tokens"]["input_range"] == {"low": 36013.5, "high": 108040.5}
+    assert priced["tokens"]["input_range"] == {"low": 36403.5, "high": 109210.5}
     assert priced["upper_bound"] is True
     unpriced = render_estimate(result, provider="ollama", model="llama3")
-    assert unpriced["cost"] is None and unpriced["tokens"]["input"] == 72_027
+    assert unpriced["cost"] is None and unpriced["tokens"]["input"] == 72_807
+
+    # A measured model scales the same calls by its profile.
+    haiku = estimate_tokens(
+        sizes,
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile("claude-haiku-4-5"),
+    )
+    assert haiku.calls == result.calls
+    # Synthesis reads the chunks' (scaled) output, so input is not just 0.78x.
+    assert haiku.input_tokens == 55_175
+    assert haiku.output_tokens == round(0.32 * expected_out) == 2_879
 
 
 def test_estimate_packs_files_like_the_splitter() -> None:
@@ -608,13 +623,60 @@ def test_estimate_contains_a_measured_run() -> None:
     low, high = estimated * (1 - RANGE_FACTOR), estimated * (1 + RANGE_FACTOR)
     for measured in (run["measured"], run["measured_without_large_merges"]):
         assert low <= usd(measured["input_tokens"], measured["output_tokens"]) <= high
-    # Tighter than the displayed range: the constants were fitted on this
-    # run, so the estimate must stay within 5 % of every measured total.
+    # Tighter than the displayed range: the constants were fitted on this run
+    # and a Biome sample, so cost, input and calls stay within 5 %. Output
+    # alone differs by repository (-13 % here, +14 % on Biome).
     like = run["measured_without_large_merges"]
-    for key in ("input_tokens", "output_tokens", "calls"):
-        assert abs(getattr(result, key) / like[key] - 1) < 0.05, key
+    for key, tolerance in (("input_tokens", 0.05), ("calls", 0.05)):
+        assert abs(getattr(result, key) / like[key] - 1) < tolerance, key
+    assert abs(result.output_tokens / like["output_tokens"] - 1) < 0.15
     measured = usd(like["input_tokens"], like["output_tokens"])
     assert abs(estimated / measured - 1) < 0.05
+
+
+@pytest.mark.parametrize(
+    ("model", "price"),
+    [
+        ("claude-sonnet-5-5", (2, 10)),
+        ("claude-haiku-4-5", (1, 5)),
+        ("claude-opus-4-7", (5, 25)),
+    ],
+)
+def test_estimate_matches_each_measured_model(model: str, price: tuple) -> None:
+    """Each profiled model's estimate is within 5 % of its measured Biome sample."""
+    sample = json.loads(
+        (
+            Path(__file__).parent / "fixtures" / "estimate_calibration_biome.json"
+        ).read_text()
+    )
+    commits = [c for c in sample["commits"] if model in c["calls"]]
+    result = estimate_tokens(
+        [CommitSize(c["files_changed"], tuple(c["file_lines"])) for c in commits],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile(model),
+    )
+    calls = [call for c in commits for call in c["calls"][model]]
+    measured_in = sum(call[0] for call in calls)
+    measured_out = sum(call[1] for call in calls)
+
+    def usd(input_tokens: float, output_tokens: float) -> float:
+        return (input_tokens * price[0] + output_tokens * price[1]) / 1e6
+
+    assert abs(result.calls / len(calls) - 1) < 0.1
+    assert abs(result.input_tokens / measured_in - 1) < 0.05
+    estimated = usd(result.input_tokens, result.output_tokens)
+    assert abs(estimated / usd(measured_in, measured_out) - 1) < 0.05
+
+
+def test_model_profile_lookup() -> None:
+    assert model_profile("claude-haiku-4-5") == MODEL_PROFILES["claude-haiku-4-5"]
+    # OpenRouter writes the vendor in front of the same model id.
+    assert (
+        model_profile("anthropic/claude-opus-4-7") == MODEL_PROFILES["claude-opus-4-7"]
+    )
+    assert model_profile("gpt-4o") is BASELINE_PROFILE  # not measured yet
+    assert model_profile(None) is BASELINE_PROFILE
 
 
 # ---------------------------------------------------------------------------
@@ -1684,6 +1746,7 @@ def test_scan_estimate_endpoint(portal: TestClient, env: SimpleNamespace) -> Non
         + [CommitSize(1, (3,))],
         max_diff_chars=50_000,
         large_commit_file_count=30,
+        profile=model_profile(body["model"]["model"]),
     )
     assert body["tokens"]["input"] == expected.input_tokens
     assert body["tokens"]["output"] == expected.output_tokens

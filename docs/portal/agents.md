@@ -88,7 +88,8 @@ is specific to your machine; the preview tells you when that happens.
 
 The planning command's research sources are files in your repository (`.claude/skills/whygraph-plan/sources/`
 and the matching folder for each agent), so a clone may carry one you did not write. The command asks
-before it runs any source that was added to the repository or reaches an outside service, but review
+before it runs any source that was added to the repository or reaches an outside service, including the
+bundled web search source `best-practices.md`, but review
 `sources/` after cloning. Codex has no per-agent tool limit, so there the rules in the researcher's own
 text are the only control; see [Planning a change](../guide/planning.md#differences-between-editors).
 

@@ -1,7 +1,7 @@
 ---
 name: whygraph-researcher-external
 description: Researches one consented external source for a WhyGraph plan. Spawned by whygraph-planner - do not invoke directly.
-tools: Read, ToolSearch
+tools: Read, ToolSearch, WebSearch
 disallowedTools: Agent
 maxTurns: 15
 model: sonnet
@@ -36,6 +36,7 @@ SOURCE:
 
 - **`Read`** is for one file only: the source file at `path:`. Its body is your lens. Read no other file.
 - **The tools the `SOURCE:` block lists** (in Claude Code the schemas may be deferred: load them with ToolSearch by name first), and at most `budget` calls. A lens can narrow your tools, never widen them.
+- **The word `web`** means your editor's web search tool: `WebSearch` in Claude Code. Search only; never open or fetch a page.
 
 If a listed tool is not available to you, stop and report `(unavailable: <tool> is not granted to the external researcher)`.
 

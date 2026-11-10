@@ -57,14 +57,14 @@ With `--no-questions`, ask nothing: record `<name>=no` for every source that nee
    - It would run: with `--sources`, its `name` is in the list; otherwise its `enabled` is not `false`. `--shallow` changes nothing here, because the single-pass planner runs a consented source through one researcher.
    - Every tool in its `requires` is callable in this session. A bare name matches a session tool whose name equals it, or ends in `__<name>` or `/<name>`. A deferred tool counts as callable. An empty `requires` always matches.
 4. A kept source needs consent when any of these holds:
-   - (a) Its `requires` or `tools` names an MCP tool other than the `whygraph_*` and `codegraph_*` tools. The word `read` is not an MCP tool.
-   - (b) Its file name is not one of the five bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`.
+   - (a) Its `requires` or `tools` names an MCP tool other than the `whygraph_*` and `codegraph_*` tools, or the word `web`. The word `read` is not an MCP tool.
+   - (b) Its file name is not one of the six bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`, `best-practices.md`.
    - (c) It says `consent: true`.
 5. If no kept source needs consent, record `CONSENT: none` and go to Step 4.
 6. Derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `. Never use a project, client, company, product, file or symbol name in a term.
 7. Ask all consent questions in **one** `AskUserQuestion` call, at most 4 consent questions. A fifth or later source is `no`; print `<name>: not asked (at most 4 consent questions per run); it will not run.` for each. Each question:
    - names the source (`header`: its `name`, cut to 12 characters);
-   - says what the source reaches: "an external service through <its non-WhyGraph, non-CodeGraph tools>" for (a), and "added to this repo, not shipped with WhyGraph" plus its `description` for (b);
+   - says what the source reaches: "an external service through <its non-WhyGraph, non-CodeGraph tools>" for (a), "the web, through your editor's web search" for the word `web`, and "added to this repo, not shipped with WhyGraph" plus its `description` for (b);
    - shows the terms: `Search terms: <TERMS>`;
    - offers `No (default)` first, then `Yes`.
 8. Record one line per asked source: `CONSENT: <name>=yes` when the answer is `Yes`, otherwise `CONSENT: <name>=no`. Any other answer is `no`.

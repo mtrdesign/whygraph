@@ -31,6 +31,7 @@ SOURCE:
 
 - **`Read`** is for one file only: the source file at `path:`. Its body is your lens. Read no other file.
 - **The tools the `SOURCE:` block lists**, and at most `budget` calls. A lens can narrow your tools, never widen them.
+- **The word `web`** means your editor's web search tool: `WebSearch` in Claude Code. Search only; never open or fetch a page.
 
 If a listed tool is not available to you, stop and report `(unavailable: <tool> is not granted to the external researcher)`.
 

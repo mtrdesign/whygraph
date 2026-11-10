@@ -32,6 +32,7 @@ from checks import (
     implementor_model,
     listener_got_no_bytes,
     external_reaches_synthesizer,
+    outside_evidence_stays_in_prior_art,
     no_edit,
     no_implementor,
     plan_log_contains,
@@ -51,6 +52,7 @@ from checks import (
     verdict_is_only,
     verdicts_per_run,
     verify_record,
+    web_search_only_in_external,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -463,6 +465,35 @@ CASES: tuple[Case, ...] = (
                 transcript_exists("whygraph-synthesizer"),
                 resolved_decisions_has("eval-p2", "Nothing here yet"),
             )
+        ),
+    ),
+    Case(
+        id="P8",
+        name="web best practices",
+        prompts=(
+            planner_prompt(
+                f"TASK: {EMPTY_STATE_TASK}\n"
+                "MODE: deep\n"
+                "SPLIT: no\n"
+                f"SOURCES_DIR: {SOURCES}\n"
+                f"SPINE_PATH: {SPINE}\n"
+                "SOURCES: repo-tests,best-practices\n"
+                "CONSENT: best-practices=yes\n"
+                "TERMS: empty state design\n"
+                "PARENT: none\n"
+                "OUT_PATH: {dir}/.whygraph/plans/eval-p8.md\n"
+                f"CAPTURE_PATH: {CAPTURE}\n"
+                "PLAN_TOOL: sh .claude/skills/whygraph-plan/plan-tool.sh\n"
+                "REFRESH_PROFILE: no"
+            ),
+        ),
+        budget=3.5,
+        estimate=2.0,
+        checks=(
+            agent_dispatched("whygraph-researcher-external", "best-practices"),
+            external_reaches_synthesizer("eval-p8", "best-practices"),
+            web_search_only_in_external(),
+            outside_evidence_stays_in_prior_art("eval-p8"),
         ),
     ),
     Case(

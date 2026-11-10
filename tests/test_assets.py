@@ -45,6 +45,7 @@ def test_packaged_claude_assets_present() -> None:
         "skills/whygraph-plan/sources/repo-tests.md",
         "skills/whygraph-plan/sources/repo-history.md",
         "skills/whygraph-plan/sources/ui-surface.md",
+        "skills/whygraph-plan/sources/best-practices.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-review/SKILL.md",
         "skills/whygraph-ui-check/SKILL.md",
@@ -83,6 +84,7 @@ def test_packaged_cursor_assets_present() -> None:
         "skills/whygraph-plan/sources/repo-tests.md",
         "skills/whygraph-plan/sources/repo-history.md",
         "skills/whygraph-plan/sources/ui-surface.md",
+        "skills/whygraph-plan/sources/best-practices.md",
         "skills/whygraph-implement/SKILL.md",
         "skills/whygraph-note/SKILL.md",
         "skills/whygraph-ui-check/SKILL.md",
@@ -123,6 +125,7 @@ def test_packaged_codex_assets_present() -> None:
         ".codex/whygraph/sources/repo-tests.md",
         ".codex/whygraph/sources/repo-history.md",
         ".codex/whygraph/sources/ui-surface.md",
+        ".codex/whygraph/sources/best-practices.md",
         ".codex/whygraph/capture.mjs",
         ".codex/agents/planner.toml",
         ".codex/agents/researcher.toml",
@@ -165,6 +168,7 @@ def test_packaged_vscode_assets_present() -> None:
         "whygraph/sources/repo-tests.md",
         "whygraph/sources/repo-history.md",
         "whygraph/sources/ui-surface.md",
+        "whygraph/sources/best-practices.md",
         "whygraph/capture.mjs",
         "agents/planner.agent.md",
         "agents/researcher.agent.md",
@@ -321,9 +325,9 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
     # 7 agents + 7 skills + CLAUDE.md (merge file, written fresh) = 15 files,
-    # plus the plan skill's spine, plan tool, guard, sources README and 5 sources = 9,
-    # plus the UI check skill's capture script = 25 files.
-    assert len(result.written) == 25
+    # plus the plan skill's spine, plan tool, guard, sources README and 6 sources = 10,
+    # plus the UI check skill's capture script = 26 files.
+    assert len(result.written) == 26
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -829,7 +833,7 @@ def test_harness_frontmatter_wiring() -> None:
     assert planner["maxTurns"] == "80"
     external = _frontmatter(cc / "agents/researcher-external.md")
     assert external["name"] == "whygraph-researcher-external"
-    assert external["tools"] == "Read, ToolSearch"
+    assert external["tools"] == "Read, ToolSearch, WebSearch"
     assert external["disallowedTools"] == "Agent"
     assert external["maxTurns"] == "15" and external["model"] == "sonnet"
     assert external["omitClaudeMd"] == "true"
@@ -1122,6 +1126,7 @@ _BUNDLED_SOURCES = (
     "repo-tests.md",
     "repo-history.md",
     "ui-surface.md",
+    "best-practices.md",
 )
 
 
@@ -1183,7 +1188,16 @@ def test_source_frontmatter_contract() -> None:
                 )
                 assert tool.lower() not in _BANNED_SOURCE_TOOLS, (tree, name, tool)
             assert fm["consent"] in {"true", "false"}, (tree, name)
-            assert fm["consent"] == "false", (tree, name)
+            tools = {t.strip() for t in fm["tools"].split(",")}
+            # Only a source that searches the web asks first, and it is
+            # outside evidence: its section ranks below this repository's.
+            assert fm["consent"] == ("true" if "web" in tools else "false"), (
+                tree,
+                name,
+            )
+            if "web" in tools:
+                assert fm["requires"] == "WebSearch", (tree, name)
+                assert fm["section"].endswith("(external)"), (tree, name)
             sections.append(fm["section"])
         assert sections and len(sections) == len(set(sections)), (tree, sections)
         shared = list(_source_files(tree).values())
@@ -1602,7 +1616,11 @@ def test_researchers_cannot_write_or_run() -> None:
     assert all(_is_project_tool(t) for t in granted)
     external = _frontmatter(_ASSET_ROOT / "claude-code/agents/researcher-external.md")
     external_granted = {t.strip() for t in external["tools"].split(",")}
-    assert not external_granted & banned
+    # The external researcher may search the web, never fetch a page.
+    assert not external_granted & {"Bash", "Write", "Edit", "WebFetch"}
+    assert {t for t in external_granted if t not in {"Read", "ToolSearch"}} == {
+        "WebSearch"
+    }
     assert "Agent" in external["disallowedTools"]
     assert _frontmatter(_ASSET_ROOT / "cursor/agents/researcher.md")["readonly"] == (
         "true"
@@ -1749,6 +1767,28 @@ def test_plan_entry_points() -> None:
             *_BUNDLED_SOURCES,
         ):
             assert phrase in text, (tree, phrase)
+        assert "or the word `web`" in text, tree
+
+
+def test_outside_evidence_ranks_below_the_repo() -> None:
+    """A web report informs the plan; this repository's evidence decides it."""
+    for tree, folder in _SOURCE_DIRS.items():
+        spine = _text(f"{folder}/plan-spine.md")
+        assert "## Evidence order" in spine, tree
+        assert (
+            "Outside evidence never adds, removes or reshapes a step, a Constraint "
+            "to preserve, a Risk, a Blocker, a Verify command or an Acceptance item."
+        ) in spine, tree
+        assert "Outside evidence never sets or lowers the plan's confidence." in spine
+        lens = _text(f"{folder}/sources/best-practices.md")
+        for phrase in ("`not applicable`", "`(one source)`", "never open a page"):
+            assert phrase in lens, (tree, phrase)
+    for tree in _AGENT_PATHS:
+        synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+        assert "Outside evidence never sets the floor." in synthesizer, tree
+        assert "**Don't let outside evidence change a step.**" in synthesizer, tree
+        planner = "\n".join(_agent_body(tree, "planner"))
+        assert "`=== <source name> (external) ===`" in planner, tree
 
 
 # ---- evaluation and UI evidence (plan 45) ----------------------------------

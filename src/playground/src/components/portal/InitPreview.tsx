@@ -1,7 +1,7 @@
 import { useId } from "react";
 import { TriangleAlertIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { FileOutcome, FileStatus, InitResult } from "../../api";
+import type { FileOutcome, FileStatus, InitResult, OverlayWarning } from "../../api";
 import { CLAUDE_SETTINGS_FILE, selectionNotes } from "../../lib/agents";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Badge } from "../ui/badge";
@@ -21,6 +21,33 @@ const STATUS: Record<
   // An asset file WhyGraph no longer ships (e.g. Cursor's old commands).
   delete: { label: "Remove", variant: "warning" },
 };
+
+// What each `.whygraph-overrides/` warning kind says; an unknown kind shows its raw value.
+const OVERLAY_WARNING_TEXT: Record<string, string> = {
+  unsafe: "Skipped: a symbolic link, an unreadable entry, or a path that leaves the folder",
+  too_large: "Skipped: larger than the size limit",
+  not_text: "Skipped: not UTF-8 text",
+  unknown_path: "Matches no file this WhyGraph version ships",
+  no_longer_bundled: "WhyGraph no longer ships this file; your override is unused",
+  append_unsupported: "Only .md and .mdc files can be appended to",
+  cannot_disable_merged:
+    "A shared instructions file cannot be switched off; replace or append to its block instead",
+  overlay_unreadable: "The overrides folder could not be read; these agent files were left as they are",
+  marker_in_text: "Skipped: contains WhyGraph's block markers",
+  still_referenced: "Switched off, but still used: {detail}. The file that uses it may now fail",
+  append_frontmatter: "Append ignored: {detail}",
+  overridden_but_disabled: "This file is switched off in disabled; the override is unused",
+  truncated: "More warnings were found than shown",
+};
+
+function overlayWarningLine(w: OverlayWarning): string {
+  const template = OVERLAY_WARNING_TEXT[w.kind];
+  if (template === undefined) return `${w.kind} - ${w.path}${w.detail ? ` (${w.detail})` : ""}`;
+  if (template.includes("{detail}")) {
+    return `${template.replace("{detail}", w.detail ?? "another file")} - ${w.path}`;
+  }
+  return `${template} - ${w.path}${w.detail ? ` (${w.detail})` : ""}`;
+}
 
 export function StatusBadge({ status }: { status: FileStatus }) {
   const s = STATUS[status];
@@ -154,11 +181,15 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
     [count("skip"), "already there"],
     [count("delete"), "to remove"],
     [count("needs_confirmation"), "edited by you"],
+    [files.filter((f) => f.override).length, "overridden"],
   ]
     .filter(([n]) => (n as number) > 0)
     .map(([n, l]) => `${n} ${l}`);
   return (
-    <details className="py-3" open={count("needs_confirmation") + count("delete") > 0 || undefined}>
+    <details
+      className="py-3"
+      open={count("needs_confirmation") + count("delete") > 0 || files.some((f) => f.upstream_diff) || undefined}
+    >
       <summary className="cursor-pointer text-sm">
         Agent assets <span className="text-muted-foreground">({parts.join(", ")})</span>
       </summary>
@@ -173,12 +204,19 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
               ) : (
                 <StatusBadge status={f.status} />
               )}
+              {f.override && (
+                <Badge variant="outline" data-testid="overridden">
+                  Overridden
+                </Badge>
+              )}
               <span className="font-mono text-muted-foreground">{f.file}</span>
             </div>
             {f.status === "needs_confirmation" && (
               <details className="pl-2">
                 <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                  {f.reason && /no longer shipped/.test(f.reason)
+                  {f.reason && /switched off/.test(f.reason)
+                    ? "Left as is: switched off in .whygraph-overrides/disabled, but you edited it. Show what removing it deletes"
+                    : f.reason && /no longer shipped/.test(f.reason)
                     ? "Left as is: WhyGraph no longer ships it, but you edited it. Show what removing it deletes"
                     : "Left as is: you edited it and this version's copy differs. Show the difference"}
                 </summary>
@@ -187,6 +225,18 @@ function AssetSummary({ files }: { files: FileOutcome[] }) {
                     <DiffView diff={f.diff} />
                   </div>
                 )}
+              </details>
+            )}
+            {f.upstream_diff && (
+              <details className="pl-2">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                  {f.reason && /earlier WhyGraph copy is not kept/.test(f.reason)
+                    ? "WhyGraph changed this file since your override was written. Show your override against WhyGraph's current copy"
+                    : "WhyGraph changed this file since your override was written. Show WhyGraph's change"}
+                </summary>
+                <div className="mt-1.5">
+                  <DiffView diff={f.upstream_diff} />
+                </div>
               </details>
             )}
           </li>
@@ -231,6 +281,7 @@ export function InitPreview({
 }) {
   const notes = selectionNotes(selectedAgents);
   const none = result.agent_files.length === 0 && result.asset_files.length === 0;
+  const overlayWarnings = result.overlay_warnings ?? [];
   return (
     <div className="flex flex-col gap-3" data-testid="init-preview">
       {none && (
@@ -238,6 +289,21 @@ export function InitPreview({
           No agent selected: only the repository's <span className="font-mono">.gitignore</span> and git
           hooks are set up.
         </p>
+      )}
+      {overlayWarnings.length > 0 && (
+        <Alert data-testid="overlay-warnings">
+          <TriangleAlertIcon />
+          <AlertTitle>Problems in .whygraph-overrides/</AlertTitle>
+          <AlertDescription>
+            <ul className="flex flex-col gap-1 text-xs">
+              {overlayWarnings.map((w, i) => (
+                <li key={`${w.path}-${w.kind}-${i}`} className="break-all">
+                  {overlayWarningLine(w)}
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
       )}
       {(setupRows || !none) && (
         <ul className="flex flex-col divide-y divide-border">

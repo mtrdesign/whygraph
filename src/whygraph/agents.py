@@ -365,6 +365,13 @@ class FileOutcome:
         entries that run ``whygraph-agent-hook`` but are not the exact
         canonical ones, left byte-identical (never their command).
         ``None`` when there are none.
+    override : {"replace", "append", "replace+append"} or None
+        For a bundled asset: how ``.whygraph-overrides/`` changes the
+        installed text. ``None`` when the file has no override.
+    upstream_diff : str or None
+        For a bundled asset whose WhyGraph copy changed since its override
+        was written: a unified diff of what WhyGraph changed (or, when the
+        earlier copy is not kept, the override against the current copy).
     """
 
     file: str
@@ -375,6 +382,8 @@ class FileOutcome:
     diff: str | None = None
     foreign_codegraph: str | None = None
     foreign_hooks: str | None = None
+    override: str | None = None
+    upstream_diff: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

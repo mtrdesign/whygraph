@@ -717,6 +717,31 @@ export interface FileOutcome {
   diff: string | null;
   // `.claude/settings.json`: hook entries that run the WhyGraph helper but are not its own.
   foreign_hooks?: string | null;
+  // Asset files: a team override in `.whygraph-overrides/`, and WhyGraph's change since it was written.
+  override?: "replace" | "append" | "replace+append" | null;
+  upstream_diff?: string | null;
+}
+
+export type OverlayWarningKind =
+  | "unsafe"
+  | "too_large"
+  | "not_text"
+  | "unknown_path"
+  | "no_longer_bundled"
+  | "append_unsupported"
+  | "cannot_disable_merged"
+  | "overlay_unreadable"
+  | "marker_in_text"
+  | "still_referenced"
+  | "append_frontmatter"
+  | "overridden_but_disabled"
+  | "truncated"
+  | (string & {});
+
+export interface OverlayWarning {
+  path: string;
+  kind: OverlayWarningKind;
+  detail?: string;
 }
 
 export interface InitBody {
@@ -727,6 +752,8 @@ export interface InitBody {
   agent_actions?: Record<string, "migrate" | "remove">;
   // Files whose foreign `codegraph` entry becomes the portal's.
   replace_codegraph?: string[];
+  // Sent only with "Update agent files": accept WhyGraph's change behind a team override.
+  acknowledge_upstream?: boolean;
 }
 
 export interface InitResult {
@@ -743,6 +770,8 @@ export interface InitResult {
   // Non-blocking: a `codegraph` entry that is not the portal's (left as it was).
   foreign_codegraph?: { file: string; description: string }[];
   codegraph_hooks?: string[];
+  // Non-blocking problems in `.whygraph-overrides/` (absent from older responses).
+  overlay_warnings?: OverlayWarning[];
   initialized: boolean;
   custom_db_paths: CustomDbPath[];
   // A linked project's leftover `.whygraph/whygraph.db`, which is never opened.

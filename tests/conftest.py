@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import shutil
 import sqlite3
@@ -86,6 +87,28 @@ def _reset_process_globals() -> Iterator[None]:
     set_strict(False)
     db_engine._reset_engine()
     portal_db._reset_engine()
+
+
+@pytest.fixture(autouse=True)
+def _restore_whygraph_logger() -> Iterator[None]:
+    """Put the ``whygraph`` logger back the way the test found it.
+
+    A test that runs the CLI calls ``configure_logging()``, which attaches a
+    Rich handler, sets ``propagate = False`` and marks the module configured
+    for the rest of the process. A later test in the same worker then sees
+    no records in ``caplog`` and pays for Rich tracebacks, so it passes or
+    fails depending on how the tests were split across workers.
+    """
+    root = logging.getLogger(core.logger._ROOT_NAME)
+    handlers, propagate, level = list(root.handlers), root.propagate, root.level
+    flags = (core.logger._configured, core.logger._file_configured)
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    root.propagate, root.level = propagate, level
+    core.logger._configured, core.logger._file_configured = flags
 
 
 @pytest.fixture(autouse=True)

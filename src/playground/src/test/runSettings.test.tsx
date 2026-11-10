@@ -1029,6 +1029,18 @@ describe("Project settings (screen 10)", () => {
     await waitFor(() => expect(calls("POST", "/api/projects/alpha/init").some((c) => !c.body?.dry_run)).toBe(true));
     const applied = calls("POST", "/api/projects/alpha/init").find((c) => !c.body?.dry_run)!;
     expect(applied.body?.force).toBeUndefined();
+    expect(applied.body?.acknowledge_upstream).toBe(true);
+  });
+
+  it("a Save without Update agent files sends no acknowledge_upstream", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    const agents = await screen.findByRole("group", { name: "Agents" });
+    await user.click(within(agents).getByRole("checkbox", { name: /Cursor/ }));
+    await user.click(within(screen.getByRole("region", { name: "Agents" })).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/init").some((c) => !c.body?.dry_run)).toBe(true));
+    const applied = calls("POST", "/api/projects/alpha/init").find((c) => !c.body?.dry_run)!;
+    expect(applied.body).not.toHaveProperty("acknowledge_upstream");
   });
 
   it("Update agent files previews the files WhyGraph no longer ships as Remove", async () => {

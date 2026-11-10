@@ -130,7 +130,7 @@ Six sources ship with WhyGraph:
 | `ui-surface.md` | The UI's stack, how to start it, its routes and the states a UI task should specify (UI tasks only) | Your repository's files and CodeGraph |
 | `best-practices.md` | Current outside guidance on the task's design choice, ranked below your repository's evidence ([details](#best-practices-from-the-web)) | The web, through Claude Code's web search, after you say yes |
 
-Your own files survive an update of the agent files. Delete a file to remove its source.
+Your own files survive an update of the agent files. Delete a file you added to remove its source; to switch off a bundled one, list it in `.whygraph-overrides/disabled` (see [Overriding the bundled files](../portal/agents.md#agent-files-overrides)).
 
 ### Adding a source
 
@@ -256,12 +256,15 @@ MCP server:
 
 | Editor | Agent file | What to change |
 |---|---|---|
-| Claude Code | `.claude/agents/researcher-external.md` | Add the server to its `tools:` line: `tools: Read, ToolSearch, WebSearch, mcp__docs__*`. The part between `mcp__` and `__*` is the name you gave the server in step 1. |
+| Claude Code | `.claude/agents/researcher-external.md` | Create `.whygraph-overrides/claude-code/agents/researcher-external.append.md` whose whole content is `---`, `tools: mcp__docs__*`, `---` on three lines. The part between `mcp__` and `__*` is the name you gave the server in step 1. |
 | Cursor | `.cursor/agents/researcher-external.md` | Nothing. The file has no tool list, and `readonly: true` keeps it from writing. |
 | Codex | `.codex/agents/researcher-external.toml` | Nothing. Codex has no per-agent tool list, so the researcher's written rules are the only control (see [Differences between editors](#differences-between-editors)). |
 | VS Code | none | Not supported. VS Code has no external researcher, so such a source does not run there. |
 
-The next **Update agent files** lists an agent file you edited as edited and leaves it alone, as it does
+The next **Update agent files** installs the agent file with your tool added to WhyGraph's own list
+(`WebSearch` stays), and keeps following WhyGraph's later changes to it; see
+[Overriding the bundled files](../portal/agents.md#agent-files-overrides). Editing the installed agent file
+by hand still works, but **Update agent files** then lists it as edited and leaves it alone, as it does
 for any file you changed. If the grant does not match the server's name, `requires` still matches, so
 the source runs, but its report says `(unavailable: search_docs is not granted to the external
 researcher)`.
@@ -304,14 +307,17 @@ official documentation, standards and maintainers' posts, and marks a claim with
 - **Claude Code only.** The source says `requires: WebSearch`, so Cursor, Codex and VS Code drop it
   without asking. It is also dropped where Claude Code has no web search, for example on a provider
   without it or when an administrator turned it off.
-- **An agent file you edited keeps your version.** If you added a server to
-  `.claude/agents/researcher-external.md`, **Update agent files** shows the new `tools:` line as a diff
+- **An agent file you edited keeps your version.** An append in `.whygraph-overrides/` keeps WhyGraph's `WebSearch` and still gets
+  updates, unlike an in-place edit. If you added a server to
+  `.claude/agents/researcher-external.md` by hand, **Update agent files** shows the new `tools:` line as a diff
   and leaves your file alone. Add `WebSearch` to your line by hand, or the source reports
   `(unavailable: web is not granted to the external researcher)`.
 
-To stop the question in a repository, set `enabled: false` in its `best-practices.md`. **Update agent
-files** keeps that edit, while a deleted bundled file comes back with the next update. With
-`enabled: false`, `--sources` still turns it on for one run.
+To stop the question in a repository, you have two options, and they are not the same. List the file in
+`.whygraph-overrides/disabled` to remove it: it is no longer installed and `--sources` cannot reach it.
+Or replace it through the overrides folder (or edit it in place) with `enabled: false`: **Update agent
+files** keeps that, and `--sources` still turns it on for one run. A deleted bundled file comes back
+with the next update. See [Overriding the bundled files](../portal/agents.md#agent-files-overrides).
 
 ## Splitting: `tasks.json`
 
@@ -498,8 +504,9 @@ and has no terminal. In Cursor the plan is run from a skill, and the review gate
     of read-only tools by the editor itself. In Codex the researcher's written rules are the only
     control. A hostile source file could ask a Codex researcher to run a shell command, and a Codex
     researcher can reach any MCP server you configured. The consent question still protects you from a repo-added source, but
-    it cannot stop a bundled file that someone edited. Review `sources/` after a clone, and review
-    changes to it in a pull request.
+    it cannot stop a bundled file that someone edited. Review `sources/` and `.whygraph-overrides/` after a clone, and review
+    changes to them in a pull request. A replaced bundled source keeps its bundled name, so it keeps the
+    trust that name has.
 
 Next: [wiring your editor](editors.md), how an agent [calls the tools](mcp-usage.md), and the
 [project notes](notes.md) the planner reads.

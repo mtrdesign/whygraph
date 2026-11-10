@@ -1218,6 +1218,126 @@ def test_retired_asset_path_goes_through_check_inside(
     assert (outside / "rationale.md").read_text() == "NOT YOURS"
 
 
+@pytest.mark.parametrize("link", ["", "claude", "claude/agents"])
+def test_contained_refuses_symlinked_asset_bases(
+    repo: Path, tmp_path: Path, link: str
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    override = repo / ".whygraph-overrides" / "claude-code" / "agents" / "planner.md"
+    override.parent.mkdir(parents=True)
+    override.write_text("TEAM PLANNER\n")
+    bases = repo / assets.ASSET_BASES_RELPATH
+    at = bases.joinpath(*link.split("/")) if link else bases
+    at.parent.mkdir(parents=True, exist_ok=True)
+    at.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UnsafePathError):
+        _init(repo, contained=True)
+
+    assert list(outside.iterdir()) == []
+    assert not (repo / assets.MANIFEST_RELPATH).exists()
+    assert not (repo / ".claude").exists()
+    assert not (repo / ".mcp.json").exists()
+    assert not (repo / ".gitignore").exists()
+
+
+def _team_planner(repo: Path, text: str = "TEAM PLANNER\n") -> None:
+    override = repo / ".whygraph-overrides" / "claude-code" / "agents" / "planner.md"
+    override.parent.mkdir(parents=True, exist_ok=True)
+    override.write_text(text)
+
+
+def test_outcomes_carry_the_override_and_the_switched_off_reasons(
+    repo: Path,
+) -> None:
+    _init(repo)
+    _team_planner(repo)
+    disabled = repo / ".whygraph-overrides" / "disabled"
+    disabled.write_text(
+        "claude-code/skills/whygraph-plan/sources/best-practices.md\n"
+        "claude-code/agents/whygraph-reviewer.md\n"
+    )
+    edited = repo / ".claude" / "agents" / "whygraph-reviewer.md"
+    edited.write_text(edited.read_text() + "\nmine\n")
+
+    result = _init(repo)
+
+    by = {f.file: f for f in result.asset_files}
+    planner = by[".claude/agents/planner.md"]
+    assert planner.override == "replace" and planner.upstream_diff is None
+    gone = by[".claude/skills/whygraph-plan/sources/best-practices.md"]
+    assert gone.status == "delete"
+    assert gone.reason == "switched off in .whygraph-overrides/disabled"
+    held = by[".claude/agents/whygraph-reviewer.md"]
+    assert held.status == "needs_confirmation"
+    assert held.reason == (
+        "switched off in .whygraph-overrides/disabled, "
+        "and edited since it was installed"
+    )
+    assert by[".claude/agents/researcher.md"].override is None
+
+
+def test_a_behind_override_gets_the_upstream_reasons(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _team_planner(repo)
+    _init(repo)
+    monkeypatch.setattr(assets, "package_version", lambda: "9.9.9")
+    bundled = assets.packaged_assets_for(_target("claude"))
+    planner_src = next(p for p in bundled.rglob("planner.md"))
+    original = planner_src.read_text()
+    try:
+        planner_src.write_text(original + "\nNEW UPSTREAM LINE\n")
+        result = _init(repo, dry_run=True)
+    finally:
+        planner_src.write_text(original)
+
+    row = next(f for f in result.asset_files if f.file == ".claude/agents/planner.md")
+    assert row.override == "replace"
+    assert row.upstream_diff and "NEW UPSTREAM LINE" in row.upstream_diff
+    assert row.reason == "WhyGraph changed this file since your override was written"
+
+
+def test_overlay_warnings_merge_across_agents_without_duplicates(repo: Path) -> None:
+    overlay = repo / ".whygraph-overrides"
+    overlay.mkdir()
+    (overlay / "disabled").write_text("../escape\n")
+    (overlay / "claude").mkdir()  # a misnamed top-level folder
+
+    result = _init(repo, agents=["claude", "cursor"])
+
+    items = [(w["path"], w["kind"]) for w in result.overlay_warnings]
+    assert len(items) == len(set(items)) and items
+    assert [(w["path"], w["kind"]) for w in result.overlay_warnings] == sorted(items)
+    assert any(k == "unknown_path" for _, k in items)
+    assert sum(1 for p, _ in items if p.endswith("disabled:1")) == 1
+    assert all(set(w) == {"path", "kind", "detail"} for w in result.overlay_warnings)
+    assert result.marker_written is True  # warnings never block the markers
+
+
+def test_overlay_warnings_are_capped_with_a_truncated_entry(repo: Path) -> None:
+    overlay = repo / ".whygraph-overrides"
+    overlay.mkdir()
+    for i in range(assets.OVERLAY_WARNINGS_MAX + 7):
+        (overlay / f"stray{i:03d}").mkdir()
+
+    result = _init(repo)
+
+    cap = assets.OVERLAY_WARNINGS_MAX
+    assert len(result.overlay_warnings) == cap + 1
+    assert result.overlay_warnings[-1] == {
+        "path": ".whygraph-overrides",
+        "kind": "truncated",
+        "detail": "7 more",
+    }
+    assert result.marker_written is True
+
+
+def test_no_overlay_means_no_warnings(repo: Path) -> None:
+    assert _init(repo).overlay_warnings == ()
+
+
 def test_removing_an_agent_leaves_retired_asset_files(
     repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

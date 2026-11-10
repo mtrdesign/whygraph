@@ -155,6 +155,7 @@ export function InitializeStep({
         agent_actions: agentActions,
         confirm_tracked: pending.filter((f) => confirmed.has(f)),
         ...(force && { force }),
+        ...(update && { acknowledge_upstream: true }),
         ...(replaceCodegraph.length > 0 && { replace_codegraph: replaceCodegraph }),
       }),
     onSuccess: (result) => {
@@ -322,7 +323,8 @@ export function InitializeStep({
                 <span className="block text-xs text-muted-foreground">
                   Bring the instruction files WhyGraph installed for the selected agents up to this
                   version. Files you have not edited update silently (or are removed, when WhyGraph no
-                  longer ships them); edited ones are listed below and left as they are.
+                  longer ships them); edited ones are listed below and left as they are. Files with an
+                  override in .whygraph-overrides/ get the override.
                 </span>
               </span>
             </label>
@@ -334,7 +336,7 @@ export function InitializeStep({
                   <span className="block text-xs text-muted-foreground">
                     {editedAssets.length > 0
                       ? `${editedAssets.length} file${editedAssets.length > 1 ? "s were" : " was"} edited since WhyGraph installed ${editedAssets.length > 1 ? "them" : "it"}.`
-                      : "Every installed file is replaced with this version's copy."}
+                      : "Every installed file is replaced with this version's copy, or with your team's override from .whygraph-overrides/."}
                   </span>
                 </span>
               </label>

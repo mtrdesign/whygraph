@@ -2336,6 +2336,50 @@ def test_init_waits_for_tracked_agent_files(
     assert set(servers) == {"other", "whygraph", "codegraph"}
 
 
+def test_init_preview_reports_overrides_and_overlay_warnings(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    root = make_repo(env.shared, "demo")
+    add_local(ready, root)
+    overlay = root / ".whygraph-overrides"
+    planner = overlay / "claude-code" / "agents" / "planner.md"
+    planner.parent.mkdir(parents=True)
+    planner.write_text("TEAM PLANNER\n")
+    (overlay / "claude").mkdir()
+
+    plan = init_project(ready, "demo", agents=["claude"], dry_run=True)
+    row = next(
+        f for f in plan["asset_files"] if f["file"].endswith("agents/planner.md")
+    )
+    assert row["override"] == "replace" and row["upstream_diff"] is None
+    assert plan["overlay_warnings"] == [
+        {"path": ".whygraph-overrides/claude", "kind": "unknown_path", "detail": ""}
+    ]
+
+    done = init_project(ready, "demo", agents=["claude"], acknowledge_upstream=True)
+    assert done["marker_written"] is True
+    assert (root / ".claude" / "agents" / "planner.md").read_text() == "TEAM PLANNER\n"
+
+
+def test_init_refuses_a_symlinked_asset_bases(
+    ready: TestClient, env: SimpleNamespace, tmp_path: Path
+) -> None:
+    root = make_repo(env.shared, "demo")
+    add_local(ready, root)
+    outside = tmp_path / "outside-bases"
+    outside.mkdir()
+    (root / ".whygraph").mkdir(exist_ok=True)
+    (root / ".whygraph" / "asset-bases").symlink_to(outside, target_is_directory=True)
+
+    response = ready.post("/api/projects/demo/init", json={"agents": ["claude"]})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "unsafe_path"
+    assert list(outside.iterdir()) == []
+    assert not (root / ".whygraph" / "assets.json").exists()
+    assert not (root / ".claude").exists()
+
+
 def test_init_reports_a_foreign_codegraph_and_replaces_it_only_when_asked(
     ready: TestClient, env: SimpleNamespace
 ) -> None:

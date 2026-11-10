@@ -2,7 +2,7 @@
 
 Each file in this folder is one source of knowledge for `/whygraph-plan`. The planner reads the frontmatter of every file here, keeps the sources whose tools exist, and starts one researcher per kept source. The researcher reads the file body and follows it.
 
-To add a source, write one file here. Delete a file to remove its source. Your own files survive an update of the agent files.
+To add a source, write one file here. Delete a file you added to remove its source; to switch off a bundled one, list it in `.whygraph-overrides/disabled`. To change a bundled source, put a replacement or an `.append.md` file in `.whygraph-overrides/` instead of editing it here. Your own files survive an update of the agent files.
 
 ## File format
 
@@ -57,4 +57,4 @@ WhyGraph bundles one such source, `best-practices.md`: it searches the web with 
 - `tools` lists only that server's tools.
 - The body gives the order of calls, the budget, the rule to stop early, and the rule to cite and paraphrase.
 
-The `whygraph-researcher-external` agent ships with web search and no outside MCP server. In Claude Code, add your server to the `tools:` line of that agent file by hand. The Cursor and Codex agent files have no tool list.
+The `whygraph-researcher-external` agent ships with web search and no outside MCP server. In Claude Code, grant your server with an append file in `.whygraph-overrides/claude-code/agents/researcher-external.append.md` whose frontmatter is `tools: mcp__<server>__*` (see the agent-file overrides docs). The Cursor and Codex agent files have no tool list.

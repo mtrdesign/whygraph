@@ -56,10 +56,14 @@ files** in the project's Settings (and re-initializing) uses it per file:
 | The file on disk | Result |
 |---|---|
 | Missing | Written |
-| Still the way WhyGraph wrote it | Updated silently to this version's copy |
-| You edited it, and this version's copy is the same as the one you started from | Left alone |
-| You edited it, and this version's copy changed | Left alone and listed as **Edited**, with the difference |
+| Still the way WhyGraph wrote it | Updated silently to this version's copy (or your override) |
+| You edited it, and this version's copy (or your override) is the same as the one you started from | Left alone |
+| You edited it, and this version's copy (or your override) changed | Left alone and listed as **Edited**, with the difference |
 | Installed before the manifest existed (a teammate's checkout, an older release) | Treated as edited |
+| An [override](#agent-files-overrides) exists for it | Installed from the override and listed **Overridden** |
+| Switched off in `.whygraph-overrides/disabled`, and not edited | Removed (listed as **Remove**) |
+| Switched off in `disabled`, and you edited it | Left alone and listed as **Edited**, with what removing it would delete |
+| Its override was removed | Back to WhyGraph's copy (a checkout without a manifest asks first) |
 | No longer shipped by WhyGraph, and still the way WhyGraph wrote it | Removed (listed as **Remove**), with its folder when that is left empty |
 | No longer shipped by WhyGraph, and you edited it | Left alone and listed as **Edited**, with what removing it would delete |
 
@@ -72,9 +76,161 @@ Settings shows `Agent files: v<installed> (current v<package>)` with an **Update
 recorded version is behind, and the project's Overview lists "Agent files are out of date" the same way.
 Removing an agent deletes only its MCP entry; the installed files and the manifest stay as they are.
 
+### Overriding the bundled files { #agent-files-overrides }
+
+Editing an installed copy works, but it is listed **Edited** after every release that touches the file,
+and a teammate's fresh clone lists every committed file as edited. To change, extend or switch off a
+bundled file for good, put the change in `.whygraph-overrides/` at the repository root instead. It is a
+normal committed folder, so the whole team gets the same files, and **Update agent files** installs
+them without asking. The portal reads it and never writes to it.
+
+```text
+.whygraph-overrides/
+  disabled                                          # optional: one path per line
+  claude-code/
+    skills/whygraph-plan/sources/repo-tests.md      # replaces that bundled file
+    agents/planner.append.md                        # appended to agents/planner.md
+    CLAUDE.md                                       # replaces the WhyGraph block in CLAUDE.md
+  vscode/
+    agents/planner.agent.append.md                  # appended to agents/planner.agent.md
+  codex/
+    .codex/agents/planner.toml                      # replaces that bundled file
+```
+
+Three operations, each a plain file:
+
+- **Replace.** A file at the same path as a bundled one. The installed file is your copy.
+- **Append.** `X.append.md` beside a bundled `X.md` (or `X.append.mdc` beside `X.mdc`). The installed file
+  is the bundled copy, a blank line, then your text, so it follows WhyGraph's own changes to the rest
+  of the file. Append only works on `.md` and `.mdc` files. The last suffix is the one that counts: the
+  VS Code file `agents/planner.agent.md` is appended to by `agents/planner.agent.append.md`.
+  An append goes on top of a replacement of the same file when both exist.
+  An append may also start with a small frontmatter that adds tools (below).
+- **Disable.** List a path in `.whygraph-overrides/disabled`, one per line (blank lines and `#` comments
+  are fine). The file is not installed, and an installed copy is removed by the usual rules for a file
+  WhyGraph no longer ships (below). A path ending in `/`, or naming a folder, switches off everything
+  under it; `claude-code` alone is the whole agent, except the shared instructions file, which cannot be
+  switched off.
+
+```text
+# <overlay folder>/<path inside the agent's bundled tree>
+claude-code/skills/whygraph-plan/sources/best-practices.md
+cursor/skills/whygraph-plan/sources/best-practices.md
+```
+
+The path is the file's path under its overlay folder, which is the install path with the install folder
+dropped and the overlay folder put in front of it:
+
+| Agent | Overlay folder | Installs to | Shared instructions file (replace or append to its block) | Example overlay path |
+|---|---|---|---|---|
+| Claude Code | `claude-code/` | `.claude/` | `CLAUDE.md` | `claude-code/agents/planner.append.md` for `.claude/agents/planner.md` |
+| Cursor | `cursor/` | `.cursor/` | none | `cursor/skills/whygraph-plan/sources/repo-tests.md` for `.cursor/skills/whygraph-plan/sources/repo-tests.md` |
+| VS Code | `vscode/` | `.github/` | `copilot-instructions.md` | `vscode/whygraph/sources/repo-tests.md` for `.github/whygraph/sources/repo-tests.md` |
+| Codex | `codex/` | the repository root | `AGENTS.md` | `codex/.codex/agents/planner.toml` for `.codex/agents/planner.toml` |
+
+For a shared instructions file the override applies to the text between WhyGraph's markers only; the rest
+of the file is yours. Overrides for an agent you did not select are ignored without a warning.
+
+**Rules**
+
+- Only files WhyGraph ships can be overridden. A path that matches none is reported as a probable typo
+  and not installed. To add a file of your own, write it into the agent's folder as before.
+- An override cannot contain WhyGraph's block markers (`BEGIN`/`END` comments of a shared file).
+- Limits: 64 KiB per file, 100 entries (folders count), 1 MiB in total, 8 folders deep. Files must be
+  UTF-8 text; a line-ending style or a leading byte-order mark is normalized.
+- A symbolic link, or an entry the portal cannot read, is skipped. If the overrides folder, one of its
+  agent folders or `disabled` cannot be read at all, **every file of the affected agent is left as it
+  is**. A problem with an override never puts the bundled copy back over your override, and never
+  re-installs a file you switched off: the installed file stays as it was.
+- Frontmatter is not body text. Only `tools` / `allowed-tools` can be added through an append; anything
+  else in frontmatter needs a replacement, and then you also own every later change WhyGraph makes to
+  that file.
+
+**Granting tools through an append.** To give an agent one more tool, such as an MCP server for a
+research source, start the append with a frontmatter holding the tools to add:
+
+```markdown
+<!-- .whygraph-overrides/claude-code/agents/researcher-external.append.md -->
+---
+tools: mcp__medium__*
+---
+```
+
+The installed `researcher-external.md` keeps WhyGraph's own `WebSearch` and gets every later WhyGraph
+update, because the file is still the bundled one with your tools added. The rules:
+
+- The frontmatter is the first thing in the append: a line that is exactly `---`, then lines, then a
+  closing `---`. It may hold `tools` and `allowed-tools`, each at most once, one `key: value` per line.
+- A value is either the comma form (`a, b`) or the list form (`['a', 'b']` or `["a", "b"]`). A tool name
+  is letters, digits and `_ . * / @ : -`, with at most one parenthesized argument such as
+  `Bash(git log *)`; at most 200 characters, and 50 tools per key.
+- WhyGraph's file (or your replacement of it) must have the same key in its own frontmatter. Your tools
+  are added after its tools, skipping any already there, and the line is written in the file's own
+  format. Nothing is ever removed from a tool list.
+- Text after the closing `---` is appended as the body, as described above; with none, only the tool
+  line changes.
+- Any error ignores the **whole** append and installs WhyGraph's file as it is, with one
+  `append_frontmatter` warning.
+
+**Warnings.** Problems are listed in the Initialize preview and result, and never stop an update.
+
+| Warning | Meaning |
+|---|---|
+| Skipped: a symbolic link, an unreadable entry, or a path that leaves the folder | The entry was not used |
+| Skipped: larger than the size limit | Over 64 KiB, or a limit above was reached |
+| Skipped: not UTF-8 text | The entry was not used |
+| Matches no file this WhyGraph version ships | Probably a typo, or a misnamed folder (`claude/`, `.claude/`, `copilot/`) |
+| WhyGraph no longer ships this file; your override is unused | The bundled file was removed in this version |
+| Only .md and .mdc files can be appended to | An `.append` next to another kind of file is ignored |
+| A shared instructions file cannot be switched off; replace or append to its block instead | The file stays installed |
+| The overrides folder could not be read; these agent files were left as they are | Nothing was changed for that agent |
+| Skipped: contains WhyGraph's block markers | The file is left as it is |
+| Append ignored: *reason* | The tools frontmatter of an append was refused (an unclosed block, an unknown or repeated key, a bad line or tool name, too many tools, or WhyGraph's file has no such key); the whole append is ignored |
+| Switched off, but still used: *path* is used by *path* | See below |
+| This file is switched off in disabled; the override is unused | The file stays off |
+| More warnings were found than shown | At most 50 are listed |
+
+**Files that belong together.** The planning command is one feature spread over several files: the
+`whygraph-plan` skill, its agents, `plan-spine.md`, `guard.sh` and `plan-tool.sh`, and the UI-capture
+script that planning and implementing both run (`skills/whygraph-ui-check/capture.mjs`, or the copy
+beside the planning files). Switching one of them off is allowed, but when an installed file still names
+its install path you get a **still used** warning with the first file that does. Nothing is refused, so
+you can break the planner by accident; read the preview before you update. A reference by bare name,
+such as an agent that says "the file plan-spine.md", is not detected. In particular, `guard.sh` is the
+`PreToolUse` hook of the implementor, synthesizer and reviewer agents: without it the hook command
+fails and Claude Code lets the tool call through, so those agents lose their guard. To turn UI capture
+off, use `--no-capture` instead of removing the script.
+
+**Moving an in-place edit into the overrides folder.** Copy your edited file to its overlay path (or, for
+a shared file such as `AGENTS.md`, only the text between the markers), then run **Update agent files**.
+Do it before you upgrade when you can: the portal then also shows what WhyGraph changed in that file
+since you wrote the override.
+
+**When WhyGraph changes a file you replaced.** The file is listed **Overridden** and keeps your copy.
+The preview adds a notice, "WhyGraph changed this file since your override was written", with the
+difference between WhyGraph's old and new copy (kept in `.whygraph/asset-bases/`), or, when the old copy
+is not kept on this machine, your override against WhyGraph's current one. It is a notice, not a
+question; tick **Update agent files** to dismiss it.
+
+**Workflow.**
+
+- Run **Update agent files** before you commit a change to `.whygraph-overrides/`, and commit the
+  installed files with it. After pulling a change to `.whygraph-overrides/`, run **Update agent files**.
+  An **Edited** row on a fresh clone can mean the committed installed copy is older than the override.
+- A replacement is **Up to date** on every teammate's checkout. An append, or a file with no override,
+  is only so when the teammate runs the same WhyGraph version as the person who committed it.
+- Prefer an append to a replacement, and a research source in `sources/` to a rewritten planner. An
+  append keeps up with WhyGraph; a replacement has to be rebased by hand.
+- Review `.whygraph-overrides/` like code, after a clone and in pull requests. Replacing a script
+  (`*.sh`, `*.mjs`), an agent's or skill's frontmatter (`hooks`, `tools`, `allowed-tools`), or adding
+  tools to it through an append,
+  `whygraph-plan/SKILL.md` (which holds the [consent rules](../guide/planning.md#consent)) or a Codex
+  agent file changes what agents may do. A replaced bundled source keeps its bundled name, so the
+  planning command runs it without asking, exactly as it would an edited one.
+
 ## Safe to commit
 
-Every one of these files may be committed. On the default port (`8765`) the entry is identical for
+Every one of these files may be committed, and so may `.whygraph-overrides/` (see [Overriding the bundled files](#agent-files-overrides)). On the default port (`8765`) the entry is identical for
 every teammate, because it carries no path and no machine name:
 
 - Claude Code and VS Code read the port from an **environment variable** or a **prompt**, with `8765` as
@@ -90,7 +246,7 @@ The planning command's research sources are files in your repository (`.claude/s
 and the matching folder for each agent), so a clone may carry one you did not write. The command asks
 before it runs any source that was added to the repository or reaches an outside service, including the
 bundled web search source `best-practices.md`, but review
-`sources/` after cloning. Codex has no per-agent tool limit, so there the rules in the researcher's own
+`sources/` and `.whygraph-overrides/` after cloning, and in pull requests. Codex has no per-agent tool limit, so there the rules in the researcher's own
 text are the only control; see [Planning a change](../guide/planning.md#differences-between-editors).
 
 If an agent file is already tracked by git, the portal shows a diff first and writes it only after you

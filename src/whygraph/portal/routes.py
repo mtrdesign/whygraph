@@ -387,6 +387,7 @@ class InitBody(_Strict):
     confirm_tracked: list[str] = Field(default_factory=list)
     agent_actions: dict[str, Literal["migrate", "remove"]] = Field(default_factory=dict)
     replace_codegraph: list[str] = Field(default_factory=list)
+    acknowledge_upstream: bool = False
 
 
 class ScanBody(_Strict):
@@ -1188,6 +1189,7 @@ def _init_dict(result: InitializeResult, root: Path | None = None) -> dict:
             if f.foreign_codegraph
         ],
         "codegraph_hooks": detect_codegraph_hooks(root) if root is not None else [],
+        "overlay_warnings": [dict(w) for w in result.overlay_warnings],
     }
 
 
@@ -2985,6 +2987,7 @@ def init_project(
             contained=True,
             replace_codegraph=body.replace_codegraph,
             claude_hooks=project.source != "platform",
+            acknowledge_upstream=body.acknowledge_upstream,
         )
     except UnsafePathError as exc:
         raise unsafe_path_error(exc) from exc
@@ -3115,6 +3118,7 @@ def _init_production(
         "needs_confirmation": [],
         "refused": [],
         "marker_written": False,
+        "overlay_warnings": [],
         "initialized": not body.dry_run or project.initialized_at is not None,
         "custom_db_paths": [],
         **_first_scan(state, project, principal, first),

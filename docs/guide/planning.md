@@ -256,12 +256,15 @@ MCP server:
 
 | Editor | Agent file | What to change |
 |---|---|---|
-| Claude Code | `.claude/agents/researcher-external.md` | Add the server to its `tools:` line: `tools: Read, ToolSearch, WebSearch, mcp__docs__*`. The part between `mcp__` and `__*` is the name you gave the server in step 1. |
+| Claude Code | `.claude/agents/researcher-external.md` | Create `.whygraph-overrides/claude-code/agents/researcher-external.append.md` whose whole content is `---`, `tools: mcp__docs__*`, `---` on three lines. The part between `mcp__` and `__*` is the name you gave the server in step 1. |
 | Cursor | `.cursor/agents/researcher-external.md` | Nothing. The file has no tool list, and `readonly: true` keeps it from writing. |
 | Codex | `.codex/agents/researcher-external.toml` | Nothing. Codex has no per-agent tool list, so the researcher's written rules are the only control (see [Differences between editors](#differences-between-editors)). |
 | VS Code | none | Not supported. VS Code has no external researcher, so such a source does not run there. |
 
-The next **Update agent files** lists an agent file you edited as edited and leaves it alone, as it does
+The next **Update agent files** installs the agent file with your tool added to WhyGraph's own list
+(`WebSearch` stays), and keeps following WhyGraph's later changes to it; see
+[Overriding the bundled files](../portal/agents.md#agent-files-overrides). Editing the installed agent file
+by hand still works, but **Update agent files** then lists it as edited and leaves it alone, as it does
 for any file you changed. If the grant does not match the server's name, `requires` still matches, so
 the source runs, but its report says `(unavailable: search_docs is not granted to the external
 researcher)`.
@@ -304,8 +307,9 @@ official documentation, standards and maintainers' posts, and marks a claim with
 - **Claude Code only.** The source says `requires: WebSearch`, so Cursor, Codex and VS Code drop it
   without asking. It is also dropped where Claude Code has no web search, for example on a provider
   without it or when an administrator turned it off.
-- **An agent file you edited keeps your version.** If you added a server to
-  `.claude/agents/researcher-external.md`, **Update agent files** shows the new `tools:` line as a diff
+- **An agent file you edited keeps your version.** An append in `.whygraph-overrides/` keeps WhyGraph's `WebSearch` and still gets
+  updates, unlike an in-place edit. If you added a server to
+  `.claude/agents/researcher-external.md` by hand, **Update agent files** shows the new `tools:` line as a diff
   and leaves your file alone. Add `WebSearch` to your line by hand, or the source reports
   `(unavailable: web is not granted to the external researcher)`.
 

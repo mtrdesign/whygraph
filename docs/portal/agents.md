@@ -105,6 +105,7 @@ Three operations, each a plain file:
   of the file. Append only works on `.md` and `.mdc` files. The last suffix is the one that counts: the
   VS Code file `agents/planner.agent.md` is appended to by `agents/planner.agent.append.md`.
   An append goes on top of a replacement of the same file when both exist.
+  An append may also start with a small frontmatter that adds tools (below).
 - **Disable.** List a path in `.whygraph-overrides/disabled`, one per line (blank lines and `#` comments
   are fine). The file is not installed, and an installed copy is removed by the usual rules for a file
   WhyGraph no longer ships (below). A path ending in `/`, or naming a folder, switches off everything
@@ -141,8 +142,35 @@ of the file is yours. Overrides for an agent you did not select are ignored with
   agent folders or `disabled` cannot be read at all, **every file of the affected agent is left as it
   is**. A problem with an override never puts the bundled copy back over your override, and never
   re-installs a file you switched off: the installed file stays as it was.
-- Frontmatter (`tools`, `hooks`, `allowed-tools`) is not body text, so an append cannot change it. To
-  change it you replace the whole file, and then you also own every later change WhyGraph makes to it.
+- Frontmatter is not body text. Only `tools` / `allowed-tools` can be added through an append; anything
+  else in frontmatter needs a replacement, and then you also own every later change WhyGraph makes to
+  that file.
+
+**Granting tools through an append.** To give an agent one more tool, such as an MCP server for a
+research source, start the append with a frontmatter holding the tools to add:
+
+```markdown
+<!-- .whygraph-overrides/claude-code/agents/researcher-external.append.md -->
+---
+tools: mcp__medium__*
+---
+```
+
+The installed `researcher-external.md` keeps WhyGraph's own `WebSearch` and gets every later WhyGraph
+update, because the file is still the bundled one with your tools added. The rules:
+
+- The frontmatter is the first thing in the append: a line that is exactly `---`, then lines, then a
+  closing `---`. It may hold `tools` and `allowed-tools`, each at most once, one `key: value` per line.
+- A value is either the comma form (`a, b`) or the list form (`['a', 'b']` or `["a", "b"]`). A tool name
+  is letters, digits and `_ . * / @ : -`, with at most one parenthesized argument such as
+  `Bash(git log *)`; at most 200 characters, and 50 tools per key.
+- WhyGraph's file (or your replacement of it) must have the same key in its own frontmatter. Your tools
+  are added after its tools, skipping any already there, and the line is written in the file's own
+  format. Nothing is ever removed from a tool list.
+- Text after the closing `---` is appended as the body, as described above; with none, only the tool
+  line changes.
+- Any error ignores the **whole** append and installs WhyGraph's file as it is, with one
+  `append_frontmatter` warning.
 
 **Warnings.** Problems are listed in the Initialize preview and result, and never stop an update.
 
@@ -157,6 +185,7 @@ of the file is yours. Overrides for an agent you did not select are ignored with
 | A shared instructions file cannot be switched off; replace or append to its block instead | The file stays installed |
 | The overrides folder could not be read; these agent files were left as they are | Nothing was changed for that agent |
 | Skipped: contains WhyGraph's block markers | The file is left as it is |
+| Append ignored: *reason* | The tools frontmatter of an append was refused (an unclosed block, an unknown or repeated key, a bad line or tool name, too many tools, or WhyGraph's file has no such key); the whole append is ignored |
 | Switched off, but still used: *path* is used by *path* | See below |
 | This file is switched off in disabled; the override is unused | The file stays off |
 | More warnings were found than shown | At most 50 are listed |
@@ -193,7 +222,8 @@ question; tick **Update agent files** to dismiss it.
 - Prefer an append to a replacement, and a research source in `sources/` to a rewritten planner. An
   append keeps up with WhyGraph; a replacement has to be rebased by hand.
 - Review `.whygraph-overrides/` like code, after a clone and in pull requests. Replacing a script
-  (`*.sh`, `*.mjs`), an agent's or skill's frontmatter (`hooks`, `tools`, `allowed-tools`),
+  (`*.sh`, `*.mjs`), an agent's or skill's frontmatter (`hooks`, `tools`, `allowed-tools`), or adding
+  tools to it through an append,
   `whygraph-plan/SKILL.md` (which holds the [consent rules](../guide/planning.md#consent)) or a Codex
   agent file changes what agents may do. A replaced bundled source keeps its bundled name, so the
   planning command runs it without asking, exactly as it would an edited one.

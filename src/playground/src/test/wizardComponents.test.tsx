@@ -397,6 +397,7 @@ describe("InitPreview", () => {
         kind: "still_referenced",
         detail: ".claude/skills/whygraph-plan/guard.sh is used by .claude/agents/implementor.md",
       },
+      { path: ".whygraph-overrides/claude-code/agents/researcher-external.append.md", kind: "append_frontmatter", detail: "unknown key model" },
       { path: ".whygraph-overrides", kind: "truncated", detail: "3 more" },
       { path: ".whygraph-overrides/x", kind: "brand_new_kind" },
     ];
@@ -404,6 +405,7 @@ describe("InitPreview", () => {
     const box = screen.getByTestId("overlay-warnings");
     expect(box).toHaveTextContent("Matches no file this WhyGraph version ships - .whygraph-overrides/claude-code/agents/planer.md");
     expect(box).toHaveTextContent("Switched off, but still used: .claude/skills/whygraph-plan/guard.sh is used by");
+    expect(box).toHaveTextContent("Append ignored: unknown key model - .whygraph-overrides/claude-code/agents/researcher-external.append.md");
     expect(box).toHaveTextContent("More warnings were found than shown - .whygraph-overrides (3 more)");
     expect(box).toHaveTextContent("brand_new_kind - .whygraph-overrides/x");
   });

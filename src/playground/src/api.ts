@@ -733,6 +733,7 @@ export type OverlayWarningKind =
   | "overlay_unreadable"
   | "marker_in_text"
   | "still_referenced"
+  | "append_frontmatter"
   | "overridden_but_disabled"
   | "truncated"
   | (string & {});

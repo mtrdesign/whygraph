@@ -3755,3 +3755,381 @@ def test_overlay_tree_is_never_written(tmp_path: Path) -> None:
     _install(project, src, force=True, acknowledge_upstream=True)
 
     assert _snapshot(project / ".whygraph-overrides") == before
+
+
+# ---- overrides: tool grants through an append (plan 48, rule 3a) ----------
+
+
+_R_AGENT = (
+    "---\nname: r\ndescription: R agent\ntools: Read, ToolSearch, WebSearch\n"
+    "model: sonnet\n---\n\nR BODY\n"
+)
+_Y_SKILL = (
+    "---\nname: y\nallowed-tools: Agent, Read, Bash(git rev-parse *)\n---\n\nY BODY\n"
+)
+
+
+def _tools_source(tmp_path: Path) -> Path:
+    """A Claude-shaped tree whose agent and skill carry tool frontmatter."""
+    src = tmp_path / "src"
+    files = {
+        "CLAUDE.md": "BUNDLED CLAUDE\n",
+        "agents/r.md": _R_AGENT,
+        "skills/y/SKILL.md": _Y_SKILL,
+    }
+    for rel, text in files.items():
+        path = src / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return src
+
+
+def _with_line(text: str, prefix: str, line: str) -> str:
+    """``text`` with its one line starting ``prefix`` replaced by ``line``."""
+    lines = text.split("\n")
+    hits = [i for i, x in enumerate(lines) if x.startswith(prefix)]
+    assert len(hits) == 1
+    lines[hits[0]] = line
+    return "\n".join(lines)
+
+
+def test_overlay_append_tools_comma_union_keeps_order(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "claude-code/agents/r.append.md",
+        "---\ntools: WebSearch, mcp__medium__*, Read, mcp__x__a, mcp__medium__*\n---\n",
+    )
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    tools = "tools: Read, ToolSearch, WebSearch, mcp__medium__*, mcp__x__a"
+    assert eff["agents/r.md"].text == _with_line(_R_AGENT, "tools:", tools)
+    assert eff["agents/r.md"].override == "append"
+    assert eff["agents/r.md"].bundled == _R_AGENT
+
+
+def test_overlay_append_tools_nothing_new_keeps_the_base(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.append.md", "---\ntools: Read\n---\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["agents/r.md"].text == _R_AGENT
+    assert eff["agents/r.md"].override == "append"
+
+
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_overlay_append_tools_list_form_keeps_the_quote(
+    tmp_path: Path, quote: str
+) -> None:
+    src = tmp_path / "src"
+    (src / "agents").mkdir(parents=True)
+    q = quote
+    base = f"---\nname: p\ntools: [{q}read{q}, {q}whygraph/*{q}]\n---\n\nP\n"
+    (src / "agents" / "p.agent.md").write_text(base, encoding="utf-8")
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "vscode/agents/p.agent.append.md",
+        "---\ntools: ['medium/*', \"read\", search]\n---\n",
+    )
+
+    eff, _, warnings = _effective(project, src, agents.resolve_agent("vscode"))
+
+    assert warnings == []
+    tools = f"tools: [{q}read{q}, {q}whygraph/*{q}, {q}medium/*{q}, {q}search{q}]"
+    assert eff["agents/p.agent.md"].text == _with_line(base, "tools:", tools)
+
+
+def test_overlay_append_tools_allowed_tools_in_a_skill(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "claude-code/skills/y/SKILL.append.md",
+        "---\n\nallowed-tools: Bash(git log *), mcp__medium__search\n\n---\n",
+    )
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    line = (
+        "allowed-tools: Agent, Read, Bash(git rev-parse *), Bash(git log *), "
+        "mcp__medium__search"
+    )
+    assert eff["skills/y/SKILL.md"].text == _with_line(_Y_SKILL, "allowed-tools:", line)
+
+
+def test_overlay_append_tools_with_a_body(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "claude-code/agents/r.append.md",
+        "---\ntools: mcp__medium__*\n---\n\n\nTEAM NOTE\nTWO\n\n",
+    )
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    merged = _with_line(
+        _R_AGENT, "tools:", "tools: Read, ToolSearch, WebSearch, mcp__medium__*"
+    )
+    assert eff["agents/r.md"].text == merged + "\nTEAM NOTE\nTWO\n"
+    assert eff["agents/r.md"].override == "append"
+
+
+def test_overlay_append_tools_without_frontmatter_is_plain(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.append.md", "tools: X\n---\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["agents/r.md"].text == _R_AGENT + "\ntools: X\n---\n"
+
+
+def test_overlay_append_tools_on_a_replacement(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.md", "---\ntools: Mine\n---\nOURS\n")
+    _put(project, "claude-code/agents/r.append.md", "---\ntools: mcp__medium__*\n---\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["agents/r.md"].text == "---\ntools: Mine, mcp__medium__*\n---\nOURS\n"
+    assert eff["agents/r.md"].override == "replace+append"
+    assert eff["agents/r.md"].bundled == _R_AGENT
+
+
+def test_overlay_append_tools_crlf_is_normalized(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "claude-code/agents/r.append.md",
+        b"\xef\xbb\xbf---\r\ntools: mcp__medium__*\r\n---\r\nMORE\r\n",
+    )
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    merged = _with_line(
+        _R_AGENT, "tools:", "tools: Read, ToolSearch, WebSearch, mcp__medium__*"
+    )
+    assert eff["agents/r.md"].text == merged + "\nMORE\n"
+
+
+_FIFTY = ", ".join(f"t{i}" for i in range(50))
+_FIFTY_ONE = ", ".join(f"t{i}" for i in range(51))
+
+
+@pytest.mark.parametrize(
+    ("rel", "append", "detail"),
+    [
+        ("agents/r.md", "---\ntools: X\nBODY\n", "unclosed frontmatter"),
+        ("agents/r.md", "---\nname: x\n---\nBODY\n", "unknown key name"),
+        ("agents/r.md", "---\nna\x07me: x\n---\n", "unknown key na\\x07me"),
+        ("agents/r.md", "---\ntools: a\ntools: b\n---\n", "duplicate key tools"),
+        ("agents/r.md", "---\n# note\n---\n", "bad line 2"),
+        ("agents/r.md", "---\n  tools: a\n---\n", "bad line 2"),
+        ("agents/r.md", "---\n- a\n---\n", "bad line 2"),
+        ("agents/r.md", "---\n\ntools:a\n---\n", "bad line 3"),
+        ("agents/r.md", "---\ntools:\n---\n", "bad line 2"),
+        ("agents/r.md", "---\ntools: a,, b\n---\n", "bad line 2"),
+        ("agents/r.md", "---\ntools: ['a',\n'b']\n---\n", "bad line 2"),
+        ("agents/r.md", "---\ntools: a'b\n---\n", "bad tool a'b"),
+        ("agents/r.md", "---\ntools: ['a\"]\n---\n", "bad tool 'a\""),
+        ("agents/r.md", "---\ntools: [a]]\n---\n", "bad tool a]"),
+        ("agents/r.md", "---\ntools: Bash(git\nlog *)\n---\n", "bad tool Bash(git"),
+        ("agents/r.md", "---\ntools: Bash(a, b)\n---\n", "bad tool Bash(a, b)"),
+        ("agents/r.md", "---\ntools: a: b\n---\n", "bad tool a: b"),
+        ("agents/r.md", "---\ntools: a\tb\n---\n", "bad tool a\\tb"),
+        ("agents/r.md", f"---\ntools: {'x' * 201}\n---\n", f"bad tool {'x' * 60}"),
+        ("agents/r.md", f"---\ntools: {_FIFTY_ONE}\n---\n", "too many tools"),
+        (
+            "CLAUDE.md",
+            "---\ntools: X\n---\nNOTE\n",
+            "WhyGraph's file has no frontmatter",
+        ),
+        (
+            "agents/r.md",
+            "---\nallowed-tools: X\n---\n",
+            "WhyGraph's file has no allowed-tools",
+        ),
+        ("skills/y/SKILL.md", "---\ntools: X\n---\n", "WhyGraph's file has no tools"),
+    ],
+)
+def test_overlay_append_tools_error_ignores_the_append(
+    tmp_path: Path, rel: str, append: str, detail: str
+) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    append_rel = assets._append_rel(rel)
+    _put(project, f"claude-code/{append_rel}", append)
+
+    eff, held, warnings = _effective(project, src)
+
+    assert warnings == [
+        assets.OverlayWarning(
+            f".whygraph-overrides/claude-code/{append_rel}",
+            "append_frontmatter",
+            detail,
+        )
+    ]
+    _json_safe(warnings)
+    assert held == set()
+    assert eff[rel].text == eff[rel].bundled == (src / rel).read_text()
+    assert eff[rel].override is None
+
+
+def test_overlay_append_tools_error_keeps_the_replacement(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.md", "OURS\n")
+    _put(project, "claude-code/agents/r.append.md", "---\ntools: X\n---\nMORE\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert [(w.kind, w.detail) for w in warnings] == [
+        ("append_frontmatter", "WhyGraph's file has no frontmatter")
+    ]
+    assert eff["agents/r.md"].text == "OURS\n"
+    assert eff["agents/r.md"].override == "replace"
+
+
+def test_overlay_append_tools_base_without_closing_line(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.md", "---\ntools: Mine\nOURS\n")
+    _put(project, "claude-code/agents/r.append.md", "---\ntools: X\n---\n")
+
+    _, _, warnings = _effective(project, src)
+
+    assert [w.detail for w in warnings] == ["WhyGraph's file has no frontmatter"]
+
+
+def test_overlay_append_tools_fifty_tokens_pass(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    token = "x" * 200
+    _put(
+        project,
+        "claude-code/agents/r.append.md",
+        f"---\ntools: {_FIFTY}\nallowed-tools: {token}\n---\n",
+    )
+
+    eff, _, warnings = _effective(project, src)
+
+    assert [w.detail for w in warnings] == ["WhyGraph's file has no allowed-tools"]
+
+    _put(project, "claude-code/agents/r.append.md", f"---\ntools: {_FIFTY}\n---\n")
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert f"tools: Read, ToolSearch, WebSearch, {_FIFTY}\n" in eff["agents/r.md"].text
+
+
+def test_overlay_append_tools_marker_still_holds(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "claude-code/agents/r.append.md",
+        f"---\ntools: X\n---\n{assets.BEGIN_MARKER}\n",
+    )
+
+    eff, held, warnings = _effective(project, src)
+
+    assert [w.kind for w in warnings] == ["marker_in_text"]
+    assert held == {"agents/r.md"} and "agents/r.md" not in eff
+
+
+@pytest.mark.parametrize(
+    ("agent", "rel", "key", "added"),
+    [
+        ("claude", "agents/researcher-external.md", "tools", "mcp__medium__*"),
+        ("claude", "skills/whygraph-plan/SKILL.md", "allowed-tools", "Bash(ls *)"),
+        ("claude", "skills/whygraph-plan/sources/repo-tests.md", "tools", "web"),
+        ("vscode", "agents/planner.agent.md", "tools", "medium/*"),
+    ],
+)
+def test_overlay_append_tools_other_bytes_are_identical(
+    tmp_path: Path, agent: str, rel: str, key: str, added: str
+) -> None:
+    target = agents.resolve_agent(agent)
+    src = assets.packaged_assets_for(target)
+    project = _overlay_project(tmp_path)
+    assert target.assets_subdir is not None
+    _put(
+        project,
+        f"{target.assets_subdir}/{assets._append_rel(rel)}",
+        f"---\n{key}: {added}\n---\n",
+    )
+
+    eff, _, warnings = _effective(project, src, target)
+
+    assert warnings == []
+    before = eff[rel].bundled.split("\n")
+    after = eff[rel].text.split("\n")
+    assert len(before) == len(after)
+    changed = [i for i, (b, a) in enumerate(zip(before, after)) if b != a]
+    assert len(changed) == 1
+    i = changed[0]
+    assert before[i].startswith(f"{key}: ") and after[i].startswith(f"{key}: ")
+    if before[i].endswith("]"):
+        assert after[i] == f"{before[i][:-1]}, '{added}']"
+    else:
+        assert after[i] == f"{before[i]}, {added}"
+
+
+def test_overlay_append_tools_install_is_stable(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.append.md", "---\ntools: mcp__medium__*\n---\n")
+    r = project / ".claude" / "agents" / "r.md"
+
+    result = _install(project, src)
+
+    merged = _with_line(
+        _R_AGENT, "tools:", "tools: Read, ToolSearch, WebSearch, mcp__medium__*"
+    )
+    assert r.read_text() == merged and r in result.written
+    assert result.overrides == {r: "append"} and result.overlay_warnings == []
+    assert "bases" not in _manifest(project)
+
+    again = _install(project, src)
+
+    assert r in again.skipped and again.needs_confirmation == []
+    assert again.overrides == {r: "append"}
+
+    shutil.rmtree(project / ".whygraph")
+    fresh = _install(project, src)
+
+    assert r in fresh.skipped and fresh.needs_confirmation == []
+    assert r.read_text() == merged
+
+
+def test_overlay_append_tools_error_installs_the_base(tmp_path: Path) -> None:
+    src = _tools_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/r.append.md", "---\ntools: a'b\n---\nMORE\n")
+    r = project / ".claude" / "agents" / "r.md"
+
+    result = _install(project, src)
+
+    assert r.read_text() == _R_AGENT and r not in result.overrides
+    assert result.overlay_warnings == [
+        assets.OverlayWarning(
+            ".whygraph-overrides/claude-code/agents/r.append.md",
+            "append_frontmatter",
+            "bad tool a'b",
+        )
+    ]

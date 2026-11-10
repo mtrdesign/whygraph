@@ -35,6 +35,7 @@ const OVERLAY_WARNING_TEXT: Record<string, string> = {
   overlay_unreadable: "The overrides folder could not be read; these agent files were left as they are",
   marker_in_text: "Skipped: contains WhyGraph's block markers",
   still_referenced: "Switched off, but still used: {detail}. The file that uses it may now fail",
+  append_frontmatter: "Append ignored: {detail}",
   overridden_but_disabled: "This file is switched off in disabled; the override is unused",
   truncated: "More warnings were found than shown",
 };

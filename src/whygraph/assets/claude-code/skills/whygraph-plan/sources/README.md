@@ -57,4 +57,4 @@ WhyGraph bundles one such source, `best-practices.md`: it searches the web with 
 - `tools` lists only that server's tools.
 - The body gives the order of calls, the budget, the rule to stop early, and the rule to cite and paraphrase.
 
-The `whygraph-researcher-external` agent ships with web search and no outside MCP server. In Claude Code, add your server to the `tools:` line of that agent file by hand. The Cursor and Codex agent files have no tool list.
+The `whygraph-researcher-external` agent ships with web search and no outside MCP server. In Claude Code, grant your server with an append file in `.whygraph-overrides/claude-code/agents/researcher-external.append.md` whose frontmatter is `tools: mcp__<server>__*` (see the agent-file overrides docs). The Cursor and Codex agent files have no tool list.

@@ -74,6 +74,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -241,11 +242,12 @@ class OverlayWarning:
         ``no_longer_bundled``, ``append_unsupported``,
         ``cannot_disable_merged``, ``overlay_unreadable``,
         ``marker_in_text``, ``still_referenced``, ``overridden_but_disabled``,
-        ``truncated``.
+        ``append_frontmatter``, ``truncated``.
     detail : str
         Extra context (``still_referenced``: ``"<install path of the
         disabled file> is used by <first install path that names it>"``,
-        plus ``" and N more"``); empty otherwise.
+        plus ``" and N more"``; ``append_frontmatter``: why the append's
+        frontmatter was refused, e.g. ``"bad tool <t>"``); empty otherwise.
     """
 
     path: str
@@ -673,7 +675,7 @@ def _disabled_overrides(
             appended = None
         if replacement is None and appended is None:
             continue
-        text, _ = _overridden_text(_bundled_text(src, rel), replacement, appended)
+        text, _, _ = _overridden_text(_bundled_text(src, rel), replacement, appended)
         out[rel] = frozenset({_sha(text)})
     return out
 
@@ -1037,6 +1039,11 @@ def _merge_block(
 _DISABLED_NAME = "disabled"
 _APPEND = ".append"
 _APPEND_SUFFIXES = frozenset({".md", ".mdc"})
+_TOOL_KEYS = ("tools", "allowed-tools")
+_TOOL_TOKEN = re.compile(r"""[A-Za-z0-9_.*/@:-]+(\([^()\n'"\[\],]*\))?""")
+_TOOL_TOKEN_MAX = 200
+_TOOLS_PER_KEY_MAX = 50
+_SHOWN_MAX = 60
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _LINK_ERRNOS = frozenset(
@@ -1459,15 +1466,197 @@ def _bundled_text(src: Traversable | Path, rel: str) -> str:
     return node.read_text(encoding="utf-8")
 
 
+def _shown_value(value: str) -> str:
+    """``value`` with non-printable characters escaped, cut to 60 characters."""
+    shown = "".join(c if c.isprintable() else ascii(c)[1:-1] for c in value)
+    return shown[:_SHOWN_MAX]
+
+
+def _split_tools(value: str) -> list[str]:
+    """Split a tool list on the commas outside parentheses."""
+    out: list[str] = []
+    depth = 0
+    start = 0
+    for i, c in enumerate(value):
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(depth - 1, 0)
+        elif c == "," and depth == 0:
+            out.append(value[start:i])
+            start = i + 1
+    out.append(value[start:])
+    return [t.strip() for t in out]
+
+
+def _unquote(item: str) -> tuple[str, str]:
+    """A list-form item without its matching quotes, and the quote used."""
+    if len(item) >= 2 and item[0] == item[-1] and item[0] in "'\"":
+        return item[1:-1], item[0]
+    return item, ""
+
+
+def _split_append_frontmatter(
+    text: str,
+) -> tuple[dict[str, list[str]] | None, str, str | None]:
+    """Rule 3a: an append's tool frontmatter, its body and an error detail.
+
+    Parameters
+    ----------
+    text : str
+        The normalized append text (LF, no BOM).
+
+    Returns
+    -------
+    tuple[dict[str, list[str]] | None, str, str | None]
+        ``(None, text, None)`` when the first line is not exactly
+        ``---``; otherwise the tokens per key (``tools`` /
+        ``allowed-tools``, in the order given), the body after the
+        closing ``---`` with leading and trailing newlines stripped, and
+        ``None``. On a refused frontmatter, ``(None, "", detail)``.
+
+    Notes
+    -----
+    A line is one top-level ``key: value``; blank lines are ignored. A
+    value is the comma form (``a, b``) or the list form (``['a', 'b']``,
+    ``["a", "b"]``). Every token must match :data:`_TOOL_TOKEN` in full
+    and be at most 200 characters, at most 50 per key, so a token can
+    hold no quote, bracket, comma or newline outside one parenthesized
+    argument and cannot change the YAML it is written into.
+    """
+    lines = text.split("\n")
+    if lines[0] != "---":
+        return None, text, None
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return None, "", "unclosed frontmatter"
+    tools: dict[str, list[str]] = {}
+    for number, line in enumerate(lines[1:end], start=2):
+        if not line.strip():
+            continue
+        key, colon, value = line.partition(":")
+        if (
+            line[0].isspace()
+            or line[0] in "-#"
+            or not colon
+            or (value and not value[0].isspace())
+        ):
+            return None, "", f"bad line {number}"
+        if key not in _TOOL_KEYS:
+            return None, "", f"unknown key {_shown_value(key)}"
+        if key in tools:
+            return None, "", f"duplicate key {key}"
+        value = value.strip()
+        if value.startswith("["):
+            if not value.endswith("]"):
+                return None, "", f"bad line {number}"
+            items = _split_tools(value[1:-1])
+            tokens = [_unquote(item)[0] for item in items]
+        else:
+            items = tokens = _split_tools(value)
+        if any(not item for item in items):
+            return None, "", f"bad line {number}"
+        if len(tokens) > _TOOLS_PER_KEY_MAX:
+            return None, "", "too many tools"
+        for token in tokens:
+            if len(token) > _TOOL_TOKEN_MAX or not _TOOL_TOKEN.fullmatch(token):
+                return None, "", f"bad tool {_shown_value(token)}"
+        tools[key] = tokens
+    return tools, "\n".join(lines[end + 1 :]).strip("\n"), None
+
+
+def _merge_tool_line(
+    base: str, key: str, tokens: list[str]
+) -> tuple[str | None, str | None]:
+    """Rule 3a: add ``tokens`` to the ``key`` line of ``base``'s frontmatter.
+
+    Parameters
+    ----------
+    base : str
+        The normalized base text (bundled or replacement).
+    key : str
+        ``tools`` or ``allowed-tools``.
+    tokens : list[str]
+        Validated tokens from :func:`_split_append_frontmatter`.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        The base with that one line rewritten in its own form (comma
+        form, or list form with the base's quote character) and ``None``,
+        or ``None`` and the error detail. The base's tokens keep their
+        order, new tokens follow in order, an exact duplicate is skipped,
+        and every other byte is unchanged (the line too when nothing is
+        new).
+    """
+    lines = base.split("\n")
+    try:
+        end = lines.index("---", 1) if lines[0] == "---" else -1
+    except ValueError:
+        end = -1
+    if end < 0:
+        return None, "WhyGraph's file has no frontmatter"
+    missing = f"WhyGraph's file has no {key}"
+    for i in range(1, end):
+        name, colon, value = lines[i].partition(":")
+        if name == key and colon and (not value or value[0].isspace()):
+            break
+    else:
+        return None, missing
+    value = value.strip()
+    if not value or value[0] in "'\"{|>&!*#":
+        return None, missing
+    quote: str | None = None
+    if value.startswith("["):
+        if not value.endswith("]"):
+            return None, missing
+        pairs = [_unquote(item) for item in _split_tools(value[1:-1]) if item]
+        have = [t for t, _ in pairs]
+        quote = pairs[0][1] if pairs else "'"
+    else:
+        have = [t for t in _split_tools(value) if t]
+    new = [t for t in dict.fromkeys(tokens) if t not in have]
+    if not new:
+        return base, None
+    merged = have + new
+    if quote is None:
+        lines[i] = f"{key}: {', '.join(merged)}"
+    else:
+        lines[i] = f"{key}: [{', '.join(quote + t + quote for t in merged)}]"
+    return "\n".join(lines), None
+
+
+def _appended_text(base: str, appended: str) -> tuple[str | None, str | None]:
+    """Rules 3 and 3a: ``base`` with ``appended`` on top, or an error detail."""
+    tools, body, error = _split_append_frontmatter(appended)
+    if error is not None:
+        return None, error
+    for key, tokens in (tools or {}).items():
+        merged, error = _merge_tool_line(base, key, tokens)
+        if merged is None:
+            return None, error
+        base = merged
+    if tools is not None and not body:
+        return base, None
+    return base.rstrip("\n") + "\n\n" + body.strip("\n") + "\n", None
+
+
 def _overridden_text(
     bundled: str, replacement: str | None, appended: str | None
-) -> tuple[str, str | None]:
-    """Rules 2-4: the text and override kind from a replacement and an append."""
+) -> tuple[str, str | None, str | None]:
+    """Rules 2-4 and 3a: the text, the override kind and an append error.
+
+    An append whose frontmatter is refused is ignored (the base applies,
+    with the kind it has without the append) and its detail returned.
+    """
     base = bundled if replacement is None else replacement
-    if appended is None:
-        return base, None if replacement is None else "replace"
-    text = base.rstrip("\n") + "\n\n" + appended.strip("\n") + "\n"
-    return text, "append" if replacement is None else "replace+append"
+    error = None
+    if appended is not None:
+        text, error = _appended_text(base, appended)
+        if text is not None:
+            return text, "append" if replacement is None else "replace+append", None
+    return base, None if replacement is None else "replace", error
 
 
 def _has_marker(text: str) -> bool:
@@ -1575,7 +1764,13 @@ def _effective_tree(
             )
             held.add(rel)
             continue
-        eff_text, kind = _overridden_text(text, replacement, appended)
+        eff_text, kind, error = _overridden_text(text, replacement, appended)
+        if error is not None:
+            warnings.append(
+                OverlayWarning(
+                    _overlay_rel(sub, append_rel), "append_frontmatter", error
+                )
+            )
         effective[rel] = _Effective(text=eff_text, bundled=text, override=kind)
 
     # Rule 5: a disabled file whose install path an installed file names.

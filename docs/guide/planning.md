@@ -130,7 +130,7 @@ Six sources ship with WhyGraph:
 | `ui-surface.md` | The UI's stack, how to start it, its routes and the states a UI task should specify (UI tasks only) | Your repository's files and CodeGraph |
 | `best-practices.md` | Current outside guidance on the task's design choice, ranked below your repository's evidence ([details](#best-practices-from-the-web)) | The web, through Claude Code's web search, after you say yes |
 
-Your own files survive an update of the agent files. Delete a file to remove its source.
+Your own files survive an update of the agent files. Delete a file you added to remove its source; to switch off a bundled one, list it in `.whygraph-overrides/disabled` (see [Overriding the bundled files](../portal/agents.md#agent-files-overrides)).
 
 ### Adding a source
 
@@ -309,9 +309,11 @@ official documentation, standards and maintainers' posts, and marks a claim with
   and leaves your file alone. Add `WebSearch` to your line by hand, or the source reports
   `(unavailable: web is not granted to the external researcher)`.
 
-To stop the question in a repository, set `enabled: false` in its `best-practices.md`. **Update agent
-files** keeps that edit, while a deleted bundled file comes back with the next update. With
-`enabled: false`, `--sources` still turns it on for one run.
+To stop the question in a repository, you have two options, and they are not the same. List the file in
+`.whygraph-overrides/disabled` to remove it: it is no longer installed and `--sources` cannot reach it.
+Or replace it through the overrides folder (or edit it in place) with `enabled: false`: **Update agent
+files** keeps that, and `--sources` still turns it on for one run. A deleted bundled file comes back
+with the next update. See [Overriding the bundled files](../portal/agents.md#agent-files-overrides).
 
 ## Splitting: `tasks.json`
 
@@ -498,8 +500,9 @@ and has no terminal. In Cursor the plan is run from a skill, and the review gate
     of read-only tools by the editor itself. In Codex the researcher's written rules are the only
     control. A hostile source file could ask a Codex researcher to run a shell command, and a Codex
     researcher can reach any MCP server you configured. The consent question still protects you from a repo-added source, but
-    it cannot stop a bundled file that someone edited. Review `sources/` after a clone, and review
-    changes to it in a pull request.
+    it cannot stop a bundled file that someone edited. Review `sources/` and `.whygraph-overrides/` after a clone, and review
+    changes to them in a pull request. A replaced bundled source keeps its bundled name, so it keeps the
+    trust that name has.
 
 Next: [wiring your editor](editors.md), how an agent [calls the tools](mcp-usage.md), and the
 [project notes](notes.md) the planner reads.

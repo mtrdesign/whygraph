@@ -2,7 +2,7 @@
 
 Each file in this folder is one source of knowledge for `/whygraph-plan`. The planner reads the frontmatter of every file here, keeps the sources whose tools exist, and starts one researcher per kept source. The researcher reads the file body and follows it.
 
-To add a source, write one file here. Delete a file to remove its source. Your own files survive an update of the agent files.
+To add a source, write one file here. Delete a file you added to remove its source; to switch off a bundled one, list it in `.whygraph-overrides/disabled`. To change a bundled source, put a replacement or an `.append.md` file in `.whygraph-overrides/` instead of editing it here. Your own files survive an update of the agent files.
 
 ## File format
 

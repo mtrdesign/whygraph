@@ -74,7 +74,7 @@ Skip this phase in revise mode.
 2. Read the frontmatter of each file only: Read with `limit` 15. Never read a source's body here. Record its `name`, `requires`, `tools`, `section`, `enabled`, `budget` and `consent`, and its path.
 3. Decide whether the source **needed consent**. It did when any of these holds:
    - its `requires` or `tools` names a tool other than `read`, a `whygraph_*` tool or a `codegraph_*` tool;
-   - its file name is not one of the five bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`;
+   - its file name is not one of the six bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`, `best-practices.md`;
    - it says `consent: true`.
    A source file can force consent. It can never switch it off.
 4. Drop a source when any of these holds:
@@ -174,7 +174,7 @@ In single-pass:
 1. Read `SPINE_PATH` once. If the file cannot be read, stop and reply `The plan spine is missing: <path>`, with the path you tried. Follow it, and apply its `## Writing rules` to every `Change`, `Expected UI`, Acceptance statement and Open question.
 2. Read the body of the bundled `repo-tests.md` when it is kept, and apply it yourself within its `tools` and `budget`: it gives each step's Verify command, the Test first test for an uncovered symbol, and Acceptance item 1. Apply the bundled `ui-surface.md` the same way when it is kept (**1f** keeps it only for a UI task). Use the fresh profile's key lines as its `PROFILE:` block, as **2a** describes. Then run **2c** before you write the plan. Read no other source body.
 3. Never read the body of a kept source that needed consent. Hand off to one `whygraph-researcher` for each such source, all in one message, with the prompt of **2a**, and use its report as deep mode would (a `Prior art` report fills `## Prior art`). A source that **External sources** in **2a** sends to `whygraph-researcher-external` goes there, with that prompt and that fallback. If delegation is unavailable, drop the source and add `<name>: skipped - single-pass mode has no researcher to run it` to the Confidence reason.
-4. Synthesise the plan yourself, in the plan format in `SPINE_PATH`. Sequence changes in the 1e dependency order. Quote constraints and risks **verbatim** from rationale cards - never paraphrase. Flag any step that appears to violate a constraint as a *Blocker*. Give each step a Verify, a Model and, from the 1e external-contract marks, Boundaries. List what the code cannot settle under `## Open questions`, each with 2 or 3 options and a default; at most 3 are `Plan-shaping: yes`. Report honest confidence.
+4. Synthesise the plan yourself, in the plan format in `SPINE_PATH`. Sequence changes in the 1e dependency order. Quote constraints and risks **verbatim** from rationale cards - never paraphrase. Apply the spine's `## Evidence order`: an outside report stays in `## Prior art` and never changes a step or the confidence. Flag any step that appears to violate a constraint as a *Blocker*. Give each step a Verify, a Model and, from the 1e external-contract marks, Boundaries. List what the code cannot settle under `## Open questions`, each with 2 or 3 options and a default; at most 3 are `Plan-shaping: yes`. Report honest confidence.
 5. When the `ui-surface` result has key lines under `## UI profile`, do these four things, with `CAPTURE_STATUS` from **2c**:
    - Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
    - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes.
@@ -274,7 +274,7 @@ WORKING SET:
 <verbatim report>
 ```
 
-Write one `=== <source name> ===` block per kept source, in the kept-list order. If you cannot write the sidecar, stop and reply `The research sidecar could not be written: <reason>`.
+Write one `=== <source name> ===` block per kept source, in the kept-list order. For a source that **External sources** sends to `whygraph-researcher-external`, write the header as `=== <source name> (external) ===`. If you cannot write the sidecar, stop and reply `The research sidecar could not be written: <reason>`.
 
 **2e. Hand off to the synthesizer.** Single handoff to `whygraph-synthesizer` with this prompt:
 

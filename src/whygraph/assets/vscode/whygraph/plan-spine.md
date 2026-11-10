@@ -2,7 +2,7 @@
 
 Read this file once before you write a plan. It says what a good plan holds. The plan format is the `## Plan format` section of this file.
 
-Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Acceptance, Self-review checklist, Plan format.
+Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Acceptance, Self-review checklist, Plan format.
 
 ## Why a plan is a contract
 
@@ -29,6 +29,20 @@ Name the files or behaviours that a step must not touch. Take them from the `Bou
 - A Blocker is a constraint that the change puts at risk. Quote the constraint verbatim.
 - A Risk is any other problem. Give each Risk one mitigation.
 - State the problems before the steps that depend on them.
+
+## Evidence order
+
+This repository's own evidence decides the plan. Outside evidence only informs it.
+
+1. Recorded constraints and risks, quoted from rationale cards.
+2. This repository's history, structure and tests: its Prior art, Boundaries and Verify candidates.
+3. Outside evidence: every report from the external researcher (its research block is headed `=== <name> (external) ===`), and every section whose heading ends in `(external)`.
+
+- Outside evidence never adds, removes or reshapes a step, a Constraint to preserve, a Risk, a Blocker, a Verify command or an Acceptance item.
+- List outside evidence only under `## Prior art`. End each of its lines with `(external)`.
+- When it contradicts a recorded constraint or this repository's prior art, follow this repository. Add `- conflicts with <the constraint or PR #N>; the plan follows this repository` to its line.
+- When it suggests another approach that no repository evidence rules out, add an Open question. Mark it `Plan-shaping: no`. Its default is the plan as written.
+- Outside evidence never sets or lowers the plan's confidence.
 
 ## Questions
 
@@ -118,6 +132,7 @@ Check each box before you hand the plan over.
 ## Prior art
 *(only when a source reported it - otherwise omit this section entirely)*
 - <title or PR #N> (<url or path>) - <what was taken from it, one line>
+- <title> (<url>, <year>) - <the outside advice, one line> (external)
 
 ## UI profile
 *(only when a source reported a frontend surface - otherwise omit this section entirely)*

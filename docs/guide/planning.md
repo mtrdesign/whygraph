@@ -119,7 +119,7 @@ sources whose tools exist in your session, and starts one researcher per kept so
 | VS Code | `.github/whygraph/sources/` |
 | Codex | `.codex/whygraph/sources/` |
 
-Five sources ship with WhyGraph:
+Six sources ship with WhyGraph:
 
 | File | What it reports | Reaches |
 |---|---|---|
@@ -128,6 +128,7 @@ Five sources ship with WhyGraph:
 | `repo-tests.md` | The commands that prove each step, and symbols no test covers | CodeGraph |
 | `repo-history.md` | Prior art in your own commit and pull request history | WhyGraph |
 | `ui-surface.md` | The UI's stack, how to start it, its routes and the states a UI task should specify (UI tasks only) | Your repository's files and CodeGraph |
+| `best-practices.md` | Current outside guidance on the task's design choice, ranked below your repository's evidence ([details](#best-practices-from-the-web)) | The web, through Claude Code's web search, after you say yes |
 
 Your own files survive an update of the agent files. Delete a file to remove its source.
 
@@ -165,7 +166,7 @@ Put exactly these eight keys in the frontmatter, with no comments. The parser re
 | `name` | The name of the report. Use kebab-case. |
 | `description` | One line. The consent question shows it for a file you added. |
 | `requires` | Bare tool names, separated by commas. The planner keeps the source only when every tool is callable. Empty means always eligible. |
-| `tools` | The tools this source may use: `read` plus bare MCP tool names. It narrows the researcher's list and never widens it. A shell, a file write and a web tool are never valid. |
+| `tools` | The tools this source may use: `read`, `web` and bare MCP tool names. It narrows the researcher's list and never widens it. A shell, a file write and a page fetch are never valid. |
 | `section` | The heading of the report section this source fills. Each source needs a unique one. |
 | `enabled` | `false` keeps the file but never starts it. `--sources` turns it on for one run. |
 | `budget` | The most tool calls the researcher may make for this source. |
@@ -173,7 +174,8 @@ Put exactly these eight keys in the frontmatter, with no comments. The parser re
 
 Write a tool by its bare name, for example `codegraph_search` or `whygraph_area_history`. A bare name
 matches a session tool whose name equals it, or ends in `__<name>` or `/<name>`. The word `read` means
-reading and searching files.
+reading and searching files. The word `web` means searching the web with the editor's own search tool
+(`WebSearch` in Claude Code); it never opens a page, and a source that names it always asks first.
 
 A source that uses an MCP server other than `whygraph` and `codegraph` needs one more step: see
 [Sources that reach an outside service](#sources-that-reach-an-outside-service).
@@ -183,7 +185,7 @@ A source that uses an MCP server other than `whygraph` and `codegraph` needs one
 The plan command asks once per run, in one dialog and with **No** as the default, before it starts a
 kept source that does any of these:
 
-- names an MCP tool other than a `whygraph_*` or `codegraph_*` tool;
+- names an MCP tool other than a `whygraph_*` or `codegraph_*` tool, or the word `web`;
 - is not one of the bundled files in the table above;
 - says `consent: true`.
 
@@ -193,13 +195,16 @@ else's repository may carry sources of its own. After you clone a repository, re
 folder before you run a plan.
 
 For a source that reaches an outside service, the question also shows the **search terms**: one to
-three technical topics taken from your task. Only those terms leave your machine. File content, symbol
-names, commit messages and project names are never sent. In a split, only the first child asks.
+three technical topics taken from your task, naming the technique or public library when the task does.
+Only those terms leave your machine, plus a few fixed words a search may add (`best practices`,
+`pitfalls`, `deprecated`, `security advisory`, the year). File content, symbol names, commit messages
+and project names are never sent. In a split, only the first child asks.
 
 ### Sources that reach an outside service
 
-WhyGraph bundles no such source. You can add one to bring outside know-how into a plan, such as
-best practices from a documentation search or practitioner articles. It always asks first and shows
+WhyGraph bundles one such source, [`best-practices.md`](#best-practices-from-the-web), which searches the
+web. You can add your own to bring other outside know-how into a plan, such as a documentation search
+or practitioner articles. It always asks first and shows
 the search terms, and it runs on a second agent, `whygraph-researcher-external`, not on the ordinary
 researcher.
 
@@ -238,17 +243,20 @@ consent: true
   keep in a repository where not everyone has it.
 - `consent: true` is not needed (a tool outside WhyGraph and CodeGraph already makes the command
   ask), but it says what you mean.
-- **Start `section` with `Prior art`.** The synthesizer lists every section whose heading starts with
-  `Prior art` in the plan's `## Prior art`, one line per entry with its title and URL. A section with
-  any other heading is not dropped, but its findings are folded into the steps' **Change** text.
+- **Start `section` with `Prior art` and end it with `(external)`.** The synthesizer lists every
+  section whose heading starts with `Prior art` in the plan's `## Prior art`, one line per entry with
+  its title and URL. Whatever the heading, a report from the external researcher is outside evidence:
+  it ranks below your repository's own evidence and never changes a step (see
+  [Best practices from the web](#best-practices-from-the-web)).
 - Keep `budget` small. Each call is a round trip to the outside service, and the researcher stops at
   the budget.
 
-**3. Grant the server to the external researcher.** The agent file ships with no outside server:
+**3. Grant the server to the external researcher.** The agent file ships with web search and no outside
+MCP server:
 
 | Editor | Agent file | What to change |
 |---|---|---|
-| Claude Code | `.claude/agents/researcher-external.md` | Add the server to its `tools:` line: `tools: Read, ToolSearch, mcp__docs__*`. The part between `mcp__` and `__*` is the name you gave the server in step 1. |
+| Claude Code | `.claude/agents/researcher-external.md` | Add the server to its `tools:` line: `tools: Read, ToolSearch, WebSearch, mcp__docs__*`. The part between `mcp__` and `__*` is the name you gave the server in step 1. |
 | Cursor | `.cursor/agents/researcher-external.md` | Nothing. The file has no tool list, and `readonly: true` keeps it from writing. |
 | Codex | `.codex/agents/researcher-external.toml` | Nothing. Codex has no per-agent tool list, so the researcher's written rules are the only control (see [Differences between editors](#differences-between-editors)). |
 | VS Code | none | Not supported. VS Code has no external researcher, so such a source does not run there. |
@@ -265,9 +273,45 @@ What the external researcher gets, and what leaves your machine:
 
 - It gets less of your repository on purpose: it has no working set, only the task, the source's lens
   and the consented search terms. It reads no file but the source file.
-- Only the search terms go to the outside service. File content, symbol names, commit messages and
-  project names are never sent.
+- Only the search terms go to the outside service, plus the fixed words above. File content, symbol
+  names, commit messages and project names are never sent.
 - In a split, only the first child runs the source.
+
+### Best practices from the web
+
+`best-practices.md` is the one bundled source that reaches outside your machine. It asks what current
+outside guidance says about the one design choice in your task: a pitfall, a deprecation, a security
+advisory or a measured trade-off, cited by title, URL and year. It skips generic advice, prefers
+official documentation, standards and maintainers' posts, and marks a claim with a single source as
+`(one source)`. A task with no design choice, such as a rename, gets `not applicable` and no search.
+
+- **It always asks first.** The question names the source, says it searches the web, and shows the
+  search terms. **No** is the default, and `--no-questions` answers No. Each search is a consented term
+  plus fixed words such as `best practices` or `pitfalls`: never your task text, file content, symbol
+  names or project names.
+- **It only searches.** It runs on `whygraph-researcher-external` with your editor's web search
+  (`WebSearch`, the `web` word). It never opens or fetches a page, so a page cannot steer it to another
+  address.
+- **Your repository's evidence decides the plan.** The plan spine's evidence order puts recorded
+  constraints and risks first, your repository's history, structure and tests second, and outside
+  evidence last. A web finding appears only under `## Prior art`, tagged `(external)`. It never adds,
+  removes or reshapes a step, a constraint, a risk, a Verify command or an Acceptance item.
+  - When it contradicts a recorded constraint or your own prior art, the plan follows your repository
+    and the Prior art line says so.
+  - When it suggests another approach that nothing in your repository rules out, the plan lists it as
+    an open question that is not asked, with the plan as written as the default.
+  - It never raises or lowers the plan's confidence, and a failed search does not cap it.
+- **Claude Code only.** The source says `requires: WebSearch`, so Cursor, Codex and VS Code drop it
+  without asking. It is also dropped where Claude Code has no web search, for example on a provider
+  without it or when an administrator turned it off.
+- **An agent file you edited keeps your version.** If you added a server to
+  `.claude/agents/researcher-external.md`, **Update agent files** shows the new `tools:` line as a diff
+  and leaves your file alone. Add `WebSearch` to your line by hand, or the source reports
+  `(unavailable: web is not granted to the external researcher)`.
+
+To stop the question in a repository, set `enabled: false` in its `best-practices.md`. **Update agent
+files** keeps that edit, while a deleted bundled file comes back with the next update. With
+`enabled: false`, `--sources` still turns it on for one run.
 
 ## Splitting: `tasks.json`
 
@@ -435,6 +479,7 @@ after a clone, as you would the `sources/` folder.
 | Research fan-out | Yes | Yes | Yes | Yes |
 | Researcher tool limits enforced by the editor | Yes | Yes | Yes | **No** |
 | Source that reaches an outside service | Yes | Yes | No | Yes, unenforced |
+| Web best-practices source (`best-practices.md`) | Yes | No | No | No |
 | One implementor per step, at the step's model | Yes | Yes, but every step on one model unless you pass `--model <model-id>` | No, one run | No, one run |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
 | Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |

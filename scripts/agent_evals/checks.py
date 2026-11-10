@@ -656,7 +656,9 @@ def sidecar_blocks_match_researchers(stem: str) -> Check:
 
     def fn(ctx: Context) -> Outcome:
         sidecar = ctx.workdir / ".whygraph" / "plans" / f"{stem}.research.md"
-        blocks = re.findall(r"^=== (\S+) ===\s*$", _text(sidecar), re.MULTILINE)
+        blocks = re.findall(
+            r"^=== (\S+)(?: \(external\))? ===\s*$", _text(sidecar), re.MULTILINE
+        )
         kept = []
         for transcript in ctx.all_transcripts():
             for use in transcript.tool_uses():
@@ -728,8 +730,8 @@ def agent_dispatched(agent_type: str, prompt_text: str) -> Check:
     return Check(f"{agent_type} for {prompt_text}", fn)
 
 
-def external_reaches_synthesizer(stem: str) -> Check:
-    """Pass when the research a synthesizer got holds an ``external`` report.
+def external_reaches_synthesizer(stem: str, source: str = "external") -> Check:
+    """Pass when the research a synthesizer got holds the ``source`` report.
 
     The research is the sidecar ``.whygraph/plans/<stem>.research.md``, or, when
     that file is gone, what a synthesizer's ``Read`` of it returned. A report or
@@ -750,13 +752,15 @@ def external_reaches_synthesizer(stem: str) -> Check:
             where = "synthesizer Read result"
         ok = any(
             re.search(
-                r"=== external ===\s*\n\s*(# Researcher report:|\(unavailable:)", p
+                rf"=== {re.escape(source)}(?: \(external\))? ===\s*\n\s*"
+                r"(# Researcher report:|\(unavailable:)",
+                p,
             )
             for p in texts
         )
         return (
             ok,
-            f"{len(texts)} {where}(s); external {'reached' if ok else 'absent'}",
+            f"{len(texts)} {where}(s); {source} {'reached' if ok else 'absent'}",
         )
 
     return Check("external reaches synthesizer", fn)
@@ -842,3 +846,48 @@ def record_comparison(defect_step: int | None) -> Check:
         )
 
     return Check("comparison record", fn, record=True)
+
+
+def web_search_only_in_external() -> Check:
+    """Pass when ``WebSearch`` ran only in the external researcher and no page was fetched."""
+
+    def fn(ctx: Context) -> Outcome:
+        searches = {
+            t.agent_type
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if _tool_matches(u.name, r"^WebSearch$")
+        }
+        fetches = [
+            u
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if _tool_matches(u.name, r"^WebFetch$")
+        ]
+        ok = searches <= {"whygraph-researcher-external"} and not fetches
+        return ok, f"WebSearch in {sorted(searches)}, {len(fetches)} WebFetch call(s)"
+
+    return Check("web search only in the external researcher", fn)
+
+
+def outside_evidence_stays_in_prior_art(stem: str) -> Check:
+    """Pass when every cited URL sits in ``## Prior art`` and ends ``(external)``.
+
+    This repository's evidence decides the plan: an outside finding may inform
+    it only from ``## Prior art`` and never appears in a step.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        plan = _text(_plan_path(ctx, stem))
+        prior = [
+            line for line in _section(plan, "Prior art").splitlines() if "http" in line
+        ]
+        untagged = [line for line in prior if "(external)" not in line]
+        in_steps = "http" in _section(plan, "Steps")
+        ok = bool(plan) and not untagged and not in_steps
+        return ok, (
+            f"{len(prior)} outside line(s), {len(untagged)} untagged, "
+            f"URL in steps: {in_steps}"
+        )
+
+    return Check("outside evidence only in Prior art", fn)

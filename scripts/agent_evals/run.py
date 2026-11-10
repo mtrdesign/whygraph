@@ -69,7 +69,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ASSETS = ROOT / "src" / "whygraph" / "assets" / "claude-code"
 PORTAL_URL = "http://127.0.0.1:8777/"
 ALLOWED_TOOLS = (
-    "Agent,Bash,Read,Edit,Write,Glob,Grep,ToolSearch,ReadMcpResourceTool,"
+    "Agent,Bash,Read,Edit,Write,Glob,Grep,ToolSearch,ReadMcpResourceTool,WebSearch,"
     "mcp__whygraph__*,mcp__codegraph__*"
 )
 RUN_TIMEOUT_S = 3600

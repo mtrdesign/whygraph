@@ -25,7 +25,7 @@ Options: `--cases` (default all), `--stage N` (default: every check), `--repeat 
 
 ## What it costs
 
-Each case has an estimate and a budget (`cases.py`), and each `claude -p` gets the case's remaining budget through `--max-budget-usd`. A full suite costs about $14 to $16.
+Each case has an estimate and a budget (`cases.py`), and each `claude -p` gets the case's remaining budget through `--max-budget-usd`. A full suite costs about $16 to $18.
 
 `--ledger` is one JSON line per run with case, stage and cost. Before each run the sum of the ledger plus the run's budget is checked against `--max-total-usd`, and the run is refused if it would exceed it. A run with no cost in its result is charged its budget, and an unreadable ledger refuses every run.
 
@@ -66,6 +66,7 @@ A failing check names the missing end state, so read it as a finding about the h
 | P5 | Same run as P4: the reviewer calls `codegraph_node` on `src/flags.js`. |
 | P6 | Records how many prompts call `whygraph_rationale_brief` before an edit. Never fails. |
 | P7 (stage 4) | Revise after P2: a synthesizer ran, and the answer lands in `## Resolved decisions` with no `Plan-shaping: yes` left. |
+| P8 | Web best practices: `best-practices` goes to the external researcher and reaches the synthesizer; `WebSearch` runs only there and `WebFetch` never; every cited URL sits in `## Prior art`, tagged `(external)`, and none in a step. |
 | C1 to C4 | Records the per-step versus final-evaluation comparison for `clean3` and `defect3`. Never fails. |
 
 ## Fixtures

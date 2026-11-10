@@ -4,6 +4,16 @@
     This page collects what is going into the next release. It moves into a numbered release page when
     that release is cut.
 
+## What's new
+
+- **Best practices from the web for `/whygraph-plan`.** A new bundled research source,
+  `best-practices.md`, searches the web for current guidance on the task's design choice and cites
+  each finding by title, URL and year. It always asks first, sends only the search terms, and never
+  opens a page. Its findings rank below your repository's own evidence: they appear only under the
+  plan's `## Prior art`, tagged `(external)`, and never change a step, a constraint or the plan's
+  confidence. Claude Code only. See
+  [Best practices from the web](../guide/planning.md#best-practices-from-the-web).
+
 ## Fixes
 
 - **The Describe now estimate matches what a run spends.** It undershot the real cost by about 3x

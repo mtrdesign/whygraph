@@ -132,7 +132,7 @@ function PhaseItem({ phase }: { phase: PhaseRow }) {
             >
               <span className="font-medium text-foreground">{crawlerLabel(c.name)}</span>{" "}
               {c.error ? "did not finish. The error is under Show details." : c.summary}
-              {c.warning && <span className="block text-warning">{c.warning}</span>}
+              {c.warning && <span className="block whitespace-pre-line text-warning">{c.warning}</span>}
             </p>
           ))}
       </div>

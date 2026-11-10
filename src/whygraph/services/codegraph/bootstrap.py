@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -410,7 +411,7 @@ def _run_codegraph(
         raise
     if proc.returncode != 0:
         if capture:
-            tail = (stderr or stdout or "").strip()
+            tail = _failure_tail(stderr or "") or _failure_tail(stdout or "")
             detail = f"\n{tail}" if tail else ""
             raise CodeGraphBootstrapError(
                 f"`codegraph {label}` failed (exit {proc.returncode}){detail}"
@@ -419,6 +420,41 @@ def _run_codegraph(
             f"`codegraph {label}` failed (exit {proc.returncode}) — see output above"
         )
     return (stdout or "") if capture else ""
+
+
+_ANSI_ESCAPE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])"
+)
+"""A terminal escape sequence: CSI (colours, erase line), OSC, or a two-byte one."""
+
+_FAILURE_TAIL_LINES = 12
+"""How many lines of a failed run's output :func:`_failure_tail` keeps."""
+
+_FAILURE_TAIL_CHARS = 2000
+"""The cap on :func:`_failure_tail`'s result, for one pathological long line."""
+
+
+def _failure_tail(output: str) -> str:
+    """The readable end of a failed run's output: no escapes, one line per progress step.
+
+    CodeGraph writes a spinner frame per line when stdout is not a TTY, so a
+    long ``init -i`` leaves megabytes of frames before the one line that says
+    why it failed. Consecutive lines with the same letters (frames of one
+    step, differing only in glyphs, bars and numbers) collapse to the last.
+    """
+    lines: list[str] = []
+    last_key: str | None = None
+    for raw in _ANSI_ESCAPE.sub("", output).splitlines():
+        line = raw.rstrip()
+        key = re.sub(r"[\W\d_]+", " ", line).strip()
+        if not key:
+            continue
+        if key == last_key:
+            lines[-1] = line
+        else:
+            lines.append(line)
+            last_key = key
+    return "\n".join(lines[-_FAILURE_TAIL_LINES:])[-_FAILURE_TAIL_CHARS:]
 
 
 def _kill_group(proc: subprocess.Popen) -> None:

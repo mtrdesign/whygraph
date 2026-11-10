@@ -312,6 +312,106 @@ describe("InitPreview", () => {
     expect(edited).toHaveTextContent("Edited");
     expect(edited).toHaveTextContent("WhyGraph no longer ships it, but you edited it");
   });
+
+  it("shows Overridden, the overridden count and an upstream diff that opens the asset list", () => {
+    render(
+      <InitPreview
+        result={result(
+          [],
+          [
+            file({
+              file: ".claude/agents/planner.md",
+              status: "skip",
+              agent: "claude",
+              override: "append",
+            }),
+            file({
+              file: ".claude/skills/x/SKILL.md",
+              status: "skip",
+              agent: "claude",
+              override: "replace",
+              reason: "WhyGraph changed this file since your override was written",
+              upstream_diff: "--- a/x\n+++ b/x\n+NEWUPSTREAM\n",
+            }),
+            file({
+              file: ".claude/skills/y/SKILL.md",
+              status: "skip",
+              agent: "claude",
+              override: "replace",
+              reason: "WhyGraph changed this file since your override was written; the earlier WhyGraph copy is not kept",
+              upstream_diff: "--- a/y\n+++ b/y\n+MINE\n",
+            }),
+          ],
+        )}
+        selectedAgents={["claude"]}
+        confirmed={new Set()}
+        onConfirmChange={noop}
+      />,
+    );
+    expect(screen.getByText(/3 already there, 3 overridden/)).toBeInTheDocument();
+    const row = screen.getByTestId("asset-.claude/agents/planner.md");
+    expect(within(row).getByTestId("overridden")).toHaveTextContent("Overridden");
+    expect(within(row).getByText("Up to date")).toBeInTheDocument();
+    const behind = screen.getByTestId("asset-.claude/skills/x/SKILL.md");
+    expect(within(behind).getByText("Show WhyGraph's change", { exact: false })).toBeInTheDocument();
+    expect(behind.closest("details")).toHaveAttribute("open");
+    expect(within(behind).getByTestId("diff")).toHaveTextContent("+NEWUPSTREAM");
+    expect(
+      within(screen.getByTestId("asset-.claude/skills/y/SKILL.md")).getByText(
+        /Show your override against WhyGraph's current copy/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("lets 'switched off' win over 'no longer shipped' on an edited row", () => {
+    render(
+      <InitPreview
+        result={result(
+          [],
+          [
+            file({
+              file: ".claude/skills/x/a.md",
+              status: "needs_confirmation",
+              agent: "claude",
+              reason: "switched off in .whygraph-overrides/disabled, and edited since it was installed (no longer shipped)",
+              diff: "--- a/x\n+++ b/x\n-MINE\n",
+            }),
+          ],
+        )}
+        selectedAgents={["claude"]}
+        confirmed={new Set()}
+        onConfirmChange={noop}
+      />,
+    );
+    const row = screen.getByTestId("asset-.claude/skills/x/a.md");
+    expect(row).toHaveTextContent("switched off in .whygraph-overrides/disabled, but you edited it");
+    expect(row).not.toHaveTextContent("no longer ships it");
+  });
+
+  it("renders overlay warnings with no asset rows, with detail and unknown-kind fallback", () => {
+    const r = result([], []);
+    r.overlay_warnings = [
+      { path: ".whygraph-overrides/claude-code/agents/planer.md", kind: "unknown_path" },
+      {
+        path: ".whygraph-overrides/disabled",
+        kind: "still_referenced",
+        detail: ".claude/skills/whygraph-plan/guard.sh is used by .claude/agents/implementor.md",
+      },
+      { path: ".whygraph-overrides", kind: "truncated", detail: "3 more" },
+      { path: ".whygraph-overrides/x", kind: "brand_new_kind" },
+    ];
+    render(<InitPreview result={r} selectedAgents={[]} confirmed={new Set()} onConfirmChange={noop} />);
+    const box = screen.getByTestId("overlay-warnings");
+    expect(box).toHaveTextContent("Matches no file this WhyGraph version ships - .whygraph-overrides/claude-code/agents/planer.md");
+    expect(box).toHaveTextContent("Switched off, but still used: .claude/skills/whygraph-plan/guard.sh is used by");
+    expect(box).toHaveTextContent("More warnings were found than shown - .whygraph-overrides (3 more)");
+    expect(box).toHaveTextContent("brand_new_kind - .whygraph-overrides/x");
+  });
+
+  it("renders no warnings block for a result without overlay_warnings", () => {
+    render(<InitPreview result={result([])} selectedAgents={[]} confirmed={new Set()} onConfirmChange={noop} />);
+    expect(screen.queryByTestId("overlay-warnings")).toBeNull();
+  });
 });
 
 // ---- detected panel -------------------------------------------------------------------

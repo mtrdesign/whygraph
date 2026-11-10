@@ -479,7 +479,7 @@ CASES: tuple[Case, ...] = (
                 f"SPINE_PATH: {SPINE}\n"
                 "SOURCES: repo-tests,best-practices\n"
                 "CONSENT: best-practices=yes\n"
-                "TERMS: empty state design\n"
+                "TERMS: React list empty state\n"
                 "PARENT: none\n"
                 "OUT_PATH: {dir}/.whygraph/plans/eval-p8.md\n"
                 f"CAPTURE_PATH: {CAPTURE}\n"

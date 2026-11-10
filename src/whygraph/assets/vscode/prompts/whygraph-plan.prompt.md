@@ -67,7 +67,7 @@ With `--no-questions`, ask nothing: record `<name>=no` for every source that nee
    - (b) Its file name is not one of the six bundled sources: `code-structure.md`, `whygraph-rationale.md`, `repo-tests.md`, `repo-history.md`, `ui-surface.md`, `best-practices.md`.
    - (c) It says `consent: true`.
 5. If no kept source needs consent, record `CONSENT: none` and go to Step 4.
-6. Derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `. Never use a project, client, company, product, file or symbol name in a term.
+6. Derive `TERMS` once: 1 to 3 technical topics from the task text, separated by `; `. Name the technique, pattern or public library the task names (`React list empty state`, not `empty state`). Never use a project, client, company, product, file or symbol name in a term.
 7. Ask the user in chat and wait: put all consent questions in **one** message, at most 4 consent questions. A fifth or later source is `no`; print `<name>: not asked (at most 4 consent questions per run); it will not run.` for each. Number the questions. Each question:
    - names the source (its `name`);
    - says what the source reaches: "an external service through <its non-WhyGraph, non-CodeGraph tools>" for (a), "the web, through your editor's web search" for the word `web`, and "added to this repo, not shipped with WhyGraph" plus its `description` for (b);

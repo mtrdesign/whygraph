@@ -12,7 +12,7 @@ consent: true
 *Question:* what does current outside guidance say about the one design choice this task makes?
 
 1. Name the task's design choice in one line. If the task makes none (a rename, a move, a version bump, a fix that restores intended behaviour), report `not applicable` under the section and make no call.
-2. Search once per term in `TERMS:`, with that term alone. Never add other words.
+2. Search once per term in `TERMS:` as `<term> best practices pitfalls`. When the budget allows, search again as `<term> deprecated <current year>` or `<term> security advisory`, whichever fits the choice. Add no other word.
 3. Prefer primary sources: official documentation, standards and RFCs, maintainers' posts and release notes. Skip listicles, SEO pages and machine-written summaries. Prefer recent sources, and give each one's year.
 4. Keep only specific advice: a version, a pitfall, a deprecation, a security advisory, a measured trade-off. Drop generic advice such as "write tests" or "keep functions small".
 5. Back each item with two independent sources, or mark it `(one source)`.

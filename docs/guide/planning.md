@@ -195,8 +195,10 @@ else's repository may carry sources of its own. After you clone a repository, re
 folder before you run a plan.
 
 For a source that reaches an outside service, the question also shows the **search terms**: one to
-three technical topics taken from your task. Only those terms leave your machine. File content, symbol
-names, commit messages and project names are never sent. In a split, only the first child asks.
+three technical topics taken from your task, naming the technique or public library when the task does.
+Only those terms leave your machine, plus a few fixed words a search may add (`best practices`,
+`pitfalls`, `deprecated`, `security advisory`, the year). File content, symbol names, commit messages
+and project names are never sent. In a split, only the first child asks.
 
 ### Sources that reach an outside service
 
@@ -271,8 +273,8 @@ What the external researcher gets, and what leaves your machine:
 
 - It gets less of your repository on purpose: it has no working set, only the task, the source's lens
   and the consented search terms. It reads no file but the source file.
-- Only the search terms go to the outside service. File content, symbol names, commit messages and
-  project names are never sent.
+- Only the search terms go to the outside service, plus the fixed words above. File content, symbol
+  names, commit messages and project names are never sent.
 - In a split, only the first child runs the source.
 
 ### Best practices from the web
@@ -284,8 +286,9 @@ official documentation, standards and maintainers' posts, and marks a claim with
 `(one source)`. A task with no design choice, such as a rename, gets `not applicable` and no search.
 
 - **It always asks first.** The question names the source, says it searches the web, and shows the
-  search terms. **No** is the default, and `--no-questions` answers No. Only the search terms are sent:
-  never your task text, file content, symbol names or project names.
+  search terms. **No** is the default, and `--no-questions` answers No. Each search is a consented term
+  plus fixed words such as `best practices` or `pitfalls`: never your task text, file content, symbol
+  names or project names.
 - **It only searches.** It runs on `whygraph-researcher-external` with your editor's web search
   (`WebSearch`, the `web` word). It never opens or fetches a page, so a page cannot steer it to another
   address.

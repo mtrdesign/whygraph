@@ -38,7 +38,7 @@ SOURCE:
 
 If a listed tool is not available to you, stop and report `(unavailable: <tool> is not granted to the external researcher)`.
 
-**A query to a tool outside this machine holds only words from `TERMS`.** Never send the task text, file content, commit messages, symbol names or project names. If `TERMS` is empty or missing, stop and report `(unavailable: no TERMS given)`.
+**A query to a tool outside this machine holds only words from `TERMS`, plus any of these fixed words: `best practices`, `pitfalls`, `deprecated`, `security advisory`, and the current year.** Never send the task text, file content, commit messages, symbol names or project names. A lens may say how to combine them; it can add no other word. If `TERMS` is empty or missing, stop and report `(unavailable: no TERMS given)`.
 
 ## Output format (markdown, this exact shape)
 

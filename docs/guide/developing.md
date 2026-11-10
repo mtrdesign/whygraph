@@ -171,7 +171,8 @@ Every mode keeps to itself, so none of them touches your own portal:
   three days, which breaks a dev Postgres and loses the data directory's `secret.key`;
 - one scratch folder of repos, `~/.local/state/whygraph-dev/repos`, shared by every mode and created
   offline on first use: a copy of your checkout (`git clone --no-hardlinks`, real history to
-  dogfood) and a tiny three-commit demo repo. Delete one to get a fresh copy next time.
+  dogfood) and a tiny three-commit demo repo. Delete one to get a fresh copy next time; one that
+  is no longer a working repository (its `HEAD` names no commit) is rebuilt the same way.
 
 Your checkout itself is never added to a dev portal, so it never gets WhyGraph's hooks or markers -
 unless you share a folder that holds it (below).

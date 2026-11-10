@@ -183,7 +183,7 @@ export function HealthPanel({
         <span className="mt-0.5 shrink-0">{ICON[item.tone]}</span>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <p className={cn("text-sm font-medium", item.tone === "error" && "text-destructive")}>{item.title}</p>
-          {item.detail && <p className="text-xs break-words text-muted-foreground">{item.detail}</p>}
+          {item.detail && <p className="text-xs break-words whitespace-pre-line text-muted-foreground">{item.detail}</p>}
           {actions.length > 0 && (
             <div className="mt-1 flex flex-wrap items-center gap-2">
               {actions.map(({ a, node }) => (

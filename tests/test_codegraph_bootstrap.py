@@ -477,6 +477,48 @@ def test_capture_true_folds_stderr_into_error(
         refresh_codegraph_index(tmp_path, capture=True)
 
 
+def _spinner_frame(label: str, glyph: str = "✶", rgb: str = "206;146;23") -> str:
+    """One non-TTY progress frame as CodeGraph's ``init -i`` writes it."""
+    return f"\x1b[K\x1b[2m│\x1b[0m  \x1b[38;2;{rgb}m\x1b[1m{glyph}\x1b[0m {label}\n"
+
+
+def test_capture_true_error_drops_spinner_frames_and_ansi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed ``init -i`` keeps the outcome line, not megabytes of frames."""
+    monkeypatch.setattr(bootstrap.shutil, "which", _which("codegraph"))
+    bar = "\x1b[38;2;160;100;9m\x1b[1m█\x1b[0m" * 13 + "\x1b[2m" + "░" * 12 + "\x1b[0m"
+    stdout = (
+        "┌  Initializing CodeGraph\n│\n◆  Initialized in /workspace\n"
+        "\x1b[2m│\x1b[0m\n\n"
+        + _spinner_frame("Scanning files...") * 500
+        + _spinner_frame("Scanning files... 3,806 found", glyph="·")
+        + "\x1b[K\x1b[2m│\x1b[0m  \x1b[32m◆\x1b[0m Scanning files — 3,806 found\n"
+        + "".join(_spinner_frame(f"Parsing code {bar}  {n}%") for n in range(101))
+        + _spinner_frame(f"Resolving refs  {bar}  50%") * 2000
+        + "│\n■  Failed: database disk image is malformed\n"
+    )
+
+    def fake_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess:
+        raise subprocess.CalledProcessError(
+            returncode=1, cmd=cmd, output=stdout, stderr=""
+        )
+
+    _fake_popen(monkeypatch, fake_run)
+
+    with pytest.raises(CodeGraphBootstrapError) as info:
+        refresh_codegraph_index(tmp_path, capture=True)
+
+    message = str(info.value)
+    assert "\x1b" not in message
+    assert message.startswith("`codegraph init -i` failed (exit 1)\n")
+    assert message.endswith("■  Failed: database disk image is malformed")
+    assert message.count("Resolving refs") == 1
+    assert message.count("Parsing code") == 1
+    assert "100%" in message  # the last frame of a run survives
+    assert len(message) < 2000
+
+
 # --------------------------------------------------------------------------- #
 # credential stripping - the codegraph subprocess never sees secrets
 # --------------------------------------------------------------------------- #

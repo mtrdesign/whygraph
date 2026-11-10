@@ -262,7 +262,7 @@ The health panel lists what needs attention, most important first, each with wha
 | A symbolic link where a real file belongs | See the [security model](security.md#symbolic-links) |
 | **A symbolic link leaves the repository** (the code index is not refreshed while it is there; the links are named) | Remove the links, then scan |
 | **CodeGraph is paused on this portal (every project)**: the shared server stopped after repeated crashes | **Restart CodeGraph** (whoever may start a scan; it restarts the server for every project) and **Open CodeGraph log** |
-| **The code index could not be refreshed** (a failed refresh, or the last scan's CodeGraph step failed) | **Rescan** and **Open CodeGraph log** |
+| **The code index could not be refreshed** (a failed refresh, or the last scan's CodeGraph step failed; the detail shows the last lines of CodeGraph's output, ending with its error) | **Rescan** and **Open CodeGraph log** |
 | **CodeGraph tool(s) withheld**: the portal's CodeGraph differs from the version WhyGraph was built against | Nothing to click; see [the schema pin](../reference/mcp.md#the-codegraph-endpoint) |
 | **Hosted CodeGraph tools are off** | Turn **Serve CodeGraph tools to agents** back on under Settings > Scanning |
 | **CodeGraph binary not found on this portal** (a natively run development portal) | Information only |

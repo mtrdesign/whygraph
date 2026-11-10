@@ -120,6 +120,12 @@ class InitializeResult:
         date) - the set the portal records as the project's agents.
     marker_written : bool
         Whether the portal markers were written.
+    overlay_warnings : tuple[dict, ...]
+        Non-blocking notes about ``.whygraph-overrides/`` as
+        ``{"path", "kind", "detail"}``: the root warnings plus every
+        agent's, deduplicated, sorted by ``(path, kind)`` and cut to
+        :data:`whygraph.assets.OVERLAY_WARNINGS_MAX` followed by one
+        ``truncated`` entry. They never withhold the markers.
     """
 
     dry_run: bool = False
@@ -131,6 +137,7 @@ class InitializeResult:
     assets: dict[str, assets_mod.InstallResult] = field(default_factory=dict)
     configured_agents: tuple[str, ...] = ()
     marker_written: bool = False
+    overlay_warnings: tuple[dict, ...] = ()
 
     @property
     def needs_confirmation(self) -> tuple[FileOutcome, ...]:
@@ -157,6 +164,7 @@ def initialize_project(
     contained: bool = False,
     replace_codegraph: Iterable[str | Path] = (),
     claude_hooks: bool = True,
+    acknowledge_upstream: bool = False,
 ) -> InitializeResult:
     """Wire a repository for WhyGraph: gitignore, hooks, agent configs, assets.
 
@@ -209,14 +217,21 @@ def initialize_project(
         deletes the helper whatever this is. A ``needs_confirmation``
         outcome for ``.claude/settings.json`` never withholds the markers:
         the hooks just stay uninstalled.
+    acknowledge_upstream : bool
+        Passed to :func:`whygraph.assets.install_assets`: record the
+        current WhyGraph copy of every overridden file as seen, which
+        clears the "WhyGraph changed this file" notice. The portal sends
+        it only for **Update agent files**.
     contained : bool
         Refuse to follow a symlink out of the repository: before any
         step runs (dry run included), every path the call could read or
         write in the work tree - ``.gitignore``, the hook helper, each
         agent config file and ``.whygraph/backups/``, each bundled asset
         destination, each asset file WhyGraph no longer ships (which a
-        re-install may delete), the markers and their temp files - goes
-        through
+        re-install may delete), the copy of each of those under
+        ``.whygraph/asset-bases/<agent>/`` (the bundled text an override
+        replaced, :data:`whygraph.assets.ASSET_BASES_RELPATH`) with its temp
+        file, the markers and their temp files - goes through
         :func:`whygraph.core.safe_paths.check_inside`. The portal passes
         ``True`` (repo content is untrusted there).
 
@@ -268,6 +283,7 @@ def initialize_project(
     asset_files: list[FileOutcome] = []
     asset_results: dict[str, assets_mod.InstallResult] = {}
     configured: list[str] = []
+    warnings: list[assets_mod.OverlayWarning] = []
     manifest_before = None if dry_run else assets_mod.read_manifest(root)
     for name, action in actions.items():
         target = agents_mod.AGENTS[name]
@@ -297,9 +313,14 @@ def initialize_project(
             configured.append(name)
         if target.has_assets:
             installed = assets_mod.install_assets(
-                target, root, force=force, dry_run=dry_run
+                target,
+                root,
+                force=force,
+                dry_run=dry_run,
+                acknowledge_upstream=acknowledge_upstream,
             )
             asset_results[name] = installed
+            warnings.extend(installed.overlay_warnings)
             asset_files.extend(_asset_outcomes(root, name, installed))
         if name == "claude" and claude_hooks:
             agent_files.append(
@@ -307,6 +328,19 @@ def initialize_project(
                     root, confirm_tracked=confirm_tracked, dry_run=dry_run
                 )
             )
+
+    known = frozenset(
+        t.assets_subdir
+        for t in agents_mod.AGENTS.values()
+        if t.assets_subdir is not None
+    )
+    selected = [
+        n
+        for n, a in actions.items()
+        if a == "migrate" and agents_mod.AGENTS[n].has_assets
+    ]
+    if selected:
+        warnings.extend(assets_mod.overlay_root_warnings(root, known))
 
     if (
         manifest_before is not None
@@ -325,6 +359,7 @@ def initialize_project(
         asset_files=tuple(asset_files),
         assets=asset_results,
         configured_agents=tuple(configured),
+        overlay_warnings=_merge_warnings(warnings),
     )
 
     # A declined .claude/settings.json leaves the hooks uninstalled; it never
@@ -337,6 +372,28 @@ def initialize_project(
     return result
 
 
+def _merge_warnings(warnings: Iterable[assets_mod.OverlayWarning]) -> tuple[dict, ...]:
+    """Deduplicate, sort and cap overlay warnings for the result.
+
+    Deduplicated by ``(path, kind, detail)`` (a shared ``disabled`` file is
+    read once per agent), sorted by ``(path, kind)``, and cut to
+    ``OVERLAY_WARNINGS_MAX`` followed by one ``truncated`` entry.
+    """
+    unique = {(w.path, w.kind, w.detail) for w in warnings}
+    ordered = sorted(unique, key=lambda t: (t[0], t[1], t[2]))
+    cap = assets_mod.OVERLAY_WARNINGS_MAX
+    out = [{"path": p, "kind": k, "detail": d} for p, k, d in ordered[:cap]]
+    if len(ordered) > cap:
+        out.append(
+            {
+                "path": ".whygraph-overrides",
+                "kind": "truncated",
+                "detail": f"{len(ordered) - cap} more",
+            }
+        )
+    return tuple(out)
+
+
 def _touched_paths(
     root: Path,
     actions: Mapping[str, AgentAction],
@@ -347,7 +404,10 @@ def _touched_paths(
     """Every work-tree path :func:`initialize_project` may read, write or delete.
 
     A generator: the manifest path is yielded (and so checked by the
-    caller) before the manifest is read for the retired asset paths.
+    caller) before the manifest is read for the retired asset paths. The
+    asset-bases copies are a superset of what the installer may write or
+    delete there (one per bundled or retired path, plus its ``.tmp``), so
+    no overlay has to be read here.
     """
     yield root / assets_mod.MANIFEST_RELPATH
     yield root / assets_mod.MANIFEST_RELPATH.with_name("assets.json.tmp")
@@ -365,11 +425,19 @@ def _touched_paths(
             assert target.assets_dest is not None
             dest = root.joinpath(*target.assets_dest)
             paths.append(dest)
-            paths.extend(
-                _asset_destinations(assets_mod.packaged_assets_for(target), dest)
+            installed = _asset_destinations(
+                assets_mod.packaged_assets_for(target), dest
             )
             for rel in assets_mod.retired_assets(target, old_files):
-                paths.append(dest.joinpath(*rel.split("/")))
+                installed.append(dest.joinpath(*rel.split("/")))
+            paths.extend(installed)
+            # The overlay's base copies mirror the same rels under the agent name.
+            bases = root / assets_mod.ASSET_BASES_RELPATH
+            mirror = bases / target.name
+            paths += [bases, mirror]
+            for path in installed:
+                base = mirror / path.relative_to(dest)
+                paths += [base, base.with_name(base.name + ".tmp")]
     if marker is not None:
         for rel in (PORTAL_ENV, PORTAL_JSON):
             paths += [root / rel, root / rel.with_name(rel.name + ".tmp")]
@@ -402,14 +470,29 @@ def _asset_outcomes(
     ):
         for p in paths:
             rel = Path(p).relative_to(root).as_posix()
-            if status == "delete":
-                reason: str | None = "no longer shipped by WhyGraph"
+            if status == "delete" and p in result.disabled:
+                reason: str | None = "switched off in .whygraph-overrides/disabled"
+            elif status == "needs_confirmation" and p in result.disabled:
+                reason = (
+                    "switched off in .whygraph-overrides/disabled, "
+                    "and edited since it was installed"
+                )
+            elif status == "delete":
+                reason = "no longer shipped by WhyGraph"
             elif status == "needs_confirmation" and p in result.retired:
                 reason = (
                     "no longer shipped by WhyGraph, and edited since it was installed"
                 )
             elif status == "needs_confirmation":
                 reason = "edited since WhyGraph installed it"
+            elif status in ("skip", "overwrite") and p in result.upstream_diffs:
+                reason = "WhyGraph changed this file since your override was written"
+                if p in result.upstream_base_missing:
+                    reason += (
+                        "; the earlier WhyGraph copy is not kept here, so the "
+                        "difference shown is your override against WhyGraph's "
+                        "current copy"
+                    )
             else:
                 reason = None
             out.append(
@@ -421,6 +504,8 @@ def _asset_outcomes(
                     diff=result.diffs.get(p)
                     if status in ("overwrite", "needs_confirmation", "delete")
                     else None,
+                    override=result.overrides.get(p),
+                    upstream_diff=result.upstream_diffs.get(p),
                 )
             )
     return sorted(out, key=lambda o: o.file)

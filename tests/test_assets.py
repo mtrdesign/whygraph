@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -2416,3 +2418,1340 @@ def test_cursor_retired_hash_matches_the_v2_command(tmp_path: Path) -> None:
 
     assert old in result.removed and not old.exists()
     assert not (project / ".cursor" / "commands").exists()
+
+
+# ---- overrides: overlay reader and effective tree (plan 48, step 1) -------
+
+
+def _overlay_source(tmp_path: Path) -> Path:
+    """A tiny Claude-shaped bundled tree (``CLAUDE.md`` is the merged file)."""
+    src = tmp_path / "src"
+    files = {
+        "CLAUDE.md": "BUNDLED CLAUDE\n",
+        "agents/planner.md": "PLANNER\n",
+        "agents/x.md": "X-AGENT uses .claude/skills/y/tool.sh\n",
+        "rules/r.mdc": "RULE\n",
+        "skills/y/SKILL.md": "Y-SKILL\n",
+        "skills/y/tool.sh": "echo tool\n",
+    }
+    for rel, text in files.items():
+        path = src / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return src
+
+
+def _overlay_project(tmp_path: Path) -> Path:
+    project = tmp_path / "proj"
+    (project / ".whygraph-overrides").mkdir(parents=True)
+    return project
+
+
+def _put(project: Path, rel: str, text: str | bytes) -> Path:
+    """Write ``.whygraph-overrides/<rel>``."""
+    path = project / ".whygraph-overrides" / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+    else:
+        path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _effective(
+    project: Path,
+    src: Path | object,
+    target: agents.AgentTarget | None = None,
+    known_old: set[str] | None = None,
+) -> tuple[dict, set[str], list[assets.OverlayWarning]]:
+    target = target or _claude_target()
+    overlay = assets._read_overlay(project, target)
+    assert target.assets_dest is not None
+    return assets._effective_tree(
+        src,
+        overlay,
+        frozenset(target.assets_merge_files),
+        known_old or set(),
+        target.assets_dest,
+    )
+
+
+def _kinds(warnings: list[assets.OverlayWarning]) -> list[tuple[str, str]]:
+    return [(w.path, w.kind) for w in warnings]
+
+
+def _json_safe(warnings: list[assets.OverlayWarning]) -> None:
+    json.dumps([dataclasses.asdict(w) for w in warnings]).encode()
+
+
+def test_overlay_absent_is_the_bundled_tree(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    eff, held, warnings = _effective(project, src)
+
+    assert held == set() and warnings == []
+    assert sorted(eff) == sorted(assets._bundled_paths(src))
+    for rel, e in eff.items():
+        assert e.text == e.bundled == (src / rel).read_text(encoding="utf-8")
+        assert e.override is None
+
+
+def test_overlay_missing_project_root_is_empty(tmp_path: Path) -> None:
+    overlay = assets._read_overlay(tmp_path / "missing", _claude_target())
+
+    assert not overlay.hold_all and overlay.files == {} and overlay.warnings == []
+
+
+def test_overlay_replace_is_the_effective_text(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert warnings == [] and held == set()
+    planner = eff["agents/planner.md"]
+    assert planner.text == "OURS\n"
+    assert planner.bundled == "PLANNER\n"
+    assert planner.override == "replace"
+    assert eff["agents/x.md"].override is None
+
+
+def test_overlay_append_joins_with_one_blank_line(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    (src / "agents" / "planner.md").write_text("PLANNER\n\n\n", encoding="utf-8")
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.append.md", "\n\nMORE\nLINES\n\n")
+    _put(project, "claude-code/rules/r.append.mdc", "MDC MORE")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["agents/planner.md"].text == "PLANNER\n\nMORE\nLINES\n"
+    assert eff["agents/planner.md"].override == "append"
+    assert eff["rules/r.mdc"].text == "RULE\n\nMDC MORE\n"
+
+
+def test_overlay_append_uses_the_last_suffix_only(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "agents").mkdir(parents=True)
+    (src / "agents" / "planner.agent.md").write_text("VS PLANNER\n", encoding="utf-8")
+    project = _overlay_project(tmp_path)
+    _put(project, "vscode/agents/planner.agent.append.md", "VS MORE\n")
+
+    eff, _, warnings = _effective(project, src, agents.resolve_agent("vscode"))
+
+    assert warnings == []
+    assert eff["agents/planner.agent.md"].text == "VS PLANNER\n\nVS MORE\n"
+
+
+def test_overlay_append_unsupported_suffix_keeps_the_base(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / ".codex" / "agents").mkdir(parents=True)
+    (src / ".codex" / "agents" / "planner.toml").write_text("TOML\n", encoding="utf-8")
+    (src / "AGENTS.md").write_text("CODEX\n", encoding="utf-8")
+    codex = agents.resolve_agent("codex")
+    project = _overlay_project(tmp_path)
+    _put(project, "codex/.codex/agents/planner.append.toml", "EXTRA\n")
+
+    eff, _, warnings = _effective(project, src, codex)
+
+    assert _kinds(warnings) == [
+        (
+            ".whygraph-overrides/codex/.codex/agents/planner.append.toml",
+            "append_unsupported",
+        )
+    ]
+    assert eff[".codex/agents/planner.toml"].text == "TOML\n"
+    assert eff[".codex/agents/planner.toml"].override is None
+
+    _put(project, "codex/.codex/agents/planner.toml", "OURS TOML\n")
+    eff, _, warnings = _effective(project, src, codex)
+
+    assert [w.kind for w in warnings] == ["append_unsupported"]
+    assert eff[".codex/agents/planner.toml"].text == "OURS TOML\n"
+    assert eff[".codex/agents/planner.toml"].override == "replace"
+
+
+def test_overlay_replace_then_append(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n\n")
+    _put(project, "claude-code/agents/planner.append.md", "MORE\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["agents/planner.md"].text == "OURS\n\nMORE\n"
+    assert eff["agents/planner.md"].override == "replace+append"
+    assert eff["agents/planner.md"].bundled == "PLANNER\n"
+
+
+def test_overlay_merged_file_body_can_be_replaced_and_appended(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/CLAUDE.md", "TEAM CLAUDE\n")
+    _put(project, "claude-code/CLAUDE.append.md", "TEAM NOTE\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["CLAUDE.md"].text == "TEAM CLAUDE\n\nTEAM NOTE\n"
+    assert eff["CLAUDE.md"].override == "replace+append"
+
+
+def _merge_folder_target() -> agents.AgentTarget:
+    return agents.AgentTarget(
+        name="t",
+        aliases=(),
+        relative_path=("ignored",),
+        scope="project",
+        format="json",
+        description="ephemeral test target",
+        assets_subdir="tsub",
+        assets_dest=("dest",),
+        assets_merge_files=("docs/merge.md",),
+    )
+
+
+@pytest.mark.parametrize("line", ["tsub/docs/merge.md", "tsub/docs/", "tsub/"])
+def test_overlay_cannot_disable_a_merged_file(tmp_path: Path, line: str) -> None:
+    src = tmp_path / "src"
+    (src / "docs").mkdir(parents=True)
+    (src / "docs" / "merge.md").write_text("MERGED\n", encoding="utf-8")
+    (src / "docs" / "other.md").write_text("OTHER\n", encoding="utf-8")
+    (src / "top.md").write_text("TOP\n", encoding="utf-8")
+    project = _overlay_project(tmp_path)
+    _put(project, "disabled", f"# comment\n\n{line}\n")
+
+    eff, held, warnings = _effective(project, src, _merge_folder_target())
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/disabled:3", "cannot_disable_merged")
+    ]
+    assert "docs/merge.md" in eff and held == set()
+    assert ("docs/other.md" in eff) == (line == "tsub/docs/merge.md")
+    assert ("top.md" in eff) == (line != "tsub/")
+
+
+def test_overlay_whole_agent_line_keeps_claude_md(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "disabled", "claude-code/CLAUDE.md\nclaude-code/\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert sorted(eff) == ["CLAUDE.md"]
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/disabled:1", "cannot_disable_merged"),
+        (".whygraph-overrides/disabled:2", "cannot_disable_merged"),
+    ]
+
+
+def test_overlay_disabled_file_and_folder_lines(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "disabled", "claude-code/agents/planner.md\nclaude-code/rules/\n")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert "agents/planner.md" not in eff and "rules/r.mdc" not in eff
+    assert "agents/x.md" in eff and held == set() and warnings == []
+
+
+def test_overlay_unknown_and_no_longer_bundled(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/nope.md", "N\n")
+    _put(project, "claude-code/agents/nope.append.md", "N\n")
+    _put(project, "claude-code/commands/old.md", "OLD\n")
+    _put(project, "claude-code/commands/gone.append.md", "OLD\n")
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _put(
+        project,
+        "disabled",
+        "claude-code/agents/planner.md\n"
+        "claude-code/agents/nope.md\n"
+        "claude-code/commands/old.md\n"
+        "claude-code/commands/\n",
+    )
+
+    eff, _, warnings = _effective(
+        project, src, known_old={"commands/old.md", "commands/gone.md"}
+    )
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/disabled:2", "unknown_path"),
+        (".whygraph-overrides/disabled:3", "no_longer_bundled"),
+        (".whygraph-overrides/disabled:4", "no_longer_bundled"),
+        (
+            ".whygraph-overrides/claude-code/agents/planner.md",
+            "overridden_but_disabled",
+        ),
+        (".whygraph-overrides/claude-code/agents/nope.append.md", "unknown_path"),
+        (".whygraph-overrides/claude-code/agents/nope.md", "unknown_path"),
+        (
+            ".whygraph-overrides/claude-code/commands/gone.append.md",
+            "no_longer_bundled",
+        ),
+        (".whygraph-overrides/claude-code/commands/old.md", "no_longer_bundled"),
+    ]
+    assert "agents/planner.md" not in eff
+
+
+def test_overlay_marker_in_text_holds_the_rel(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/CLAUDE.md", f"TEAM\n{assets.END_MARKER}\nmore\n")
+    _put(project, "claude-code/agents/planner.append.md", f"{assets.BEGIN_MARKER}\n")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/CLAUDE.md", "marker_in_text"),
+        (".whygraph-overrides/claude-code/agents/planner.append.md", "marker_in_text"),
+    ]
+    assert held == {"CLAUDE.md", "agents/planner.md"}
+    assert "CLAUDE.md" not in eff and "agents/planner.md" not in eff
+
+
+def test_overlay_text_is_newline_normalized(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project, "claude-code/agents/planner.md", b"\xef\xbb\xbfOURS\r\nTWO\rTHREE\r\n"
+    )
+    _put(project, "claude-code/agents/x.append.md", b"\r\nMORE\r\n\r\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert warnings == []
+    assert eff["agents/planner.md"].text == "OURS\nTWO\nTHREE\n"
+    assert "\r" not in eff["agents/x.md"].text
+    assert eff["agents/x.md"].text.endswith("\n\nMORE\n")
+
+
+def test_overlay_still_referenced_warns() -> None:
+    claude = _claude_target()
+    src = assets.packaged_assets_for(claude)
+    guard = "claude-code/skills/whygraph-plan/guard.sh"
+
+    def run(lines: str, target: agents.AgentTarget = claude, source: object = src):
+        project = Path(tempfile.mkdtemp())
+        try:
+            _put(project, "disabled", lines)
+            return _effective(project, source, target)
+        finally:
+            shutil.rmtree(project)
+
+    eff, _, warnings = run(f"{guard}\n")
+    assert "skills/whygraph-plan/guard.sh" not in eff
+    assert [w.kind for w in warnings] == ["still_referenced"]
+    (warning,) = warnings
+    assert warning.path == ".whygraph-overrides/disabled:1"
+    assert warning.detail.startswith(
+        ".claude/skills/whygraph-plan/guard.sh is used by .claude/agents/"
+    )
+    assert warning.detail.endswith(" and 2 more")
+
+    together = "\n".join(
+        [guard]
+        + [
+            f"claude-code/agents/{name}.md"
+            for name in ("implementor", "synthesizer", "whygraph-reviewer")
+        ]
+    )
+    _, _, warnings = run(together)
+    assert warnings == []
+
+    codex = agents.resolve_agent("codex")
+    _, _, warnings = run(
+        "codex/.codex/whygraph/plan-tool.sh\n", codex, assets.packaged_assets_for(codex)
+    )
+    assert [(w.kind, w.detail) for w in warnings] == [
+        ("still_referenced", ".codex/whygraph/plan-tool.sh is used by AGENTS.md")
+    ]
+
+    _, _, warnings = run("claude-code/skills/whygraph-ui-check/\n")
+    assert {w.kind for w in warnings} == {"still_referenced"}
+    assert all(w.path == ".whygraph-overrides/disabled:1" for w in warnings)
+    assert all(
+        w.detail.startswith(".claude/skills/whygraph-ui-check/") for w in warnings
+    )
+
+
+def test_overlay_reference_only_from_a_disabled_file_is_silent(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "disabled", "claude-code/skills/y/tool.sh\n")
+
+    _, _, warnings = _effective(project, src)
+    assert [(w.kind, w.detail) for w in warnings] == [
+        ("still_referenced", ".claude/skills/y/tool.sh is used by .claude/agents/x.md")
+    ]
+
+    _put(project, "disabled", "claude-code/skills/y/tool.sh\nclaude-code/agents/x.md\n")
+    _, _, warnings = _effective(project, src)
+    assert warnings == []
+
+
+# ---- overrides: the reader treats the overlay as untrusted ---------------
+
+
+def _outside_overlay(tmp_path: Path) -> Path:
+    """A directory outside the project shaped like an overlay root."""
+    outside = tmp_path / "outside"
+    (outside / "claude-code" / "agents").mkdir(parents=True)
+    (outside / "claude-code" / "agents" / "planner.md").write_text("STOLEN\n")
+    (outside / "disabled").write_text("claude-code/agents/x.md\n")
+    return outside
+
+
+def test_overlay_symlinked_root_holds_everything(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".whygraph-overrides").symlink_to(_outside_overlay(tmp_path))
+
+    overlay = assets._read_overlay(project, _claude_target())
+    eff, held, warnings = _effective(project, src)
+
+    assert overlay.hold_all and overlay.files == {} and overlay.disabled == []
+    assert _kinds(warnings) == [(".whygraph-overrides", "overlay_unreadable")]
+    assert eff == {} and held == assets._bundled_paths(src)
+    _json_safe(warnings)
+
+
+def test_overlay_symlinked_subfolder_holds_everything(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    outside = _outside_overlay(tmp_path)
+    (project / ".whygraph-overrides" / "claude-code").symlink_to(
+        outside / "claude-code"
+    )
+
+    overlay = assets._read_overlay(project, _claude_target())
+    eff, held, warnings = _effective(project, src)
+
+    assert overlay.hold_all and overlay.files == {}
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code", "overlay_unreadable")
+    ]
+    assert eff == {} and held == assets._bundled_paths(src)
+    _json_safe(warnings)
+
+
+def test_overlay_symlinked_disabled_holds_everything(tmp_path: Path) -> None:
+    project = _overlay_project(tmp_path)
+    outside = _outside_overlay(tmp_path)
+    (project / ".whygraph-overrides" / "disabled").symlink_to(outside / "disabled")
+
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert overlay.hold_all and overlay.disabled == []
+    assert _kinds(overlay.warnings) == [
+        (".whygraph-overrides/disabled", "overlay_unreadable")
+    ]
+
+
+def test_overlay_symlinked_entries_are_held(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    outside = _outside_overlay(tmp_path)
+    agent = project / ".whygraph-overrides" / "claude-code"
+    agent.mkdir()
+    (agent / "agents").mkdir()
+    (agent / "agents" / "planner.md").symlink_to(
+        outside / "claude-code/agents/planner.md"
+    )
+    (agent / "skills").symlink_to(outside / "claude-code")
+
+    overlay = assets._read_overlay(project, _claude_target())
+    eff, held, warnings = _effective(project, src)
+
+    assert overlay.files == {} and not overlay.hold_all
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/agents/planner.md", "unsafe"),
+        (".whygraph-overrides/claude-code/skills", "unsafe"),
+    ]
+    assert held == {"agents/planner.md", "skills/y/SKILL.md", "skills/y/tool.sh"}
+    assert "agents/planner.md" not in eff and "agents/x.md" in eff
+    _json_safe(warnings)
+
+
+def test_overlay_symlinked_append_holds_its_base(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    outside = _outside_overlay(tmp_path)
+    link = project / ".whygraph-overrides" / "claude-code" / "agents" / "x.append.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside / "claude-code/agents/planner.md")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert held == {"agents/x.md"} and "agents/x.md" not in eff
+    assert [w.kind for w in warnings] == ["unsafe"]
+
+
+def test_overlay_unsafe_disabled_lines(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(
+        project,
+        "disabled",
+        "claude-code/../x.md\n"
+        "claude-code/agents//x.md\n"
+        "claude-code/agents\\x.md\n"
+        "claude-code/./agents/x.md\n",
+    )
+
+    eff, _, warnings = _effective(project, src)
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/disabled:1", "unsafe"),
+        (".whygraph-overrides/disabled:2", "unsafe"),
+        (".whygraph-overrides/disabled:3", "unsafe"),
+        (".whygraph-overrides/disabled:4", "unsafe"),
+    ]
+    assert "agents/x.md" in eff
+    _json_safe(warnings)
+
+
+def test_overlay_backslash_and_control_names_are_unsafe(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/a\\b.md", "X\n")
+    _put(project, "claude-code/agents/c\x01d.md", "X\n")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert sorted(w.kind for w in warnings) == ["unsafe", "unsafe"]
+    assert held == set() and "agents/x.md" in eff
+    _json_safe(warnings)
+
+
+def test_overlay_undecodable_name_is_unsafe(tmp_path: Path) -> None:
+    project = _overlay_project(tmp_path)
+    agent = project / ".whygraph-overrides" / "claude-code"
+    agent.mkdir()
+    try:
+        fd = os.open(
+            os.path.join(os.fsencode(agent), b"\xff.md"), os.O_CREAT | os.O_WRONLY
+        )
+    except OSError:
+        pytest.skip("the file system refuses a non-UTF-8 name (APFS)")
+    os.close(fd)
+
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert [w.kind for w in overlay.warnings] == ["unsafe"]
+    assert overlay.files == {} and overlay.held == set()
+    _json_safe(overlay.warnings)
+
+
+def test_overlay_too_large_file_is_held(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "x" * (100 * 1024))
+    _put(project, "claude-code/agents/x.md", "y" * assets.OVERLAY_FILE_MAX)
+
+    eff, held, warnings = _effective(project, src)
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/agents/planner.md", "too_large")
+    ]
+    assert held == {"agents/planner.md"}
+    assert eff["agents/x.md"].override == "replace"
+
+
+def test_overlay_not_text_is_held(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.append.md", b"\xff\xfe binary")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/agents/planner.append.md", "not_text")
+    ]
+    assert held == {"agents/planner.md"} and "agents/planner.md" not in eff
+    _json_safe(warnings)
+
+
+def test_overlay_fifo_is_unsafe(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no FIFOs on this platform")
+    project = _overlay_project(tmp_path)
+    (project / ".whygraph-overrides" / "claude-code" / "agents").mkdir(parents=True)
+    os.mkfifo(project / ".whygraph-overrides" / "claude-code" / "agents" / "planner.md")
+
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert [w.kind for w in overlay.warnings] == ["unsafe"]
+    assert "agents/planner.md" in overlay.held
+
+
+def test_overlay_entry_cap_holds_the_agent(tmp_path: Path) -> None:
+    project = _overlay_project(tmp_path)
+    for n in range(assets.OVERLAY_FILES_MAX - 1):
+        _put(project, f"claude-code/f{n:03}.md", "x")
+    ok = assets._read_overlay(project, _claude_target())
+    assert not ok.hold_all  # 99 files + no folder: under the cap
+
+    _put(project, "claude-code/sub/one.md", "x")  # 2 more entries: over
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert overlay.hold_all
+    assert _kinds(overlay.warnings) == [
+        (".whygraph-overrides/claude-code", "too_large")
+    ]
+
+
+def test_overlay_total_size_cap_holds_the_agent(tmp_path: Path) -> None:
+    project = _overlay_project(tmp_path)
+    count = assets.OVERLAY_TOTAL_MAX // assets.OVERLAY_FILE_MAX + 1
+    for n in range(count):
+        _put(project, f"claude-code/f{n}.md", "x" * assets.OVERLAY_FILE_MAX)
+
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert overlay.hold_all
+    assert _kinds(overlay.warnings) == [
+        (".whygraph-overrides/claude-code", "too_large")
+    ]
+
+
+def test_overlay_depth_cap_holds_the_agent(tmp_path: Path) -> None:
+    project = _overlay_project(tmp_path)
+    deep = "/".join(f"d{n}" for n in range(assets.OVERLAY_DEPTH_MAX))
+    _put(project, f"claude-code/{deep}/ok.md", "x")
+    ok = assets._read_overlay(project, _claude_target())
+    assert not ok.hold_all and f"{deep}/ok.md" in ok.files
+
+    _put(project, f"claude-code/{deep}/too-deep/x.md", "x")
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert overlay.hold_all
+    assert _kinds(overlay.warnings) == [
+        (".whygraph-overrides/claude-code", "too_large")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("make", "path"),
+    [
+        ("root_file", ".whygraph-overrides"),
+        ("agent_file", ".whygraph-overrides/claude-code"),
+        ("disabled_dir", ".whygraph-overrides/disabled"),
+    ],
+)
+def test_overlay_wrong_type_holds_the_agent(
+    tmp_path: Path, make: str, path: str
+) -> None:
+    src = _overlay_source(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    root = project / ".whygraph-overrides"
+    if make == "root_file":
+        root.write_text("not a folder\n")
+    else:
+        root.mkdir()
+        name = "claude-code" if make == "agent_file" else "disabled"
+        if make == "agent_file":
+            (root / name).write_text("not a folder\n")
+        else:
+            (root / name).mkdir()
+
+    eff, held, warnings = _effective(project, src)
+
+    assert _kinds(warnings) == [(path, "overlay_unreadable")]
+    assert eff == {} and held == assets._bundled_paths(src)
+    _json_safe(warnings)
+
+
+def test_overlay_unreadable_disabled_holds_the_agent(tmp_path: Path) -> None:
+    project = _overlay_project(tmp_path)
+    _put(project, "disabled", b"claude-code/\xff\n")
+
+    overlay = assets._read_overlay(project, _claude_target())
+
+    assert overlay.hold_all
+    assert _kinds(overlay.warnings) == [(".whygraph-overrides/disabled", "not_text")]
+
+
+def test_overlay_file_where_a_folder_is_bundled(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents", "a file, not a folder\n")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/agents", "unknown_path")
+    ]
+    assert held == set()
+    assert eff["agents/planner.md"].text == "PLANNER\n"
+
+
+def test_overlay_unreadable_subfolder_is_held(tmp_path: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads a mode-000 folder")
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    locked = project / ".whygraph-overrides" / "claude-code" / "skills"
+    _put(project, "claude-code/skills/y/SKILL.md", "OURS\n")
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    locked.chmod(0)
+    try:
+        eff, held, warnings = _effective(project, src)
+    finally:
+        locked.chmod(0o755)
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/skills", "overlay_unreadable")
+    ]
+    assert held == {"skills/y/SKILL.md", "skills/y/tool.sh"}
+    assert eff["agents/planner.md"].text == "OURS\n"
+    _json_safe(warnings)
+
+
+def test_overlay_names_match_exactly(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "Disabled", "claude-code/agents/planner.md\n")
+    _put(project, "Claude-Code/agents/planner.md", "OURS\n")
+
+    eff, held, warnings = _effective(project, src)
+
+    assert warnings == [] and held == set()
+    assert eff["agents/planner.md"].text == "PLANNER\n"
+    assert _kinds(assets.overlay_root_warnings(project, _known_subdirs())) == [
+        (".whygraph-overrides/Claude-Code", "unknown_path"),
+        (".whygraph-overrides/Disabled", "unknown_path"),
+    ]
+
+
+def test_overlay_append_name_is_case_sensitive(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/PLANNER.append.md", "MORE\n")
+
+    eff, _, warnings = _effective(project, src)
+
+    assert eff["agents/planner.md"].text == "PLANNER\n"
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude-code/agents/PLANNER.append.md", "unknown_path")
+    ]
+
+
+def _known_subdirs() -> frozenset[str]:
+    return frozenset(
+        t.assets_subdir
+        for t in agents.AGENTS.values()
+        if t.has_assets and t.assets_subdir is not None
+    )
+
+
+def test_overlay_root_warnings(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    assert assets.overlay_root_warnings(project, _known_subdirs()) == []
+
+    _put(project, "claude/agents/planner.md", "OURS\n")
+    _put(project, "cursor/rules/x.mdc", "C\n")
+    _put(project, "disabled", "claude/x.md\ncursor/rules/x.mdc\n../x\n")
+
+    warnings = assets.overlay_root_warnings(project, _known_subdirs())
+
+    assert _kinds(warnings) == [
+        (".whygraph-overrides/claude", "unknown_path"),
+        (".whygraph-overrides/disabled:1", "unknown_path"),
+        (".whygraph-overrides/disabled:3", "unsafe"),
+    ]
+    _json_safe(warnings)
+
+
+def test_overlay_root_warnings_symlinked_root(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".whygraph-overrides").symlink_to(_outside_overlay(tmp_path))
+
+    warnings = assets.overlay_root_warnings(project, _known_subdirs())
+
+    assert _kinds(warnings) == [(".whygraph-overrides", "overlay_unreadable")]
+
+
+# ---- overrides: the installer, retire and manifest (plan 48, step 2) ------
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _install(project: Path, src: Path, **kw) -> assets.InstallResult:
+    return assets.install_assets(_claude_target(), project, source=src, **kw)
+
+
+def _base_copy(project: Path, rel: str) -> Path:
+    return project / ".whygraph" / "asset-bases" / "claude" / rel
+
+
+def _git(project: Path, *args: str) -> subprocess.CompletedProcess:
+    git = ["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@x"]
+    return subprocess.run([*git, *args], capture_output=True, check=False)
+
+
+def _snapshot(root: Path) -> dict[str, tuple[bytes | None, int]]:
+    """Every entry below ``root``: its bytes (files) and mtime."""
+    out: dict[str, tuple[bytes | None, int]] = {}
+    for path in sorted(root.rglob("*")):
+        is_file = path.is_file() and not path.is_symlink()
+        out[path.relative_to(root).as_posix()] = (
+            path.read_bytes() if is_file else None,
+            path.lstat().st_mtime_ns,
+        )
+    return out
+
+
+def test_overlay_replace_installs_the_override(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    result = _install(project, src)
+
+    assert planner.read_text() == "OURS\n" and planner in result.written
+    assert result.overrides == {planner: "replace"}
+    manifest = _manifest(project)
+    assert manifest["files"]["claude/agents/planner.md"] == _sha("OURS\n")
+    assert manifest["bases"] == {"claude/agents/planner.md": _sha("PLANNER\n")}
+    assert _base_copy(project, "agents/planner.md").read_text() == "PLANNER\n"
+
+    again = _install(project, src)
+
+    assert planner in again.skipped and again.needs_confirmation == []
+    assert again.overrides == {planner: "replace"}
+    assert again.upstream_diffs == {} and again.overlay_warnings == []
+
+
+def test_overlay_replace_is_up_to_date_without_manifest(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    shutil.rmtree(project / ".whygraph")
+
+    result = _install(project, src)
+
+    planner = project / ".claude" / "agents" / "planner.md"
+    assert planner in result.skipped and result.needs_confirmation == []
+    assert result.upstream_diffs == {}
+
+
+def test_overlay_crlf_override_is_up_to_date_without_manifest(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", b"OURS\r\nTWO\r\n")
+    _put(project, "claude-code/agents/x.append.md", b"MORE\r\n")
+    _install(project, src)
+    (project / ".whygraph" / "assets.json").unlink()
+
+    result = _install(project, src)
+
+    planner = project / ".claude" / "agents" / "planner.md"
+    assert planner in result.skipped and result.needs_confirmation == []
+    assert planner.read_bytes() == b"OURS\nTWO\n"
+    assert b"\r" not in (project / ".claude" / "agents" / "x.md").read_bytes()
+
+
+def test_overlay_merged_file_install_keeps_the_outside_text(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    claude_md = project / ".claude" / "CLAUDE.md"
+    _install(project, src)
+    claude_md.write_text("above\n\n" + claude_md.read_text() + "below\n")
+    _put(project, "claude-code/CLAUDE.md", "TEAM\n")
+    _put(project, "claude-code/CLAUDE.append.md", "NOTE\n")
+
+    result = _install(project, src)
+
+    assert claude_md.read_text() == (
+        f"above\n\n{assets.BEGIN_MARKER}\nTEAM\n\nNOTE\n{assets.END_MARKER}\nbelow\n"
+    )
+    assert claude_md in result.overwritten
+    assert result.overrides == {claude_md: "replace+append"}
+    assert _manifest(project)["files"]["claude/CLAUDE.md"] == _sha("TEAM\n\nNOTE")
+
+    again = _install(project, src)
+    assert claude_md in again.skipped
+
+
+def test_overlay_marker_in_text_leaves_the_merged_file(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    claude_md = project / ".claude" / "CLAUDE.md"
+    _install(project, src)
+    claude_md.write_text("above\n\n" + claude_md.read_text() + "below\n")
+    before = claude_md.read_bytes()
+    entry = _manifest(project)["files"]["claude/CLAUDE.md"]
+    _put(project, "claude-code/CLAUDE.md", f"TEAM\n{assets.END_MARKER}\nmore\n")
+
+    result = _install(project, src)
+
+    assert _kinds(result.overlay_warnings) == [
+        (".whygraph-overrides/claude-code/CLAUDE.md", "marker_in_text")
+    ]
+    assert claude_md.read_bytes() == before
+    assert claude_md not in result.skipped + result.overwritten + result.removed
+    assert _manifest(project)["files"]["claude/CLAUDE.md"] == entry
+
+
+def test_overlay_disabled_unedited_files_are_removed(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _install(project, src)
+    _put(project, "disabled", "claude-code/agents/planner.md\nclaude-code/skills/y/\n")
+    dest = project / ".claude"
+    planner = dest / "agents" / "planner.md"
+    skill, tool = dest / "skills" / "y" / "SKILL.md", dest / "skills" / "y" / "tool.sh"
+
+    result = _install(project, src)
+
+    assert sorted(result.removed) == sorted([planner, skill, tool])
+    assert sorted(result.disabled) == sorted([planner, skill, tool])
+    assert result.needs_confirmation == []
+    assert not planner.exists() and not (dest / "skills").exists()
+    assert (dest / "agents" / "x.md").is_file()
+    assert [w.kind for w in result.overlay_warnings] == ["still_referenced"]
+    files = _manifest(project)["files"]
+    assert "claude/agents/planner.md" not in files
+    assert "claude/skills/y/tool.sh" not in files
+
+    again = _install(project, src)
+    assert again.removed == [] and again.written == [] and again.disabled == []
+
+
+def test_overlay_disabled_edited_file_asks(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _install(project, src)
+    planner = project / ".claude" / "agents" / "planner.md"
+    planner.write_text("MINE\n")
+    _put(project, "disabled", "claude-code/agents/planner.md\n")
+
+    result = _install(project, src)
+
+    assert result.needs_confirmation == [planner] and result.retired == [planner]
+    assert result.disabled == [planner] and result.removed == []
+    assert "-MINE" in result.diffs[planner]
+    assert planner.read_text() == "MINE\n"
+
+
+@pytest.mark.parametrize("committed", ["bundled", "override"])
+def test_overlay_disabled_without_manifest_is_removed(
+    tmp_path: Path, committed: str
+) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    if committed == "override":
+        _put(project, "claude-code/agents/planner.md", "OURS\n")
+        _put(project, "claude-code/agents/planner.append.md", "MORE\n")
+    _install(project, src)
+    shutil.rmtree(project / ".whygraph")
+    _put(project, "disabled", "claude-code/agents/planner.md\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    result = _install(project, src)
+
+    assert result.removed == [planner] and result.disabled == [planner]
+    assert result.needs_confirmation == [] and not planner.exists()
+
+
+def test_overlay_disabled_folder_force_deletes_an_edited_file(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _install(project, src)
+    skill = project / ".claude" / "skills" / "y" / "SKILL.md"
+    skill.write_text("MINE\n")
+    _put(project, "disabled", "claude-code/skills/\n")
+
+    asked = _install(project, src)
+    assert asked.needs_confirmation == [skill] and skill.exists()
+
+    forced = _install(project, src, force=True)
+
+    assert skill in forced.removed and skill in forced.disabled
+    assert not (project / ".claude" / "skills").exists()
+
+
+def test_overlay_hold_all_installs_nothing(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _put(project, "disabled", "claude-code/skills/y/tool.sh\n")
+    _install(project, src)
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    (src / "agents" / "x.md").write_text("X v2\n")
+    before = _snapshot(project / ".claude"), _snapshot(project / ".whygraph")
+    agent = project / ".whygraph-overrides" / "claude-code"
+    agent.rename(tmp_path / "moved")
+    agent.symlink_to(tmp_path / "moved")
+
+    for dry_run in (True, False):
+        result = _install(project, src, dry_run=dry_run, force=True)
+
+        assert _kinds(result.overlay_warnings) == [
+            (".whygraph-overrides/claude-code", "overlay_unreadable")
+        ]
+        assert result.written == result.skipped == result.overwritten == []
+        assert result.removed == result.needs_confirmation == []
+        assert (_snapshot(project / ".claude"), _snapshot(project / ".whygraph")) == (
+            before
+        )
+        _json_safe(result.overlay_warnings)
+
+
+def test_overlay_held_rel_keeps_its_file_and_entries(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    override = _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    before = _manifest(project)
+    override.write_text("x" * (assets.OVERLAY_FILE_MAX + 1))
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    result = _install(project, src)
+
+    assert [w.kind for w in result.overlay_warnings] == ["too_large"]
+    assert planner.read_text() == "OURS\n"
+    assert planner not in result.overwritten + result.removed + result.skipped
+    after = _manifest(project)
+    key = "claude/agents/planner.md"
+    assert after["files"][key] == before["files"][key]
+    assert after["bases"] == before["bases"]
+    assert _base_copy(project, "agents/planner.md").read_text() == "PLANNER\n"
+
+
+def test_overlay_behind_shows_the_upstream_diff_until_acknowledged(
+    tmp_path: Path,
+) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+    key = "claude/agents/planner.md"
+    copy = _base_copy(project, "agents/planner.md")
+
+    for _ in range(2):  # a Save without acknowledge_upstream keeps the notice
+        result = _install(project, src)
+        diff = result.upstream_diffs[planner]
+        assert "-PLANNER\n" in diff and "+PLANNER v2\n" in diff
+        assert "a/.claude/agents/planner.md" in diff
+        assert result.upstream_base_missing == set()
+        assert planner in result.skipped and planner.read_text() == "OURS\n"
+        assert _manifest(project)["bases"][key] == _sha("PLANNER\n")
+        assert copy.read_text() == "PLANNER\n"
+
+    acked = _install(project, src, acknowledge_upstream=True)
+
+    assert planner in acked.upstream_diffs  # what was acknowledged
+    assert _manifest(project)["bases"][key] == _sha("PLANNER v2\n")
+    assert copy.read_text() == "PLANNER v2\n"
+    assert _install(project, src).upstream_diffs == {}
+
+
+@pytest.mark.parametrize("damage", ["missing", "tampered"])
+def test_overlay_behind_without_a_usable_base_copy(tmp_path: Path, damage: str) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    copy = _base_copy(project, "agents/planner.md")
+    if damage == "missing":
+        copy.unlink()
+    else:
+        copy.write_text("SOMETHING ELSE\n")
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    result = _install(project, src)
+
+    assert result.upstream_base_missing == {planner}
+    diff = result.upstream_diffs[planner]
+    assert "-OURS\n" in diff and "+PLANNER v2\n" in diff
+
+
+def test_overlay_removing_a_replacement_drops_its_base(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    override = _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    override.unlink()
+
+    result = _install(project, src)
+
+    planner = project / ".claude" / "agents" / "planner.md"
+    assert planner in result.overwritten and planner.read_text() == "PLANNER\n"
+    assert "bases" not in _manifest(project)
+    assert not _base_copy(project, "agents/planner.md").exists()
+
+
+def test_overlay_append_only_gets_no_base(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.append.md", "MORE\n")
+    _install(project, src)
+    assert "bases" not in _manifest(project)
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    result = _install(project, src)
+
+    assert planner in result.overwritten and result.needs_confirmation == []
+    assert planner.read_text() == "PLANNER v2\n\nMORE\n"
+    assert result.upstream_diffs == {} and result.overrides == {planner: "append"}
+    assert not (project / ".whygraph" / "asset-bases").exists()
+
+
+def test_overlay_dry_run_writes_nothing(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _put(project, "disabled", "claude-code/rules/\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    fresh = _install(project, src, dry_run=True)
+
+    assert planner in fresh.written and fresh.overrides == {planner: "replace"}
+    assert not (project / ".claude").exists()
+    assert not (project / ".whygraph").exists()
+
+    _install(project, src)
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    (src / "agents" / "x.md").write_text("X v2\n")
+    _put(project, "disabled", "claude-code/skills/y/SKILL.md\n")
+    before = _snapshot(project / ".claude"), _snapshot(project / ".whygraph")
+
+    result = _install(project, src, dry_run=True, acknowledge_upstream=True)
+
+    assert planner in result.upstream_diffs
+    assert project / ".claude" / "agents" / "x.md" in result.overwritten
+    assert result.disabled == [project / ".claude" / "skills" / "y" / "SKILL.md"]
+    assert (_snapshot(project / ".claude"), _snapshot(project / ".whygraph")) == before
+
+
+def test_overlay_read_manifest_bases(tmp_path: Path) -> None:
+    _, project, _ = _installed(tmp_path)
+    path = project / ".whygraph" / "assets.json"
+    data = json.loads(path.read_text())
+
+    for malformed in (["claude/agents/x.md"], "x", None, {}):
+        data["bases"] = malformed
+        path.write_text(json.dumps(data))
+        manifest = assets.read_manifest(project)
+        assert manifest is not None and "bases" not in manifest
+        assert manifest["files"] == data["files"]
+
+    good = _sha("X")
+    data["bases"] = {
+        "claude/agents/x.md": good,
+        "cursor/rules/r.mdc": good,
+        "claude/../../victim.md": good,
+        "nobody/agents/x.md": good,
+        "claude": good,
+        "claude/agents/y.md": good.upper(),
+        "claude/agents/z.md": "abc",
+        "claude/agents/w.md": 7,
+    }
+    path.write_text(json.dumps(data))
+
+    manifest = assets.read_manifest(project)
+
+    assert manifest is not None
+    assert manifest["bases"] == {
+        "claude/agents/x.md": good,
+        "cursor/rules/r.mdc": good,
+    }
+
+    _git(project, "init", "-q")
+    _git(project, "add", "-f", str(assets.MANIFEST_RELPATH))
+    assert assets.read_manifest(project) is None
+
+
+def test_overlay_dir_is_not_gitignored(tmp_path: Path) -> None:
+    from whygraph.core.gitignore import ensure_gitignore_entries
+    from whygraph.project_setup import GITIGNORE_ENTRIES
+
+    project = _overlay_project(tmp_path)
+    _git(project, "init", "-q")
+    ensure_gitignore_entries(project, GITIGNORE_ENTRIES)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    (project / ".whygraph" / "asset-bases").mkdir(parents=True)
+
+    overlay = ".whygraph-overrides/claude-code/agents/planner.md"
+    assert _git(project, "check-ignore", "-q", overlay).returncode == 1
+    bases = ".whygraph/asset-bases/claude/x.md"
+    assert _git(project, "check-ignore", "-q", bases).returncode == 0
+
+
+def test_overlay_bases_survive_per_agent(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    cursor_src = tmp_path / "cursor-src"
+    (cursor_src / "rules").mkdir(parents=True)
+    (cursor_src / "rules" / "r.mdc").write_text("CURSOR RULE\n")
+    cursor = agents.resolve_agent("cursor")
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _put(project, "cursor/rules/r.mdc", "OUR RULE\n")
+
+    _install(project, src)
+    assets.install_assets(cursor, project, source=cursor_src)
+    _install(project, src)
+
+    assert _manifest(project)["bases"] == {
+        "claude/agents/planner.md": _sha("PLANNER\n"),
+        "cursor/rules/r.mdc": _sha("CURSOR RULE\n"),
+    }
+    copy = project / ".whygraph" / "asset-bases" / "cursor" / "rules" / "r.mdc"
+    assert copy.read_text() == "CURSOR RULE\n"
+
+
+def test_overlay_bases_only_change_writes_the_manifest(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    path = project / ".whygraph" / "assets.json"
+    data = json.loads(path.read_text())
+    del data["bases"]
+    path.write_text(json.dumps(data))
+
+    result = _install(project, src)
+
+    assert result.written == result.overwritten == []
+    assert _manifest(project)["bases"] == {
+        "claude/agents/planner.md": _sha("PLANNER\n")
+    }
+
+
+def test_overlay_set_manifest_version_keeps_bases(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    bases = _manifest(project)["bases"]
+
+    assets.set_manifest_version(project, "0.0.1")
+
+    assert _manifest(project)["version"] == "0.0.1"
+    assert _manifest(project)["bases"] == bases
+
+
+def test_overlay_bases_keys_outside_scope_touch_nothing(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    victim = project / ".whygraph" / "victim.md"
+    victim.write_text("X")
+    stray = _base_copy(project, "agents/stray.md")
+    stray.write_text("STRAY")
+    path = project / ".whygraph" / "assets.json"
+    data = json.loads(path.read_text())
+    data["bases"]["claude/../../victim.md"] = _sha("X")
+    data["bases"]["claude/agents/stray.md"] = _sha("STRAY")
+    path.write_text(json.dumps(data))
+
+    _install(project, src)
+
+    assert victim.read_text() == "X" and stray.read_text() == "STRAY"
+    assert _manifest(project)["bases"] == {
+        "claude/agents/planner.md": _sha("PLANNER\n")
+    }
+
+
+def test_overlay_tracked_asset_bases_are_never_touched(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    override = _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _install(project, src)
+    _git(project, "init", "-q")
+    _git(project, "add", "-f", ".whygraph/asset-bases")
+    copy = _base_copy(project, "agents/planner.md")
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    planner = project / ".claude" / "agents" / "planner.md"
+
+    result = _install(project, src, acknowledge_upstream=True)
+
+    assert result.upstream_base_missing == {planner}
+    assert "-OURS\n" in result.upstream_diffs[planner]
+    assert copy.read_text() == "PLANNER\n"
+    assert _manifest(project)["bases"]["claude/agents/planner.md"] == _sha(
+        "PLANNER v2\n"
+    )
+
+    override.unlink()
+    _install(project, src)
+
+    assert copy.read_text() == "PLANNER\n"
+    assert "bases" not in _manifest(project)
+
+
+def test_overlay_in_place_edit_moved_after_an_upgrade(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _install(project, src)
+    planner = project / ".claude" / "agents" / "planner.md"
+    planner.write_text("MINE\n")
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    _put(project, "claude-code/agents/planner.md", "MINE\n")
+    key = "claude/agents/planner.md"
+    copy = _base_copy(project, "agents/planner.md")
+
+    for _ in range(2):
+        result = _install(project, src)
+        assert planner in result.skipped and result.needs_confirmation == []
+        assert result.upstream_base_missing == {planner}
+        diff = result.upstream_diffs[planner]
+        assert "-MINE\n" in diff and "+PLANNER v2\n" in diff
+        assert _manifest(project)["bases"][key] == _sha("PLANNER\n")
+        assert not copy.exists()
+
+    _install(project, src, acknowledge_upstream=True)
+
+    assert copy.read_text() == "PLANNER v2\n"
+    assert _install(project, src).upstream_diffs == {}
+
+
+def test_overlay_added_without_an_upgrade_is_silent(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _install(project, src)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+
+    result = _install(project, src)
+
+    planner = project / ".claude" / "agents" / "planner.md"
+    assert planner in result.overwritten and result.upstream_diffs == {}
+
+
+def test_overlay_tree_is_never_written(tmp_path: Path) -> None:
+    src = _overlay_source(tmp_path)
+    project = _overlay_project(tmp_path)
+    _put(project, "claude-code/agents/planner.md", "OURS\n")
+    _put(project, "claude-code/agents/x.append.md", "MORE\n")
+    _put(project, "claude-code/agents/nope.md", "NOPE\n")
+    _put(project, "disabled", "claude-code/rules/\n")
+    before = _snapshot(project / ".whygraph-overrides")
+
+    _install(project, src)
+    (src / "agents" / "planner.md").write_text("PLANNER v2\n")
+    _install(project, src, force=True, acknowledge_upstream=True)
+
+    assert _snapshot(project / ".whygraph-overrides") == before

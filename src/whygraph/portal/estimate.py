@@ -59,7 +59,13 @@ from sqlmodel import func, or_, select
 
 from whygraph.core.config import Config, ConfigError
 from whygraph.db import get_session
-from whygraph.db.models import Commit, CommitFileChange
+from whygraph.db.models import (
+    Commit,
+    CommitFileChange,
+    CoreBulkPair,
+    CoreCommit,
+    CoreState,
+)
 from whygraph.services.git import GitError, Repository
 
 from .prices import (
@@ -525,8 +531,12 @@ def scan_estimate(
     Returns
     -------
     dict
-        :func:`render_estimate`'s body; ``missing_key`` is added by the
-        caller.
+        :func:`render_estimate`'s body (= Describe all; tokens and cost
+        include pending core bulk pairs) plus ``file_slices``, ``core``
+        (the same figure over the core commits, with ``files``,
+        ``selection``, ``as_of`` and ``completed_head``; ``None`` until a
+        core pass has completed) and ``core_progress``; ``missing_key`` is
+        added by the caller.
     """
     try:
         choice = config.model_for("analyze")
@@ -537,16 +547,58 @@ def scan_estimate(
         "max_diff_chars": config.analyze.max_diff_chars,
         "large_commit_file_count": config.analyze.large_commit_file_count,
     }
-    tokens = estimate_tokens(
-        waiting_commit_sizes(root, **limits), **limits, profile=model_profile(model)
-    )
-    return render_estimate(
-        tokens,
-        provider=provider,
-        model=model,
-        overrides=overrides,
-        custom_endpoint=has_custom_endpoint(config, provider),
-    )
+    profile = model_profile(model)
+    sizes = waiting_commits(root, **limits)
+    pair_sizes = _pending_pair_sizes()
+    with get_session() as session:
+        core_shas = set(session.exec(select(CoreCommit.sha)).all())
+        state = session.get(CoreState, 1)
+        if state is not None:
+            session.expunge(state)
+
+    def render(values: list[CommitSize]) -> dict:
+        body = render_estimate(
+            estimate_tokens([*values, *pair_sizes], **limits, profile=profile),
+            provider=provider,
+            model=model,
+            overrides=overrides,
+            custom_endpoint=has_custom_endpoint(config, provider),
+        )
+        # estimate_tokens counts a pair as a commit; the body's count is commits.
+        body["commits"] -= len(pair_sizes)
+        body["file_slices"] = len(pair_sizes)
+        return body
+
+    body = render(list(sizes.values()))
+    body["core"] = None
+    body["core_progress"] = None
+    if state is not None and state.completed_at is None:
+        body["core_progress"] = {"done": state.files_done, "total": state.files_total}
+    if state is not None and state.completed_at is not None:
+        core = render([size for sha, size in sizes.items() if sha in core_shas])
+        core.update(
+            files=state.files_selected,
+            selection=state.selection,
+            as_of=state.completed_at,
+            completed_head=state.completed_head,
+        )
+        body["core"] = core
+    return body
+
+
+def _pending_pair_sizes() -> list[CommitSize]:
+    """One single-file size per core bulk pair that has no description yet."""
+    with get_session() as session:
+        rows = session.exec(
+            select(CommitFileChange.lines_added + CommitFileChange.lines_deleted)
+            .join(
+                CoreBulkPair,
+                (CoreBulkPair.sha == CommitFileChange.commit_sha)  # type: ignore[arg-type]
+                & (CoreBulkPair.path == CommitFileChange.path),  # type: ignore[arg-type]
+            )
+            .where(CommitFileChange.llm_description.is_(None))  # type: ignore[union-attr]
+        ).all()
+    return [CommitSize(files_changed=1, file_lines=(lines,)) for lines in rows]
 
 
 PURPOSE_INPUT_TOKENS = 8_000

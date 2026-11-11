@@ -858,9 +858,23 @@ describe("Configure", () => {
     expect(within(card).queryByRole("button")).toBeNull();
     expect(screen.getByTestId("key-ready")).toHaveTextContent("Uses the Anthropic key from Portal defaults.");
 
-    await user.click(screen.getByRole("button", { name: "Describe 120 commits (about $1.20)" }));
+    await user.click(screen.getByRole("button", { name: "Describe all (120, about $1.20)" }));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=8"));
-    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe" });
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "all" });
+  });
+
+  it("the footer offers Describe core (primary) and Describe all, and core posts its scope", async () => {
+    fake.estimate = {
+      ...fake.estimate,
+      core: { commits: 30, file_slices: 0, files: 8, selection: "codegraph", stale: false, as_of: "2026-11-11T12:00:00+00:00", cost: { usd: 0.3, low: 0.1, high: 0.5, currency: "USD", prices_as_of: "2026-09-01" } },
+    };
+    const user = userEvent.setup();
+    const { router } = mount("/p/alpha/init?step=configure&run=7");
+    await screen.findByTestId("scan-estimate");
+    expect(screen.getByRole("button", { name: "Describe all (120, about $1.20)" })).toBeEnabled();
+    await user.click(await screen.findByRole("button", { name: "Describe core (30, about $0.30)" }));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=8"));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "core" });
   });
 
   it("before the estimate, the describe model is layer-derived prose, not set like a model id", async () => {
@@ -902,7 +916,8 @@ describe("Configure", () => {
     expect(screen.getByTestId("estimate-pending")).toHaveTextContent(
       "Estimating once the first scan has read the history",
     );
-    expect(screen.getByRole("button", { name: "Describe commits" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Describe all" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Describe core" })).toBeDisabled();
     expect(fake.log.some((c) => c.path === "/api/projects/alpha/scan-estimate")).toBe(false);
     // Open project is always there: the scan carries on.
     expect(screen.getByRole("button", { name: "Open project" })).toBeEnabled();
@@ -928,6 +943,21 @@ describe("Configure", () => {
     await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=7"));
     expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "manual", analyze: false });
+  });
+
+  it("retries a failed Describe core run as a core describe (RunCardView)", async () => {
+    fake.projects = [summary("alpha")];
+    fake.runRow = { id: 8, kind: "scan", trigger: "describe", analyze: true, status: "failed", summary: { describe_scope: "core" } };
+    fake.events = [
+      'id: 1\ndata: {"type":"start","phase_total":2}\n\n',
+      'id: 2\nevent: end\ndata: {"type":"end","run_id":8,"status":"failed","summary":{"error":"boom","describe_scope":"core"}}\n\n',
+    ];
+    const user = userEvent.setup();
+    mount("/p/alpha/init?step=configure&run=8");
+    await screen.findByTestId("scan-failed");
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(posts("/api/projects/alpha/scans")).toHaveLength(1));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "core" });
   });
 
   it("titles a describe run from its row after a reload (BUG-22)", async () => {

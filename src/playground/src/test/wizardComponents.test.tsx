@@ -50,9 +50,11 @@ async function renderWithRouter(ui: React.ReactNode) {
     routeTree: root,
     history: createMemoryHistory({ initialEntries: ["/"] }),
   });
+  let result!: ReturnType<typeof render>;
   await act(async () => {
-    render(<RouterProvider router={router} />);
+    result = render(<RouterProvider router={router} />);
   });
+  return result;
 }
 
 // ---- multi-select agent picker ---------------------------------------------------
@@ -630,6 +632,91 @@ describe("NotSharedAlert", () => {
 
 // ---- cost card --------------------------------------------------------------------------
 
+describe("EstimateBody: Describe core and Describe all", () => {
+  const base = {
+    commits: 1204,
+    upper_bound: true,
+    large_commits: 0,
+    model: { provider: "anthropic", model: "claude-haiku-4-5" },
+    tokens: null,
+    cost: { usd: 4.6, low: 2.3, high: 6.9, currency: "USD", prices_as_of: "2026-09-01" },
+    missing_key: null,
+    file_slices: 40,
+    core: {
+      commits: 300,
+      file_slices: 25,
+      files: 61,
+      selection: "codegraph" as const,
+      stale: false,
+      as_of: "2026-11-11T12:00:00+00:00",
+      cost: { usd: 1.1, low: 0.5, high: 1.7, currency: "USD", prices_as_of: "2026-09-01" },
+    },
+  };
+  type Est = Parameters<typeof EstimateBody>[0]["estimate"];
+  const view = (estimate: Est, onDescribe = vi.fn()) =>
+    renderWithRouter(
+      <EstimateBody slug="a" estimate={estimate} canDescribe canConfigure onDescribe={onDescribe} onLater={() => {}} />,
+    );
+  const coreButton = () => screen.getByRole("button", { name: "Describe core" });
+
+  it("shows both lines, both buttons and the helper text, and sends the scope", async () => {
+    const onDescribe = vi.fn();
+    const user = userEvent.setup();
+    await view(base, onDescribe);
+    expect(screen.getByTestId("estimate-core")).toHaveTextContent(
+      "Core: 300 commits in 61 files + 25 file changes (about $1.10) · as of",
+    );
+    expect(screen.getByTestId("estimate-core")).not.toHaveTextContent("may have new commits");
+    expect(screen.getByTestId("estimate-all")).toHaveTextContent("All: 1,204 commits + 40 file changes (about $4.60)");
+    expect(screen.getByTestId("core-help")).toHaveTextContent(
+      "Core covers the commits behind the files the rest of your code depends on. It refreshes first",
+    );
+    await user.click(coreButton());
+    await user.click(screen.getByRole("button", { name: "Describe all" }));
+    expect(onDescribe.mock.calls).toEqual([["core"], ["all"]]);
+    expect(screen.getByRole("button", { name: "Later" })).toBeEnabled();
+  });
+
+  it("omits '+ K file changes' at zero, flags a stale core, and names the all-text fallback", async () => {
+    await view({ ...base, file_slices: 0, core: { ...base.core, file_slices: 0, stale: true, selection: "all_text" } });
+    expect(screen.getByTestId("estimate-core")).toHaveTextContent("may have new commits");
+    expect(screen.getByTestId("estimate-core")).not.toHaveTextContent("file change");
+    expect(screen.getByTestId("estimate-all")).not.toHaveTextContent("file change");
+    expect(screen.getByTestId("scan-estimate")).toHaveTextContent("No usable code index, so core covers every text file.");
+  });
+
+  it("disables core with the reason: still being found, not scanned yet, all described", async () => {
+    let r = await view({ ...base, core: null, core_progress: { done: 400, total: 700 } });
+    expect(coreButton()).toBeDisabled();
+    expect(coreButton()).toHaveAccessibleDescription(
+      "Core commits are still being found (400 of 700); run a Quick rescan to continue",
+    );
+    expect(screen.getByRole("button", { name: "Describe all" })).toBeEnabled();
+    r.unmount();
+    r = await view({ ...base, core: null });
+    expect(coreButton()).toHaveAccessibleDescription("Core commits are found by a scan; run a Quick rescan");
+    r.unmount();
+    const zero = { ...base.core, commits: 0, file_slices: 0 };
+    r = await view({ ...base, core: zero });
+    expect(coreButton()).toBeDisabled();
+    expect(coreButton()).toHaveAccessibleDescription("Core commits are all described");
+    r.unmount();
+    // A stale core stays enabled even with nothing waiting (I24).
+    await view({ ...base, core: { ...zero, stale: true } });
+    expect(coreButton()).toBeEnabled();
+  });
+
+  it("missing_key disables both; cost_hidden shows counts without prices", async () => {
+    const r = await view({ ...base, missing_key: "anthropic" });
+    expect(coreButton()).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Describe all" })).toBeDisabled();
+    r.unmount();
+    await view({ ...base, cost: null, cost_hidden: true, core: { ...base.core, cost: null } });
+    expect(screen.getByTestId("estimate-core")).toHaveTextContent("Core: 300 commits in 61 files + 25 file changes · as of");
+    expect(screen.getByTestId("scan-estimate")).not.toHaveTextContent("$");
+  });
+});
+
 describe("EstimateBody", () => {
   const estimate = {
     commits: 1204,
@@ -659,9 +746,9 @@ describe("EstimateBody", () => {
     expect(card).toHaveTextContent("Model: Anthropic, claude-haiku-4-5");
     expect(screen.getByTestId("estimate-tokens")).toHaveTextContent("2.4M input and 310k output tokens");
     expect(card).toHaveTextContent("About $4.60 (between $2.30 and $6.90)");
-    await user.click(screen.getByRole("button", { name: "Describe now" }));
+    await user.click(screen.getByRole("button", { name: "Describe all" }));
     await user.click(screen.getByRole("button", { name: "Later" }));
-    expect(onDescribe).toHaveBeenCalled();
+    expect(onDescribe).toHaveBeenCalledWith("all");
     expect(onLater).toHaveBeenCalled();
   });
 
@@ -689,7 +776,7 @@ describe("EstimateBody", () => {
     expect(screen.getByTestId("scan-estimate")).toHaveTextContent("tokens only");
   });
 
-  it("disables Describe now while the provider has no key and links to the model settings", async () => {
+  it("disables both describe buttons while the provider has no key and links to the model settings", async () => {
     await renderWithRouter(
       <EstimateBody
         slug="a"
@@ -700,7 +787,8 @@ describe("EstimateBody", () => {
         onLater={() => {}}
       />,
     );
-    expect(screen.getByRole("button", { name: "Describe now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Describe all" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Describe core" })).toBeDisabled();
     // Information, not an error (IMP-3).
     expect(screen.getByTestId("missing-key")).toHaveTextContent("No Anthropic key yet");
     expect(screen.getByRole("link", { name: "Add a key in Settings" })).toHaveAttribute(
@@ -726,7 +814,7 @@ describe("EstimateBody", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  it("says one commit is waiting, and offers Describe now to someone who may", () => {
+  it("says one commit is waiting, and offers Describe all to someone who may", () => {
     render(
       <EstimateBody
         slug="a"
@@ -739,7 +827,7 @@ describe("EstimateBody", () => {
     );
     expect(screen.getByTestId("scan-estimate")).toHaveTextContent("1 commit is waiting for descriptions.");
     expect(screen.getByTestId("scan-estimate")).not.toHaveTextContent("Ask a project admin");
-    expect(screen.getByRole("button", { name: "Describe now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Describe all" })).toBeEnabled();
   });
 
   it("pluralizes the very large commits line", () => {

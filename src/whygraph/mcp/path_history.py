@@ -1,6 +1,6 @@
 """Path-history queries against the ``commit_file_change`` index.
 
-Three pieces live here:
+Four pieces live here:
 
 * :func:`resolve_path_aliases` — given a current path, walk
   ``renamed_from`` edges backwards (recursive CTE) and return every
@@ -9,6 +9,8 @@ Three pieces live here:
 * :func:`path_commit_counts` — one grouped query giving the per-file
   commit count under a directory prefix, so an area outline can show
   where the churn is without a query per file.
+* :func:`area_history_shas` - the ordered SHA-only query behind area
+  history, shared by the collector and the scan's core pass.
 * :func:`area_history_commits` — given a path (and optionally a
   pre-resolved alias set), return the :class:`CommitEvidence` bundles
   for every scanned commit that touched any alias, newest first.
@@ -21,6 +23,8 @@ the JSON serialisers stay unchanged.
 """
 
 from __future__ import annotations
+
+from collections.abc import Collection
 
 from sqlalchemy import func
 from sqlmodel import Session, col, select
@@ -191,6 +195,66 @@ def path_commit_counts(path_prefix: str) -> dict[str, int]:
     return {path: count for path, count in rows}
 
 
+def area_history_shas(
+    session: Session,
+    aliases: Collection[str],
+    *,
+    limit: int,
+    exclude: Collection[str] = (),
+) -> list[str]:
+    """The newest default-branch commits that touched any of ``aliases``.
+
+    The one home of the area-history rule (plan 49 section 5.2): the
+    collector's area fill (:func:`area_history_commits`) and the scan's
+    core pass both read it, so the two cannot drift. Ordered
+    ``(committed_at desc, sha desc)``: the SHA tie-break makes the cut at
+    ``limit`` deterministic when commits share a timestamp.
+
+    Parameters
+    ----------
+    session : Session
+        An open SQLModel/SQLAlchemy session.
+    aliases : Collection[str]
+        Paths to match, typically from :func:`resolve_path_aliases`.
+    limit : int
+        Cap on the number of SHAs returned.
+    exclude : Collection[str], optional
+        SHAs to leave out; applied before ``limit``.
+
+    Returns
+    -------
+    list[str]
+        Distinct SHAs, newest first. Empty for no aliases.
+    """
+    if not aliases:
+        return []
+    stmt = (
+        select(Commit.sha, Commit.committed_at)
+        .join(
+            CommitFileChange,
+            col(CommitFileChange.commit_sha) == col(Commit.sha),
+        )
+        .where(col(CommitFileChange.path).in_(set(aliases)))
+        # Area-history is a default-branch-only view, and this filter
+        # is what enforces it. Flag-0 rows are no longer only PR-origin
+        # recoveries (which carry no commit_file_change rows): they now
+        # also include unmerged local work scanned off a feature
+        # branch, which *does* carry them. The alias set may widen to
+        # the current branch; the commit set never does.
+        .where(col(Commit.on_default_branch) == 1)
+    )
+    if exclude:
+        stmt = stmt.where(col(Commit.sha).not_in(set(exclude)))
+    # ``distinct()`` collapses the join's duplicates (one row per touched
+    # alias per commit) before ordering / capping.
+    stmt = (
+        stmt.distinct()
+        .order_by(col(Commit.committed_at).desc(), col(Commit.sha).desc())
+        .limit(limit)
+    )
+    return [row[0] for row in session.exec(stmt).all()]
+
+
 def area_history_commits(
     path: str,
     *,
@@ -238,29 +302,14 @@ def area_history_commits(
             )
         else:
             aliases = {path}
-        if not aliases:
-            return []
-        stmt = (
-            select(Commit)
-            .join(
-                CommitFileChange,
-                col(CommitFileChange.commit_sha) == col(Commit.sha),
-            )
-            .where(col(CommitFileChange.path).in_(aliases))
-            # Area-history is a default-branch-only view, and this filter
-            # is what enforces it. Flag-0 rows are no longer only PR-origin
-            # recoveries (which carry no commit_file_change rows): they now
-            # also include unmerged local work scanned off a feature
-            # branch, which *does* carry them. The alias set above may
-            # widen to the current branch; the commit set never does.
-            .where(col(Commit.on_default_branch) == 1)
+        shas = area_history_shas(
+            session, aliases, limit=limit, exclude=exclude_shas or ()
         )
-        if exclude_shas:
-            stmt = stmt.where(col(Commit.sha).not_in(exclude_shas))
-        # ``distinct()`` collapses the join's duplicates (one row per
-        # touched alias per commit) before ordering / capping.
-        stmt = stmt.distinct().order_by(col(Commit.committed_at).desc()).limit(limit)
-        commits = list(session.exec(stmt).all())
+        if not shas:
+            return []
+        rows = session.exec(select(Commit).where(col(Commit.sha).in_(shas))).all()
+        by_sha = {commit.sha: commit for commit in rows}
+        commits = [by_sha[sha] for sha in shas if sha in by_sha]
 
         items: list[CommitEvidence] = []
         for commit in commits:

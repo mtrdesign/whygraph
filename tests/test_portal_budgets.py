@@ -611,7 +611,13 @@ def test_a_blocked_full_scan_is_refused_while_quick_scans_and_cancel_work(
     w = _ids(portal)
     _block_scans(portal, w)
 
-    for body in ({"trigger": "manual"}, {"trigger": "describe"}, None):
+    for body in (
+        {"trigger": "manual"},
+        {"trigger": "describe"},
+        {"trigger": "describe", "scope": "core"},
+        {"trigger": "describe", "scope": "all"},
+        None,
+    ):
         refused = portal.post("/api/projects/demo/scans", json=body)
         assert refused.status_code == 403, (body, refused.text)
         assert (refused.json()["code"], refused.json()["scope"]) == (
@@ -653,6 +659,26 @@ def test_a_queued_full_run_blocked_at_dispatch_scans_structure_only(
     assert run["summary"]["usage"]["calls"] == 0
     assert "--skip-analyze" in scanner.calls()[-1]["argv"]
     assert _scan_rows(w.state, pending) == []  # a structure-only run's events drop
+
+
+def test_a_queued_core_run_blocked_at_dispatch_finds_core_but_never_describes(
+    portal: TestClient, env: SimpleNamespace, scanner: SimpleNamespace
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    w = _ids(portal)
+    scanner.hold.touch()
+    running = scan(portal, "demo", trigger="hook")
+    wait_for(lambda: run_by_id(portal, "demo", running)["status"] == "running")
+    pending = scan(portal, "demo", trigger="describe", scope="core")
+    _block_scans(portal, w)
+    scanner.hold.unlink()
+
+    run = wait_run(portal, "demo", pending)
+    assert run["summary"].get("analyze_skipped") == "budget", run
+    argv = scanner.calls()[-1]["argv"]
+    assert "--skip-analyze" in argv and "--find-core" in argv
+    assert "--describe-core" not in argv
 
 
 def test_a_running_full_scan_is_cancelled_once_its_spend_exhausts_the_budget(

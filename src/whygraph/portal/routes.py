@@ -44,7 +44,7 @@ from typing import Annotated, Any, Literal
 import anyio
 import anyio.from_thread
 from fastapi import APIRouter, Body, Depends, Request, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from sqlalchemy import and_, case, cast, false, func, not_, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
@@ -396,6 +396,14 @@ class ScanBody(_Strict):
 
     trigger: Literal["manual", "hook", "describe"] | None = None
     analyze: bool | None = None
+    scope: Literal["all", "core"] | None = None
+    """Which commits a ``describe`` run covers; refused on any other trigger."""
+
+    @model_validator(mode="after")
+    def _scope_needs_describe(self) -> "ScanBody":
+        if self.scope is not None and self.trigger != "describe":
+            raise ValueError("scope applies only to a describe run")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -3182,7 +3190,9 @@ async def post_scan(
     if may_spend and resolve_analyze(
         body.trigger or "manual", body.analyze, project.source
     ):
-        estimate = await anyio.to_thread.run_sync(_describe_estimate, state, project)
+        estimate = await anyio.to_thread.run_sync(
+            _describe_estimate, state, project, body.scope
+        )
     try:
         run_id = await state.runner.request_scan(
             project,
@@ -3191,6 +3201,7 @@ async def post_scan(
             principal=principal,
             may_spend=may_spend,
             estimate=estimate,
+            scope=body.scope,
         )
     except ScanForbidden as exc:
         raise _scan_full_forbidden(project) from exc
@@ -3279,8 +3290,14 @@ def _scan_full_forbidden(project: BoundProject) -> ApiError:
     )
 
 
-def _describe_estimate(state: PortalState, project: BoundProject) -> dict | None:
-    """The compact describe estimate a full run stores (blocking; ``None`` on failure)."""
+def _describe_estimate(
+    state: PortalState, project: BoundProject, scope: str | None = None
+) -> dict | None:
+    """The compact describe estimate a full run stores (blocking; ``None`` on failure).
+
+    For ``scope="core"`` it is the core figure, and ``None`` while no core
+    pass has completed - never the all figure.
+    """
     try:
         with use_project(project.ctx):
             body = _scan_estimate(
@@ -3295,6 +3312,10 @@ def _describe_estimate(state: PortalState, project: BoundProject) -> dict | None
             exc_info=True,
         )
         return None
+    if scope == "core":
+        body = body.get("core")
+        if body is None:
+            return None
     return compact_estimate(body, _missing_key(project.ctx.config, ("analyze",)))
 
 
@@ -3756,7 +3777,11 @@ def get_scan_estimate(
     A caller without ``project.usage`` gets ``cost: null``, ``tokens:
     null`` and ``cost_hidden: true`` (tokens times a public price table
     give the cost back); the commit counts, the model and ``missing_key``
-    stay (M2f-3 plan section 0.3 #46).
+    stay (M2f-3 plan section 0.3 #46); ``core`` is nulled the same way.
+
+    ``core`` (the core-commit figure) is ``null`` until a core pass has
+    completed; ``core.stale`` is true when ``HEAD`` moved since that pass,
+    and ``core_progress`` is ``{done, total}`` while a first pass runs.
     """
     _refuse_linked(project, "estimating this project's describe cost")
     overrides = portal_state(request).prices.for_org(project.org_id)
@@ -3764,8 +3789,13 @@ def get_scan_estimate(
         project.ctx.config, root=project.ctx.root, overrides=overrides
     )
     body["missing_key"] = _missing_key(project.ctx.config, ("analyze",))
+    core = body.get("core")
+    if core is not None:
+        core["stale"] = project.last_scanned_head != core.pop("completed_head", None)
     if not project_allowed(project.role, Action.PROJECT_USAGE):
         body.update(cost=None, tokens=None, cost_hidden=True)
+        if core is not None:
+            core.update(cost=None, tokens=None)
     return body
 
 

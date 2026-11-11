@@ -17,7 +17,7 @@ from sqlmodel import func, select
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError
 from whygraph.db import get_session as project_session
-from whygraph.db.models import RationaleCache
+from whygraph.db.models import Commit, CoreCommit, CoreState, RationaleCache
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.resources import _repo_overview_resource
 
@@ -51,9 +51,13 @@ def project_counts(
     -------
     dict or None
         ``{commits, described, described_pct, pull_requests, issues,
-        rationale_cards}``. ``rationale_cards`` counts **distinct**
+        rationale_cards, core_commits, core_described,
+        core_described_pct}``. ``rationale_cards`` counts **distinct**
         ``(path, line_start, line_end)`` ranges, so one range explained by
-        two providers or models counts once (BUG-26). ``None`` for a
+        two providers or models counts once (BUG-26). The three ``core_``
+        counts cover the core set (commits only, no bulk slices) and are
+        ``None`` before the first complete core pass, and the pct is also
+        ``None`` when the core set is empty. ``None`` for a
         linked project (no local DB, the file untouched), when a DB path is
         a symlink (nothing is opened), when the DB does not exist yet, or
         when it cannot be read.
@@ -83,6 +87,25 @@ def project_counts(
             overview = _repo_overview_resource()
             with project_session() as session:
                 cards = session.exec(select(func.count()).select_from(ranges)).one()
+                core_state = session.get(CoreState, 1)
+                core_ready = (
+                    core_state is not None and core_state.completed_at is not None
+                )
+                core_commits = core_described = core_described_pct = None
+                if core_ready:
+                    core_commits = session.exec(
+                        select(func.count()).select_from(CoreCommit)
+                    ).one()
+                    core_described = session.exec(
+                        select(func.count())
+                        .select_from(CoreCommit)
+                        .join(Commit, CoreCommit.sha == Commit.sha)
+                        .where(Commit.llm_description.is_not(None))
+                    ).one()
+                    if core_commits:
+                        core_described_pct = round(
+                            100 * core_described / core_commits, 1
+                        )
     except WhyGraphError:
         return None
     coverage = overview["llm_description_coverage"]
@@ -93,6 +116,9 @@ def project_counts(
         "pull_requests": overview["counts"]["pull_requests"],
         "issues": overview["counts"]["issues"],
         "rationale_cards": cards,
+        "core_commits": core_commits,
+        "core_described": core_described,
+        "core_described_pct": core_described_pct,
     }
 
 

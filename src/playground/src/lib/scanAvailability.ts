@@ -1,4 +1,4 @@
-import type { ProjectDetails, ProjectSummary } from "../api";
+import type { ProjectDetails, ProjectSummary, ScanEstimate } from "../api";
 import { providerLabel } from "./labels";
 import { can } from "./permissions";
 
@@ -61,4 +61,22 @@ export function scanAvailability(
   else full = OK;
 
   return { quick, full, retryImport };
+}
+
+/**
+ * Why Describe core cannot run on this estimate, or `undefined` when it can. A stale core stays
+ * enabled even with nothing waiting: its run refreshes core first and finds the new commits (I24).
+ */
+export function coreEstimateReason(
+  estimate: Pick<ScanEstimate, "core" | "core_progress"> | null | undefined,
+): string | undefined {
+  if (!estimate) return undefined;
+  const { core, core_progress: progress } = estimate;
+  if (!core) {
+    return progress
+      ? `Core commits are still being found (${progress.done} of ${progress.total}); run a Quick rescan to continue`
+      : "Core commits are found by a scan; run a Quick rescan";
+  }
+  if (core.commits === 0 && core.file_slices === 0 && !core.stale) return "Core commits are all described";
+  return undefined;
 }

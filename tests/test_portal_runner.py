@@ -53,7 +53,13 @@ from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
-from whygraph.db.models import Commit, CommitFileChange
+from whygraph.db.models import (
+    Commit,
+    CommitFileChange,
+    CoreBulkPair,
+    CoreCommit,
+    CoreState,
+)
 from whygraph.services.git import Repository
 from whygraph.portal import db as portal_db
 from whygraph.portal import estimate as estimate_mod
@@ -290,13 +296,13 @@ def first_scan(client: TestClient, slug: str) -> dict:
 @pytest.mark.parametrize(
     ("trigger", "analyze", "flags"),
     [
-        ("initial", None, ["--skip-analyze"]),
+        ("initial", None, ["--skip-analyze", "--find-core"]),
         ("hook", None, ["--skip-analyze", "--no-remote"]),
         ("poll", None, ["--skip-analyze"]),
         ("sync", None, ["--skip-analyze"]),
         ("manual", None, []),
         ("manual", True, []),
-        ("manual", False, ["--skip-analyze"]),
+        ("manual", False, ["--skip-analyze", "--find-core"]),
         ("describe", None, []),
         ("forge", None, ["--github-only"]),
     ],
@@ -307,6 +313,40 @@ def test_trigger_to_flags(trigger: str, analyze: bool | None, flags: list[str]) 
     assert resolved is (flags == [])
     argv = scan_argv(trigger, resolved, {"WHYGRAPH_SCAN_CMD": "scanner --no-codegraph"})
     assert argv == ["scanner", "--no-codegraph", *flags]
+
+
+@pytest.mark.parametrize(
+    ("trigger", "analyze", "source", "scope", "flags"),
+    [
+        ("describe", True, "local", "core", ["--describe-core"]),
+        ("describe", True, "local", None, []),
+        ("describe", True, "local", "all", []),
+        ("manual", True, "local", None, []),
+        # A budget-downgraded Describe core still finds core, never describes.
+        ("describe", False, "local", "core", ["--skip-analyze", "--find-core"]),
+        ("describe", False, "local", None, ["--skip-analyze"]),
+        ("manual", False, "local", None, ["--skip-analyze", "--find-core"]),
+        ("initial", False, "local", None, ["--skip-analyze", "--find-core"]),
+        ("poll", False, "local", None, ["--skip-analyze"]),
+        ("sync", False, "github", None, ["--skip-analyze"]),
+        # The early returns stay first, whatever the scope.
+        ("describe", True, "platform", "core", ["--codegraph-only"]),
+        ("forge", False, "github", "core", ["--github-only"]),
+        ("hook", False, "local", "core", ["--skip-analyze", "--no-remote"]),
+    ],
+)
+def test_scope_to_flags(
+    trigger: str, analyze: bool, source: str, scope: str | None, flags: list[str]
+) -> None:
+    assert scan_flags(trigger, analyze, source, scope) == flags
+    argv = scan_argv(
+        trigger,
+        analyze,
+        {"WHYGRAPH_SCAN_CMD": "scanner"},
+        source=source,
+        scope=scope,
+    )
+    assert argv == ["scanner", *flags]
 
 
 def test_default_argv_runs_this_interpreter() -> None:
@@ -772,11 +812,11 @@ def test_first_scan_is_initial_and_argv_per_trigger(
     assert [runner_flags(c) for c in calls] == [
         list(flags)
         for flags in (
-            ["--skip-analyze"],
-            ["--skip-analyze"],
+            ["--skip-analyze", "--find-core"],
+            ["--skip-analyze", "--find-core"],
             ["--skip-analyze", "--no-remote"],
             [],
-            ["--skip-analyze"],
+            ["--skip-analyze", "--find-core"],
             [],
         )
     ]
@@ -1769,6 +1809,100 @@ def test_scan_estimate_endpoint(portal: TestClient, env: SimpleNamespace) -> Non
     assert portal.get("/api/projects/demo/scan-estimate").json()["missing_key"] is None
 
 
+def test_scan_estimate_core(
+    portal: TestClient, env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = local_project(portal, env, "demo")
+    shas = {name: ch * 40 for name, ch in (("a", "a"), ("b", "b"), ("c", "c"))}
+    with use_project(manual_ctx(root, "demo")), project_session() as session:
+        for sha, files in ((shas["a"], 1), (shas["b"], 1), (shas["c"], 40)):
+            session.add(
+                Commit(
+                    sha=sha,
+                    parent_shas="",
+                    author_name="T",
+                    author_email="t@example.com",
+                    authored_at="2026-01-01T00:00:00+00:00",
+                    committed_at="2026-01-01T00:00:00+00:00",
+                    subject="s",
+                    body="",
+                    files_changed=files,
+                    insertions=10,
+                    deletions=0,
+                    scanned_at="2026-01-01T00:00:00+00:00",
+                )
+            )
+        session.flush()
+        for path, added, desc in (("x.py", 30, None), ("y.py", 20, "done")):
+            session.add(
+                CommitFileChange(
+                    commit_sha=shas["c"],
+                    path=path,
+                    change_type="M",
+                    lines_added=added,
+                    lines_deleted=10,
+                    llm_description=desc,
+                )
+            )
+        session.add(CoreBulkPair(sha=shas["c"], path="x.py"))
+        session.add(CoreBulkPair(sha=shas["c"], path="y.py"))
+    url = "/api/projects/demo/scan-estimate"
+
+    body = portal.get(url).json()
+    assert body["core"] is None and body["core_progress"] is None
+    assert body["file_slices"] == 1  # the described pair is not pending
+    assert body["commits"] == 2 and body["large_commits"] == 1
+
+    with use_project(manual_ctx(root, "demo")), project_session() as session:
+        session.add(CoreState(id=1, rules_key="k", files_total=7, files_done=3))
+    body = portal.get(url).json()
+    assert body["core"] is None
+    assert body["core_progress"] == {"done": 3, "total": 7}
+
+    with use_project(manual_ctx(root, "demo")), project_session() as session:
+        session.add(CoreCommit(sha=shas["a"]))
+        state = session.get(CoreState, 1)
+        state.completed_at = "2026-11-11T12:00:00+00:00"
+        state.completed_head = "h" * 40
+        state.files_selected = 5
+        state.selection = "codegraph"
+        session.add(state)
+    body = portal.get(url).json()
+    core = body["core"]
+    assert body["core_progress"] is None
+    assert core["commits"] == 1 and core["file_slices"] == 1
+    assert core["files"] == 5 and core["selection"] == "codegraph"
+    assert core["as_of"] == "2026-11-11T12:00:00+00:00"
+    assert core["stale"] is True  # last_scanned_head is None, not the pass's HEAD
+    assert "completed_head" not in core
+    pair = estimate_tokens(
+        [CommitSize(1, (40,))],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile(body["model"]["model"]),
+    )
+    only_a = estimate_tokens(
+        [CommitSize(1, (10,)), CommitSize(1, (40,))],
+        max_diff_chars=50_000,
+        large_commit_file_count=30,
+        profile=model_profile(body["model"]["model"]),
+    )
+    assert core["tokens"]["input"] == only_a.input_tokens
+    assert body["tokens"]["input"] > core["tokens"]["input"] > pair.input_tokens
+
+    with portal_db.get_session() as session:
+        project = session.exec(select(Project).where(Project.slug == "demo")).one()
+        project.last_scanned_head = "h" * 40
+        session.add(project)
+    assert portal.get(url).json()["core"]["stale"] is False
+
+    monkeypatch.setattr(routes_mod, "project_allowed", lambda *_a, **_k: False)
+    hidden = portal.get(url).json()
+    assert hidden["cost_hidden"] is True and hidden["tokens"] is None
+    assert hidden["core"]["cost"] is None and hidden["core"]["tokens"] is None
+    assert hidden["core"]["commits"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Lifespan exit with an open events stream (real uvicorn)
 # ---------------------------------------------------------------------------
@@ -2656,6 +2790,91 @@ def test_merge_attributes_the_run_to_the_first_requester_who_asked_for_analysis(
     assert pending.analyze is (first[1] or second[1])
 
 
+def _scoped(
+    scope: str | None, analyze: bool = True, trigger: str | None = None
+) -> _Pending:
+    """A pending run in the effective scope ``scope`` (a ``"full"`` one is a Full rescan)."""
+    if scope == "full":
+        return _Pending(1, 1, "scan", "manual", True, 5, True, estimate=EST)
+    if scope == "core":
+        return _Pending(
+            1, 1, "scan", "describe", True, 5, True, estimate=EST, describe_scope="core"
+        )
+    if scope == "all":
+        return _Pending(1, 1, "scan", "describe", True, 5, True, estimate=EST)
+    return _Pending(1, 1, "scan", trigger or "manual", False, 5, True)
+
+
+@pytest.mark.parametrize(
+    ("queued", "incoming", "result", "estimate", "by"),
+    [
+        (None, "core", "core", "incoming", 9),
+        (None, "all", None, "incoming", 9),
+        (None, None, None, "kept", 5),
+        ("core", "core", "core", "kept", 5),
+        ("core", None, "core", "kept", 5),
+        ("core", "all", None, "incoming", 9),  # widened: even a None estimate
+        ("core", "full", None, "incoming", 9),
+        ("all", "core", None, "kept", 5),
+        ("full", "core", None, "kept", 5),  # a queued Full rescan is all
+        ("all", "all", None, "kept", 5),
+        ("all", None, None, "kept", 5),
+    ],
+)
+def test_merge_by_effective_scope(
+    queued: str | None, incoming: str | None, result: str | None, estimate: str, by: int
+) -> None:
+    pending = _scoped(queued)
+    before = pending.estimate
+    analyze = incoming is not None
+    scope = "core" if incoming == "core" else None
+    trigger = "describe" if incoming in ("core", "all") else "manual"
+    new = OTHER_EST if incoming == "core" or incoming in ("all", "full") else None
+    if queued == "core" and incoming in ("all", "full"):
+        new = None  # the widening request may have no estimate at all
+    pending.merge(
+        kind="scan",
+        trigger=trigger,
+        analyze=analyze,
+        requested_by=9,
+        scan_requested=True,
+        estimate=new,
+        scope=scope,
+    )
+    assert pending.describe_scope == result
+    assert pending.estimate == (new if estimate == "incoming" else before)
+    assert pending.requested_by == by
+    assert pending.analyze is (queued is not None or analyze)
+
+
+def test_a_none_scope_takes_the_first_estimate_offered() -> None:
+    pending = _scoped("all")
+    pending.estimate = None
+    pending.merge(
+        kind="scan",
+        trigger="describe",
+        analyze=True,
+        requested_by=9,
+        scan_requested=True,
+        estimate=OTHER_EST,
+    )
+    assert pending.estimate == OTHER_EST and pending.requested_by == 5
+
+
+def test_a_describe_scope_round_trips_through_the_queued_summary() -> None:
+    pending = _scoped("core")
+    row = ScanRun(project_id=1, kind="scan", trigger="describe", analyze=True)
+    row.summary = runner_mod._queued_summary(pending)
+    assert json.loads(row.summary)["describe_scope"] == "core"
+    assert runner_mod._queued_scope(row) == "core"
+    # Missing key = all; a stray key on a run that does not analyze is ignored.
+    row.summary = runner_mod._queued_summary(_scoped("all"))
+    assert runner_mod._queued_scope(row) is None
+    row.summary = json.dumps({"describe_scope": "core"})
+    row.analyze = False
+    assert runner_mod._queued_scope(row) is None
+
+
 GOOD_USAGE: dict[str, Any] = {
     "type": "usage",
     "task": "analyze",
@@ -3259,6 +3478,7 @@ def test_portal_summary_keys_cannot_come_from_the_child(
         "cloned": True,
         "scanned": True,
         "usage": {"calls": 999},
+        "describe_scope": "core",
     }
     scanner.configure(result_extra=json.dumps(forged))
     run = wait_run(portal, "demo", scan(portal, "demo", trigger="hook"))
@@ -3269,7 +3489,7 @@ def test_portal_summary_keys_cannot_come_from_the_child(
         and summary["coverage"]["at"] == run["finished_at"]
     )
     assert summary["usage"]["calls"] == 0
-    for key in ("estimate", "cloned", "scanned"):
+    for key in ("estimate", "cloned", "scanned", "describe_scope"):
         assert key not in summary
 
 
@@ -3286,13 +3506,20 @@ def test_execute_sets_portal_keys_after_the_sync_summary(
         requested_by=None,
         scan_requested=True,
         estimate=EST,
+        describe_scope="core",
     )
     runner = ScanRunner()
     recorded: list[tuple[str, dict]] = []
 
     def inner(job: Any) -> tuple[str, dict, Any]:
         job.scanned = True
-        forged = {"moved": True, "estimate": OTHER_EST, "coverage": {}, "cloned": True}
+        forged = {
+            "moved": True,
+            "estimate": OTHER_EST,
+            "coverage": {},
+            "cloned": True,
+            "describe_scope": "forged",
+        }
         return "ok", {**forged, "scanned": False}, runner_mod.redactor([])
 
     monkeypatch.setattr(runner, "_execute_inner", inner)
@@ -3306,6 +3533,7 @@ def test_execute_sets_portal_keys_after_the_sync_summary(
     assert status == "ok"
     assert summary["moved"] is True and summary["scanned"] is True
     assert summary["estimate"] == EST
+    assert summary["describe_scope"] == "core"
     assert (
         "coverage" not in summary and "cloned" not in summary
     )  # no state: no snapshot
@@ -3485,6 +3713,57 @@ def test_post_scan_stores_the_describe_estimate(
         run = wait_run(portal, "demo", scan(portal, "demo", **body))
         assert "estimate" not in run["summary"], body
         assert run["estimate_usd"] is None
+
+
+def test_post_scan_scope_is_core_only_for_describe(
+    portal: TestClient,
+    env: SimpleNamespace,
+    scanner: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_project(portal, env, "demo")
+    first_scan(portal, "demo")
+    # `scope` on any other trigger is a plain 422 with no new code, queues nothing.
+    for body in ({"scope": "core"}, {"trigger": "manual", "scope": "all"}):
+        refused = portal.post("/api/projects/demo/scans", json=body)
+        assert refused.status_code == 422, body
+        assert refused.json()["error"] == "invalid request", body
+        assert "code" not in refused.json(), body
+    assert (
+        portal.post(
+            "/api/projects/demo/scans", json={"trigger": "describe", "scope": "x"}
+        ).status_code
+        == 422
+    )
+    assert len(portal.get("/api/projects/demo/scans").json()["runs"]) == 1
+
+    # No completed core pass: a core run stores no estimate, never the all one.
+    run = wait_run(
+        portal, "demo", scan(portal, "demo", trigger="describe", scope="core")
+    )
+    assert run["summary"]["describe_scope"] == "core"
+    assert "estimate" not in run["summary"] and run["estimate_usd"] is None
+    assert runner_flags(scanner.calls()[-1]) == ["--describe-core"]
+
+    # With a core figure, the core figure is stored.
+    real = routes_mod._scan_estimate
+
+    def with_core(*args: Any, **kwargs: Any) -> dict:
+        body = real(*args, **kwargs)
+        body["core"] = {**body, "commits": 7, "core": None}
+        return body
+
+    monkeypatch.setattr(routes_mod, "_scan_estimate", with_core)
+    run = wait_run(
+        portal, "demo", scan(portal, "demo", trigger="describe", scope="core")
+    )
+    assert run["summary"]["estimate"]["commits"] == 7
+    run = wait_run(
+        portal, "demo", scan(portal, "demo", trigger="describe", scope="all")
+    )
+    assert "describe_scope" not in run["summary"]
+    assert run["summary"]["estimate"]["commits"] != 7
+    assert runner_flags(scanner.calls()[-1]) == []
 
 
 def test_run_routes_answer_for_an_uninitialized_project(

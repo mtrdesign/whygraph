@@ -5,10 +5,17 @@ The portal runs every scan as this child process, with the repository as
 it: it refuses to run without that variable (exit ``2``), and a full scan
 also needs the config's ``whygraph_db``.
 
-Flags (the runner passes at most the first four):
+Flags (the runner passes at most the first six):
 
 ``--skip-analyze``
     Skip the LLM-descriptions phase; the descriptor probe is bypassed too.
+``--find-core``
+    Run the "Core commits" phase until a pass completes (a first scan, a
+    Quick rescan), capped by its wall; afterwards only when the last pass
+    fell back for want of an index file and one exists now.
+``--describe-core``
+    A Describe core run: always run the "Core commits" phase, with no wall.
+    Not with ``--skip-analyze``, ``--codegraph-only`` or ``--github-only``.
 ``--no-remote``
     Skip the GitHub crawl and PR-origin recovery (offline, token-free).
 ``--codegraph-only``
@@ -17,7 +24,9 @@ Flags (the runner passes at most the first four):
 ``--github-only``
     Crawl only the forge (pull requests, issues, milestones) and mirror
     the tags the portal's sync fetched: no commit walk, no CodeGraph, no
-    descriptions. The runner's ``forge`` trigger.
+    descriptions. The runner's ``forge`` trigger. ``--find-core`` and
+    ``--describe-core`` are refused with this flag and with
+    ``--codegraph-only``.
 ``--no-codegraph``
     Hidden test seam: skip the CodeGraph refresh of a full scan.
 
@@ -40,6 +49,7 @@ from typing import TYPE_CHECKING
 
 from .authors import AuthorResolver
 from .codegraph_crawler import CodeGraphCrawler
+from .core_crawler import CORE_PHASE_WALL_SEC, CoreCrawler, index_file_exists
 from .git_crawler import GitCrawler, TagCrawler
 from .github_crawler import GitHubCrawler
 from .json_progress import JsonProgress, JsonUsageSink
@@ -119,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
             skip_analyze=args.skip_analyze,
             remote=args.remote,
             refresh_codegraph=args.refresh_codegraph,
+            find_core=args.find_core,
+            describe_core=args.describe_core,
         )
     _log.info(
         "scan finished: status=%s elapsed=%.1fs",
@@ -135,6 +147,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         description="The WhyGraph portal's scan child.",
     )
     parser.add_argument("--skip-analyze", dest="skip_analyze", action="store_true")
+    parser.add_argument("--find-core", dest="find_core", action="store_true")
+    parser.add_argument("--describe-core", dest="describe_core", action="store_true")
     parser.add_argument("--no-remote", dest="remote", action="store_false")
     only = parser.add_mutually_exclusive_group()
     only.add_argument("--codegraph-only", dest="codegraph_only", action="store_true")
@@ -145,7 +159,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_false",
         help=argparse.SUPPRESS,
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # argparse cannot put one flag in two exclusive groups: check by hand.
+    only = "--codegraph-only" if args.codegraph_only else None
+    if args.github_only:
+        only = "--github-only"
+    if args.describe_core and args.skip_analyze:
+        parser.error("argument --describe-core: not allowed with --skip-analyze")
+    if args.describe_core and only:
+        parser.error(f"argument --describe-core: not allowed with {only}")
+    if args.find_core and only:
+        parser.error(f"argument --find-core: not allowed with {only}")
+    return args
 
 
 def _flag_list(args: argparse.Namespace) -> list[str]:
@@ -153,6 +178,10 @@ def _flag_list(args: argparse.Namespace) -> list[str]:
     flags = []
     if args.skip_analyze:
         flags.append("--skip-analyze")
+    if args.find_core:
+        flags.append("--find-core")
+    if args.describe_core:
+        flags.append("--describe-core")
     if not args.remote:
         flags.append("--no-remote")
     if args.codegraph_only:
@@ -185,7 +214,14 @@ def _configure_logging() -> None:
     logger.propagate = False
 
 
-def _scan(*, skip_analyze: bool, remote: bool, refresh_codegraph: bool) -> int:
+def _scan(
+    *,
+    skip_analyze: bool,
+    remote: bool,
+    refresh_codegraph: bool,
+    find_core: bool = False,
+    describe_core: bool = False,
+) -> int:
     """Run the full, phased scan and emit its events; return the exit status."""
     from whygraph.analyze import LlmDescriptor
     from whygraph.core import get_config
@@ -223,14 +259,18 @@ def _scan(*, skip_analyze: bool, remote: bool, refresh_codegraph: bool) -> int:
     # Which optional phases have work - decided up front so the phases are
     # numbered against the count of phases that actually run.
     run_pr_origins = github_client is not None
+    run_core = _run_core(
+        find_core=find_core, describe_core=describe_core, root=repository.root
+    )
     run_analyze = descriptor is not None
     # Author resolution always runs: local-only, no network, no token, so it
     # is valid under --no-remote and for the auto-rescan git hooks.
-    phase_total = 1 + int(run_pr_origins) + 1 + int(run_analyze)
+    phase_total = 1 + int(run_pr_origins) + 1 + int(run_core) + int(run_analyze)
     phase_titles = [
         "Structural crawl",
         *(["PR-origin recovery"] if run_pr_origins else []),
         "Author identity",
+        *(["Core commits"] if run_core else []),
         *(["LLM descriptions"] if run_analyze else []),
     ]
 
@@ -257,6 +297,10 @@ def _scan(*, skip_analyze: bool, remote: bool, refresh_codegraph: bool) -> int:
             if refresh_codegraph
             else None
         )
+        # Recorded before the refresh starts: `codegraph init` creates the
+        # file before it indexes, so a later check could see a half-built
+        # index (plan 49 section 5.3 step 0).
+        index_existed = index_file_exists(repository.root)
         if codegraph_crawler is not None:
             codegraph_crawler.start()
 
@@ -305,7 +349,28 @@ def _scan(*, skip_analyze: bool, remote: bool, refresh_codegraph: bool) -> int:
         resolver.join()
         phase_timings["Author identity"] = time.monotonic() - t0
 
-        # Phase 4 - LLM descriptions: the slow, token-heavy long pole, run
+        # Phase 4 - Core commits: needs the commit rows and the code index.
+        # With no index file at scan start (a first scan), wait for the
+        # CodeGraph build first; the core task has no total meanwhile, and
+        # its wall starts after the wait. An existing index is read as is.
+        if run_core:
+            n += 1
+            progress.phase(n, "Core commits")
+            t0 = time.monotonic()
+            core = CoreCrawler(
+                progress,
+                repository=repository,
+                large_commit_file_count=config.analyze.large_commit_file_count,
+                wall_sec=None if describe_core else CORE_PHASE_WALL_SEC,
+            )
+            ran.append(core)
+            if not index_existed and codegraph_crawler is not None:
+                codegraph_crawler.join()
+            core.start()
+            core.join()
+            phase_timings["Core commits"] = time.monotonic() - t0
+
+        # Phase 5 - LLM descriptions: the slow, token-heavy long pole, run
         # strictly last and alone. It describes commits reachable from the
         # current branch (reachability, not on_default_branch), so PR-origin
         # rows stay lazy because their objects are unreachable.
@@ -319,6 +384,7 @@ def _scan(*, skip_analyze: bool, remote: bool, refresh_codegraph: bool) -> int:
                 descriptor=descriptor,
                 max_workers=config.analyze.max_workers,
                 large_commit_file_count=config.analyze.large_commit_file_count,
+                core_only=describe_core,
             )
             ran.append(analyzer)
             analyzer.start()
@@ -346,6 +412,27 @@ def _scan(*, skip_analyze: bool, remote: bool, refresh_codegraph: bool) -> int:
     for c in failed:
         print(f"crawler {c.name!r} failed: {c.error}", file=sys.stderr)
     return 1 if failed else 0
+
+
+def _run_core(*, find_core: bool, describe_core: bool, root: Path) -> bool:
+    """Whether this scan runs the "Core commits" phase (plan 49 section 5.3).
+
+    ``--describe-core`` always does. ``--find-core`` does until a pass
+    completes, and again once when the last complete pass fell back because
+    no index file existed and one exists now (section 5.1 rule 7).
+    """
+    if describe_core:
+        return True
+    if not find_core:
+        return False
+    from whygraph.db import get_session
+    from whygraph.db.models import CoreState
+
+    with get_session() as session:
+        state = session.get(CoreState, 1)
+        if state is None or state.completed_at is None:
+            return True
+        return state.fallback_reason == "no_index" and index_file_exists(root)
 
 
 def _scan_codegraph_only() -> int:

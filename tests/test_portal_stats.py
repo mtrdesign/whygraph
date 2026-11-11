@@ -22,7 +22,7 @@ from test_portal_runner import (  # noqa: F401 -- `scanner` is a fixture
 from whygraph.core.context import use_project
 from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
-from whygraph.db.models import RationaleCache
+from whygraph.db.models import Commit, CoreCommit, CoreState, RationaleCache
 from whygraph.portal.migrate import ProjectMigrations
 from whygraph.portal.stats import project_counts
 
@@ -72,7 +72,99 @@ def test_rationale_cards_count_distinct_ranges(tmp_path: Path) -> None:
         "pull_requests": 0,
         "issues": 0,
         "rationale_cards": 3,
+        "core_commits": None,
+        "core_described": None,
+        "core_described_pct": None,
     }
+
+
+def _commit(sha: str, *, described: bool) -> Commit:
+    return Commit(
+        sha=sha,
+        parent_shas="",
+        author_name="Test User",
+        author_email="tester@example.com",
+        authored_at="2026-10-01T00:00:00+00:00",
+        committed_at="2026-10-01T00:00:00+00:00",
+        subject="s",
+        body="",
+        files_changed=1,
+        insertions=1,
+        deletions=0,
+        scanned_at="2026-10-01T00:00:00+00:00",
+        llm_description="described" if described else None,
+    )
+
+
+def _core_state(*, completed: bool) -> CoreState:
+    return CoreState(
+        id=1,
+        rules_key="k",
+        selection="codegraph",
+        files_selected=1,
+        files_total=1,
+        files_done=1,
+        completed_at="2026-10-01T00:00:00+00:00" if completed else None,
+        completed_head="h",
+    )
+
+
+def _core_counts(tmp_path: Path, rows: list) -> dict:
+    ctx = manual_ctx(tmp_path, "demo")
+    with use_project(ctx):
+        ensure_initialized()
+        with project_session() as session:
+            session.add_all(rows)
+            session.commit()
+    counts = project_counts(_state(), ctx)
+    assert counts is not None
+    return counts
+
+
+def test_core_figure_is_none_before_a_complete_core_pass(tmp_path: Path) -> None:
+    """No core_state row, or one with completed_at None, leaves all three None."""
+    counts = _core_counts(
+        tmp_path / "none",
+        [_commit("a" * 40, described=True), CoreCommit(sha="a" * 40)],
+    )
+    assert counts["core_commits"] is None
+    assert counts["core_described"] is None
+    assert counts["core_described_pct"] is None
+
+    counts = _core_counts(
+        tmp_path / "incomplete",
+        [
+            _commit("b" * 40, described=True),
+            CoreCommit(sha="b" * 40),
+            _core_state(completed=False),
+        ],
+    )
+    assert counts["core_commits"] is None
+    assert counts["core_described"] is None
+    assert counts["core_described_pct"] is None
+
+
+def test_core_figure_with_no_core_commits_has_no_pct(tmp_path: Path) -> None:
+    counts = _core_counts(tmp_path, [_core_state(completed=True)])
+    assert counts["core_commits"] == 0
+    assert counts["core_described"] == 0
+    assert counts["core_described_pct"] is None
+
+
+def test_core_figure_counts_described_core_commits(tmp_path: Path) -> None:
+    counts = _core_counts(
+        tmp_path,
+        [
+            _commit("c" * 40, described=True),
+            _commit("d" * 40, described=False),
+            CoreCommit(sha="c" * 40),
+            CoreCommit(sha="d" * 40),
+            _core_state(completed=True),
+        ],
+    )
+    assert counts["core_commits"] == 2
+    assert counts["core_described"] == 1
+    assert counts["core_described_pct"] == 50.0
 
 
 def test_no_counts_without_a_db_or_for_a_linked_project(tmp_path: Path) -> None:

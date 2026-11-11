@@ -331,9 +331,13 @@ A member's role on a project is the one granted to them on it, or else the organ
 | Explorer: generate a **new** rationale card | - | yes | yes |
 | Chat | - | yes | yes |
 | Quick rescan (git and CodeGraph, no LLM) | - | yes | yes |
-| Full rescan and Describe now (LLM) | - | - | yes |
+| Full rescan, Describe core and Describe all (LLM; all three also describe the pending file changes of large commits in core files) | - | - | yes |
 | Settings, keys and the project's access list | - | - | yes |
 | The project's **usage** and its budget: this month's spend, each person's share, the project budget | - | - | yes |
+
+A Quick rescan is cheap once core commits are found, but its first passes can hold a scan slot for
+the code index build plus up to 15 minutes while the "Core commits" phase works (it resumes on the
+next Quick rescan if it does not finish).
 
 A viewer never causes LLM spend: no chat, no new rationale card and no lazy description backfill,
 whether they use the Explorer, a connected machine or an agent.

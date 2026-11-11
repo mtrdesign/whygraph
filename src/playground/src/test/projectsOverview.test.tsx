@@ -186,6 +186,19 @@ describe("projectHealth precedence (plan section 4.10)", () => {
     expect(busy.items[2].title).toBe("12 commits have no description yet");
   });
 
+  it("offers Describe core only when core has something waiting, and keeps Describe", () => {
+    const both = projectHealth(details(), { waiting: 12, waitingCore: 5 }).items.find((i) => i.id === "waiting");
+    expect(both?.actions).toEqual([
+      { kind: "describe_core", label: "Describe core" },
+      { kind: "describe", label: "Describe" },
+    ]);
+    const slicesOnly = projectHealth(details(), { waiting: 0, waitingCore: 3 }).items.find((i) => i.id === "waiting");
+    expect(slicesOnly?.actions.map((x) => x.kind)).toEqual(["describe_core"]);
+    const noCore = projectHealth(details(), { waiting: 12, waitingCore: 0 }).items.find((i) => i.id === "waiting");
+    expect(noCore?.actions.map((x) => x.kind)).toEqual(["describe"]);
+    expect(projectHealth(details(), { waiting: 0, waitingCore: 0 }).items).toEqual([]);
+  });
+
   it("asks a project admin when the caller cannot fix it", () => {
     const h = projectHealth(details({ missing_key: "openai", permissions: CONTRIBUTOR }), { waiting: 1 });
     expect(h.items[0]).toMatchObject({ title: "No OpenAI key", actions: [] });

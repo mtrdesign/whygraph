@@ -9,7 +9,7 @@ Event contract (one JSON object per line, ``type`` discriminates):
 
 ``start``
     Always the **first** event: ``{"type": "start", "phase_total": n,
-    "phases": ["Structural crawl", ...]}``. The phase count is 2-4
+    "phases": ["Structural crawl", ...]}``. The phase count is 2-5
     depending on the scan flags; ``phases`` lists the titles of the phases
     that will run, in order (``["Code index"]`` for ``--codegraph-only``).
     ``phases`` is optional for readers: events written by older runs lack it.

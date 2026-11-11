@@ -157,7 +157,12 @@ function Tiles({ project, production }: { project: ProjectDetails; production: b
         label="Commits described"
         value={`${Math.round(stats.described_pct)}%`}
         info="Commits with an LLM description of what changed and why."
-        hint={stats.commits === 0 ? "None yet" : `${formatNumber(stats.described)} of ${formatNumber(stats.commits)}`}
+        hint={
+          stats.commits === 0
+            ? "None yet"
+            : `${formatNumber(stats.described)} of ${formatNumber(stats.commits)}` +
+              (stats.core_described_pct != null ? ` · core ${Math.round(stats.core_described_pct)} %` : "")
+        }
       />
       <Tile
         testId="pull-requests"
@@ -627,15 +632,19 @@ export function ProjectHome() {
 
   const unsafe = estimate.isError && projectProblem(estimate.error).kind === "unsafe_path" ? projectProblem(estimate.error) : null;
   const waiting = estimate.data?.commits ?? null;
+  const core = estimate.data?.core ?? null;
   const health = projectHealth(p, {
     lastFailure: overview.data?.last_failure ?? null,
     waiting,
+    waitingCore: core ? core.commits + core.file_slices : null,
     unsafePath: !!unsafe,
     codegraph: overview.data?.codegraph ?? null,
   });
   // Access lost / an unsupported source refuse every scan, Describe included (OVW-3).
   const scannable = !p.access_lost && p.source_supported !== false;
-  const showEstimate = ready && !linked && scannable && !dismissed && !!estimate.data && estimate.data.commits > 0;
+  const coreWork = !!core && (core.commits + core.file_slices > 0 || core.stale);
+  const showEstimate =
+    ready && !linked && scannable && !dismissed && !!estimate.data && (estimate.data.commits > 0 || coreWork);
   const link = p.link ?? null;
   const deadLink = linked && (link?.status === "revoked" || link?.status === "removed");
   const role = p.my_role && p.my_role !== "admin" ? projectRoleLabel(p.my_role) : null;
@@ -768,7 +777,7 @@ export function ProjectHome() {
             canDescribe={can(p, "project.scan_full") && p.llm_block !== "budget_exceeded"}
             canConfigure={can(p, "project.configure")}
             busy={scanPending}
-            onDescribe={() => scanNow({ trigger: "describe" })}
+            onDescribe={(scope) => scanNow({ trigger: "describe", scope })}
             onLater={() => setDismissed(true)}
           />
         </section>

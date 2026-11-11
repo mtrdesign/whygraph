@@ -160,6 +160,12 @@ export function HealthPanel({
             {a.label}
           </Button>
         );
+      case "describe_core":
+        return hideDescribe ? null : (
+          <Button size="sm" disabled={scanPending} onClick={() => onScan({ trigger: "describe", scope: "core" })}>
+            {a.label}
+          </Button>
+        );
       case "describe":
         return hideDescribe ? null : (
           <Button size="sm" variant="outline" disabled={scanPending} onClick={() => onScan({ trigger: "describe" })}>

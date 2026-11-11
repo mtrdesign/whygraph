@@ -290,6 +290,9 @@ def test_last_scan_stats_from_the_newest_snapshot(
         "pull_requests",
         "issues",
         "rationale_cards",
+        "core_commits",
+        "core_described",
+        "core_described_pct",
     }
     assert details["root"] == str(env.shared / "demo")
 

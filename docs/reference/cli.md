@@ -123,7 +123,7 @@ scan. At most two projects scan at once.
 | `push`, `reconcile` | Production mode: a push to the default branch (the GitHub App's webhook), and the hourly check of the default branch on GitHub | No |
 | `forge` | Production mode: GitHub activity on pull requests, issues, milestones or tags. It refreshes only those and the tags, never the commits or the code index | No |
 | `manual` | **Scan now** | Yes (unless turned off for that run) |
-| `describe` | **Describe now** on the first-scan estimate | Yes |
+| `describe` | **Describe core** or **Describe all** (the project's describe buttons). Core is the commits behind the most-referenced files; all is every commit. A queued core run that a Describe all or a Full rescan joins runs as all | Yes |
 
 The first scan never calls the LLM. Afterwards the project shows how many commits a full scan would
 describe, with which model and a token (and, for known models, cost) estimate, so you choose when
@@ -166,7 +166,7 @@ reader can parse line by line. Logs and errors stay on stderr. The `type` key sa
 
 | `type` | When | Fields |
 |---|---|---|
-| `start` | Always first | `phase_total` - the number of phases this run executes (2 to 4, depending on the run's flags and whether an LLM is configured); `phases` - their titles in order (`["Code index"]` for a code-index-only run), so a reader can name every phase before it begins. Optional: events recorded by older runs lack it |
+| `start` | Always first | `phase_total` - the number of phases this run executes (1 to 5, depending on the run's flags and whether an LLM is configured); `phases` - their titles in order (`["Code index"]` for a code-index-only run), so a reader can name every phase before it begins. Optional: events recorded by older runs lack it |
 | `phase` | Each phase begins | `phase` (1-based), `title` |
 | `task` | A crawler registers, and as it progresses (throttled; a finished task is always sent) | `name` (stable crawler label), `completed`, `total` (`null` while unknown), `description` (current status text) |
 | `result` | Always last | `status` (`ok` or `failed`), `elapsed_sec`, `phase_timings`, `crawlers` (per crawler: `name`, `status`, `summary`, and `error` / `warning` when set), `analyze_skipped` (why the LLM phase was skipped, else `null`) |
@@ -184,7 +184,7 @@ message rather than "no such command".
 | `whygraph serve` | The single-repo web panel | The [portal](../portal/index.md), for all your projects |
 | `whygraph-mcp` | The stdio MCP server | The portal's HTTP endpoint at `/mcp/<slug>` |
 | `whygraph scan` | Crawl the repo and describe commits, in a terminal or a CI job | The portal runs every scan: **Scan now** (Full rescan or Quick rescan) on the project's page, or the git hooks |
-| `whygraph analyze` | Describe one commit and print it | Gone; descriptions come from a Full rescan and **Describe now** |
+| `whygraph analyze` | Describe one commit and print it | Gone; descriptions come from a Full rescan, **Describe core** and **Describe all** |
 
 `whygraph init`, `whygraph serve`, `whygraph scan` and `whygraph-mcp` still exist as **stubs**: each prints a pointer to
 `whygraph up` on **stderr** and exits with status `2`. The `whygraph-mcp` stub writes nothing to

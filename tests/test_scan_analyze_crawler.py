@@ -504,3 +504,224 @@ def test_without_a_sink_the_crawler_records_nothing(
     assert crawler.error is None
     assert current_usage_sink() is None
     assert '"usage"' not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# Plan 49: core_only, the re-read and the core bulk pairs (D14)
+# --------------------------------------------------------------------------- #
+
+
+def _crawl(
+    repo_path: Path,
+    descriptor: _StubDescriptor,
+    *,
+    core_only: bool = False,
+    large: int = 3,
+) -> AnalyzeCrawler:
+    with Progress() as progress:
+        crawler = AnalyzeCrawler(
+            progress,
+            repository=Repository(repo_path),
+            descriptor=descriptor,
+            max_workers=2,
+            large_commit_file_count=large,
+            core_only=core_only,
+        )
+        crawler.start()
+        crawler.join()
+    return crawler
+
+
+def _pair_fixture(root: Path) -> dict[str, str]:
+    """Commits: small core commit, small other commit, a bulk commit (4 files)."""
+    shas: dict[str, str] = {}
+    for name, files in (
+        ("core", {"core.py": "c1\n"}),
+        ("other", {"other.py": "o1\n"}),
+        ("bulk", {"core.py": "c1\nc2\n", "g/1": "1\n", "g/2": "2\n", "g/3": "3\n"}),
+    ):
+        for rel, text in files.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text)
+            _git(root, "add", "--", rel)
+        _git(root, "commit", "-q", "-m", name)
+        shas[name] = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    return shas
+
+
+def _record(root: Path, *, core: set[str], pairs: set[tuple[str, str]]) -> None:
+    """Record the history, then a complete core pass's rows."""
+    from whygraph.db.models import CoreBulkPair, CoreCommit, CoreState
+    from whygraph.scan.git_crawler import GitCrawler
+
+    crawler = GitCrawler(Progress(), repository=Repository(root, default_branch="main"))
+    crawler.run()
+    assert crawler.error is None
+    with get_session() as session:
+        session.add(CoreState(id=1, rules_key="k", completed_at="2026-01-01"))
+        for sha in core:
+            session.add(CoreCommit(sha=sha))
+        for sha, path in pairs:
+            session.add(CoreBulkPair(sha=sha, path=path))
+    db_engine._reset_engine()
+
+
+def _slice(sha: str, path: str) -> str | None:
+    from whygraph.db.models import CommitFileChange
+
+    with get_session() as session:
+        return session.exec(
+            select(CommitFileChange.llm_description)
+            .where(CommitFileChange.commit_sha == sha)
+            .where(CommitFileChange.path == path)
+        ).first()
+
+
+def test_core_only_describes_only_core_commits(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core={shas["core"]}, pairs=set())
+    descriptor = _StubDescriptor()
+
+    _crawl(repo_path, descriptor, core_only=True)
+
+    described = {sha for sha, (text, _) in _descriptions().items() if text}
+    assert described == {shas["core"]}
+
+
+def test_a_commit_described_meanwhile_is_not_described_again(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    commits = _commits(repo_path)
+    _insert(commits)
+    descriptor = _StubDescriptor()
+    original = AnalyzeCrawler._describe_commit
+
+    def racing(self, commit):  # type: ignore[no-untyped-def]
+        with get_session() as session:
+            session.get(CommitRow, commit.sha).llm_description = "BY PORTAL"
+        return original(self, commit)
+
+    AnalyzeCrawler._describe_commit = racing  # type: ignore[method-assign]
+    try:
+        _crawl(repo_path, descriptor, large=10_000)
+    finally:
+        AnalyzeCrawler._describe_commit = original  # type: ignore[method-assign]
+
+    assert descriptor.seen == []
+    assert {t for t, _ in _descriptions().values()} == {"BY PORTAL"}
+
+
+def test_pending_bulk_pairs_are_described_once(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core=set(), pairs={(shas["bulk"], "core.py")})
+    descriptor = _StubDescriptor()
+
+    first = _crawl(repo_path, descriptor, core_only=True)
+
+    assert _slice(shas["bulk"], "core.py") == "DESCRIPTION"
+    assert _slice(shas["bulk"], "g/1") is None
+    assert "1 bulk file slices" in (first.summary or "")
+    calls = len(descriptor.seen)
+
+    second = _crawl(repo_path, descriptor, core_only=True)
+    assert len(descriptor.seen) == calls
+    assert second.summary == "up to date"
+
+
+def test_pairs_are_described_when_no_commit_is_pending(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core=set(), pairs={(shas["bulk"], "core.py")})
+    with get_session() as session:
+        for row in session.exec(select(CommitRow)).all():
+            row.llm_description = "DONE"
+    db_engine._reset_engine()
+    descriptor = _StubDescriptor()
+
+    crawler = _crawl(repo_path, descriptor)
+
+    assert len(descriptor.seen) == 1
+    assert crawler.summary != "up to date"
+    assert _slice(shas["bulk"], "core.py") == "DESCRIPTION"
+
+
+def test_a_pair_the_portal_described_meanwhile_costs_no_call(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    from whygraph.db.models import CommitFileChange
+
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core=set(), pairs={(shas["bulk"], "core.py")})
+    descriptor = _StubDescriptor()
+    original = AnalyzeCrawler._describe_pair
+
+    def racing(self, commit, path):  # type: ignore[no-untyped-def]
+        with get_session() as session:
+            row = session.exec(
+                select(CommitFileChange)
+                .where(CommitFileChange.commit_sha == commit.sha)
+                .where(CommitFileChange.path == path)
+            ).first()
+            row.llm_description = "BY PORTAL"
+        return original(self, commit, path)
+
+    AnalyzeCrawler._describe_pair = racing  # type: ignore[method-assign]
+    try:
+        _crawl(repo_path, descriptor, core_only=True)
+    finally:
+        AnalyzeCrawler._describe_pair = original  # type: ignore[method-assign]
+
+    assert descriptor.seen == []
+    assert _slice(shas["bulk"], "core.py") == "BY PORTAL"
+
+
+def test_a_failing_pair_stays_pending_and_is_counted(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core=set(), pairs={(shas["bulk"], "core.py")})
+
+    crawler = _crawl(repo_path, _StubDescriptor(fail_on="c2"), core_only=True)
+
+    assert isinstance(crawler.error, AnalyzeError)
+    assert "1 of 1 commits or file slices failed" in str(crawler.error)
+    assert _slice(shas["bulk"], "core.py") is None
+
+
+def test_a_pair_whose_sha_is_not_reachable_is_never_attempted(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core=set(), pairs={(shas["bulk"], "core.py")})
+    _git(repo_path, "reset", "-q", "--hard", shas["other"])
+    descriptor = _StubDescriptor()
+
+    _crawl(repo_path, descriptor, core_only=True)
+
+    assert descriptor.seen == []
+    assert _slice(shas["bulk"], "core.py") is None
+
+
+def test_no_pairs_without_a_complete_pass(isolated_db: Path, repo_path: Path) -> None:
+    from whygraph.db.models import CoreState
+
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core=set(), pairs={(shas["bulk"], "core.py")})
+    with get_session() as session:
+        session.get(CoreState, 1).completed_at = None
+    db_engine._reset_engine()
+    descriptor = _StubDescriptor()
+
+    _crawl(repo_path, descriptor, core_only=True)
+
+    assert descriptor.seen == []

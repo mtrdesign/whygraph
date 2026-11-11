@@ -41,7 +41,7 @@ export function runSeconds(run: Pick<ScanRunRow, "started_at" | "finished_at" | 
 
 export { triggerLabel } from "./labels";
 
-type RunLike = Pick<ScanRunRow, "trigger" | "kind" | "analyze">;
+type RunLike = Pick<ScanRunRow, "trigger" | "kind" | "analyze"> & { summary?: ScanRunSummary | null };
 
 /**
  * What a run was, for its title and the history: First scan, Import, Quick rescan,
@@ -55,7 +55,7 @@ export function runLabel(run: RunLike): string {
     case "manual":
       return run.analyze ? "Full rescan" : "Quick rescan";
     case "describe":
-      return "Describe";
+      return run.summary?.describe_scope === "core" ? "Describe core" : "Describe";
     case "hook":
       return "Commit hook";
     case "push":
@@ -79,7 +79,10 @@ const runMoment = (run: Pick<ScanRunRow, "queued_at" | "started_at">) => run.que
  * A run's title, "<what> - <when>" (`Full rescan - 9 Oct 2026, 2:02 PM`); the run
  * id is only in the URL.
  */
-export function runTitle(run: Pick<ScanRunRow, "trigger" | "kind" | "analyze" | "queued_at" | "started_at">): string {
+export function runTitle(run: Pick<ScanRunRow, "trigger" | "kind" | "analyze" | "queued_at" | "started_at"> & {
+    summary?: ScanRunSummary | null;
+  },
+): string {
   const when = runMoment(run);
   return when ? `${runLabel(run)} - ${formatDateTime(when)}` : runLabel(run);
 }

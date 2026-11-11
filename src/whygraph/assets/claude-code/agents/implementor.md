@@ -2,7 +2,7 @@
 name: whygraph-implementor
 description: Executes one step of a reviewed WhyGraph plan. Spawned by /whygraph-implement - do not invoke directly.
 model: sonnet
-tools: Read, Edit, Write, Grep, Glob, Bash
+tools: Read, Edit, Write, Grep, Glob, Bash, TaskStop
 maxTurns: 60
 hooks:
   PreToolUse:

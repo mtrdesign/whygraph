@@ -1,7 +1,7 @@
 ---
 name: whygraph-synthesizer
 description: Combines researcher reports into one WhyGraph plan. Spawned by whygraph-planner - do not invoke directly.
-tools: Read, Grep, Glob, Bash, Write, Edit
+tools: Read, Grep, Glob, Bash, Write, Edit, TaskStop
 maxTurns: 15
 omitClaudeMd: true
 hooks:

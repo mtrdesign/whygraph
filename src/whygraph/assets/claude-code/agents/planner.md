@@ -1,7 +1,7 @@
 ---
 name: whygraph-planner
 description: Writes a WhyGraph plan for a code change. Spawned by /whygraph-plan - do not invoke directly.
-tools: Read, Grep, Glob, Bash, Write, Edit, Agent, ToolSearch, ReadMcpResourceTool, mcp__whygraph__*, mcp__codegraph__*
+tools: Read, Grep, Glob, Bash, Write, Edit, Agent, TaskStop, ToolSearch, ReadMcpResourceTool, mcp__whygraph__*, mcp__codegraph__*
 maxTurns: 80
 ---
 

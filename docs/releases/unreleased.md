@@ -12,3 +12,10 @@
   are most of the cost: on one 4,100-file application they were $1.17 of Describe core's $1.74. The
   estimate card shows what they add, and the Describe core button's price follows the checkbox.
   Describe all and Full rescan still describe them.
+
+## Changes
+
+- **Plan agents can stop their background tasks.** The `whygraph-planner`, `whygraph-synthesizer`
+  and `whygraph-implementor` agents get Claude Code's `TaskStop` tool, so a command one of them runs
+  in the background can be stopped instead of left running. Run **Settings > Update agent files** to
+  pick it up.

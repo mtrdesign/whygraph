@@ -824,12 +824,12 @@ def test_harness_frontmatter_wiring() -> None:
     )
     assert _frontmatter(cc / "agents/researcher.md")["model"] == "sonnet"
     assert _frontmatter(cc / "agents/synthesizer.md")["tools"] == (
-        "Read, Grep, Glob, Bash, Write, Edit"
+        "Read, Grep, Glob, Bash, Write, Edit, TaskStop"
     )
     planner = _frontmatter(cc / "agents/planner.md")
     assert "disallowedTools" not in planner
     assert planner["tools"] == (
-        "Read, Grep, Glob, Bash, Write, Edit, Agent, ToolSearch, "
+        "Read, Grep, Glob, Bash, Write, Edit, Agent, TaskStop, ToolSearch, "
         "ReadMcpResourceTool, mcp__whygraph__*, mcp__codegraph__*"
     )
     assert planner["maxTurns"] == "80"

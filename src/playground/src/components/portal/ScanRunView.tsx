@@ -555,11 +555,19 @@ export function ScanRunView({ slug, runId }: { slug: string; runId: number }) {
   const logOpen = logChoice ?? badStatus;
   const phaseNow = phases.find((p) => p.status === "running");
   const availability = project.data ? scanAvailability(project.data) : null;
-  const retryKind = row.analyze ? availability?.full : availability?.quick;
+  const isDescribe = row.trigger === "describe";
+  const retryKind = row.analyze || isDescribe ? availability?.full : availability?.quick;
   const retry =
     project.data && retryKind && (project.data.permissions?.includes("project.scan") ?? false)
       ? {
-          run: () => scanNow(row.analyze ? FULL_SCAN : QUICK_SCAN),
+          run: () =>
+            scanNow(
+              isDescribe
+                ? { trigger: "describe", scope: row.summary?.describe_scope ?? "all" }
+                : row.analyze
+                  ? FULL_SCAN
+                  : QUICK_SCAN,
+            ),
           pending: scanPending,
           allowed: retryKind.allowed,
           reason: retryKind.reason,

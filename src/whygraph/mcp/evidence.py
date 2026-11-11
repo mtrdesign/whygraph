@@ -68,6 +68,10 @@ _SOURCE_PRIORITY = {
 
 _log = logging.getLogger(__name__)
 
+# "Not passed" for :func:`_rename_events_for`'s ``current_branch``, where
+# ``None`` already means "the default branch only".
+_UNSET = object()
+
 BACKFILL_WALL_SEC = 20
 """Wall-clock seconds one call may spend describing commits (plan section 5.4).
 
@@ -513,10 +517,11 @@ def _blame_hunk_at_its_sha(
                 rev=hunk.sha,
                 ignore_revs=ignore_revs,
             )
-        except GitError:
+        except (GitError, OSError):
             # Walk-past is best-effort: if git refuses the call (e.g. an
-            # ignored SHA can't be resolved), this hunk keeps its lines
-            # and the walk goes on with the others.
+            # ignored SHA can't be resolved), or the ``-L`` list is too long
+            # for the OS (ARG_MAX), this hunk keeps its lines and the walk
+            # goes on with the others.
             return []
         if hunks is None:
             return None
@@ -604,6 +609,111 @@ def _predecessor_blame(
     return out
 
 
+def reachable_shas_for_file(
+    repo: Repository,
+    path: str,
+    *,
+    blamer: _Blamer | None = None,
+    rev: str = "HEAD",
+    timeout: int | None = None,
+) -> set[str]:
+    """Every commit that still owns a line of ``path``: whole-file blame at ``rev``.
+
+    The scan-time half of the collector's ``"blame"`` rule (plan 49
+    section 5.2): a range blame of the same file can only return SHAs from
+    this set. It blames the commit, never the working tree, with the
+    collector's flags and ``.git-blame-ignore-revs`` (through ``blamer``).
+
+    Parameters
+    ----------
+    repo : Repository
+        The repository to blame in.
+    path : str
+        The file, relative to the repository root.
+    blamer : _Blamer or None, optional
+        The blame calls' shared ignore-revs file; ``None`` (default) makes
+        one for this call. It must have no budget.
+    rev : str, optional
+        The commit to blame (default ``"HEAD"``). A caller that resolved
+        ``HEAD`` once passes that SHA, so a moving ``HEAD`` cannot mix two
+        states in one pass.
+    timeout : int or None, optional
+        Seconds the blame may take; ``None`` (default) uses the shell's
+        default.
+
+    Returns
+    -------
+    set[str]
+        The owning SHAs; empty for an empty file.
+
+    Raises
+    ------
+    GitError
+        If ``git blame`` fails or times out, or ``blamer``'s budget is spent.
+    """
+    if blamer is None:
+        blamer = _Blamer(repo)
+    hunks = blamer.blame(path, whole_file=True, rev=rev, timeout=timeout)
+    if hunks is None:
+        raise GitError("the blame budget is spent")
+    return {h.sha for h in hunks if not h.is_uncommitted}
+
+
+def predecessor_shas(
+    repo: Repository,
+    rename_sha: str,
+    pred_path: str,
+    *,
+    blamer: _Blamer | None = None,
+    timeout: int | None = None,
+) -> set[str]:
+    """Every commit owning a line of a rename's predecessor, at the rename's first parent.
+
+    The scan-time half of the collector's ``"predecessor-blame"`` rule
+    (plan 49 section 5.2): the **whole** predecessor is blamed, so the set
+    covers any target range, including one longer than the renamed file.
+    Query-time :func:`_predecessor_blame` keeps blaming only the target's
+    range.
+
+    Parameters
+    ----------
+    repo : Repository
+        The repository to blame in.
+    rename_sha : str
+        The commit that renamed (or copied) the file, as
+        :func:`_rename_events_for` returns it.
+    pred_path : str
+        The path before the rename.
+    blamer : _Blamer or None, optional
+        The blame calls' shared ignore-revs file; ``None`` (default) makes
+        one for this call. It must have no budget.
+    timeout : int or None, optional
+        Seconds the blame may take; ``None`` (default) uses the shell's
+        default.
+
+    Returns
+    -------
+    set[str]
+        The owning SHAs; empty when the rename commit is unknown to the
+        WhyGraph DB or has no parent.
+
+    Raises
+    ------
+    GitError
+        If ``git blame`` fails (the predecessor is missing at the parent,
+        say) or times out, or ``blamer``'s budget is spent.
+    """
+    parent_sha = _first_parent_of(rename_sha)
+    if parent_sha is None:
+        return set()
+    if blamer is None:
+        blamer = _Blamer(repo)
+    hunks = blamer.blame(pred_path, whole_file=True, rev=parent_sha, timeout=timeout)
+    if hunks is None:
+        raise GitError("the blame budget is spent")
+    return {h.sha for h in hunks if not h.is_uncommitted}
+
+
 def _enriched_squash_prs_for(
     session: Session, blame_shas: set[str]
 ) -> list[PullRequest]:
@@ -681,13 +791,22 @@ def _attribute_squash_origins(
     return out
 
 
-def _rename_events_for(path: str) -> list[tuple[str, str]]:
-    """Return ``(rename_commit_sha, predecessor_path)`` for every rename in path's lineage."""
+def _rename_events_for(
+    path: str, *, current_branch: str | None | object = _UNSET
+) -> list[tuple[str, str]]:
+    """Return ``(rename_commit_sha, predecessor_path)`` for every rename in path's lineage.
+
+    ``current_branch`` is the alias scope (:func:`~.path_history.branch_scope`);
+    left unset it is resolved here, so a pass over many paths resolves it
+    once and passes it in.
+    """
     # Lazy import: path_history reuses _linked_prs / _linked_issues from
     # this module, so eager imports would create a cycle.
     from .path_history import branch_scope, current_branch_scope, resolve_path_aliases
 
-    current_branch = current_branch_scope()
+    if current_branch is _UNSET:
+        current_branch = current_branch_scope()
+    assert current_branch is None or isinstance(current_branch, str)
     out: list[tuple[str, str]] = []
     with get_session() as session:
         aliases = resolve_path_aliases(session, path, current_branch=current_branch)

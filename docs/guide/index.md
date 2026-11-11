@@ -24,7 +24,7 @@ Start with the concepts, then dig into whichever piece you need.
 
     ---
 
-    The four scan phases, every flag, branch membership, and the keep-fresh git hooks.
+    The scan phases, every flag, branch membership, and the keep-fresh git hooks.
 
     [:octicons-arrow-right-24: Scanning](scanning.md)
 

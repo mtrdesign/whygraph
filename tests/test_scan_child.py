@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -119,6 +120,7 @@ _CLASSES = {
     "AuthorResolver": "authors",
     "CodeGraphCrawler": "codegraph",
     "TagCrawler": "tags",
+    "CoreCrawler": "core",
 }
 
 
@@ -1115,3 +1117,273 @@ def test_real_child_scan_of_a_fixture_repo_emits_valid_jsonl(tmp_path: Path) -> 
     # The config came from the env: nothing was written into the checkout.
     assert not (repo / "whygraph.toml").exists()
     assert not (repo / ".whygraph").exists()
+
+
+# --------------------------------------------------------------------------- #
+# The "Core commits" phase (plan 49 section 9 items 13b and 16)
+# --------------------------------------------------------------------------- #
+
+
+def _complete_core_state(fallback_reason: str | None = None) -> None:
+    from whygraph.db import get_session
+    from whygraph.db.models import CoreState
+
+    with get_session() as session:
+        session.add(
+            CoreState(
+                id=1,
+                rules_key="k",
+                selection="all_text" if fallback_reason else "codegraph",
+                fallback_reason=fallback_reason,
+                files_selected=1,
+                files_total=1,
+                files_done=1,
+                completed_at="2026-11-11T00:00:00+00:00",
+                completed_head="0" * 40,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("flags", "wall"),
+    [(["--find-core"], child.CORE_PHASE_WALL_SEC), (["--describe-core"], None)],
+)
+def test_the_core_phase_runs_after_authors_and_before_descriptions(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flags: list[str],
+    wall: float | None,
+) -> None:
+    order: list[tuple[str, str]] = []
+    stubs = _patch_crawlers(monkeypatch, order)
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _DummyDescriptor)
+
+    status, events, _ = _run(capsys, "--no-remote", *flags)
+
+    assert status == 0
+    titles = ["Structural crawl", "Author identity", "Core commits", "LLM descriptions"]
+    assert events[0] == {"type": "start", "phase_total": 4, "phases": titles}
+    assert [e["title"] for e in events if e["type"] == "phase"] == titles
+    assert stubs["core"].constructed == 1
+    assert stubs["core"].last_kwargs["wall_sec"] == wall  # type: ignore[index]
+    assert _idx(order, ("join", "authors")) < _idx(order, ("start", "core"))
+    assert _idx(order, ("join", "core")) < _idx(order, ("start", "analyze"))
+    assert "core" in {c["name"] for c in events[-1]["crawlers"]}
+    # The start log line names the flag.
+    assert child._flag_list(child._parse_args([*flags, "--no-remote"])) == [
+        *flags,
+        "--no-remote",
+    ]
+
+
+def test_find_core_after_a_completed_pass_runs_no_phase(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stubs = _patch_crawlers(monkeypatch)
+    _complete_core_state()
+
+    status, events, _ = _run(capsys, "--skip-analyze", "--no-remote", "--find-core")
+
+    assert status == 0
+    assert "Core commits" not in events[0]["phases"]
+    assert stubs["core"].constructed == 0
+
+
+def test_describe_core_runs_after_a_completed_pass(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stubs = _patch_crawlers(monkeypatch)
+    _complete_core_state()
+
+    status, events, _ = _run(capsys, "--no-remote", "--describe-core")
+
+    assert status == 0
+    assert stubs["core"].constructed == 1
+    assert stubs["core"].last_kwargs["wall_sec"] is None  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("reason", "index", "runs"),
+    [
+        ("no_index", True, True),
+        ("no_index", False, False),
+        ("unusable", True, False),
+        (None, True, False),
+    ],
+)
+def test_a_no_index_fallback_reruns_once_an_index_exists(
+    isolated_db: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reason: str | None,
+    index: bool,
+    runs: bool,
+) -> None:
+    """Section 5.1 rule 7: only a "no_index" fallback re-runs."""
+    stubs = _patch_crawlers(monkeypatch)
+    _complete_core_state(reason)
+    if index:
+        (repo / ".codegraph").mkdir()
+        (repo / ".codegraph" / "codegraph.db").write_bytes(b"")
+
+    _run(capsys, "--skip-analyze", "--no-remote", "--find-core")
+
+    assert stubs["core"].constructed == int(runs)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--describe-core", "--skip-analyze"],
+        ["--describe-core", "--codegraph-only"],
+        ["--describe-core", "--github-only"],
+        ["--find-core", "--codegraph-only"],
+        ["--find-core", "--github-only"],
+    ],
+)
+def test_core_flags_refuse_the_runs_they_do_not_fit(
+    capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        child.main(argv)
+    assert exc.value.code == 2
+    assert "not allowed with" in capsys.readouterr().err
+
+
+class _TimedCodeGraph:
+    """A CodeGraph refresh that creates the index file at once, then takes a while."""
+
+    log: list[tuple[str, float]] = []
+    delay = 0.4
+
+    def __init__(
+        self, progress: object, *, project_root: Path, **kwargs: object
+    ) -> None:
+        self.name = "codegraph"
+        self.error: BaseException | None = None
+        self.warning = None
+        self.summary = "indexed"
+        self._root = project_root
+        progress.add_task("codegraph", total=None)  # type: ignore[attr-defined]
+        self._thread: threading.Thread | None = None
+
+    def _work(self) -> None:
+        db = self._root / ".codegraph" / "codegraph.db"
+        db.parent.mkdir(exist_ok=True)
+        db.write_bytes(b"")
+        time.sleep(self.delay)
+        type(self).log.append(("codegraph finished", time.monotonic()))
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._work)
+        self._thread.start()
+
+    def join(self, timeout: float | None = None) -> None:
+        assert self._thread is not None
+        self._thread.join(timeout)
+
+
+class _TimedCore:
+    """A core crawler that records when it was built and started."""
+
+    log: list[tuple[str, float]] = []
+
+    def __init__(self, progress: object, **kwargs: object) -> None:
+        self.name = "core"
+        self.error: BaseException | None = None
+        self.warning = None
+        self.summary = "core ok"
+        self._progress = progress
+        self._task = progress.add_task("core", total=None)  # type: ignore[attr-defined]
+        type(self).log.append(("core built", time.monotonic()))
+
+    def start(self) -> None:
+        type(self).log.append(("core started", time.monotonic()))
+        self._progress.update(self._task, total=1, completed=1)  # type: ignore[attr-defined]
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+
+@pytest.mark.parametrize("index_at_start", [False, True])
+def test_the_core_phase_waits_for_a_first_index_build_only(
+    isolated_db: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    index_at_start: bool,
+) -> None:
+    """Acceptance 18: with no index file at scan start the core work starts
+    after the CodeGraph crawler finished, even though the file appeared at
+    once; with one present it does not wait."""
+    _patch_crawlers(monkeypatch)
+    log: list[tuple[str, float]] = []
+    monkeypatch.setattr(_TimedCodeGraph, "log", log)
+    monkeypatch.setattr(_TimedCore, "log", log)
+    monkeypatch.setattr(child, "CodeGraphCrawler", _TimedCodeGraph)
+    monkeypatch.setattr(child, "CoreCrawler", _TimedCore)
+    if index_at_start:
+        (repo / ".codegraph").mkdir()
+        (repo / ".codegraph" / "codegraph.db").write_bytes(b"")
+
+    status, events, _ = _run(capsys, "--skip-analyze", "--no-remote", "--find-core")
+
+    assert status == 0
+    at = dict(log)
+    if index_at_start:
+        assert at["core started"] < at["codegraph finished"]
+    else:
+        assert at["core built"] < at["codegraph finished"] <= at["core started"]
+    # The phase is announced, and the core task has no total, during the wait.
+    phase = next(i for i, e in enumerate(events) if e.get("title") == "Core commits")
+    core_tasks = [i for i, e in enumerate(events) if e.get("name") == "core"]
+    assert phase < core_tasks[0]
+    assert events[core_tasks[0]]["total"] is None
+
+
+def test_real_child_scan_finds_core_commits_once(tmp_path: Path) -> None:
+    """``--find-core`` runs the phase until a pass completes, then not again."""
+    repo = _make_repo(tmp_path / "repo")
+    db_path = tmp_path / "history" / "w.db"
+    argv = [
+        sys.executable,
+        "-P",
+        "-m",
+        "whygraph.scan.child",
+        "--no-codegraph",
+        "--skip-analyze",
+        "--no-remote",
+        "--find-core",
+    ]
+    env = _child_env(
+        WHYGRAPH_CONFIG_JSON=json.dumps(
+            {"scan": {"forge": "off"}, "whygraph_db": str(db_path)}
+        )
+    )
+
+    first = subprocess.run(
+        argv, cwd=repo, env=env, capture_output=True, text=True, timeout=180
+    )
+    assert first.returncode == 0, first.stderr
+    events = _events(first.stdout)
+    assert events[0]["phases"] == [
+        "Structural crawl",
+        "Author identity",
+        "Core commits",
+    ]
+    core = next(c for c in events[-1]["crawlers"] if c["name"] == "core")
+    assert core["status"] == "ok" and "warning" not in core
+    assert core["summary"].startswith("1 core commits and 0 bulk file slices")
+    assert "no usable code index" in core["summary"]
+
+    second = subprocess.run(
+        argv, cwd=repo, env=env, capture_output=True, text=True, timeout=180
+    )
+    assert second.returncode == 0, second.stderr
+    assert "Core commits" not in _events(second.stdout)[0]["phases"]

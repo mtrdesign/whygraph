@@ -6,7 +6,7 @@ import { portalKey, projectApi, projectKey } from "../api";
 import { errorInfo } from "./apiErrors";
 
 /** What a scan request carries; every call site says what it wants (no default). */
-export type ScanBody = { trigger: "manual" | "describe"; analyze?: boolean };
+export type ScanBody = { trigger: "manual" | "describe"; analyze?: boolean; scope?: "all" | "core" };
 
 /**
  * "Scan now" for one project (on a production project it fetches first). The portal coalesces requests: while a

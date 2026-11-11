@@ -472,3 +472,63 @@ def test_area_history_full_emits_a_shared_pr_once(
     assert list(result["pull_requests"]) == ["7"]
     assert result["issues"] == {}
     assert json.dumps(result).count("The shared PR body.") == 1
+
+
+# ---- plan 49 section 5.2: the SHA-only area rule ----------------------------
+
+
+def test_area_history_shas_matches_area_history_commits_for_every_path(
+    whygraph_db_initialized: Path,
+) -> None:
+    """One rule, one home: the collector's fill and the SHA query agree."""
+    from whygraph.mcp.path_history import area_history_commits, area_history_shas
+
+    with get_session() as session:
+        _seed_rename_history(session)
+        session.commit()
+
+    for path in ("legacy.py", "mid.py", "final.py", "never.py"):
+        for limit in range(1, 7):
+            for exclude in (set(), {"sha_recent"}, {"sha_mid", "sha_old"}):
+                with get_session() as session:
+                    aliases = resolve_path_aliases(session, path)
+                    shas = area_history_shas(
+                        session, aliases, limit=limit, exclude=exclude
+                    )
+                items = area_history_commits(path, limit=limit, exclude_shas=exclude)
+                assert shas == [item.commit.sha for item in items], (path, limit)
+
+
+def test_area_history_shas_breaks_timestamp_ties_by_sha(
+    whygraph_db_initialized: Path,
+) -> None:
+    """Same ``committed_at``: ``sha desc``, so the cut at ``limit`` is stable."""
+    from whygraph.mcp.path_history import area_history_shas
+
+    when = "2025-01-01T00:00:00+00:00"
+    with get_session() as session:
+        for sha in ("sha_b", "sha_c", "sha_a"):
+            session.add(_commit(sha, subject=sha, committed_at=when))
+            session.add(_change(commit_sha=sha, path="tie.py"))
+        session.add(
+            _commit("sha_new", subject="new", committed_at="2025-02-01T00:00:00+00:00")
+        )
+        session.add(_change(commit_sha="sha_new", path="tie.py"))
+        # Two aliases touched by one commit still give it once.
+        session.add(_change(commit_sha="sha_new", path="tie_old.py"))
+        session.commit()
+
+        aliases = {"tie.py", "tie_old.py"}
+        assert area_history_shas(session, aliases, limit=10) == [
+            "sha_new",
+            "sha_c",
+            "sha_b",
+            "sha_a",
+        ]
+        assert area_history_shas(session, aliases, limit=2) == ["sha_new", "sha_c"]
+        # ``exclude`` applies before the limit.
+        assert area_history_shas(session, aliases, limit=2, exclude={"sha_c"}) == [
+            "sha_new",
+            "sha_b",
+        ]
+        assert area_history_shas(session, set(), limit=10) == []

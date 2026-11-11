@@ -197,6 +197,8 @@ describe("scan formatting", () => {
     expect(runLabel(row({ trigger: "manual", analyze: false }))).toBe("Quick rescan");
     expect(runLabel(row({ trigger: "manual", analyze: true }))).toBe("Full rescan");
     expect(runLabel(row({ trigger: "describe" }))).toBe("Describe");
+    expect(runLabel(row({ trigger: "describe", summary: { describe_scope: "core" } }))).toBe("Describe core");
+    expect(runTitle(row({ trigger: "describe", summary: { describe_scope: "core" } }))).toMatch(/^Describe core - /);
     expect(runLabel(row({ trigger: "hook" }))).toBe("Commit hook");
     expect(runLabel(row({ trigger: "push", kind: "sync" }))).toBe("GitHub push");
     expect(runLabel(row({ trigger: "sync", kind: "sync" }))).toBe("Sync from GitHub");
@@ -552,6 +554,25 @@ describe("progressModel", () => {
     expect(at("LLM descriptions", { name: "analyze", completed: 12, total: 300 })).toBe(
       "Describing commits - 12 of 300 commits",
     );
+  });
+
+  it("reads a core task with no total as the index wait, then the choice", () => {
+    const base = [
+      ev({ type: "start", phase_total: 3, phases: ["Structural crawl", "Author identity", "Core commits"] }),
+      ev({ type: "task", name: "codegraph", completed: 0, total: null }),
+      ev({ type: "phase", phase: 3, title: "Core commits" }),
+      ev({ type: "task", name: "core", completed: 0, total: null }),
+    ];
+    expect(progressModel(fold(base)).status).toBe("Waiting for the code index");
+    const indexed = fold([...base, ev({ type: "task", name: "codegraph", completed: 1, total: 1 })]);
+    expect(progressModel(indexed).status).toBe("Choosing core files");
+    const counting = fold([
+      ...base,
+      ev({ type: "task", name: "codegraph", completed: 1, total: 1 }),
+      ev({ type: "task", name: "core", completed: 40, total: 600 }),
+    ]);
+    expect(progressModel(counting).status).toBe("Finding core commits - 40 of 600 files");
+    expect(progressModel(counting).steps.map((x) => x.label)).toContain("Core commits");
   });
 
   it("lists the planned phases with human labels, and the failed one", () => {

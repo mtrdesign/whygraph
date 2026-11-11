@@ -48,8 +48,10 @@ the project (Codex), then ask why a function exists and WhyGraph answers from hi
 
 ## Descriptions when you want them
 
-After the first scan, the project offers **Describe now**, with the commit count, the model and a cost
-estimate, to write the LLM description for each commit. Skip it and descriptions backfill on demand.
+After the first scan, the project offers **Describe core** and **Describe all**, each with its commit
+count, the model and a cost estimate, to write the LLM description for each commit. Core covers the
+commits behind the files the rest of your code depends on; all covers every commit. Skip both and
+descriptions backfill on demand.
 What you spend, per project and model, is tracked under [Usage & cost](../portal/usage.md).
 See [Scanning your repo](../guide/scanning.md).
 

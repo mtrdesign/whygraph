@@ -293,7 +293,7 @@ make agent-eval ARGS="--cases O1 --stage 1"
 
 ## Estimate calibration
 
-The Describe now estimate (`src/whygraph/portal/estimate.py`) replays how a scan splits each commit into model calls. Its constants are measured on `claude-sonnet-5-5`, and each other model it knows has a profile in `MODEL_PROFILES`: how many input tokens and how much output it produces per Sonnet token on the same diffs. A model without a profile is estimated as Sonnet.
+The Describe core / Describe all estimate (`src/whygraph/portal/estimate.py`) replays how a scan splits each commit into model calls. Its constants are measured on `claude-sonnet-5-5`, and each other model it knows has a profile in `MODEL_PROFILES`: how many input tokens and how much output it produces per Sonnet token on the same diffs. A model without a profile is estimated as Sonnet.
 
 `scripts/estimate_calibration.py` measures a model. It samples waiting commits from a copy of a project's WhyGraph database, describes each one the way a scan does, and prints the estimate next to the real usage. It never writes a description, and its JSON output holds only counts.
 

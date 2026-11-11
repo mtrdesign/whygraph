@@ -158,3 +158,27 @@ def test_inline_argv_is_defensively_copied() -> None:
     cmd = ShellCommand(argv=original, parse=lambda r: r.stdout.rstrip("\n"))
     original.append("bye")
     assert Shell().run(cmd) == "hi"
+
+
+@dataclass
+class _CatCommand(ShellCommand[str]):
+    """Print a file's bytes and return the decoded stdout."""
+
+    path: Path
+
+    def argv(self) -> list[str]:
+        return ["cat", str(self.path)]
+
+    def parse(self, result: CompletedProcess[str]) -> str:
+        return result.stdout
+
+
+def test_errors_replace_decodes_bytes_that_are_not_utf8(tmp_path: Path) -> None:
+    """``errors=`` reaches the subprocess decoder, on both call shapes."""
+    latin1 = tmp_path / "latin1.txt"
+    latin1.write_bytes(b"caf\xe9\n")
+
+    with pytest.raises(UnicodeDecodeError):
+        Shell().run(["cat", str(latin1)])
+    assert Shell().run(["cat", str(latin1)], errors="replace").stdout == "caf�\n"
+    assert Shell().run(_CatCommand(latin1), errors="replace") == "caf�\n"

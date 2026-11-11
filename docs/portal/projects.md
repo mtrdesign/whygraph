@@ -87,8 +87,11 @@ The last step is one screen you can read while the first scan runs:
   a token field. Saving it also asks for a quick rescan, which runs right after the first scan, so
   pull requests and issues arrive without a full rescan.
 - **More settings** opens the project's settings (chat model, hooks, limits).
-- **The estimate**, once the first scan has read the history: how many commits a full scan would
-  describe, with which model, the tokens and an estimated cost. The cost is priced for every provider
+- **The estimate**, once the first scan has read the history, in two lines: **Core: N commits in F
+  files (about $X)** and **All: M commits (about $Y)**, each followed by "+ K file changes" when
+  large commits have pending per-file changes, with the model, the tokens and an estimated cost.
+  Core is "as of" the date of its last complete pass, and says "may have new commits" when HEAD has
+  moved since (Describe core stays available, and refreshes core first). The cost is priced for every provider
   that has a price (Anthropic and OpenAI out of the box, any other model once your organization adds
   a price), at the bundled prices or your organization's own; a model with no price shows tokens
   only. The cost is a point estimate with a range of plus or minus 50 %; a merge commit counts with
@@ -97,6 +100,14 @@ The last step is one screen you can read while the first scan runs:
   `claude-sonnet-5-5`, so a model that writes less costs less than shown. Someone without access to
   the project's spend sees the number of commits without a price.
   An empty history says "No commits yet".
+
+  **What core means.** Core is the commits behind the most-referenced files in the code index (the
+  files that make up 95 % of cross-file references), including the per-file changes of large commits
+  (more than 30 files) in those files. With no usable code index it covers every text file, and the
+  card says "No usable code index, so core covers every text file". Core leaves tests, fixtures,
+  docs and config to the lazy path. The trade-off: a commit outside core is described when a question
+  reaches it, and is not searchable by description until then. How much core saves depends on the
+  repository, so the two lines show both costs and you choose.
 
 ### Moving from another portal { #moving-from-another-portal }
 
@@ -115,8 +126,9 @@ wizard shows it in a card to confirm. The tick is **not remembered**: if you clo
 first scan does not finish `ok`, nothing is generated. The Overview's purpose card does the same on
 demand. Local and production projects only; a [linked project](platform-projects.md) has no purpose.
 
-**Open project** leaves the wizard at any time - the scan carries on. **Describe N commits (~$X)**
-starts the full scan that writes the descriptions, once the first scan has finished and you may spend
+**Open project** leaves the wizard at any time - the scan carries on. **Describe core (N, about $X)**
+and **Describe all (M, about $Y)** start the run that writes the descriptions (core or every
+commit), once the first scan has finished and you may spend
 on this project; otherwise it says why it is disabled. Spend is tracked on [Usage & cost](usage.md);
 descriptions you skip backfill on demand. See [Scanning](../guide/scanning.md).
 
@@ -271,7 +283,7 @@ The health panel lists what needs attention, most important first, each with wha
 | No key for the model that describes commits, writes rationale cards or chats | **Add a key** (project admins) |
 | The last scan failed | **Retry** and **Open log** |
 | The checkout is ahead of what WhyGraph last scanned, so the Explorer, Chat and the `whygraph_*` tools miss the newest commits; the CodeGraph tools stay current | **Rescan** |
-| Commits have no description yet | **Describe** (project admins); they also fill in as you browse |
+| Commits have no description yet | **Describe core** and **Describe all** (project admins); they also fill in as you browse |
 
 The CodeGraph rows are local-mode only, sit between "last scan failed" and "behind", and never change
 the status pill. With nothing to report it says **Healthy**. An import ranks above "folder missing", because an
@@ -279,7 +291,7 @@ imported repository has no folder until its clone lands.
 
 ### Tiles, coverage and usage
 
-Five tiles count **Commits**, **Commits described** (with an LLM description; the share and "N of M"),
+Five tiles count **Commits**, **Commits described** (with an LLM description; the share and "N of M", plus "core X %" once a core pass has completed),
 **Pull requests**, **Issues** and **Symbols explained** (symbols with a rationale card, as the
 Explorer's coverage map shows them). Each has a one-line definition; a zero says why, for example "No
 GitHub data: add a GitHub token" for a local project whose remote is on GitHub.
@@ -289,7 +301,7 @@ GitHub data: add a GitHub token" for a local project whose remote is on GitHub.
 project shows "History starts with the next scan" until it has two scans to compare.
 
 When commits are waiting for a description, the Overview shows how many, with the estimated cost and
-**Describe now** for project admins; everyone else sees the count without a price. People who can see
+**Describe core** and **Describe all** for project admins; everyone else sees the count without a price. People who can see
 the project's usage also get **Usage this month**: the spend against the budget, split by task, with a
 link to the project's usage and budgets.
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+import threading
 from collections.abc import Mapping, Sequence
 from functools import cached_property
 from pathlib import Path
@@ -17,8 +19,10 @@ from .blame import BlameHunk
 from .commands import (
     PRIVATE_TAGS_PREFIX,
     TAGS_SOURCE_PREFIX,
+    BlobInfo,
     GitBlameCmd,
     GitCatBlobCmd,
+    GitCatFileBatchCmd,
     GitCheckMailmapCmd,
     GitCheckoutPathsCmd,
     GitCheckoutResetCmd,
@@ -35,6 +39,7 @@ from .commands import (
     GitIsAncestorCmd,
     GitIsShallowCmd,
     GitLogCommitCmd,
+    GitLogPathsBetweenCmd,
     GitLsRemoteBranchCmd,
     GitLsRemoteRefsCmd,
     GitLsTreeLongCmd,
@@ -79,6 +84,29 @@ _EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # it via the ``blame.ignoreRevsFile`` config setting, but WhyGraph wires it
 # explicitly so behaviour does not depend on the user's local git config.
 _BLAME_IGNORE_REVS_FILE = ".git-blame-ignore-revs"
+
+IGNORE_REVS_MAX = 1_000
+"""Entries a ``.git-blame-ignore-revs`` may hold before it is ignored (plan 49, I12)."""
+
+_IGNORE_REVS_MAX_BYTES = 64 * 1024
+"""Bytes a ``.git-blame-ignore-revs`` may hold before it is ignored (plan 49, I12)."""
+
+# One ignore-revs entry once ``#...`` and whitespace are stripped: a full
+# SHA-1 or SHA-256 object id, which is all git accepts there.
+_IGNORE_REVS_ENTRY = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+
+# ``.git-blame-ignore-revs`` paths already reported as unusable, so a
+# repository with a bad file logs it once, not on every blame.
+_ignore_revs_reported: set[Path] = set()
+
+# Bytes of a blob :meth:`Repository.blob_info` checks for a NUL (git's own
+# binary test reads the same prefix).
+_BINARY_PROBE_BYTES = 8000
+
+# Read size for streaming blob content in :meth:`Repository.blob_info`.
+_BATCH_CHUNK = 1 << 16
+
+_log = logging.getLogger(__name__)
 
 # Contacts per ``git check-mailmap`` invocation. Keeps argv well under
 # ARG_MAX on every platform even for a repository with thousands of
@@ -404,7 +432,9 @@ class Repository:
         except ShellError:
             return None
 
-    def tree_entries(self, ref: str, *paths: str) -> tuple[TreeEntry, ...]:
+    def tree_entries(
+        self, ref: str, *paths: str, recursive: bool = False
+    ) -> tuple[TreeEntry, ...]:
         """``git ls-tree -z -l`` of ``ref``: exact ``paths``, or the top level.
 
         Reads the object store only, never the working tree; global and
@@ -418,6 +448,9 @@ class Repository:
             The commit-ish to read (a full SHA, or ``"HEAD"``).
         *paths : str
             Root-relative paths; none lists the top-level entries.
+        recursive : bool, optional
+            ``True`` lists every blob and submodule below (``-r``), with no
+            tree entries. Default ``False``.
 
         Returns
         -------
@@ -431,7 +464,7 @@ class Repository:
         """
         if not ref or ref.startswith("-"):
             raise GitError(f"unusable ref {ref!r}")
-        cmd = GitLsTreeLongCmd(ref, paths)
+        cmd = GitLsTreeLongCmd(ref, paths, recursive=recursive)
         try:
             result = subprocess.run(
                 cmd.argv(),
@@ -502,6 +535,111 @@ class Repository:
             raise GitError(f"failed to read a blob: exit {code}")
         return data, truncated
 
+    def paths_changed_between(self, a: str, b: str) -> set[str]:
+        """Every path a commit in ``a...b`` touched (purely local).
+
+        ``git log --format= --name-only --no-renames -m -z a...b``: the
+        symmetric difference, so a fast-forward, a merge, a squash, a revert
+        pair, a rebase and a branch switch all name the paths they changed;
+        merges are diffed against each parent, and a rename names both
+        paths. Read as bytes with ``-z``, so a non-ASCII name is not
+        C-quoted. Global and system git config are ignored
+        (:func:`~.credentials.git_env`).
+
+        Parameters
+        ----------
+        a, b : str
+            The two commit-ishes, e.g. a stored SHA and ``"HEAD"``.
+
+        Returns
+        -------
+        set of str
+            The paths, decoded as UTF-8 with replacement characters.
+
+        Raises
+        ------
+        GitError
+            If a revision is unusable (a missing SHA makes the log fatal),
+            ``git`` fails or times out.
+        """
+        for ref in (a, b):
+            if not ref or ref.startswith("-"):
+                raise GitError(f"unusable ref {ref!r}")
+        cmd = GitLogPathsBetweenCmd(a, b)
+        try:
+            result = subprocess.run(
+                cmd.argv(),
+                cwd=self.root,
+                capture_output=True,
+                timeout=self._shell.timeout,
+                check=False,
+                env=git_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise GitError("failed to list the changed paths") from exc
+        if result.returncode != 0:
+            lines = os.fsdecode(result.stderr).strip().splitlines()
+            detail = lines[-1] if lines else f"exit {result.returncode}"
+            raise GitError(f"failed to list the changed paths: {detail}")
+        return cmd.parse_bytes(result.stdout)
+
+    def blob_info(self, objects: Sequence[str]) -> dict[str, BlobInfo | None]:
+        """Size, binary test and line count of blobs, in one ``git cat-file --batch``.
+
+        The names are fed to git's stdin from a separate thread while this
+        one reads stdout, so a large batch cannot deadlock on full pipes.
+        Content is streamed, never held whole. Global and system git config
+        are ignored (:func:`~.credentials.git_env`).
+
+        Parameters
+        ----------
+        objects : Sequence[str]
+            Object names: a blob id, or ``"<commit>:<path>"``. A name
+            holding a newline or a NUL cannot be sent and maps to ``None``.
+
+        Returns
+        -------
+        dict of str to BlobInfo or None
+            One entry per distinct name: ``None`` when the object is
+            missing, ambiguous, not a blob, or cannot be named.
+
+        Raises
+        ------
+        GitError
+            If ``git`` cannot be started or its output ends early.
+        """
+        names = list(dict.fromkeys(objects))
+        out: dict[str, BlobInfo | None] = dict.fromkeys(names)
+        sendable = [n for n in names if n and "\n" not in n and "\0" not in n]
+        if not sendable:
+            return out
+        try:
+            proc = subprocess.Popen(
+                GitCatFileBatchCmd().argv(),
+                cwd=self.root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=git_env(),
+            )
+        except OSError as exc:
+            raise GitError("failed to read blobs") from exc
+        assert proc.stdin is not None and proc.stdout is not None
+        writer = threading.Thread(
+            target=_feed_names, args=(proc.stdin, sendable), daemon=True
+        )
+        writer.start()
+        try:
+            for name in sendable:
+                out[name] = _read_batch_entry(proc.stdout)
+        finally:
+            proc.stdout.close()
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            writer.join()
+        return out
+
     def _ref_exists(self, ref: str) -> bool:
         """Whether ``ref`` resolves to a commit; ``False`` if git fails."""
         try:
@@ -561,7 +699,12 @@ class Repository:
         The file is repository content, so it goes through
         :func:`~whygraph.core.safe_paths.check_inside`: a symlink (or a
         path resolving outside :attr:`root`) is ignored, as is anything
-        that is not a regular file.
+        that is not a regular file. Its content is checked too, because
+        one bad line makes every ``git blame`` exit 128 and a huge list
+        slows every call: a file over 64 KiB, over :data:`IGNORE_REVS_MAX`
+        entries, not UTF-8, or with a line that is not a full 40 or
+        64-hex object id once ``#...`` and whitespace are stripped, is
+        ignored (and logged once).
 
         Returns
         -------
@@ -573,7 +716,15 @@ class Repository:
             path = check_inside(self.root, _BLAME_IGNORE_REVS_FILE)
         except UnsafePathError:
             return None
-        return path if path.is_file() else None
+        if not path.is_file():
+            return None
+        problem = _ignore_revs_problem(path)
+        if problem is None:
+            return path
+        if path not in _ignore_revs_reported:
+            _ignore_revs_reported.add(path)
+            _log.warning("ignoring %s: %s", path, problem)
+        return None
 
     def blame(
         self,
@@ -585,6 +736,8 @@ class Repository:
         rev: str | None = None,
         ranges: Sequence[tuple[int, int]] | None = None,
         ignore_revs_file: Any = _AUTO,
+        whole_file: bool = False,
+        timeout: int | None = None,
     ) -> tuple[BlameHunk, ...]:
         """Blame a line range (or several) of one file.
 
@@ -629,6 +782,12 @@ class Repository:
             The skip-list file to pass, already resolved by the caller
             (:meth:`blame_ignore_revs_file`), or ``None`` for none. Omitted,
             the file is detected for this call.
+        whole_file : bool, optional
+            ``True`` blames every line of the file (no range may be given).
+            Default ``False``.
+        timeout : int or None, optional
+            Seconds the call may take; ``None`` (default) uses the shell's
+            default.
 
         Returns
         -------
@@ -640,10 +799,16 @@ class Repository:
         Raises
         ------
         GitError
-            If ``git`` fails — unknown path, or a range outside the file.
+            If ``git`` fails (an unknown path, a range outside the file) or
+            the call times out.
         ValueError
             If both or neither of ``ranges`` and ``line_start`` /
-            ``line_end`` are given.
+            ``line_end`` are given, or a range is given with ``whole_file``.
+
+        Notes
+        -----
+        Output is decoded with replacement characters, so a file in another
+        encoding (Latin-1, say) blames instead of raising.
         """
         if ignore_revs_file is _AUTO:
             ignore_revs_file = self.blame_ignore_revs_file()
@@ -657,12 +822,18 @@ class Repository:
             ignore_revs=ignore_revs,
             rev=rev,
             ranges=ranges,
+            whole_file=whole_file,
         )
+        spans = ",".join(f"{a}-{b}" for a, b in cmd.ranges)
+        where = f"{path}:{spans}" if spans else path
         try:
-            return self._shell.run(cmd, cwd=self.root)
+            return self._shell.run(
+                cmd, cwd=self.root, timeout=timeout, errors="replace"
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitError(f"blame of {where} timed out") from exc
         except ShellError as exc:
-            spans = ",".join(f"{a}-{b}" for a, b in cmd.ranges)
-            raise GitError(f"failed to blame {path}:{spans}") from exc
+            raise GitError(f"failed to blame {where}") from exc
 
     def has_commit(self, sha: str) -> bool:
         """Whether ``sha`` names a commit present in this repository.
@@ -1208,6 +1379,28 @@ class Repository:
                 raise GitError("failed to rewrite tracked links as files") from exc
         return tuple(rewritten)
 
+    def index_paths(self, *paths: str) -> list[str]:
+        """The files git's index tracks under ``paths`` (``git ls-files -z -- <paths>``).
+
+        Purely local; read as bytes, so any file name decodes.
+
+        Parameters
+        ----------
+        *paths : str
+            Root-relative pathspecs, e.g. ``".codegraph/"``.
+
+        Returns
+        -------
+        list of str
+            The tracked paths; empty when nothing under ``paths`` is tracked.
+
+        Raises
+        ------
+        GitError
+            If ``git`` fails or times out.
+        """
+        return self._ls_files_z("--", *paths)
+
     def _ls_files_z(self, *args: str) -> list[str]:
         """``git ls-files -z <args>`` as a list, read as bytes so any file name decodes."""
         try:
@@ -1449,6 +1642,73 @@ class Repository:
             return self._shell.run(GitLogCommitCmd(ref), cwd=self.root)
         except ShellError as exc:
             raise GitError(f"failed to read commit metadata for {ref[:7]}") from exc
+
+
+def _ignore_revs_problem(path: Path) -> str | None:
+    """Why ``path`` is not a usable ignore-revs file, or ``None`` when it is."""
+    try:
+        if path.stat().st_size > _IGNORE_REVS_MAX_BYTES:
+            return "over 64 KiB"
+        text = path.read_bytes().decode("utf-8")
+    except OSError as exc:
+        return f"unreadable ({exc.__class__.__name__})"
+    except UnicodeDecodeError:
+        return "not UTF-8"
+    entries = 0
+    for line in text.splitlines():
+        entry = line.split("#", 1)[0].strip()
+        if not entry:
+            continue
+        if not _IGNORE_REVS_ENTRY.fullmatch(entry):
+            return "a line is not a full object id"
+        entries += 1
+        if entries > IGNORE_REVS_MAX:
+            return f"over {IGNORE_REVS_MAX} entries"
+    return None
+
+
+def _feed_names(stdin: Any, names: Sequence[str]) -> None:
+    """Write one object name per line to ``git cat-file --batch``, then close."""
+    try:
+        for name in names:
+            stdin.write(name.encode("utf-8", "surrogateescape") + b"\n")
+        stdin.close()
+    except OSError:
+        # git exited early (killed by the reader); the reader reports it.
+        pass
+
+
+def _read_batch_entry(stdout: Any) -> BlobInfo | None:
+    """Read one ``git cat-file --batch`` answer, streaming past its content."""
+    header = stdout.readline()
+    if not header.endswith(b"\n"):
+        raise GitError("failed to read blobs: output ended early")
+    fields = header.split()
+    if len(fields) != 3 or not fields[2].isdigit():
+        # ``<name> missing`` / ``<name> ambiguous``: no content follows.
+        return None
+    oid, kind, size = fields[0].decode("ascii", "replace"), fields[1], int(fields[2])
+    remaining = size
+    newlines = 0
+    binary = False
+    probed = 0
+    last = b""
+    while remaining:
+        chunk = stdout.read(min(_BATCH_CHUNK, remaining))
+        if not chunk:
+            raise GitError("failed to read blobs: output ended early")
+        if probed < _BINARY_PROBE_BYTES:
+            binary = binary or b"\0" in chunk[: _BINARY_PROBE_BYTES - probed]
+            probed += len(chunk)
+        newlines += chunk.count(b"\n")
+        last = chunk[-1:]
+        remaining -= len(chunk)
+    if stdout.read(1) != b"\n":
+        raise GitError("failed to read blobs: output ended early")
+    if kind != b"blob":
+        return None
+    lines = newlines + (1 if size and last != b"\n" else 0)
+    return BlobInfo(sha=oid, size=size, binary=binary, lines=lines)
 
 
 def _run_network(

@@ -38,6 +38,13 @@ from whygraph.db.models.chat_message import ChatMessage
 from whygraph.db.models.chat_session import ChatSession
 from whygraph.db.models.commit import Commit
 from whygraph.db.models.commit_file_change import CommitFileChange
+from whygraph.db.models.core import (
+    CoreBulkPair,
+    CoreCommit,
+    CoreFile,
+    CoreRename,
+    CoreState,
+)
 from whygraph.db.models.forge_crawl_state import ForgeCrawlState
 from whygraph.db.models.imported_actor import ImportedActor
 from whygraph.db.models.imported_chat import ImportedChat
@@ -58,6 +65,11 @@ __all__ = [
     "ChatSession",
     "Commit",
     "CommitFileChange",
+    "CoreBulkPair",
+    "CoreCommit",
+    "CoreFile",
+    "CoreRename",
+    "CoreState",
     "ForgeCrawlState",
     "ImportedActor",
     "ImportedChat",

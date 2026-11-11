@@ -11,6 +11,7 @@ export const PHASE_TASKS: Record<string, string[]> = {
   "Structural crawl": ["git", "github"],
   "PR-origin recovery": ["pr-origins"],
   "Author identity": ["authors"],
+  "Core commits": ["core"],
   "LLM descriptions": ["analyze"],
 };
 
@@ -20,6 +21,7 @@ const CRAWLER_LABEL: Record<string, string> = {
   github: "GitHub pull requests and issues",
   "pr-origins": "PR-origin recovery",
   authors: "Author identities",
+  core: "Core commits",
   analyze: "LLM descriptions",
   codegraph: "CodeGraph index",
 };
@@ -36,6 +38,7 @@ export const PHASE_LABEL: Record<string, string> = {
   "Structural crawl": "Git history and GitHub",
   "PR-origin recovery": "Pull request origins",
   "Author identity": "Author identities",
+  "Core commits": "Core commits",
   "LLM descriptions": "Commit descriptions",
   "Code index": "Code index",
   CodeGraph: "Code index",
@@ -52,6 +55,7 @@ const PHASE_STATUS: Record<string, string> = {
   "Structural crawl": "Reading git history",
   "PR-origin recovery": "Recovering pull request origins",
   "Author identity": "Matching author identities",
+  "Core commits": "Finding core commits",
   "LLM descriptions": "Describing commits",
 };
 
@@ -61,6 +65,7 @@ const TASK_STATUS: Record<string, { verb: string; unit?: string }> = {
   github: { verb: "Fetching pull requests and issues" },
   "pr-origins": { verb: "Recovering pull request origins" },
   authors: { verb: "Matching author identities" },
+  core: { verb: "Finding core commits", unit: "files" },
   analyze: { verb: "Describing commits", unit: "commits" },
   codegraph: { verb: "Building the code index" },
 };
@@ -174,6 +179,12 @@ export function rawPercent(state: ScanRunState): number | null {
   return Math.min(99, Math.floor((done / weight) * 100));
 }
 
+/** Whether the CodeGraph task has started and not finished. */
+function codegraphRunning(state: ScanRunState): boolean {
+  const t = state.tasks.find((task) => task.name === "codegraph");
+  return !!t && (t.total === null || t.completed < t.total);
+}
+
 function countText(completed: number, total: number, unit?: string): string {
   return `${formatNumber(completed)} of ${formatNumber(total)}${unit ? ` ${unit}` : ""}`;
 }
@@ -197,6 +208,11 @@ function statusLine(state: ScanRunState, fullName: string | undefined): string {
   const tasks = tasksOf(state, title);
   const active = tasks.find((t) => t.total === null || t.completed < t.total) ?? tasks.at(-1);
   if (active) {
+    // The core task has no total until it has chosen its files; before that it
+    // may be waiting for a first CodeGraph build (plan 49 section 5.3 step 0).
+    if (active.name === "core" && active.total === null) {
+      return codegraphRunning(state) ? "Waiting for the code index" : "Choosing core files";
+    }
     const what = TASK_STATUS[active.name] ?? { verb: crawlerLabel(active.name) };
     return active.total ? `${what.verb} - ${countText(active.completed, active.total, what.unit)}` : what.verb;
   }

@@ -15,11 +15,11 @@ webhooks and an hourly check instead). Progress and the log of each run are on t
 
 A project's **Scans** page lists every run, newest first, and a run opens on its own page. A run is
 titled by what it was and when - *Full rescan - 9 Oct 2026, 14:02*, *Quick rescan*, *First scan*,
-*Import*, *Describe*, *Commit hook*, *GitHub push*, *Sync from GitHub* or *Scheduled check* - never
+*Import*, *Describe all*, *Describe core*, *Commit hook*, *GitHub push*, *Sync from GitHub* or *Scheduled check* - never
 by a run number (the number is only in the address). Quick versus full is visible on every row.
 
 **The run page** shows who asked for it and when it was queued, started and finished, then the
-phases. Every phase is named from the start ("Phase 2 of 4"), so you can see what is still to come;
+phases. Every phase is named from the start ("Phase 2 of 5"), so you can see what is still to come;
 a phase that never ran because an earlier one failed reads *Skipped*, and a run you stopped shows a
 grey stop mark on the phase it was in, not a red failure. Per-task progress bars (commits described
 so far) stay on this page. The outcome says what happened - *Imported and scanned*, *Fetched new
@@ -48,7 +48,7 @@ the address, so a filtered view can be bookmarked or shared; **Clear filters** r
 
 ## What a scan does
 
-A scan runs up to four ordered phases. The run's page numbers them against the phases that will
+A scan runs up to five ordered phases. The run's page numbers them against the phases that will
 actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2" rather than gaps.
 
 1. **Structural crawl** - the git crawler and, when a remote provider is enabled, the GitHub crawler,
@@ -65,8 +65,15 @@ actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2
    on GitHub; the others are still recovered.
 3. **Author identity** - resolves commit addresses into one row per human. Local-only, no network and
    no token, so it runs on every scan including the offline git-hook path.
-4. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
-   configured provider. The slow, token-heavy long pole, so it runs strictly last and alone.
+4. **Core commits** *(optional)* - finds the commits behind the most-referenced files, so
+   **Describe core** knows what to describe. It reads the CodeGraph index to choose its files, so on
+   a first scan with no index it waits for the CodeGraph refresh. It runs on the first scan and on
+   Quick rescans until one pass completes, is capped at 15 minutes after the code index is ready,
+   and resumes where it stopped. Git-hook scans skip it.
+5. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
+   configured provider, and the pending per-file changes of large commits in core files. The slow,
+   token-heavy long pole, so it runs strictly last and alone. **Describe core** describes only core;
+   **Describe all** and a Full rescan describe everything.
 
 **CodeGraph is not a phase.** The index refresh - `codegraph init -i` on the first run, `codegraph
 sync -q` after - is a background task started before phase 1 and joined after the last one, so it
@@ -103,7 +110,7 @@ In the portal, **Scan now** offers two kinds of run:
 
 | Run | What it does |
 |---|---|
-| **Quick rescan** | Git history and the CodeGraph index only: no LLM and no remote calls (no GitHub PRs or issues), so it is fast, offline and token-free. This is also what the git hooks ask for. |
+| **Quick rescan** | Git history and the CodeGraph index only: no LLM and no remote calls (no GitHub PRs or issues), so it is fast, offline and token-free. This is also what the git hooks ask for. While core commits are still being found, the first passes can be slower (they run the "Core commits" phase), then it is fast again; the hooks ask for the quick scan without that phase. |
 | **Full rescan** | Everything a Quick rescan does, plus the GitHub crawl (after the first one, only what changed since), squash-merge recovery and the LLM description of each commit. |
 
 !!! tip "Lazy backfill"

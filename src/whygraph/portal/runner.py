@@ -318,6 +318,7 @@ dispatch because a covering hard-stopped budget was exhausted (section 9.2 D6)."
 PORTAL_SUMMARY_KEYS: tuple[str, ...] = (
     "usage",
     "estimate",
+    "describe_scope",
     "coverage",
     "scanned",
     "cloned",
@@ -509,7 +510,9 @@ def resolve_analyze(trigger: str, analyze: bool | None, source: str = "local") -
     return False
 
 
-def scan_flags(trigger: str, analyze: bool, source: str = "local") -> list[str]:
+def scan_flags(
+    trigger: str, analyze: bool, source: str = "local", scope: str | None = None
+) -> list[str]:
     """The scan-child flags of the section 4.6 trigger-to-flags table.
 
     Parameters
@@ -518,15 +521,22 @@ def scan_flags(trigger: str, analyze: bool, source: str = "local") -> list[str]:
         The recorded trigger.
     analyze : bool
         The recorded (resolved) analyze flag.
+    source : str, optional
+        The project's source.
+    scope : str or None, optional
+        ``"core"`` for a Describe core run (``describe_scope``).
 
     Returns
     -------
     list[str]
         ``hook`` -> ``--skip-analyze --no-remote``; ``forge`` ->
-        ``--github-only``; ``initial`` / ``poll`` / ``sync`` / ``push`` /
-        ``reconcile`` -> ``--skip-analyze``; ``manual`` / ``describe`` ->
-        none (full scan), or ``--skip-analyze`` when ``analyze`` is off. A
-        ``platform`` project's scan is always ``--codegraph-only``.
+        ``--github-only``; ``poll`` / ``sync`` / ``push`` / ``reconcile`` ->
+        ``--skip-analyze``; ``initial`` -> ``--skip-analyze --find-core``;
+        ``manual`` / ``describe`` -> none (full scan), ``--describe-core``
+        (``scope="core"``), or ``--skip-analyze`` when ``analyze`` is off
+        (plus ``--find-core`` for ``manual`` and for ``describe`` with
+        ``scope="core"``, a budget-downgraded Describe core). A ``platform``
+        project's scan is always ``--codegraph-only``.
     """
     if source == "platform":
         return ["--codegraph-only"]
@@ -535,7 +545,9 @@ def scan_flags(trigger: str, analyze: bool, source: str = "local") -> list[str]:
     if trigger == "hook":
         return ["--skip-analyze", "--no-remote"]
     if trigger in EXPLICIT_TRIGGERS and analyze:
-        return []
+        return ["--describe-core"] if scope == "core" else []
+    if trigger in ("initial", "manual") or (trigger == "describe" and scope == "core"):
+        return ["--skip-analyze", "--find-core"]
     return ["--skip-analyze"]
 
 
@@ -544,6 +556,7 @@ def scan_argv(
     analyze: bool,
     environ: Mapping[str, str] | None = None,
     source: str = "local",
+    scope: str | None = None,
 ) -> list[str]:
     """The child scanner's argv.
 
@@ -555,6 +568,8 @@ def scan_argv(
         Where :data:`SCAN_CMD_ENV` is read (default :data:`os.environ`).
     source : str, optional
         The project's source (``"platform"`` -> ``--codegraph-only``).
+    scope : str or None, optional
+        As for :func:`scan_flags`.
 
     Returns
     -------
@@ -578,7 +593,7 @@ def scan_argv(
     )
     return [
         *prefix,
-        *scan_flags(trigger, analyze, source),
+        *scan_flags(trigger, analyze, source, scope),
     ]
 
 
@@ -969,6 +984,8 @@ class _Pending:
     scan_requested: bool
     estimate: dict | None = None
     """The compact describe estimate the requester saw (full runs only)."""
+    describe_scope: str | None = None
+    """``"core"`` for a Describe core run; ``None`` is all when the run analyzes."""
     org_id: int | None = None
     """The project's org (per-org import fairness in ``_dispatch``)."""
     importing: bool = False
@@ -985,20 +1002,35 @@ class _Pending:
         requested_by: int | None,
         scan_requested: bool,
         estimate: dict | None = None,
+        scope: str | None = None,
     ) -> None:
         if kind == "sync":
             self.kind = "sync"
+        # The effective scope of each side (plan 49 section 5.5): None = does
+        # not analyze, "core" = Describe core, "all" = any other analyzing
+        # request (a Full rescan included).
+        queued = _effective_scope(self.analyze, self.describe_scope)
+        incoming = _effective_scope(analyze, scope)
+        widened = queued == "core" and incoming == "all"
         # One estimate per run, never recomputed (M2f-3 plan section 0.3
         # #10): a request that turns the run into a full one brings its
         # estimate; a quick request merged into a full run keeps the full
-        # run's; a full run that had none takes the first one offered.
-        if analyze and (not self.analyze or self.estimate is None):
+        # run's; a full run that had none takes the first one offered. A
+        # core run widened to all takes the all request's estimate, even
+        # when it has none (the core figure no longer describes the run).
+        if widened or (queued is None and incoming is not None):
             self.estimate = estimate
+        elif queued == "all" and incoming == "all" and self.estimate is None:
+            self.estimate = estimate
+        if incoming == "all":
+            self.describe_scope = None
+        elif queued is None and incoming == "core":
+            self.describe_scope = "core"
         self.trigger = merge_trigger(self.trigger, trigger)
         # Attribution follows the spend: the first requester who asked for
         # analysis becomes the requester (M2f-2 plan section 0.2 #7), else
-        # the first non-null one.
-        if analyze and not self.analyze and requested_by is not None:
+        # the first non-null one; whoever widens a core run to all pays.
+        if (widened or (analyze and not self.analyze)) and requested_by is not None:
             self.requested_by = requested_by
         elif self.requested_by is None:
             self.requested_by = requested_by
@@ -1006,6 +1038,13 @@ class _Pending:
         self.scan_requested = self.scan_requested or scan_requested
         if self.trigger != "forge":
             self.not_before = None  # a fuller run is never debounced
+
+
+def _effective_scope(analyze: bool, scope: str | None) -> str | None:
+    """``None`` when the request does not analyze, else ``"core"`` or ``"all"``."""
+    if not analyze:
+        return None
+    return "core" if scope == "core" else "all"
 
 
 def _int_in(value: Any, high: int) -> bool:
@@ -1621,7 +1660,11 @@ class ScanRunner:
                     self._tg.start_soon(self._kill_after_grace, job)
             for pending in dropped:
                 await anyio.to_thread.run_sync(
-                    _mark_cancelled, pending.run_id, None, pending.estimate
+                    _mark_cancelled,
+                    pending.run_id,
+                    None,
+                    pending.estimate,
+                    pending.describe_scope,
                 )
                 self._live.discard(pending.run_id)
         return jobs
@@ -1699,6 +1742,7 @@ class ScanRunner:
         principal: Principal | None,
         may_spend: bool,
         estimate: dict | None = None,
+        scope: str | None = None,
     ) -> int:
         """Queue (or coalesce into) a scan and return its ``scan_runs.id``.
 
@@ -1722,6 +1766,9 @@ class ScanRunner:
             out structure-only (the first-scan forcing); a request merged
             into a run keeps that run's estimate unless it makes the run a
             full one.
+        scope : str or None
+            ``"core"`` for a Describe core run (``describe`` only); anything
+            else is all. Dropped when the run does not analyze.
 
         Returns
         -------
@@ -1764,6 +1811,7 @@ class ScanRunner:
             scan_requested=True,
             may_spend=may_spend,
             estimate=estimate,
+            scope=scope,
         )
 
     async def request_sync(
@@ -1875,6 +1923,7 @@ class ScanRunner:
         scan_requested: bool,
         may_spend: bool,
         estimate: dict | None = None,
+        scope: str | None = None,
     ) -> int:
         if self._tg is None or self._lock is None or self._stopping:
             raise RunnerUnavailable("the scan runner is not running")
@@ -1907,6 +1956,7 @@ class ScanRunner:
                     may_spend=may_spend,
                     estimate=estimate,
                     importing=importing,
+                    scope=scope,
                 )
 
     async def _request_claimed(
@@ -1922,6 +1972,7 @@ class ScanRunner:
         may_spend: bool,
         estimate: dict | None = None,
         importing: bool = False,
+        scope: str | None = None,
     ) -> int:
         assert self._lock is not None
         async with self._lock:
@@ -1929,6 +1980,8 @@ class ScanRunner:
                 trigger, analyze = "initial", False
             if not analyze:
                 estimate = None  # only a run that describes carries one
+            if not analyze or trigger != "describe" or scope != "core":
+                scope = None  # only a Describe core run carries a scope
             if analyze and not may_spend:
                 # After the default and the forcing: what would really run.
                 raise ScanForbidden("this run would describe commits with the LLM")
@@ -1949,6 +2002,7 @@ class ScanRunner:
                     requested_by=requested_by,
                     scan_requested=scan_requested,
                     estimate=estimate,
+                    describe_scope=scope,
                     org_id=org_id,
                     importing=importing,
                 )
@@ -1975,6 +2029,7 @@ class ScanRunner:
                     requested_by=requested_by,
                     scan_requested=scan_requested,
                     estimate=estimate,
+                    scope=scope,
                 )
                 pending.importing = pending.importing or importing
                 run_id = pending.run_id
@@ -2043,7 +2098,11 @@ class ScanRunner:
                 # The row first: a stream that sees the run leave `_live`
                 # reads its final status next, which must not be "queued".
                 await anyio.to_thread.run_sync(
-                    _mark_cancelled, run_id, by, pending.estimate
+                    _mark_cancelled,
+                    run_id,
+                    by,
+                    pending.estimate,
+                    pending.describe_scope,
                 )
                 self._live.discard(run_id)
                 return "queued"
@@ -2378,6 +2437,8 @@ class ScanRunner:
         summary["usage"] = job.usage_total.summary()
         if job.spec.estimate is not None:
             summary["estimate"] = job.spec.estimate
+        if job.spec.describe_scope is not None and job.spec.analyze:
+            summary["describe_scope"] = job.spec.describe_scope
         if job.spec.kind == "sync" and job.scanned:
             summary["scanned"] = True
         if job.cloned:
@@ -2664,12 +2725,14 @@ class ScanRunner:
                         token_file=token_path,
                     )
                     log(f"the {blocked} budget is spent: scanning structure only")
-            argv = scan_argv(spec.trigger, analyze, source=source)
+            argv = scan_argv(
+                spec.trigger, analyze, source=source, scope=spec.describe_scope
+            )
             if production:
                 _log.debug(
                     "scan runner: run %s argv %s", spec.run_id, redact(shlex.join(argv))
                 )
-                flags = scan_flags(spec.trigger, analyze, source)
+                flags = scan_flags(spec.trigger, analyze, source, spec.describe_scope)
                 log(" ".join(["$ scan", *flags]))
             else:
                 log(f"$ {shlex.join(argv)}")
@@ -3554,6 +3617,8 @@ def _queued_summary(pending: _Pending) -> str | None:
         out["scan_requested"] = True
     if pending.estimate is not None:
         out["estimate"] = pending.estimate
+    if pending.describe_scope == "core" and pending.analyze:
+        out["describe_scope"] = "core"
     return json.dumps(out) if out else None
 
 
@@ -3580,6 +3645,13 @@ def _queued_estimate(run: ScanRun) -> dict | None:
     summary = _queued_json(run)
     estimate = None if summary is None else summary.get("estimate")
     return estimate if run.analyze and isinstance(estimate, dict) else None
+
+
+def _queued_scope(run: ScanRun) -> str | None:
+    """A queued run's persisted ``"core"`` scope, or ``None`` (all, if it analyzes)."""
+    summary = _queued_json(run)
+    scope = None if summary is None else summary.get("describe_scope")
+    return "core" if run.analyze and scope == "core" else None
 
 
 def _update_queued(pending: _Pending) -> None:
@@ -3623,7 +3695,10 @@ def _finish_run(
 
 
 def _mark_cancelled(
-    run_id: int, by: int | None = None, estimate: dict | None = None
+    run_id: int,
+    by: int | None = None,
+    estimate: dict | None = None,
+    describe_scope: str | None = None,
 ) -> None:
     """Record a still-queued run as cancelled by the user ``by``, keeping its estimate."""
     with get_session() as session:
@@ -3634,6 +3709,8 @@ def _mark_cancelled(
             summary: dict[str, Any] = dict(CANCELLED_BY_USER)
             if estimate is not None:
                 summary["estimate"] = estimate
+            if describe_scope == "core":
+                summary["describe_scope"] = "core"
             run.summary = json.dumps(summary)
             run.cancelled_by = by
             session.add(run)
@@ -3699,6 +3776,7 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
                         requested_by=run.requested_by,
                         scan_requested=_queued_scan_requested(run),
                         estimate=_queued_estimate(run),
+                        scope=_queued_scope(run),
                     )
                     run.summary = json.dumps({"merged_into": existing.run_id})
                 session.add(run)
@@ -3712,6 +3790,7 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
                 requested_by=run.requested_by,
                 scan_requested=_queued_scan_requested(run),
                 estimate=_queued_estimate(run),
+                describe_scope=_queued_scope(run),
                 org_id=None if project is None else project.org_id,
                 importing=importing,
             )

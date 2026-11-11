@@ -935,6 +935,8 @@ class BoundProject:
     ----------
     id, org_id, slug, name, source, remote_url, initialized_at, last_scan_at, created_at
         Copied from the ``projects`` row.
+    last_scanned_head : str or None
+        ``projects.last_scanned_head`` (written only by an ``ok`` scan).
     stored_root : str
         ``projects.root`` as stored (relative for a GitHub clone).
     root : Path
@@ -956,6 +958,7 @@ class BoundProject:
     remote_url: str | None
     initialized_at: str | None
     last_scan_at: str | None
+    last_scanned_head: str | None
     created_at: str
     ctx: ProjectContext
     role: ProjectRole
@@ -1144,6 +1147,7 @@ def bound_from(
         remote_url=project.remote_url,
         initialized_at=project.initialized_at,
         last_scan_at=project.last_scan_at,
+        last_scanned_head=project.last_scanned_head,
         created_at=project.created_at,
         ctx=ctx,
         role=role,

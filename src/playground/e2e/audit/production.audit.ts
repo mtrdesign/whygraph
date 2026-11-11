@@ -218,7 +218,7 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     }
     await expect(ben.getByText("First scan complete")).toBeVisible({ timeout: 90_000 });
     await settle(ben, 800);
-    await snap(ben, "import", "wizard-configure", "done-cost-card", "Configure after the first scan: First scan complete, the cost card with commits waiting for a description, Describe now / Later");
+    await snap(ben, "import", "wizard-configure", "done-cost-card", "Configure after the first scan: First scan complete, the cost card with commits waiting for a description, Describe core / Describe all / Later");
     await openAfterFirstScan(ben);
     await expect(ben).toHaveURL(/\/p\/demo$/);
     await settle(ben);

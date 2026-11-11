@@ -139,6 +139,7 @@ class Shell:
         check: bool = True,
         env: Mapping[str, str] | None = None,
         log_output: bool = True,
+        errors: str | None = None,
     ) -> T: ...
 
     @overload
@@ -151,6 +152,7 @@ class Shell:
         check: bool = True,
         env: Mapping[str, str] | None = None,
         log_output: bool = True,
+        errors: str | None = None,
     ) -> subprocess.CompletedProcess[str]: ...
 
     def run(
@@ -162,6 +164,7 @@ class Shell:
         check: bool = True,
         env: Mapping[str, str] | None = None,
         log_output: bool = True,
+        errors: str | None = None,
     ) -> subprocess.CompletedProcess[str] | T:
         """Run a subprocess, capture its output, and optionally raise on failure.
 
@@ -201,6 +204,11 @@ class Shell:
             ``False`` keeps the captured stdout / stderr out of the DEBUG
             trace, for a command whose output may hold a credential
             (``gh auth status`` prints most of a token). Default ``True``.
+        errors : str or None, optional
+            How undecodable output bytes are handled, passed to
+            :func:`subprocess.run` (e.g. ``"replace"`` for a command that
+            prints repository content in an unknown encoding). ``None``
+            (default) raises :class:`UnicodeDecodeError` on such bytes.
 
         Returns
         -------
@@ -224,6 +232,7 @@ class Shell:
                 check=check,
                 env=env,
                 log_output=log_output,
+                errors=errors,
             )
             return cmd.parse(result)
 
@@ -234,6 +243,7 @@ class Shell:
             check=check,
             env=env,
             log_output=log_output,
+            errors=errors,
         )
 
     def _run_argv(
@@ -245,6 +255,7 @@ class Shell:
         check: bool,
         env: Mapping[str, str] | None,
         log_output: bool = True,
+        errors: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Execute ``cmd`` and return the captured :class:`CompletedProcess`.
 
@@ -262,6 +273,7 @@ class Shell:
             list(cmd),
             capture_output=True,
             text=True,
+            errors=errors,
             cwd=cwd,
             timeout=effective_timeout,
             env=dict(effective_env) if effective_env is not None else None,

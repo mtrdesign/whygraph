@@ -356,3 +356,86 @@ def test_relation_is_frozen(fake_codegraph_db: Path) -> None:
 
     with pytest.raises(Exception):  # FrozenInstanceError
         caller.kind = "imports"  # type: ignore[misc]
+
+
+# ---- file_in_degree / connection (plan 49 section 5.2) --------------------
+
+_CORE_KINDS = (
+    "calls",
+    "references",
+    "imports",
+    "instantiates",
+    "implements",
+    "extends",
+)
+
+
+def _in_degree_graph() -> tuple[list[dict], list[tuple[str, str, str]]]:
+    """Five symbols in three files, with same-file, cross-file and ignored edges."""
+    specs = [
+        ("n_a1", "src/a.py"),
+        ("n_a2", "src/a.py"),
+        ("n_b1", "src/b.py"),
+        ("n_b2", "src/b.py"),
+        ("n_c1", "src/c.py"),
+    ]
+    nodes = [
+        {
+            "id": nid,
+            "kind": "function",
+            "name": nid,
+            "qualified_name": f"pkg.{nid}",
+            "file_path": path,
+            "language": "python",
+            "start_line": 1,
+            "end_line": 2,
+            "docstring": None,
+            "signature": None,
+        }
+        for nid, path in specs
+    ]
+    edges = [
+        ("n_a1", "n_b1", "calls"),
+        ("n_a2", "n_b2", "references"),
+        ("n_c1", "n_b1", "imports"),
+        ("n_b1", "n_a1", "extends"),
+        ("n_a1", "n_a2", "calls"),  # same file: not counted
+        ("n_c1", "n_a1", "contains"),  # structure: not a core kind
+        ("n_c1", "n_a2", "decorates"),  # not a core kind
+    ]
+    return nodes, edges
+
+
+def test_file_in_degree_counts_cross_file_edges_of_the_kinds(
+    codegraph_db_factory,
+) -> None:
+    nodes, edges = _in_degree_graph()
+    path = codegraph_db_factory(nodes=nodes, edges=edges)
+    with CodeGraph(path) as graph:
+        degree = graph.file_in_degree(_CORE_KINDS)
+        # The same counts as a group-by over ``file_edges`` without self-edges.
+        expected: dict[str, int] = {}
+        for src, tgt, _kind in graph.file_edges(_CORE_KINDS):
+            if src != tgt:
+                expected[tgt] = expected.get(tgt, 0) + 1
+        assert graph.file_in_degree(()) == {}
+        assert graph.file_in_degree(("calls",)) == {"src/b.py": 1}
+
+    assert degree == expected == {"src/b.py": 3, "src/a.py": 1}
+
+
+def test_file_in_degree_on_the_default_fixture(fake_codegraph_db: Path) -> None:
+    with CodeGraph(fake_codegraph_db) as graph:
+        assert graph.file_in_degree(_CORE_KINDS) == {
+            "src/pkg/b.py": 1,
+            "src/pkg/c.py": 1,
+        }
+
+
+def test_connection_is_the_read_only_connection(fake_codegraph_db: Path) -> None:
+    with CodeGraph(fake_codegraph_db) as graph:
+        conn = graph.connection
+        assert isinstance(conn, sqlite3.Connection)
+        assert conn.execute("SELECT count(*) FROM nodes").fetchone()[0] == 3
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("DELETE FROM nodes")

@@ -1899,6 +1899,8 @@ def test_only_project_admins_start_or_cancel_a_full_scan(two_orgs: World) -> Non
         {"trigger": "manual"},
         {"trigger": "manual", "analyze": True},
         {"trigger": "describe"},
+        {"trigger": "describe", "scope": "core"},
+        {"trigger": "describe", "scope": "all"},
     ):
         response = _post_scan(w, "carol", body)
         assert response.status_code == 403, (body, response.text)

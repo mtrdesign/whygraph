@@ -148,7 +148,7 @@ directory and never reads the in-repo file, so a project starts with empty histo
 |---|---|
 | `whygraph init` | Removed. Add the repo in the portal; it initializes it. |
 | `whygraph serve` | Removed. The portal is the web panel, for all your projects at once. |
-| `whygraph analyze` | Removed. Per-commit descriptions come from a Full rescan and from **Describe now**. |
+| `whygraph analyze` | Removed. Per-commit descriptions come from a Full rescan, **Describe core** and **Describe all**. |
 | `whygraph-mcp` (stdio server) | Removed. Agents connect over HTTP to `/mcp/<slug>` on the portal. The `whygraph-mcp` command remains only to print a message. |
 | `whygraph scan` | Removed. The portal runs every scan (**Scan now**, the git hooks); there is no headless scan. |
 | Hooks ran a local scan | Hooks ask the running portal to scan. They need the portal running; commits made while it was down are caught up when it next starts. |

@@ -53,6 +53,9 @@ OWN_FLAGS = ("--control", "--delay")
 OWN_SWITCHES = ("--codegraph-only", "--real-git")
 """This fixture's own valueless options (dropped when forwarding)."""
 
+DROPPED_FLAGS = ("--find-core", "--describe-core")
+"""Runner flags the real scanner never gets: no core phase, so the phases stay put."""
+
 REAL_GIT_FLAGS = ("--skip-analyze", "--no-remote", "--no-codegraph")
 """Forced on the real scanner: no LLM, no network, no CodeGraph binary."""
 
@@ -187,7 +190,7 @@ def codegraph_only(fail: bool, delay: float) -> int:
 
 
 def forwarded(args: list[str]) -> list[str]:
-    """``args`` without this fixture's own options, with :data:`REAL_GIT_FLAGS`."""
+    """``args`` without this fixture's own options or :data:`DROPPED_FLAGS`, with :data:`REAL_GIT_FLAGS`."""
     out: list[str] = []
     skip = False
     for arg in args:
@@ -198,6 +201,8 @@ def forwarded(args: list[str]) -> list[str]:
             skip = True
             continue
         if arg in OWN_SWITCHES or arg.split("=", 1)[0] in OWN_FLAGS:
+            continue
+        if arg in DROPPED_FLAGS:
             continue
         out.append(arg)
     return out + [f for f in REAL_GIT_FLAGS if f not in out]

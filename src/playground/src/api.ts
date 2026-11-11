@@ -534,6 +534,8 @@ export interface ProjectDetails extends ProjectSummary {
     commits: number;
     described: number;
     described_pct: number;
+    /** Core coverage; `null` before the first complete core pass. */
+    core_described_pct?: number | null;
     pull_requests: number;
     issues: number;
     rationale_cards: number;
@@ -806,6 +808,28 @@ export interface ScanEstimate {
     prices_as_of: string;
   } | null;
   missing_key: string | null;
+  /** Pending per-file slices of bulk commits (also described by Describe all); optional, older fixtures omit it. */
+  file_slices?: number;
+  /** The core set's own estimate; `null` until a first complete pass. Optional, older fixtures omit it. */
+  core?: ScanEstimateCore | null;
+  /** Non-null once a core pass has started and none has completed. */
+  core_progress?: { done: number; total: number } | null;
+}
+
+/** `ScanEstimate.core`: what Describe core would cost. */
+export interface ScanEstimateCore {
+  commits: number;
+  file_slices: number;
+  files: number;
+  selection: "codegraph" | "all_text";
+  /** HEAD moved since the last complete core pass. */
+  stale: boolean;
+  as_of: string;
+  upper_bound?: boolean;
+  large_commits?: number;
+  model?: { provider: string | null; model: string | null };
+  tokens?: ScanEstimate["tokens"];
+  cost?: ScanEstimate["cost"];
 }
 
 export type ScanRunStatus =
@@ -835,6 +859,8 @@ export interface ScanRunSummary {
   estimate?: ScanRunEstimate;
   /** The coverage snapshot taken at the end of the run. */
   coverage?: { commits: number; described: number; described_pct: number; rationale_cards: number };
+  /** Stored only as `"core"` for a Describe core run; absent means all. */
+  describe_scope?: "core";
   /** A production GitHub project: whether the sync cloned the repository. */
   cloned?: boolean;
   /** Whether a sync went on to scan. */
@@ -2208,7 +2234,7 @@ export function projectApi(slug: string) {
     config: () => get<ProjectConfigView>(`${base}/config`),
     putConfig: (body: ConfigPut) => send<ProjectConfigView>("PUT", `${base}/config`, body),
     init: (body: InitBody) => send<InitResult>("POST", `${base}/init`, body),
-    requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean } = {}) =>
+    requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean; scope?: "all" | "core" } = {}) =>
       send<{ run_id: number }>("POST", `${base}/scans`, body),
     scans: (f: ScanFilters = {}) => {
       const params = new URLSearchParams();

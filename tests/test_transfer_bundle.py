@@ -1174,6 +1174,11 @@ NOT_TRANSFERRED: dict[str, str] = {
     "project_import": "target-side import log",
     "imported_actor": "target-side; built from actors.jsonl",
     "imported_chat": "target-side; built from origin_key",
+    "core_state": "recomputed by the next scan",
+    "core_file": "recomputed by the next scan",
+    "core_rename": "recomputed by the next scan",
+    "core_commit": "recomputed by the next scan",
+    "core_bulk_pair": "recomputed by the next scan",
 }
 """Tables that never travel, with why."""
 

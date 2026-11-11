@@ -90,8 +90,8 @@ nothing in it draws no chart and says "No LLM usage this month yet".
 
 !!! note "Triggered is not benefited"
     Every figure is split into **interactive** (chat, generating a rationale card, agents, the lazy
-    backfill) and **scans started** (a full rescan or Describe now). A call is attributed to whoever
-    **triggered** it, not whoever benefits from the result: one admin starting a Describe now pays for
+    backfill) and **scans started** (a full rescan, Describe core or Describe all). A call is attributed to whoever
+    **triggered** it, not whoever benefits from the result: one admin starting a Describe all pays for
     descriptions the whole team reads. The Members tab is accounting, not a ranking.
 
 ### Export
@@ -108,7 +108,7 @@ prefixed with `'` so a spreadsheet does not run it.
 | Trigger | Attributed to |
 |---|---|
 | Chat, Explorer **Generate**, the lazy backfill | The person using it |
-| A full rescan or **Describe now** | The person who started it. When requests merge, the first person who asked for analysis |
+| A full rescan, **Describe core** or **Describe all** | The person who started it. When requests merge, the first person who asked for analysis; when a queued core run is widened to all by a Describe all or a Full rescan, the person who widened it |
 | A connected machine's agent | The connection's owner, with the connection and machine name |
 | A webhook, reconcile, hook or catch-up scan | **System** |
 
@@ -164,7 +164,7 @@ resets or someone raises it:
 - a **project** budget covers everyone on that project;
 - a **member** budget covers that person in every project.
 
-Those people behave like a Viewer for LLM spend: no chat, no new rationale card, no Describe now or
+Those people behave like a Viewer for LLM spend: no chat, no new rationale card, no Describe core, Describe all or
 other full scan. **Everything else keeps working**: the Explorer, evidence and every already-written
 description or card, MCP reads, quick scans (git and CodeGraph, no LLM), and **Cancel**, which is never
 blocked.

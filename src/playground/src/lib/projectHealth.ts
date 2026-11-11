@@ -68,6 +68,7 @@ export type HealthActionKind =
   | "retry_scan"
   | "rescan"
   | "describe"
+  | "describe_core"
   | "update_agents"
   | "codegraph_log"
   | "codegraph_restart";
@@ -122,6 +123,8 @@ export interface HealthOptions {
   lastFailure?: ProjectOverview["last_failure"];
   /** Commits waiting for a description (the scan estimate's `commits`), when known. */
   waiting?: number | null;
+  /** The core set's waiting commits plus file slices, when the estimate has a core. */
+  waitingCore?: number | null;
   /** The project DB is behind a symbolic link (`409 unsafe_path`). */
   unsafePath?: boolean;
   /** The Overview route's `codegraph` block (local mode with a CodeGraph host). */
@@ -161,7 +164,7 @@ function budgetDetail(scope: string | null | undefined): string {
  */
 export function projectHealth(
   p: ProjectSummary | ProjectDetails,
-  { lastFailure = null, waiting = null, unsafePath = false, codegraph = null }: HealthOptions = {},
+  { lastFailure = null, waiting = null, waitingCore = null, unsafePath = false, codegraph = null }: HealthOptions = {},
 ): ProjectHealth {
   const items: HealthItem[] = [];
   let status: ProjectStatus | null = null;
@@ -398,16 +401,22 @@ export function projectHealth(
   }
 
   // 11. Commits waiting for a description.
-  if (usable && !linked && waiting && waiting > 0) {
+  if (usable && !linked && ((waiting && waiting > 0) || (waitingCore && waitingCore > 0))) {
     const canDescribe = can(p, "project.scan_full");
+    const count = waiting && waiting > 0 ? waiting : (waitingCore ?? 0);
+    const actions: HealthAction[] = [];
+    if (canDescribe) {
+      if (waitingCore && waitingCore > 0) actions.push({ kind: "describe_core", label: "Describe core" });
+      if (waiting && waiting > 0) actions.push({ kind: "describe", label: "Describe" });
+    }
     items.push({
       id: "waiting",
       tone: "info",
-      title: `${plural(waiting, "commit")} ${waiting === 1 ? "has" : "have"} no description yet`,
+      title: `${plural(count, "commit")} ${count === 1 ? "has" : "have"} no description yet`,
       detail: canDescribe
         ? "Describe them now, or let them fill in on demand as you browse."
         : "They fill in on demand as you browse. Ask a project admin to describe them all at once.",
-      actions: canDescribe ? [{ kind: "describe", label: "Describe" }] : [],
+      actions,
     });
   }
 

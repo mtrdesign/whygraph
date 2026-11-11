@@ -213,7 +213,7 @@ class TreeEntry:
 
 
 class GitLsTreeLongCmd:
-    """``git --literal-pathspecs ls-tree -z -l <ref> [-- <path>...]`` - tree entries with sizes.
+    """``git --literal-pathspecs ls-tree -z -l [-r] <ref> [-- <path>...]`` - tree entries with sizes.
 
     Run for its **bytes** (a file name need not be UTF-8), so it pairs its
     argv with :meth:`parse_bytes` instead of a :class:`ShellCommand` parser.
@@ -226,14 +226,23 @@ class GitLsTreeLongCmd:
         The commit-ish to read (never starting with ``-``; the caller checks).
     paths : Sequence[str]
         Exact paths to list; empty lists the top level.
+    recursive : bool, optional
+        ``True`` adds ``-r``: every blob and submodule below, with no tree
+        entries. Default ``False``.
     """
 
-    def __init__(self, ref: str, paths: Sequence[str] = ()) -> None:
+    def __init__(
+        self, ref: str, paths: Sequence[str] = (), *, recursive: bool = False
+    ) -> None:
         self.ref = ref
         self.paths = tuple(paths)
+        self.recursive = recursive
 
     def argv(self) -> list[str]:
-        args = ["git", "--literal-pathspecs", "ls-tree", "-z", "-l", self.ref]
+        args = ["git", "--literal-pathspecs", "ls-tree", "-z", "-l"]
+        if self.recursive:
+            args.append("-r")
+        args.append(self.ref)
         if self.paths:
             args.extend(["--", *self.paths])
         return args
@@ -276,6 +285,81 @@ class GitCatBlobCmd:
 
     def argv(self) -> list[str]:
         return ["git", "cat-file", "blob", self.sha]
+
+
+@dataclass(frozen=True)
+class BlobInfo:
+    """What :meth:`Repository.blob_info` learned about one blob.
+
+    Attributes
+    ----------
+    sha : str
+        The blob's object id.
+    size : int
+        Its size in bytes.
+    binary : bool
+        Whether a NUL byte occurs in its first 8,000 bytes (git's own test).
+    lines : int
+        Its line count, as ``git blame`` counts lines: newlines, plus one
+        for a last line without one.
+    """
+
+    sha: str
+    size: int
+    binary: bool
+    lines: int
+
+
+class GitCatFileBatchCmd:
+    """``git cat-file --batch`` - one header plus raw content per object name on stdin.
+
+    Streamed by :meth:`Repository.blob_info`, which feeds the names from a
+    separate thread. No filters or textconv apply.
+    """
+
+    def argv(self) -> list[str]:
+        return ["git", "cat-file", "--batch"]
+
+
+class GitLogPathsBetweenCmd:
+    """``git log --format= --name-only --no-renames -m -z <a>...<b>`` - paths touched.
+
+    Every path a commit in the symmetric difference of ``a`` and ``b``
+    touched (merges diffed against each parent). Run for its **bytes**:
+    ``-z`` keeps git from C-quoting a non-ASCII name, and the names are
+    decoded by :meth:`parse_bytes`.
+
+    Parameters
+    ----------
+    a, b : str
+        The two commit-ishes (never starting with ``-``; the caller checks).
+    """
+
+    def __init__(self, a: str, b: str) -> None:
+        self.a = a
+        self.b = b
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            "-m",
+            "-z",
+            f"{self.a}...{self.b}",
+            "--",
+        ]
+
+    def parse_bytes(self, stdout: bytes) -> set[str]:
+        """The NUL-separated names, decoded as UTF-8 with replacement characters."""
+        names: set[str] = set()
+        for record in stdout.split(b"\0"):
+            name = record.lstrip(b"\n")
+            if name:
+                names.add(name.decode("utf-8", "replace"))
+        return names
 
 
 class GitRevListShasCmd(ShellCommand[frozenset[str]]):
@@ -341,11 +425,11 @@ class GitDiffCmd(ShellCommand[str]):
 
 
 class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
-    """``git blame -w -M -C -L<a>,<b> [-L<c>,<d> ...] --porcelain [rev] -- <path>``.
+    """``git blame -w -M -C [-L<a>,<b> ...] --porcelain [rev] -- <path>``.
 
     Blames a contiguous line range of one file (or several ranges, one
-    ``-L`` each) and parses the porcelain output into per-commit
-    :class:`BlameHunk` records.
+    ``-L`` each, or the whole file with no ``-L``) and parses the
+    porcelain output into per-commit :class:`BlameHunk` records.
 
     The default flag set deliberately strengthens blame against three
     refactor-mask cases that the bare command misses:
@@ -393,12 +477,16 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
         Several ``(start, end)`` line ranges (1-based, inclusive), one
         ``-L`` each, in place of ``line_start`` / ``line_end``. Git
         coalesces overlapping ranges.
+    whole_file : bool, optional
+        ``True`` blames every line (no ``-L``); no range may be given then.
+        Default ``False``.
 
     Raises
     ------
     ValueError
         If both or neither of ``ranges`` and ``line_start`` / ``line_end``
-        are given, or ``ranges`` is empty.
+        are given, or ``ranges`` is empty, or a range is given with
+        ``whole_file``.
     """
 
     def __init__(
@@ -411,14 +499,19 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
         rev: str | None = None,
         *,
         ranges: Sequence[tuple[int, int]] | None = None,
+        whole_file: bool = False,
     ) -> None:
-        if ranges is None:
+        if whole_file:
+            if ranges is not None or line_start is not None or line_end is not None:
+                raise ValueError("whole_file takes no line range")
+            ranges = ()
+        elif ranges is None:
             if line_start is None or line_end is None:
                 raise ValueError("pass line_start and line_end, or ranges")
             ranges = ((line_start, line_end),)
         elif line_start is not None or line_end is not None:
             raise ValueError("pass line_start / line_end or ranges, not both")
-        if not ranges:
+        if not ranges and not whole_file:
             raise ValueError("ranges must not be empty")
         self.path = path
         self.line_start = line_start
@@ -427,6 +520,7 @@ class GitBlameCmd(ShellCommand[tuple[BlameHunk, ...]]):
         self.ignore_revs_file = ignore_revs_file
         self.ignore_revs = ignore_revs
         self.rev = rev
+        self.whole_file = whole_file
 
     def argv(self) -> list[str]:
         args = [

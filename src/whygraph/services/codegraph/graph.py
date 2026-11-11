@@ -148,6 +148,16 @@ class CodeGraph:
         """Close the underlying SQLite connection."""
         self._conn.close()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The read-only SQLite connection this view queries.
+
+        For a caller that must guard a query against an untrusted index
+        (``PRAGMA trusted_schema``, a progress-handler deadline) before
+        calling a method here. Closing it closes this view.
+        """
+        return self._conn
+
     def symbol(self, qualified_name: str) -> Symbol | None:
         """Look a symbol up by its fully-qualified name.
 
@@ -546,6 +556,39 @@ class CodeGraph:
             kinds,
         ).fetchall()
         return [(r["src"], r["tgt"], r["k"]) for r in rows]
+
+    def file_in_degree(self, kinds: tuple[str, ...]) -> dict[str, int]:
+        """How many edges of the given kinds come into each file from other files.
+
+        Uses the same node join as :meth:`file_edges`, but aggregates in
+        SQL: a large index holds hundreds of thousands of such edges, which
+        :meth:`file_edges` would build as Python tuples. An edge whose two
+        ends are in the same file is not counted.
+
+        Parameters
+        ----------
+        kinds : tuple of str
+            Edge kinds to count, e.g. ``("calls", "imports")``.
+
+        Returns
+        -------
+        dict of str to int
+            ``target_file_path -> incoming cross-file edge count``. Files
+            with none are absent; empty ``kinds`` gives ``{}``.
+        """
+        if not kinds:
+            return {}
+        placeholders = ",".join("?" * len(kinds))
+        rows = self._conn.execute(
+            "SELECT t.file_path AS path, count(*) AS n "
+            "FROM edges e "
+            "JOIN nodes s ON s.id = e.source "
+            "JOIN nodes t ON t.id = e.target "
+            f"WHERE e.kind IN ({placeholders}) AND s.file_path != t.file_path "
+            "GROUP BY t.file_path",
+            kinds,
+        ).fetchall()
+        return {r["path"]: r["n"] for r in rows}
 
     def definition_ranges(self) -> list[tuple[str, int, int]]:
         """The ``(file_path, start_line, end_line)`` of every definable symbol.

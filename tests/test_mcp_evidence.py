@@ -7,6 +7,7 @@ git repo, so the blame → commit → PR → issue join runs end to end.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Collection
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, Pul
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import _commit_dict, _pr_dict, whygraph_evidence_for
 from whygraph.scan.refactor_score import BORING_THRESHOLD
-from whygraph.services.git import Repository
+from whygraph.services.git import GitError, Repository
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -1598,3 +1599,380 @@ def test_stop_describes_stops_pulling_and_drops_a_late_result(
     # A later call gets a fresh event (a re-added project works).
     again = ev.backfill_evidence_descriptions(_undescribed(1), target_path="sample.py")
     assert again.left == 0
+
+
+# ---- plan 49 Step 7: the core rules cover the collector (acceptance 11) ----
+
+_CORE_SOURCES = frozenset({"blame", "predecessor-blame", "area"})
+"""The evidence sources the core rules must cover (walk-past and pr-origin may miss)."""
+
+_BULK_FILES = 3
+"""The fixture's bulk threshold: a commit touching more files than this is bulk."""
+
+
+def _commit_files(root: Path, message: str, files: dict[str, str | bytes]) -> str:
+    """Write ``files`` (text or raw bytes), commit them, and return the SHA."""
+    for rel, content in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content)
+        _run_git(root, "add", "--", rel)
+    _run_git(root, "commit", "-q", "-m", message)
+    return _run_git(root, "rev-parse", "HEAD").strip()
+
+
+def _numbered(prefix: str, count: int, *, changed: range = range(0)) -> str:
+    """``count`` distinct lines; the ones in ``changed`` carry an edit."""
+    return "".join(
+        f"{prefix}{i} = {i}{' * 2' if i in changed else ''}\n"
+        for i in range(1, count + 1)
+    )
+
+
+def _build_core_fixture(root: Path) -> dict[str, str]:
+    """A repo with a shrinking rename, a bulk commit, a merge, ignore-revs,
+    a squash merge and a Latin-1 file, all on ``main``."""
+    _bootstrap_repo(root)
+    _run_git(root, "checkout", "-q", "-b", "main")
+    sha: dict[str, str] = {}
+    sha["init"] = _commit_files(
+        root,
+        "feat: initial layout",
+        {
+            "lib/old_util.py": _numbered("u", 30),
+            "app.py": _numbered("x", 10),
+            "notes.txt": "one\ntwo\nthree\n",
+            "legacy.txt": b"caf\xe9\nna\xefve\n",
+        },
+    )
+    sha["tail"] = _commit_files(
+        root,
+        "fix: the tail of the util module",
+        {"lib/old_util.py": _numbered("u", 30, changed=range(20, 26))},
+    )
+    # A rename that keeps only the first 18 lines: the predecessor is longer
+    # than the file, so only a ``line_end > n`` target reaches ``tail``.
+    _run_git(root, "mv", "lib/old_util.py", "lib/util.py")
+    sha["rename"] = _commit_files(
+        root, "refactor: move util", {"lib/util.py": _numbered("u", 18)}
+    )
+    sha["bulk"] = _commit_files(
+        root,
+        "chore: generated files",
+        {
+            **{f"gen/g{i}.txt": f"generated {i}\n" for i in range(_BULK_FILES + 1)},
+            "app.py": _numbered("x", 10).replace("x1 = 1", "x1 = 100"),
+        },
+    )
+    _run_git(root, "checkout", "-q", "-b", "topic")
+    sha["topic"] = _commit_files(
+        root,
+        "feat: topic edit",
+        {"app.py": (root / "app.py").read_text().replace("x5 = 5", "x5 = 55")},
+    )
+    _run_git(root, "checkout", "-q", "main")
+    sha["side"] = _commit_files(
+        root, "docs: four", {"notes.txt": "one\ntwo\nthree\nfour\n"}
+    )
+    _run_git(root, "merge", "-q", "--no-ff", "-m", "merge topic", "topic")
+    sha["merge"] = _run_git(root, "rev-parse", "HEAD").strip()
+    sha["noise"] = _commit_files(
+        root,
+        "style: annotate x8",
+        {"app.py": (root / "app.py").read_text().replace("x8 = 8", "x8 = 8  # noqa")},
+    )
+    sha["ignore"] = _commit_files(
+        root, "chore: ignore the noise", {".git-blame-ignore-revs": f"{sha['noise']}\n"}
+    )
+    _run_git(root, "checkout", "-q", "-b", "sq")
+    util = root / "lib" / "util.py"
+    _commit_files(
+        root, "wip 1", {"lib/util.py": util.read_text().replace("u2 = 2", "u2 = 22")}
+    )
+    _commit_files(
+        root, "wip 2", {"lib/util.py": util.read_text().replace("u3 = 3", "u3 = 33")}
+    )
+    _run_git(root, "checkout", "-q", "main")
+    _run_git(root, "merge", "-q", "--squash", "sq")
+    _run_git(root, "commit", "-q", "-m", "feat: squashed util edits")
+    sha["squash"] = _run_git(root, "rev-parse", "HEAD").strip()
+    return sha
+
+
+def _scan_fixture(root: Path) -> None:
+    """Record the fixture's history the way a scan does."""
+    from rich.progress import Progress
+
+    from whygraph.scan.git_crawler import GitCrawler
+
+    crawler = GitCrawler(Progress(), repository=Repository(root, default_branch="main"))
+    crawler.run()
+    assert crawler.error is None
+
+
+def _core_pass(root: Path) -> set[str]:
+    """Record the history, run one complete core pass, and return ``core_commit``.
+
+    Step 8's oracle (plan 49 section 9 item 12): the core set the scan
+    stored, with the fixture's bulk threshold.
+    """
+    from rich.progress import Progress
+
+    from whygraph.db.models import CoreCommit
+    from whygraph.scan.core_crawler import CoreCrawler
+
+    _scan_fixture(root)
+    crawler = CoreCrawler(
+        Progress(),
+        repository=Repository(root, default_branch="main"),
+        large_commit_file_count=_BULK_FILES,
+        wall_sec=None,
+    )
+    crawler.run()
+    assert crawler.error is None and crawler.completed, crawler.warning
+    with get_session() as session:
+        return set(session.exec(select(CoreCommit.sha)).all())
+
+
+def _non_merge_bulk() -> set[str]:
+    with get_session() as session:
+        return {
+            row.sha
+            for row in session.exec(select(Commit)).all()
+            if row.files_changed > _BULK_FILES and len(row.parent_shas.split()) <= 1
+        }
+
+
+def _assert_core_covers_collector(
+    root: Path, paths: Collection[str] | None = None
+) -> dict[str, set[str]]:
+    """Every core-sourced evidence SHA of every target is in ``core_commit`` ∪ bulk.
+
+    Runs a core pass first. Targets: every one-line range and one
+    ``1..n+1000`` range per file of ``paths`` (default: every tracked
+    file). Returns the SHAs seen per source, so a caller can check the run
+    was not vacuous.
+    """
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.targets import Target
+
+    oracle = _core_pass(root)
+    bulk = _non_merge_bulk()
+    assert not oracle & bulk
+    seen: dict[str, set[str]] = {source: set() for source in _CORE_SOURCES}
+    if paths is None:
+        paths = _run_git(root, "ls-files").splitlines()
+    for path in paths:
+        lines = (root / path).read_bytes().count(b"\n")
+        targets = [Target(path, i, i, None) for i in range(1, lines + 1)]
+        targets.append(Target(path, 1, lines + 1000, None))
+        for target in targets:
+            for item in collect_evidence(target, limit=20):
+                if item.source not in _CORE_SOURCES:
+                    continue
+                sha = item.commit.sha
+                assert sha in oracle or sha in bulk, (target, item.source, sha)
+                seen[item.source].add(sha)
+    return seen
+
+
+def test_core_rules_cover_every_core_sourced_evidence_item(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 11, the fallback form (no index, every file is core): every
+    fixture file, on ``main`` after a squash merge and again after a branch
+    switch."""
+    root = tmp_path / "repo"
+    sha = _build_core_fixture(root)
+    monkeypatch.chdir(root)
+
+    seen = _assert_core_covers_collector(root)
+    # Not vacuous: every source showed up, the bulk commit was blamed, and
+    # the predecessor tail came only through the ``1..n+1000`` target.
+    assert all(seen.values()), seen
+    assert sha["tail"] in seen["predecessor-blame"]
+    assert sha["squash"] in seen["blame"]
+    assert sha["bulk"] in seen["blame"]
+
+    # A branch switch: unmerged work, and a rename only this branch knows.
+    _run_git(root, "checkout", "-q", "-b", "feature")
+    (root / "docs").mkdir()
+    _run_git(root, "mv", "notes.txt", "docs/notes.txt")
+    feature_rename = _commit_files(
+        root, "docs: move notes", {"docs/notes.txt": "one\ntwo\nthree\nfour\nfive\n"}
+    )
+    feature_edit = _commit_files(
+        root,
+        "feat: feature edit",
+        {"app.py": (root / "app.py").read_text().replace("x3 = 3", "x3 = 33")},
+    )
+    seen = _assert_core_covers_collector(root)
+    assert {feature_rename, feature_edit} <= seen["blame"]
+    assert sha["side"] in seen["blame"] | seen["predecessor-blame"]
+
+
+def test_core_commit_covers_the_selected_files(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 11, the selected-file form: the index ranks two files, and
+    every core-sourced item of a target in them is in ``core_commit``."""
+    from conftest import build_fake_codegraph_db
+
+    root = tmp_path / "repo"
+    sha = _build_core_fixture(root)
+    monkeypatch.chdir(root)
+
+    def node(node_id: str, path: str) -> dict:
+        return {
+            "id": node_id,
+            "kind": "function",
+            "name": node_id,
+            "qualified_name": node_id,
+            "file_path": path,
+            "language": "python",
+            "start_line": 1,
+            "end_line": 1,
+        }
+
+    (root / ".codegraph").mkdir()
+    build_fake_codegraph_db(
+        root / ".codegraph" / "codegraph.db",
+        nodes=[
+            node("c", "elsewhere.py"),
+            node("a", "app.py"),
+            node("u", "lib/util.py"),
+        ],
+        edges=[("c", "a", "calls")] * 50
+        + [("c", "u", "imports")] * 40
+        + [("a", "u", "references")] * 5,
+    )
+    selected = ("app.py", "lib/util.py")
+
+    seen = _assert_core_covers_collector(root, selected)
+    assert seen["blame"] and seen["area"] and seen["predecessor-blame"]
+    assert sha["tail"] in seen["predecessor-blame"]
+    from whygraph.db.models import CoreState
+
+    with get_session() as session:
+        state = session.get(CoreState, 1)
+        assert state is not None
+        assert (state.selection, state.files_selected) == ("codegraph", 2)
+
+    # After a branch switch the selected files are still covered.
+    _run_git(root, "checkout", "-q", "-b", "feature")
+    edit = _commit_files(
+        root,
+        "feat: feature edit",
+        {"app.py": (root / "app.py").read_text().replace("x3 = 3", "x3 = 33")},
+    )
+    seen = _assert_core_covers_collector(root, selected)
+    assert edit in seen["blame"]
+
+
+def test_reachable_and_predecessor_shas_on_the_core_fixture(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§9 item 11: whole-file blame at HEAD, and the whole predecessor - which
+    reaches a SHA the query-time range blame of ``1..n`` does not."""
+    from whygraph.mcp.evidence import (
+        _predecessor_blame,
+        _rename_events_for,
+        predecessor_shas,
+        reachable_shas_for_file,
+    )
+    from whygraph.mcp.targets import Target
+
+    root = tmp_path / "repo"
+    sha = _build_core_fixture(root)
+    _scan_fixture(root)
+    monkeypatch.chdir(root)
+    repo = Repository(root)
+
+    # ``noise`` is listed in .git-blame-ignore-revs, so blame walks past it.
+    assert reachable_shas_for_file(repo, "app.py") == {
+        sha["init"],
+        sha["bulk"],
+        sha["topic"],
+    }
+    assert reachable_shas_for_file(repo, "lib/util.py") == {sha["init"], sha["squash"]}
+    assert reachable_shas_for_file(repo, "lib/util.py", rev=sha["rename"]) == {
+        sha["init"]
+    }
+
+    events = _rename_events_for("lib/util.py", current_branch=None)
+    assert events == [(sha["rename"], "lib/old_util.py")]
+    assert predecessor_shas(repo, *events[0]) == {sha["init"], sha["tail"]}
+    # The query-time rule blames only the target's range in the predecessor.
+    short = _predecessor_blame(repo, Target("lib/util.py", 1, 18, None))
+    assert sha["tail"] not in {h.sha for h in short}
+    long = _predecessor_blame(repo, Target("lib/util.py", 1, 1018, None))
+    assert sha["tail"] in {h.sha for h in long}
+
+    # An unknown rename commit has no parent to blame at.
+    assert predecessor_shas(repo, "f" * 40, "lib/old_util.py") == set()
+    with pytest.raises(GitError):
+        predecessor_shas(repo, sha["rename"], "lib/never_there.py")
+    with pytest.raises(GitError):
+        reachable_shas_for_file(repo, "never_there.py")
+
+
+def test_rename_events_resolve_the_branch_only_when_not_given(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import path_history
+    from whygraph.mcp.evidence import _rename_events_for
+
+    root = tmp_path / "repo"
+    sha = _build_core_fixture(root)
+    _scan_fixture(root)
+    monkeypatch.chdir(root)
+    calls: list[None] = []
+    real = path_history.current_branch_scope
+
+    def counting() -> str | None:
+        calls.append(None)
+        return real()
+
+    monkeypatch.setattr(path_history, "current_branch_scope", counting)
+
+    expected = [(sha["rename"], "lib/old_util.py")]
+    assert _rename_events_for("lib/util.py") == expected
+    assert len(calls) == 1
+    assert _rename_events_for("lib/util.py", current_branch="main") == expected
+    assert _rename_events_for("lib/util.py", current_branch=None) == expected
+    assert len(calls) == 1
+
+
+def test_walk_past_survives_an_argv_too_long_for_the_os(
+    temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A huge ``-L`` list can exceed ARG_MAX: the hunk stays unwalked."""
+    from whygraph.mcp.evidence import _Blamer, _blame_hunk_at_its_sha
+    from whygraph.mcp.targets import Target
+    from whygraph.services.git import BlameHunk, BlameOrigin
+
+    repo = Repository(temp_git_repo)
+    newest = list(repo.commits)[0]
+
+    def too_long(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(Repository, "blame", too_long)
+    hunk = BlameHunk(
+        newest.sha, 1, None, None, None, None, (BlameOrigin("sample.py", 3, 3, 3),)
+    )
+    out = _blame_hunk_at_its_sha(
+        _Blamer(repo), Target("sample.py", 3, 3, None), hunk, {newest.sha}
+    )
+    assert out == []

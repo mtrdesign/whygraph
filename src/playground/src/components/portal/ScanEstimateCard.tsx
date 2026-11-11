@@ -5,8 +5,10 @@ import { useCanFor } from "../../lib/permissions";
 import { ErrorState } from "../state/ErrorState";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { formatTokens } from "../../lib/format";
-import { estimateCostLine, modelLabel } from "../../lib/scanFormat";
+import { formatDate, formatTokens } from "../../lib/format";
+import { costPhrase, estimateCostLine, modelLabel } from "../../lib/scanFormat";
+import { coreEstimateReason } from "../../lib/scanAvailability";
+import { DisabledReason } from "../state/DisabledReason";
 import { providerLabel } from "../../lib/labels";
 import { plural } from "../../lib/plural";
 
@@ -17,9 +19,9 @@ function pricedWith(asOf: string): string {
 
 /**
  * The §4.14 cost guard: what describing the waiting commits would cost, with
- * *Describe now* / *Later*. The count is an upper bound (empty and PR-only commits
+ * *Describe core* / *Describe all* / *Later*. The count is an upper bound (empty and PR-only commits
  * stay undescribed); a model outside the price table shows tokens only; a missing
- * provider key disables *Describe now* and links to the project's model settings.
+ * provider key disables both describe buttons and links to the project's model settings.
  * A caller without `project.usage` gets the count without a price (R6,
  * `cost_hidden`).
  */
@@ -32,7 +34,7 @@ export function ScanEstimateCard({
   totalCommits,
 }: {
   slug: string;
-  onDescribe: () => void;
+  onDescribe: (scope: "all" | "core") => void;
   onLater: () => void;
   busy?: boolean;
   /** `false` leaves the choices to the caller (the wizard's footer). */
@@ -84,7 +86,7 @@ export function EstimateBody({
   canDescribe: boolean;
   /** `project.configure`: the link to add a key. */
   canConfigure: boolean;
-  onDescribe: () => void;
+  onDescribe: (scope: "all" | "core") => void;
   onLater: () => void;
   busy?: boolean;
   /** `false` hides *Describe now* / *Later* (the caller offers its own). */
@@ -94,10 +96,25 @@ export function EstimateBody({
 }) {
   const { commits, model, tokens, cost, large_commits, missing_key, cost_hidden } = estimate;
   const modelName = model.provider ? modelLabel(providerLabel(model.provider), model.model) : "The default model";
-  const showActions = actions && commits > 0;
+  const slices = estimate.file_slices ?? 0;
+  const core = estimate.core ?? null;
+  const coreReason = coreEstimateReason(estimate);
+  const coreWork = !!core && (core.commits + core.file_slices > 0 || core.stale);
+  const anyWork = commits > 0 || coreWork;
+  const showActions = actions && anyWork;
+  const withSlices = (n: number) => (n > 0 ? ` + ${plural(n, "file change")}` : "");
+  const price = (c: ScanEstimate["cost"] | undefined) => (c && !cost_hidden ? ` (${costPhrase(c.usd)})` : "");
+  const allLine = `All: ${plural(commits, "commit")}${withSlices(slices)}${price(cost)}`;
+  const coreLine = core
+    ? `Core: ${plural(core.commits, "commit")} in ${plural(core.files, "file")}${withSlices(core.file_slices)}${price(core.cost)}` +
+      ` · as of ${formatDate(core.as_of)}` +
+      (core.stale ? " · may have new commits" : "")
+    : null;
   return (
     <div className="flex flex-col gap-4" data-testid="scan-estimate">
-      {commits === 0 ? (
+      {commits === 0 && coreWork ? (
+        <p className="text-sm">No commits are waiting for descriptions in the whole history.</p>
+      ) : commits === 0 ? (
         <p className="text-sm">
           {totalCommits === 0
             ? "No commits yet. Push some history, then rescan."
@@ -142,7 +159,16 @@ export function EstimateBody({
           )}
         </div>
       )}
-      {commits > 0 && missing_key && (
+      {anyWork && (
+        <div className="flex flex-col gap-0.5 text-sm" data-testid="estimate-scopes">
+          {coreLine && <p data-testid="estimate-core">{coreLine}</p>}
+          <p data-testid="estimate-all">{allLine}</p>
+          {core?.selection === "all_text" && (
+            <p className="text-xs text-muted-foreground">No usable code index, so core covers every text file.</p>
+          )}
+        </div>
+      )}
+      {anyWork && missing_key && (
         <div className="flex flex-wrap items-center gap-2" data-testid="missing-key">
           <Badge variant="info">No {providerLabel(missing_key)} key yet</Badge>
           {canConfigure && (
@@ -158,18 +184,37 @@ export function EstimateBody({
         </div>
       )}
       {showActions && (canDescribe || !cost_hidden) && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {canDescribe && (
-            <Button onClick={onDescribe} disabled={!!missing_key || busy}>
-              Describe now
-            </Button>
+            <>
+              {(() => {
+                const reason = coreReason;
+                const button = (
+                  <Button
+                    onClick={() => onDescribe("core")}
+                    disabled={!!missing_key || busy || !!reason}
+                    title="commits behind the files the rest of the code depends on"
+                  >
+                    Describe core
+                  </Button>
+                );
+                return reason ? <DisabledReason reason={reason}>{button}</DisabledReason> : button;
+              })()}
+              <Button
+                variant="outline"
+                onClick={() => onDescribe("all")}
+                disabled={!!missing_key || busy || (commits === 0 && slices === 0)}
+              >
+                Describe all
+              </Button>
+            </>
           )}
           <Button variant="outline" onClick={onLater} disabled={busy}>
             Later
           </Button>
         </div>
       )}
-      {actions && commits === 0 && (
+      {actions && !anyWork && (
         <div>
           <Button onClick={onLater} disabled={busy}>
             Open project
@@ -180,6 +225,13 @@ export function EstimateBody({
         <p className="text-xs text-muted-foreground">
           <strong className="font-medium">Later</strong> leaves descriptions to on-demand
           generation as you browse, and to later full scans. Nothing is spent until then.
+        </p>
+      )}
+      {showActions && canDescribe && (
+        <p className="text-xs text-muted-foreground" data-testid="core-help">
+          Core covers the commits behind the files the rest of your code depends on. It refreshes first, so the count
+          can change a little. Other commits are described when a question reaches them, and are not searchable by
+          description until then.
         </p>
       )}
     </div>

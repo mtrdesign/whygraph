@@ -498,6 +498,25 @@ describe("Scan run (screen 7)", () => {
     await waitFor(() => expect(here(router)).toBe("/p/alpha/scans/9"));
   });
 
+  it.each([
+    ["a describe run", undefined, { trigger: "describe", scope: "all" }, /^Describe - /],
+    ["a Describe core run", "core", { trigger: "describe", scope: "core" }, /^Describe core - /],
+  ] as const)("retries %s as the same describe scope", async (_name, scope, body, title) => {
+    const summary = scope ? { error: "boom", describe_scope: scope } : { error: "boom" };
+    handlers["GET /api/projects/alpha/scans"] = () => ({
+      runs: [run(6, { status: "failed", trigger: "describe", analyze: true, summary })],
+    });
+    handlers["GET /api/projects/alpha/scans/6/events"] = () => sse([endFrame(1, "failed", summary)]);
+    handlers["POST /api/projects/alpha/scans"] = () => ({ status: 202, body: { run_id: 9 } });
+    handlers["GET /api/projects/alpha/scans/9/events"] = () => sse([]);
+    const user = userEvent.setup();
+    mount("/p/alpha/scans/6");
+    const result = await screen.findByTestId("run-result");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(title);
+    await user.click(within(result).getByTestId("run-retry"));
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans").map((c) => c.body)).toEqual([body]));
+  });
+
   it("a failed sync is a red 'Sync from GitHub - failed' row", async () => {
     handlers["GET /api/projects/alpha/scans"] = () => ({
       runs: [run(6, { kind: "sync", status: "failed", analyze: false, summary: { error: "could not get a GitHub token: unreachable" } })],
@@ -835,6 +854,52 @@ describe("Project overview (screen 9a)", () => {
     expect(calls("POST", "/api/projects/alpha/sync")).toHaveLength(0);
   });
 
+  const statsWith = (extra: Json) => ({
+    commits: 240,
+    described: 178,
+    described_pct: 74.2,
+    pull_requests: 50,
+    issues: 12,
+    rationale_cards: 31,
+    ...extra,
+  });
+
+  it.each([
+    ["shows the core coverage with a number", { core_described_pct: 61.4 }, "core 61 %"],
+    ["says nothing when it is null", { core_described_pct: null }, null],
+    ["says nothing when it is missing", {}, null],
+  ] as const)("the described tile %s", async (_n, extra, hint) => {
+    handlers["GET /api/projects/alpha"] = () => details("alpha", { stats: statsWith(extra) });
+    mount("/p/alpha");
+    const tile = await screen.findByTestId("stat-described");
+    if (hint) expect(tile).toHaveTextContent(hint);
+    else expect(tile).not.toHaveTextContent("core");
+  });
+
+  it("shows the card for a stale core with 0 waiting commits, Describe core enabled", async () => {
+    handlers["GET /api/projects/alpha/scan-estimate"] = () => ({
+      commits: 0,
+      upper_bound: true,
+      large_commits: 0,
+      model: { provider: "anthropic", model: "claude-haiku-4-5" },
+      tokens: null,
+      cost: null,
+      missing_key: null,
+      core: { commits: 0, file_slices: 0, files: 12, selection: "codegraph", stale: true, as_of: "2026-11-11T12:00:00+00:00" },
+    });
+    handlers["POST /api/projects/alpha/scans"] = () => ({ status: 202, body: { run_id: 3 } });
+    handlers["GET /api/projects/alpha/scans/3/events"] = () => sse([]);
+    const user = userEvent.setup();
+    mount("/p/alpha");
+    expect(await screen.findByTestId("scan-estimate")).toHaveTextContent("may have new commits");
+    expect(screen.getByRole("button", { name: "Describe core" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Describe all" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Describe core" }));
+    await waitFor(() =>
+      expect(calls("POST", "/api/projects/alpha/scans")[0]?.body).toEqual({ trigger: "describe", scope: "core" }),
+    );
+  });
+
   it("shows the describe-cost card when more than 500 commits wait", async () => {
     handlers["GET /api/projects/alpha/scan-estimate"] = () => ({
       commits: 900,
@@ -850,8 +915,8 @@ describe("Project overview (screen 9a)", () => {
     const user = userEvent.setup();
     mount("/p/alpha");
     expect(await screen.findByTestId("scan-estimate")).toHaveTextContent("900 commits to describe");
-    await user.click(screen.getByRole("button", { name: "Describe now" }));
-    await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans")[0]?.body).toEqual({ trigger: "describe" }));
+    await user.click(screen.getByRole("button", { name: "Describe all" }));
+    await waitFor(() => expect(calls("POST", "/api/projects/alpha/scans")[0]?.body).toEqual({ trigger: "describe", scope: "all" }));
   });
 });
 

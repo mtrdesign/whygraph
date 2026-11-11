@@ -108,7 +108,7 @@ prefixed with `'` so a spreadsheet does not run it.
 | Trigger | Attributed to |
 |---|---|
 | Chat, Explorer **Generate**, the lazy backfill | The person using it |
-| A full rescan, **Describe core** or **Describe all** | The person who started it. When requests merge, the first person who asked for analysis; when a queued core run is widened to all by a Describe all or a Full rescan, the person who widened it |
+| A full rescan, **Describe core** or **Describe all** | The person who started it. When requests merge, the first person who asked for analysis; when a queued core run is widened (to all by a Describe all or a Full rescan, or to include large commits' file changes by a Describe core with them), the person who widened it |
 | A connected machine's agent | The connection's owner, with the connection and machine name |
 | A webhook, reconcile, hook or catch-up scan | **System** |
 
@@ -187,7 +187,7 @@ anywhere else).
 A rationale card on a project with undescribed commits describes them first, so with the default
 per-member limits one member's agents get about 7 cold cards per hour (an estimate). A completion of
 a partial card counts as a second card. Cards on commits that are already described cost no
-descriptions, and **Describe core** (coming in a later release) is the remedy. See
+descriptions, and **Describe core** is the remedy. See
 [Agent limits](../deploy/production.md#agent-limits).
 
 Everything the stop refuses answers **`403 budget_exceeded`** with a `scope` of `org`, `project` or

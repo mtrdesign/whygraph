@@ -877,6 +877,31 @@ describe("Configure", () => {
     expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "core" });
   });
 
+  it("the footer's Describe core follows the file-slices checkbox", async () => {
+    const price = (usd: number) => ({ usd, low: usd / 2, high: usd * 1.5, currency: "USD", prices_as_of: "2026-09-01" });
+    fake.estimate = {
+      ...fake.estimate,
+      core: {
+        commits: 30,
+        file_slices: 12,
+        files: 8,
+        selection: "codegraph",
+        stale: false,
+        as_of: "2026-11-11T12:00:00+00:00",
+        cost: price(0.5),
+        commits_only: { commits: 30, file_slices: 0, cost: price(0.2) },
+      },
+    };
+    const user = userEvent.setup();
+    const { router } = mount("/p/alpha/init?step=configure&run=7");
+    await screen.findByTestId("scan-estimate");
+    expect(screen.getByRole("button", { name: "Describe core (30, about $0.50)" })).toBeEnabled();
+    await user.click(screen.getByRole("checkbox", { name: /Also describe large commits file by file/ }));
+    await user.click(await screen.findByRole("button", { name: "Describe core (30, about $0.20)" }));
+    await waitFor(() => expect(here(router)).toBe("/p/alpha/init?step=configure&run=8"));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "core_commits" });
+  });
+
   it("before the estimate, the describe model is layer-derived prose, not set like a model id", async () => {
     fake.events = RUNNING;
     mount("/p/alpha/init?step=configure&run=7");
@@ -958,6 +983,28 @@ describe("Configure", () => {
     await user.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(posts("/api/projects/alpha/scans")).toHaveLength(1));
     expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "core" });
+  });
+
+  it("retries a failed commits-only Describe core run with the same scope (RunCardView)", async () => {
+    fake.projects = [summary("alpha")];
+    fake.runRow = {
+      id: 8,
+      kind: "scan",
+      trigger: "describe",
+      analyze: true,
+      status: "failed",
+      summary: { describe_scope: "core_commits" },
+    };
+    fake.events = [
+      'id: 1\ndata: {"type":"start","phase_total":2}\n\n',
+      'id: 2\nevent: end\ndata: {"type":"end","run_id":8,"status":"failed","summary":{"error":"boom","describe_scope":"core_commits"}}\n\n',
+    ];
+    const user = userEvent.setup();
+    mount("/p/alpha/init?step=configure&run=8");
+    await screen.findByTestId("scan-failed");
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(posts("/api/projects/alpha/scans")).toHaveLength(1));
+    expect(posts("/api/projects/alpha/scans")[0].body).toEqual({ trigger: "describe", scope: "core_commits" });
   });
 
   it("titles a describe run from its row after a reload (BUG-22)", async () => {

@@ -524,7 +524,8 @@ def scan_flags(
     source : str, optional
         The project's source.
     scope : str or None, optional
-        ``"core"`` for a Describe core run (``describe_scope``).
+        ``"core"`` for a Describe core run, ``"core_commits"`` for one
+        without the core bulk pairs (``describe_scope``).
 
     Returns
     -------
@@ -533,10 +534,11 @@ def scan_flags(
         ``--github-only``; ``poll`` / ``sync`` / ``push`` / ``reconcile`` ->
         ``--skip-analyze``; ``initial`` -> ``--skip-analyze --find-core``;
         ``manual`` / ``describe`` -> none (full scan), ``--describe-core``
-        (``scope="core"``), or ``--skip-analyze`` when ``analyze`` is off
-        (plus ``--find-core`` for ``manual`` and for ``describe`` with
-        ``scope="core"``, a budget-downgraded Describe core). A ``platform``
-        project's scan is always ``--codegraph-only``.
+        (``scope="core"``), ``--describe-core --skip-file-slices``
+        (``scope="core_commits"``), or ``--skip-analyze`` when ``analyze``
+        is off (plus ``--find-core`` for ``manual`` and for ``describe``
+        with a core scope, a budget-downgraded Describe core). A
+        ``platform`` project's scan is always ``--codegraph-only``.
     """
     if source == "platform":
         return ["--codegraph-only"]
@@ -545,8 +547,12 @@ def scan_flags(
     if trigger == "hook":
         return ["--skip-analyze", "--no-remote"]
     if trigger in EXPLICIT_TRIGGERS and analyze:
+        if scope == "core_commits":
+            return ["--describe-core", "--skip-file-slices"]
         return ["--describe-core"] if scope == "core" else []
-    if trigger in ("initial", "manual") or (trigger == "describe" and scope == "core"):
+    if trigger in ("initial", "manual") or (
+        trigger == "describe" and scope in CORE_SCOPES
+    ):
         return ["--skip-analyze", "--find-core"]
     return ["--skip-analyze"]
 
@@ -985,7 +991,8 @@ class _Pending:
     estimate: dict | None = None
     """The compact describe estimate the requester saw (full runs only)."""
     describe_scope: str | None = None
-    """``"core"`` for a Describe core run; ``None`` is all when the run analyzes."""
+    """``"core"`` for a Describe core run, ``"core_commits"`` for one without
+    the core bulk pairs; ``None`` is all when the run analyzes."""
     org_id: int | None = None
     """The project's org (per-org import fairness in ``_dispatch``)."""
     importing: bool = False
@@ -1007,29 +1014,34 @@ class _Pending:
         if kind == "sync":
             self.kind = "sync"
         # The effective scope of each side (plan 49 section 5.5): None = does
-        # not analyze, "core" = Describe core, "all" = any other analyzing
-        # request (a Full rescan included).
+        # not analyze, "core_commits" / "core" = Describe core without / with
+        # the core bulk pairs, "all" = any other analyzing request (a Full
+        # rescan included). The wider scope wins (DESCRIBE_SCOPES' order).
         queued = _effective_scope(self.analyze, self.describe_scope)
         incoming = _effective_scope(analyze, scope)
-        widened = queued == "core" and incoming == "all"
+        widened = (
+            queued is not None
+            and incoming is not None
+            and DESCRIBE_SCOPES.index(incoming) > DESCRIBE_SCOPES.index(queued)
+        )
         # One estimate per run, never recomputed (M2f-3 plan section 0.3
         # #10): a request that turns the run into a full one brings its
         # estimate; a quick request merged into a full run keeps the full
         # run's; a full run that had none takes the first one offered. A
-        # core run widened to all takes the all request's estimate, even
-        # when it has none (the core figure no longer describes the run).
+        # core run widened takes the wider request's estimate, even when it
+        # has none (the narrower figure no longer describes the run).
         if widened or (queued is None and incoming is not None):
             self.estimate = estimate
         elif queued == "all" and incoming == "all" and self.estimate is None:
             self.estimate = estimate
         if incoming == "all":
             self.describe_scope = None
-        elif queued is None and incoming == "core":
-            self.describe_scope = "core"
+        elif queued is None or widened:
+            self.describe_scope = incoming
         self.trigger = merge_trigger(self.trigger, trigger)
         # Attribution follows the spend: the first requester who asked for
         # analysis becomes the requester (M2f-2 plan section 0.2 #7), else
-        # the first non-null one; whoever widens a core run to all pays.
+        # the first non-null one; whoever widens a core run pays.
         if (widened or (analyze and not self.analyze)) and requested_by is not None:
             self.requested_by = requested_by
         elif self.requested_by is None:
@@ -1040,11 +1052,18 @@ class _Pending:
             self.not_before = None  # a fuller run is never debounced
 
 
+DESCRIBE_SCOPES: tuple[str, ...] = ("core_commits", "core", "all")
+"""A describe run's effective scopes, narrowest first: each covers the one before."""
+
+CORE_SCOPES: frozenset[str] = frozenset({"core_commits", "core"})
+"""The scopes stored as ``describe_scope`` (``None`` is all)."""
+
+
 def _effective_scope(analyze: bool, scope: str | None) -> str | None:
-    """``None`` when the request does not analyze, else ``"core"`` or ``"all"``."""
+    """``None`` when the request does not analyze, else a :data:`DESCRIBE_SCOPES` entry."""
     if not analyze:
         return None
-    return "core" if scope == "core" else "all"
+    return scope if scope in CORE_SCOPES else "all"
 
 
 def _int_in(value: Any, high: int) -> bool:
@@ -1767,8 +1786,9 @@ class ScanRunner:
             into a run keeps that run's estimate unless it makes the run a
             full one.
         scope : str or None
-            ``"core"`` for a Describe core run (``describe`` only); anything
-            else is all. Dropped when the run does not analyze.
+            ``"core"`` for a Describe core run, ``"core_commits"`` for one
+            without the core bulk pairs (``describe`` only); anything else
+            is all. Dropped when the run does not analyze.
 
         Returns
         -------
@@ -1980,7 +2000,7 @@ class ScanRunner:
                 trigger, analyze = "initial", False
             if not analyze:
                 estimate = None  # only a run that describes carries one
-            if not analyze or trigger != "describe" or scope != "core":
+            if not analyze or trigger != "describe" or scope not in CORE_SCOPES:
                 scope = None  # only a Describe core run carries a scope
             if analyze and not may_spend:
                 # After the default and the forcing: what would really run.
@@ -3617,8 +3637,8 @@ def _queued_summary(pending: _Pending) -> str | None:
         out["scan_requested"] = True
     if pending.estimate is not None:
         out["estimate"] = pending.estimate
-    if pending.describe_scope == "core" and pending.analyze:
-        out["describe_scope"] = "core"
+    if pending.describe_scope in CORE_SCOPES and pending.analyze:
+        out["describe_scope"] = pending.describe_scope
     return json.dumps(out) if out else None
 
 
@@ -3648,10 +3668,10 @@ def _queued_estimate(run: ScanRun) -> dict | None:
 
 
 def _queued_scope(run: ScanRun) -> str | None:
-    """A queued run's persisted ``"core"`` scope, or ``None`` (all, if it analyzes)."""
+    """A queued run's persisted core scope, or ``None`` (all, if it analyzes)."""
     summary = _queued_json(run)
     scope = None if summary is None else summary.get("describe_scope")
-    return "core" if run.analyze and scope == "core" else None
+    return scope if run.analyze and scope in CORE_SCOPES else None
 
 
 def _update_queued(pending: _Pending) -> None:
@@ -3709,8 +3729,8 @@ def _mark_cancelled(
             summary: dict[str, Any] = dict(CANCELLED_BY_USER)
             if estimate is not None:
                 summary["estimate"] = estimate
-            if describe_scope == "core":
-                summary["describe_scope"] = "core"
+            if describe_scope in CORE_SCOPES:
+                summary["describe_scope"] = describe_scope
             run.summary = json.dumps(summary)
             run.cancelled_by = by
             session.add(run)

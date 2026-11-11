@@ -331,7 +331,7 @@ A member's role on a project is the one granted to them on it, or else the organ
 | Explorer: generate a **new** rationale card | - | yes | yes |
 | Chat | - | yes | yes |
 | Quick rescan (git and CodeGraph, no LLM) | - | yes | yes |
-| Full rescan, Describe core and Describe all (LLM; all three also describe the pending file changes of large commits in core files) | - | - | yes |
+| Full rescan, Describe core and Describe all (LLM; all three also describe the pending file changes of large commits in core files, unless Describe core's checkbox for them is unticked) | - | - | yes |
 | Settings, keys and the project's access list | - | - | yes |
 | The project's **usage** and its budget: this month's spend, each person's share, the project budget | - | - | yes |
 

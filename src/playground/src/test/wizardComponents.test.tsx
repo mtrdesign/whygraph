@@ -706,6 +706,46 @@ describe("EstimateBody: Describe core and Describe all", () => {
     expect(coreButton()).toBeEnabled();
   });
 
+  it("offers Describe core without the file slices, at its own price", async () => {
+    const onDescribe = vi.fn();
+    const user = userEvent.setup();
+    const commitsOnly = {
+      commits: 300,
+      file_slices: 0,
+      cost: { usd: 0.4, low: 0.2, high: 0.6, currency: "USD", prices_as_of: "2026-09-01" },
+    };
+    await view({ ...base, core: { ...base.core, commits_only: commitsOnly } }, onDescribe);
+    const box = screen.getByRole("checkbox", { name: /Also describe large commits file by file/ });
+    expect(box).toBeChecked();
+    expect(screen.getByTestId("estimate-core-slices")).toHaveTextContent("(25 file changes, about $0.70 more)");
+    await user.click(coreButton());
+    await user.click(box);
+    expect(screen.getByTestId("estimate-core")).toHaveTextContent("Core: 300 commits in 61 files (about $0.40) · as of");
+    await user.click(coreButton());
+    expect(onDescribe.mock.calls).toEqual([["core"], ["core_commits"]]);
+  });
+
+  it("unticked with only file slices waiting, Describe core says why it is disabled", async () => {
+    const user = userEvent.setup();
+    const commitsOnly = { commits: 0, file_slices: 0 };
+    await view({ ...base, core: { ...base.core, commits: 0, commits_only: commitsOnly } });
+    expect(coreButton()).toBeEnabled();
+    await user.click(screen.getByRole("checkbox", { name: /Also describe large commits file by file/ }));
+    expect(coreButton()).toBeDisabled();
+    expect(coreButton()).toHaveAccessibleDescription(
+      "Core commits are all described; tick the box to describe the large commits' file changes",
+    );
+  });
+
+  it("hides the file-slices choice with no slices waiting or no commits-only figure", async () => {
+    const commitsOnly = { commits: 300, file_slices: 0 };
+    const r = await view({ ...base, core: { ...base.core, file_slices: 0, commits_only: commitsOnly } });
+    expect(screen.queryByTestId("estimate-core-slices")).toBeNull();
+    r.unmount();
+    await view(base);
+    expect(screen.queryByTestId("estimate-core-slices")).toBeNull();
+  });
+
   it("missing_key disables both; cost_hidden shows counts without prices", async () => {
     const r = await view({ ...base, missing_key: "anthropic" });
     expect(coreButton()).toBeDisabled();

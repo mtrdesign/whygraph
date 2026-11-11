@@ -2,11 +2,11 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { portalKey, projectApi, projectKey } from "../api";
+import { portalKey, projectApi, projectKey, type DescribeScope } from "../api";
 import { errorInfo } from "./apiErrors";
 
 /** What a scan request carries; every call site says what it wants (no default). */
-export type ScanBody = { trigger: "manual" | "describe"; analyze?: boolean; scope?: "all" | "core" };
+export type ScanBody = { trigger: "manual" | "describe"; analyze?: boolean; scope?: DescribeScope };
 
 /**
  * "Scan now" for one project (on a production project it fetches first). The portal coalesces requests: while a

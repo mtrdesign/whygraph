@@ -55,7 +55,11 @@ export function runLabel(run: RunLike): string {
     case "manual":
       return run.analyze ? "Full rescan" : "Quick rescan";
     case "describe":
-      return run.summary?.describe_scope === "core" ? "Describe core" : "Describe";
+      return run.summary?.describe_scope === "core_commits"
+        ? "Describe core (commits only)"
+        : run.summary?.describe_scope === "core"
+          ? "Describe core"
+          : "Describe";
     case "hook":
       return "Commit hook";
     case "push":

@@ -1207,6 +1207,27 @@ def test_describe_core_runs_after_a_completed_pass(
     assert stubs["core"].last_kwargs["wall_sec"] is None  # type: ignore[index]
 
 
+def test_skip_file_slices_reaches_the_analyze_crawler(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stubs = _patch_crawlers(monkeypatch)
+    monkeypatch.setattr("whygraph.analyze.LlmDescriptor", _DummyDescriptor)
+    flags = ["--describe-core", "--skip-file-slices", "--no-remote"]
+    assert child._flag_list(child._parse_args(flags)) == flags
+    with pytest.raises(SystemExit) as exc:
+        child.main(["--skip-file-slices"])
+    assert exc.value.code == 2
+    assert "needs --describe-core" in capsys.readouterr().err
+
+    seen = []
+    for argv in (flags, ["--describe-core", "--no-remote"]):
+        assert _run(capsys, *argv)[0] == 0
+        seen.append(stubs["analyze"].last_kwargs["file_slices"])  # type: ignore[index]
+    assert seen == [False, True]
+
+
 @pytest.mark.parametrize(
     ("reason", "index", "runs"),
     [

@@ -319,11 +319,25 @@ def test_trigger_to_flags(trigger: str, analyze: bool | None, flags: list[str]) 
     ("trigger", "analyze", "source", "scope", "flags"),
     [
         ("describe", True, "local", "core", ["--describe-core"]),
+        (
+            "describe",
+            True,
+            "local",
+            "core_commits",
+            ["--describe-core", "--skip-file-slices"],
+        ),
         ("describe", True, "local", None, []),
         ("describe", True, "local", "all", []),
         ("manual", True, "local", None, []),
         # A budget-downgraded Describe core still finds core, never describes.
         ("describe", False, "local", "core", ["--skip-analyze", "--find-core"]),
+        (
+            "describe",
+            False,
+            "local",
+            "core_commits",
+            ["--skip-analyze", "--find-core"],
+        ),
         ("describe", False, "local", None, ["--skip-analyze"]),
         ("manual", False, "local", None, ["--skip-analyze", "--find-core"]),
         ("initial", False, "local", None, ["--skip-analyze", "--find-core"]),
@@ -1889,6 +1903,11 @@ def test_scan_estimate_core(
     )
     assert core["tokens"]["input"] == only_a.input_tokens
     assert body["tokens"]["input"] > core["tokens"]["input"] > pair.input_tokens
+    # Without the file slices: the core commit alone.
+    lean = core["commits_only"]
+    assert lean["commits"] == 1 and lean["file_slices"] == 0
+    assert lean["tokens"]["input"] == only_a.input_tokens - pair.input_tokens
+    assert lean["cost"]["usd"] < core["cost"]["usd"]
 
     with portal_db.get_session() as session:
         project = session.exec(select(Project).where(Project.slug == "demo")).one()
@@ -1901,6 +1920,8 @@ def test_scan_estimate_core(
     assert hidden["cost_hidden"] is True and hidden["tokens"] is None
     assert hidden["core"]["cost"] is None and hidden["core"]["tokens"] is None
     assert hidden["core"]["commits"] == 1
+    lean = hidden["core"]["commits_only"]
+    assert lean["cost"] is None and lean["tokens"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -2796,9 +2817,9 @@ def _scoped(
     """A pending run in the effective scope ``scope`` (a ``"full"`` one is a Full rescan)."""
     if scope == "full":
         return _Pending(1, 1, "scan", "manual", True, 5, True, estimate=EST)
-    if scope == "core":
+    if scope in ("core", "core_commits"):
         return _Pending(
-            1, 1, "scan", "describe", True, 5, True, estimate=EST, describe_scope="core"
+            1, 1, "scan", "describe", True, 5, True, estimate=EST, describe_scope=scope
         )
     if scope == "all":
         return _Pending(1, 1, "scan", "describe", True, 5, True, estimate=EST)
@@ -2819,6 +2840,15 @@ def _scoped(
         ("full", "core", None, "kept", 5),  # a queued Full rescan is all
         ("all", "all", None, "kept", 5),
         ("all", None, None, "kept", 5),
+        # Describe core without the file slices is the narrowest scope.
+        (None, "core_commits", "core_commits", "incoming", 9),
+        ("core_commits", "core_commits", "core_commits", "kept", 5),
+        ("core_commits", None, "core_commits", "kept", 5),
+        ("core_commits", "core", "core", "incoming", 9),  # widened
+        ("core_commits", "all", None, "incoming", 9),
+        ("core_commits", "full", None, "incoming", 9),
+        ("core", "core_commits", "core", "kept", 5),
+        ("all", "core_commits", None, "kept", 5),
     ],
 )
 def test_merge_by_effective_scope(
@@ -2827,9 +2857,9 @@ def test_merge_by_effective_scope(
     pending = _scoped(queued)
     before = pending.estimate
     analyze = incoming is not None
-    scope = "core" if incoming == "core" else None
-    trigger = "describe" if incoming in ("core", "all") else "manual"
-    new = OTHER_EST if incoming == "core" or incoming in ("all", "full") else None
+    scope = incoming if incoming in ("core", "core_commits") else None
+    trigger = "describe" if incoming in ("core", "core_commits", "all") else "manual"
+    new = OTHER_EST if incoming is not None else None
     if queued == "core" and incoming in ("all", "full"):
         new = None  # the widening request may have no estimate at all
     pending.merge(
@@ -2869,6 +2899,10 @@ def test_a_describe_scope_round_trips_through_the_queued_summary() -> None:
     assert runner_mod._queued_scope(row) == "core"
     # Missing key = all; a stray key on a run that does not analyze is ignored.
     row.summary = runner_mod._queued_summary(_scoped("all"))
+    assert runner_mod._queued_scope(row) is None
+    row.summary = runner_mod._queued_summary(_scoped("core_commits"))
+    assert runner_mod._queued_scope(row) == "core_commits"
+    row.summary = json.dumps({"describe_scope": "bogus"})
     assert runner_mod._queued_scope(row) is None
     row.summary = json.dumps({"describe_scope": "core"})
     row.analyze = False
@@ -3758,6 +3792,23 @@ def test_post_scan_scope_is_core_only_for_describe(
         portal, "demo", scan(portal, "demo", trigger="describe", scope="core")
     )
     assert run["summary"]["estimate"]["commits"] == 7
+
+    # Without the file slices: its own figure, scope and flags.
+    def with_lean_core(*args: Any, **kwargs: Any) -> dict:
+        body = with_core(*args, **kwargs)
+        body["core"]["commits_only"] = {**body["core"], "commits": 4}
+        return body
+
+    monkeypatch.setattr(routes_mod, "_scan_estimate", with_lean_core)
+    run = wait_run(
+        portal, "demo", scan(portal, "demo", trigger="describe", scope="core_commits")
+    )
+    assert run["summary"]["describe_scope"] == "core_commits"
+    assert run["summary"]["estimate"]["commits"] == 4
+    assert runner_flags(scanner.calls()[-1]) == [
+        "--describe-core",
+        "--skip-file-slices",
+    ]
     run = wait_run(
         portal, "demo", scan(portal, "demo", trigger="describe", scope="all")
     )

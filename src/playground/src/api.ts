@@ -816,6 +816,20 @@ export interface ScanEstimate {
   core_progress?: { done: number; total: number } | null;
 }
 
+/**
+ * Which commits a Describe run covers: `core_commits` is Describe core without the
+ * per-file slices of large commits (the cheapest), `core` with them, `all` everything.
+ */
+export type DescribeScope = "all" | "core" | "core_commits";
+
+/** `ScanEstimateCore.commits_only`: Describe core without the per-file slices. */
+export interface ScanEstimateFigure {
+  commits: number;
+  file_slices: number;
+  tokens?: ScanEstimate["tokens"];
+  cost?: ScanEstimate["cost"];
+}
+
 /** `ScanEstimate.core`: what Describe core would cost. */
 export interface ScanEstimateCore {
   commits: number;
@@ -830,6 +844,8 @@ export interface ScanEstimateCore {
   model?: { provider: string | null; model: string | null };
   tokens?: ScanEstimate["tokens"];
   cost?: ScanEstimate["cost"];
+  /** The same figure without the per-file slices; optional, older fixtures omit it. */
+  commits_only?: ScanEstimateFigure;
 }
 
 export type ScanRunStatus =
@@ -859,8 +875,8 @@ export interface ScanRunSummary {
   estimate?: ScanRunEstimate;
   /** The coverage snapshot taken at the end of the run. */
   coverage?: { commits: number; described: number; described_pct: number; rationale_cards: number };
-  /** Stored only as `"core"` for a Describe core run; absent means all. */
-  describe_scope?: "core";
+  /** Stored only for a Describe core run (`"core_commits"` without the file slices); absent means all. */
+  describe_scope?: "core" | "core_commits";
   /** A production GitHub project: whether the sync cloned the repository. */
   cloned?: boolean;
   /** Whether a sync went on to scan. */
@@ -2234,7 +2250,7 @@ export function projectApi(slug: string) {
     config: () => get<ProjectConfigView>(`${base}/config`),
     putConfig: (body: ConfigPut) => send<ProjectConfigView>("PUT", `${base}/config`, body),
     init: (body: InitBody) => send<InitResult>("POST", `${base}/init`, body),
-    requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean; scope?: "all" | "core" } = {}) =>
+    requestScan: (body: { trigger?: "manual" | "hook" | "describe"; analyze?: boolean; scope?: DescribeScope } = {}) =>
       send<{ run_id: number }>("POST", `${base}/scans`, body),
     scans: (f: ScanFilters = {}) => {
       const params = new URLSearchParams();

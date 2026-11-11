@@ -534,9 +534,10 @@ def scan_estimate(
         :func:`render_estimate`'s body (= Describe all; tokens and cost
         include pending core bulk pairs) plus ``file_slices``, ``core``
         (the same figure over the core commits, with ``files``,
-        ``selection``, ``as_of`` and ``completed_head``; ``None`` until a
-        core pass has completed) and ``core_progress``; ``missing_key`` is
-        added by the caller.
+        ``selection``, ``as_of``, ``completed_head`` and ``commits_only``,
+        the figure without the pending core bulk pairs (``file_slices``
+        0); ``None`` until a core pass has completed) and
+        ``core_progress``; ``missing_key`` is added by the caller.
     """
     try:
         choice = config.model_for("analyze")
@@ -556,31 +557,33 @@ def scan_estimate(
         if state is not None:
             session.expunge(state)
 
-    def render(values: list[CommitSize]) -> dict:
+    def render(values: list[CommitSize], pairs: list[CommitSize]) -> dict:
         body = render_estimate(
-            estimate_tokens([*values, *pair_sizes], **limits, profile=profile),
+            estimate_tokens([*values, *pairs], **limits, profile=profile),
             provider=provider,
             model=model,
             overrides=overrides,
             custom_endpoint=has_custom_endpoint(config, provider),
         )
         # estimate_tokens counts a pair as a commit; the body's count is commits.
-        body["commits"] -= len(pair_sizes)
-        body["file_slices"] = len(pair_sizes)
+        body["commits"] -= len(pairs)
+        body["file_slices"] = len(pairs)
         return body
 
-    body = render(list(sizes.values()))
+    body = render(list(sizes.values()), pair_sizes)
     body["core"] = None
     body["core_progress"] = None
     if state is not None and state.completed_at is None:
         body["core_progress"] = {"done": state.files_done, "total": state.files_total}
     if state is not None and state.completed_at is not None:
-        core = render([size for sha, size in sizes.items() if sha in core_shas])
+        core_sizes = [size for sha, size in sizes.items() if sha in core_shas]
+        core = render(core_sizes, pair_sizes)
         core.update(
             files=state.files_selected,
             selection=state.selection,
             as_of=state.completed_at,
             completed_head=state.completed_head,
+            commits_only=render(core_sizes, []),
         )
         body["core"] = core
     return body

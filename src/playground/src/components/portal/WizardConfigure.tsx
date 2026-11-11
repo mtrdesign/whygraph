@@ -9,6 +9,7 @@ import {
   projectApi,
   projectKey,
   type ConfigDict,
+  type DescribeScope,
   type ProjectDetails,
   type ScanEstimate,
   type ScanRunRow,
@@ -31,17 +32,23 @@ import { Input } from "../ui/input";
 import { Skeleton } from "../ui/skeleton";
 import { Field } from "./Field";
 import { ProjectPurposeCard, purposeCostText, purposeKey } from "./ProjectPurposeCard";
-import { ScanEstimateCard } from "./ScanEstimateCard";
+import { ScanEstimateCard, coreFigure, coreScope } from "./ScanEstimateCard";
 import { ScanProgress } from "./ScanProgress";
 
 const CARD = "flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card";
 
 /** What a run is, from its row (BUG-22: not from local state, so a reload keeps it). */
-type RunKind = "initial" | "describe" | "describe-core" | "other";
+type RunKind = "initial" | "describe" | "describe-core" | "describe-core-commits" | "other";
+
+/** Whether the run writes descriptions (any Describe scope). */
+function describes(kind: RunKind): boolean {
+  return kind === "describe" || kind === "describe-core" || kind === "describe-core-commits";
+}
 
 function runKind(row: ScanRunRow | undefined): RunKind {
   if (!row) return "initial";
   if (row.trigger === "describe" && row.summary?.describe_scope === "core") return "describe-core";
+  if (row.trigger === "describe" && row.summary?.describe_scope === "core_commits") return "describe-core-commits";
   if (row.trigger === "describe" || row.analyze) return "describe";
   return row.trigger === "initial" || row.trigger === "manual" ? "initial" : "other";
 }
@@ -50,6 +57,7 @@ const TITLES: Record<RunKind, { running: string; ok: string }> = {
   initial: { running: "First scan", ok: "First scan complete" },
   describe: { running: "Writing descriptions", ok: "Descriptions written" },
   "describe-core": { running: "Writing core descriptions", ok: "Core descriptions written" },
+  "describe-core-commits": { running: "Writing core descriptions", ok: "Core descriptions written" },
   other: { running: "Scan", ok: "Scan complete" },
 };
 
@@ -106,9 +114,11 @@ export function RunCardView({
       projectApi(slug).requestScan(
         kind === "describe-core"
           ? { trigger: "describe", scope: "core" }
-          : kind === "describe"
-            ? { trigger: "describe", scope: "all" }
-            : { trigger: "manual", analyze: false },
+          : kind === "describe-core-commits"
+            ? { trigger: "describe", scope: "core_commits" }
+            : kind === "describe"
+              ? { trigger: "describe", scope: "all" }
+              : { trigger: "manual", analyze: false },
       ),
     onSuccess: ({ run_id }) => onRetried?.(run_id),
   });
@@ -132,7 +142,7 @@ export function RunCardView({
     const avail = project ? scanAvailability(project) : null;
     // Retrying a describe run spends tokens, so it needs what a full scan needs.
     const mayRetry =
-      !!onRetried && !!avail && (kind === "describe" || kind === "describe-core" ? avail.full.allowed : avail.quick.allowed || avail.retryImport);
+      !!onRetried && !!avail && (describes(kind) ? avail.full.allowed : avail.quick.allowed || avail.retryImport);
     return (
       <section className={CARD} data-testid="run-card">
         <h2 className="text-sm font-semibold">The scan did not finish</h2>
@@ -514,7 +524,7 @@ export function WizardConfigure({
   // The attached run ended well (with none, the project has a scan): the estimate can load.
   const finished = runId === undefined ? false : runId === null ? !!project.last_scan_at : run.state.finished === "ok";
   // The first scan is done (a describe run only starts after it): the stepper ticks Configure.
-  const scanned = finished || ((run.kind === "describe" || run.kind === "describe-core") && !!project.last_scan_at);
+  const scanned = finished || (describes(run.kind) && !!project.last_scan_at);
   const linked = project.source === "platform";
   const config = useQuery({
     queryKey: projectKey(slug, "config"),
@@ -533,7 +543,7 @@ export function WizardConfigure({
     retry: false,
   });
   const describe = useMutation({
-    mutationFn: (scope: "all" | "core") => projectApi(slug).requestScan({ trigger: "describe", scope }),
+    mutationFn: (scope: DescribeScope) => projectApi(slug).requestScan({ trigger: "describe", scope }),
     onSuccess: ({ run_id }) => onRun(run_id),
   });
 
@@ -541,6 +551,8 @@ export function WizardConfigure({
   const queryClient = useQueryClient();
   const canPurpose = can(project, "project.scan_full") && !linked && project.initialized;
   const [purposeTick, setPurposeTick] = useState(false);
+  // Describe core's *Also describe large commits file by file*, shared by the card and the footer button.
+  const [withSlices, setWithSlices] = useState(true);
   const purposeFired = useRef(false);
   const purposeInfo = useQuery({
     queryKey: purposeKey(slug),
@@ -568,7 +580,7 @@ export function WizardConfigure({
   const avail = scanAvailability(project, { analyzeMissingKey: estimate.data?.missing_key ?? null });
   const waiting = estimate.data?.commits ?? null;
   const describeReason = !finished
-    ? run.kind === "describe" || run.kind === "describe-core"
+    ? describes(run.kind)
       ? "The descriptions are being written"
       : "Wait for the first scan to finish"
     : !estimate.data
@@ -586,11 +598,12 @@ export function WizardConfigure({
   );
   const core = estimate.data?.core ?? null;
   const coreWork = !!core && (core.commits + core.file_slices > 0 || core.stale);
-  const coreReason = describeReason ?? coreEstimateReason(estimate.data);
-  const coreCost = core?.cost && !hidden ? `, ${costPhrase(core.cost.usd)}` : "";
+  const coreReason = describeReason ?? coreEstimateReason(estimate.data, withSlices);
+  const coreChosen = core ? coreFigure(core, withSlices) : null;
+  const coreCost = coreChosen?.cost && !hidden ? `, ${costPhrase(coreChosen.cost.usd)}` : "";
   const coreLabel = core ? `Describe core (${core.commits}${coreCost})` : "Describe core";
   const coreButton = (
-    <Button onClick={() => describe.mutate("core")} disabled={!!coreReason || describe.isPending}>
+    <Button onClick={() => describe.mutate(coreScope(withSlices))} disabled={!!coreReason || describe.isPending}>
       {describe.isPending ? "Starting…" : coreLabel}
     </Button>
   );
@@ -678,12 +691,14 @@ export function WizardConfigure({
             slug={slug}
             actions={false}
             totalCommits={totalCommits}
+            withSlices={withSlices}
+            onWithSlices={setWithSlices}
             onDescribe={(scope) => describe.mutate(scope)}
             onLater={() => void navigate({ to: "/p/$slug", params: { slug } })}
           />
         ) : (
           <p className="text-sm text-muted-foreground" data-testid="estimate-pending">
-            {run.kind === "describe" || run.kind === "describe-core"
+            {describes(run.kind)
               ? "Updating once the descriptions are written…"
               : "Estimating once the first scan has read the history…"}
           </p>

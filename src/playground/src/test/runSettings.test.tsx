@@ -501,6 +501,12 @@ describe("Scan run (screen 7)", () => {
   it.each([
     ["a describe run", undefined, { trigger: "describe", scope: "all" }, /^Describe - /],
     ["a Describe core run", "core", { trigger: "describe", scope: "core" }, /^Describe core - /],
+    [
+      "a commits-only Describe core run",
+      "core_commits",
+      { trigger: "describe", scope: "core_commits" },
+      /^Describe core \(commits only\) - /,
+    ],
   ] as const)("retries %s as the same describe scope", async (_name, scope, body, title) => {
     const summary = scope ? { error: "boom", describe_scope: scope } : { error: "boom" };
     handlers["GET /api/projects/alpha/scans"] = () => ({

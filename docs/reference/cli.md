@@ -123,7 +123,7 @@ scan. At most two projects scan at once.
 | `push`, `reconcile` | Production mode: a push to the default branch (the GitHub App's webhook), and the hourly check of the default branch on GitHub | No |
 | `forge` | Production mode: GitHub activity on pull requests, issues, milestones or tags. It refreshes only those and the tags, never the commits or the code index | No |
 | `manual` | **Scan now** | Yes (unless turned off for that run) |
-| `describe` | **Describe core** or **Describe all** (the project's describe buttons). Core is the commits behind the most-referenced files; all is every commit. A queued core run that a Describe all or a Full rescan joins runs as all | Yes |
+| `describe` | **Describe core** or **Describe all** (the project's describe buttons). Core is the commits behind the most-referenced files; all is every commit. Describe core with **Also describe large commits file by file** unticked leaves those file changes out. Merged requests run as the widest one: a queued core run that a Describe all or a Full rescan joins runs as all | Yes |
 
 The first scan never calls the LLM. Afterwards the project shows how many commits a full scan would
 describe, with which model and a token (and, for known models, cost) estimate, so you choose when

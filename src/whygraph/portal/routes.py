@@ -396,8 +396,9 @@ class ScanBody(_Strict):
 
     trigger: Literal["manual", "hook", "describe"] | None = None
     analyze: bool | None = None
-    scope: Literal["all", "core"] | None = None
-    """Which commits a ``describe`` run covers; refused on any other trigger."""
+    scope: Literal["all", "core", "core_commits"] | None = None
+    """Which commits a ``describe`` run covers; refused on any other trigger.
+    ``core_commits`` is Describe core without the core bulk pairs."""
 
     @model_validator(mode="after")
     def _scope_needs_describe(self) -> "ScanBody":
@@ -3295,8 +3296,9 @@ def _describe_estimate(
 ) -> dict | None:
     """The compact describe estimate a full run stores (blocking; ``None`` on failure).
 
-    For ``scope="core"`` it is the core figure, and ``None`` while no core
-    pass has completed - never the all figure.
+    For ``scope="core"`` it is the core figure (``"core_commits"``: its
+    ``commits_only`` figure), and ``None`` while no core pass has
+    completed - never the all figure.
     """
     try:
         with use_project(project.ctx):
@@ -3312,10 +3314,12 @@ def _describe_estimate(
             exc_info=True,
         )
         return None
-    if scope == "core":
+    if scope in ("core", "core_commits"):
         body = body.get("core")
         if body is None:
             return None
+        if scope == "core_commits":
+            body = body["commits_only"]
     return compact_estimate(body, _missing_key(project.ctx.config, ("analyze",)))
 
 
@@ -3781,7 +3785,10 @@ def get_scan_estimate(
 
     ``core`` (the core-commit figure) is ``null`` until a core pass has
     completed; ``core.stale`` is true when ``HEAD`` moved since that pass,
-    and ``core_progress`` is ``{done, total}`` while a first pass runs.
+    ``core.commits_only`` is the figure without the core bulk pairs
+    (Describe core with *Also describe large commits file by file*
+    unticked), and ``core_progress`` is ``{done, total}`` while a first
+    pass runs.
     """
     _refuse_linked(project, "estimating this project's describe cost")
     overrides = portal_state(request).prices.for_org(project.org_id)
@@ -3796,6 +3803,7 @@ def get_scan_estimate(
         body.update(cost=None, tokens=None, cost_hidden=True)
         if core is not None:
             core.update(cost=None, tokens=None)
+            core["commits_only"].update(cost=None, tokens=None)
     return body
 
 

@@ -516,6 +516,7 @@ def _crawl(
     descriptor: _StubDescriptor,
     *,
     core_only: bool = False,
+    file_slices: bool = True,
     large: int = 3,
 ) -> AnalyzeCrawler:
     with Progress() as progress:
@@ -526,6 +527,7 @@ def _crawl(
             max_workers=2,
             large_commit_file_count=large,
             core_only=core_only,
+            file_slices=file_slices,
         )
         crawler.start()
         crawler.join()
@@ -653,6 +655,21 @@ def test_pairs_are_described_when_no_commit_is_pending(
     assert len(descriptor.seen) == 1
     assert crawler.summary != "up to date"
     assert _slice(shas["bulk"], "core.py") == "DESCRIPTION"
+
+
+def test_without_file_slices_core_describes_only_its_commits(
+    isolated_db: Path, repo_path: Path
+) -> None:
+    shas = _pair_fixture(repo_path)
+    _record(repo_path, core={shas["core"]}, pairs={(shas["bulk"], "core.py")})
+    descriptor = _StubDescriptor()
+
+    _crawl(repo_path, descriptor, core_only=True, file_slices=False)
+
+    described = {sha for sha, (text, _) in _descriptions().items() if text}
+    assert described == {shas["core"]}
+    assert len(descriptor.seen) == 1
+    assert _slice(shas["bulk"], "core.py") is None
 
 
 def test_a_pair_the_portal_described_meanwhile_costs_no_call(

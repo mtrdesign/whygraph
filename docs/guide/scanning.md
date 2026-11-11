@@ -73,7 +73,10 @@ actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2
 5. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
    configured provider, and the pending per-file changes of large commits in core files. The slow,
    token-heavy long pole, so it runs strictly last and alone. **Describe core** describes only core;
-   **Describe all** and a Full rescan describe everything.
+   **Describe all** and a Full rescan describe everything. Untick **Also describe large commits file
+   by file** under Describe core for the cheapest run: core's commits only, with the per-file changes
+   of large commits left until a question reaches them. On a repository with many large feature
+   merges those file changes can be most of the cost.
 
 **CodeGraph is not a phase.** The index refresh - `codegraph init -i` on the first run, `codegraph
 sync -q` after - is a background task started before phase 1 and joined after the last one, so it

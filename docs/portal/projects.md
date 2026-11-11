@@ -91,7 +91,10 @@ The last step is one screen you can read while the first scan runs:
   files (about $X)** and **All: M commits (about $Y)**, each followed by "+ K file changes" when
   large commits have pending per-file changes, with the model, the tokens and an estimated cost.
   Core is "as of" the date of its last complete pass, and says "may have new commits" when HEAD has
-  moved since (Describe core stays available, and refreshes core first). The cost is priced for every provider
+  moved since (Describe core stays available, and refreshes core first). When core has pending file
+  changes, a checkbox under the core line, **Also describe large commits file by file** (ticked, with
+  what they add to the cost), decides whether Describe core writes them now; unticked is the
+  cheapest run, and they are described when a question reaches them. The cost is priced for every provider
   that has a price (Anthropic and OpenAI out of the box, any other model once your organization adds
   a price), at the bundled prices or your organization's own; a model with no price shows tokens
   only. The cost is a point estimate with a range of plus or minus 50 %; a merge commit counts with
@@ -128,7 +131,7 @@ demand. Local and production projects only; a [linked project](platform-projects
 
 **Open project** leaves the wizard at any time - the scan carries on. **Describe core (N, about $X)**
 and **Describe all (M, about $Y)** start the run that writes the descriptions (core or every
-commit), once the first scan has finished and you may spend
+commit; Describe core's price follows the file-changes checkbox), once the first scan has finished and you may spend
 on this project; otherwise it says why it is disabled. Spend is tracked on [Usage & cost](usage.md);
 descriptions you skip backfill on demand. See [Scanning](../guide/scanning.md).
 

@@ -66,9 +66,11 @@ export function scanAvailability(
 /**
  * Why Describe core cannot run on this estimate, or `undefined` when it can. A stale core stays
  * enabled even with nothing waiting: its run refreshes core first and finds the new commits (I24).
+ * Without the file slices (`withSlices` false), pending slices alone are nothing to describe.
  */
 export function coreEstimateReason(
   estimate: Pick<ScanEstimate, "core" | "core_progress"> | null | undefined,
+  withSlices = true,
 ): string | undefined {
   if (!estimate) return undefined;
   const { core, core_progress: progress } = estimate;
@@ -77,6 +79,10 @@ export function coreEstimateReason(
       ? `Core commits are still being found (${progress.done} of ${progress.total}); run a Quick rescan to continue`
       : "Core commits are found by a scan; run a Quick rescan";
   }
-  if (core.commits === 0 && core.file_slices === 0 && !core.stale) return "Core commits are all described";
+  if (core.commits === 0 && (!withSlices || core.file_slices === 0) && !core.stale) {
+    return withSlices || core.file_slices === 0
+      ? "Core commits are all described"
+      : "Core commits are all described; tick the box to describe the large commits' file changes";
+  }
   return undefined;
 }

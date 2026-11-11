@@ -5,7 +5,7 @@ The portal runs every scan as this child process, with the repository as
 it: it refuses to run without that variable (exit ``2``), and a full scan
 also needs the config's ``whygraph_db``.
 
-Flags (the runner passes at most the first six):
+Flags (the runner passes at most the first seven):
 
 ``--skip-analyze``
     Skip the LLM-descriptions phase; the descriptor probe is bypassed too.
@@ -16,6 +16,9 @@ Flags (the runner passes at most the first six):
 ``--describe-core``
     A Describe core run: always run the "Core commits" phase, with no wall.
     Not with ``--skip-analyze``, ``--codegraph-only`` or ``--github-only``.
+``--skip-file-slices``
+    With ``--describe-core`` only: leave the per-file slices of core bulk
+    commits to on-demand describing (Describe core without them).
 ``--no-remote``
     Skip the GitHub crawl and PR-origin recovery (offline, token-free).
 ``--codegraph-only``
@@ -131,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             refresh_codegraph=args.refresh_codegraph,
             find_core=args.find_core,
             describe_core=args.describe_core,
+            file_slices=not args.skip_file_slices,
         )
     _log.info(
         "scan finished: status=%s elapsed=%.1fs",
@@ -149,6 +153,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--skip-analyze", dest="skip_analyze", action="store_true")
     parser.add_argument("--find-core", dest="find_core", action="store_true")
     parser.add_argument("--describe-core", dest="describe_core", action="store_true")
+    parser.add_argument(
+        "--skip-file-slices", dest="skip_file_slices", action="store_true"
+    )
     parser.add_argument("--no-remote", dest="remote", action="store_false")
     only = parser.add_mutually_exclusive_group()
     only.add_argument("--codegraph-only", dest="codegraph_only", action="store_true")
@@ -168,6 +175,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("argument --describe-core: not allowed with --skip-analyze")
     if args.describe_core and only:
         parser.error(f"argument --describe-core: not allowed with {only}")
+    if args.skip_file_slices and not args.describe_core:
+        parser.error("argument --skip-file-slices: needs --describe-core")
     if args.find_core and only:
         parser.error(f"argument --find-core: not allowed with {only}")
     return args
@@ -182,6 +191,8 @@ def _flag_list(args: argparse.Namespace) -> list[str]:
         flags.append("--find-core")
     if args.describe_core:
         flags.append("--describe-core")
+    if args.skip_file_slices:
+        flags.append("--skip-file-slices")
     if not args.remote:
         flags.append("--no-remote")
     if args.codegraph_only:
@@ -221,6 +232,7 @@ def _scan(
     refresh_codegraph: bool,
     find_core: bool = False,
     describe_core: bool = False,
+    file_slices: bool = True,
 ) -> int:
     """Run the full, phased scan and emit its events; return the exit status."""
     from whygraph.analyze import LlmDescriptor
@@ -385,6 +397,7 @@ def _scan(
                 max_workers=config.analyze.max_workers,
                 large_commit_file_count=config.analyze.large_commit_file_count,
                 core_only=describe_core,
+                file_slices=file_slices,
             )
             ran.append(analyzer)
             analyzer.start()

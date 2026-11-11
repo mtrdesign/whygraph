@@ -64,6 +64,10 @@ class AnalyzeCrawler(Crawler):
         Describe only the commits of ``core_commit`` (Describe core). The
         core bulk pairs (``core_bulk_pair``) are described by every run
         whatever this is, so "all" always covers "core".
+    file_slices : bool
+        Whether to describe the core bulk pairs (default). ``False`` is a
+        Describe core run without them (``--skip-file-slices``): the
+        cheapest, leaving them to the on-demand path.
 
     Notes
     -----
@@ -88,6 +92,7 @@ class AnalyzeCrawler(Crawler):
         max_workers: int,
         large_commit_file_count: int,
         core_only: bool = False,
+        file_slices: bool = True,
     ) -> None:
         super().__init__("analyze", progress, total=None)
         self._repository = repository
@@ -95,6 +100,7 @@ class AnalyzeCrawler(Crawler):
         self._max_workers = max_workers
         self._large_commit_file_count = large_commit_file_count
         self._core_only = core_only
+        self._file_slices = file_slices
 
     def work(self) -> None:
         # Warm the `commits` cached_property single-threaded before the
@@ -108,7 +114,11 @@ class AnalyzeCrawler(Crawler):
             pending: set[str] = set(session.exec(query).all())
             pairs: list[tuple[CommitRow, str]] = []
             state = session.get(CoreState, 1)
-            if state is not None and state.completed_at is not None:
+            if (
+                self._file_slices
+                and state is not None
+                and state.completed_at is not None
+            ):
                 pair_rows = session.exec(
                     select(CoreBulkPair.sha, CoreBulkPair.path)
                     .join(

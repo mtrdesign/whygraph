@@ -12,10 +12,47 @@ Neither one is a new MCP tool: they are skills and subagents that call the tools
 
 ## The pipeline
 
-```text
-task -> triage -> research (one researcher per source) -> synthesis -> questions
-     -> implement (one step at a time, review gate after each) -> acceptance
+Planning a change, with `/whygraph-plan`:
+
+```mermaid
+flowchart LR
+    task(["/whygraph-plan task"]) --> consent["Consent for sources<br/>that reach an outside service"]
+    consent --> planner["Planner: triage<br/>with CodeGraph"]
+    planner -- "small or mechanical" --> single["Single-pass plan"]
+    planner -- "otherwise" --> res["One researcher per source<br/>(in parallel)"]
+    res --> synth["Synthesizer writes the plan<br/>and runs the plan check"]
+    single --> q{"Plan-shaping<br/>questions?"}
+    synth --> q
+    q -- "yes" --> ask["You answer<br/>(at most 3)"] --> revise["Planner revises the plan"] --> plan[("Plan file")]
+    q -- "no" --> plan
 ```
+
+Implementing it, with `/whygraph-implement` in Claude Code:
+
+```mermaid
+flowchart TD
+    start(["/whygraph-implement plan.md"]) --> pre{"Open Blockers or a<br/>plan-shaping question?"}
+    pre -- "yes" --> refuse(["Refuse"])
+    pre -- "no" --> pick["Pick the first step<br/>not marked done"]
+    pick --> impl["Implementor at the step's model:<br/>baseline, start tree, Test first,<br/>change, Verify, end tree, log"]
+    impl --> ok{"Step complete?"}
+    ok -- "no" --> halt(["Halt: fix it, then run again<br/>with --from-step N"])
+    ok -- "yes" --> review["Review gate: the step's diff<br/>against the cached cards"]
+    review --> risk{"Constraint<br/>at risk?"}
+    risk -- "yes" --> halt
+    risk -- "no" --> spec["Spec evaluation"]
+    spec -- "pass" --> more{"More steps?"}
+    spec -- "fix" --> left{"Findings re-run left?<br/>(default 1)"}
+    left -- "yes" --> rerun["Implementor applies<br/>the findings"] --> review
+    left -- "no" --> halt
+    spec -- "escalate" --> halt
+    more -- "yes" --> impl
+    more -- "no" --> acc["Acceptance run"]
+    acc --> qual["Quality and UI evaluations<br/>(advisory)"] --> done(["Done"])
+```
+
+Cursor runs the same loop without the review gate. VS Code and Codex run one implementor for the
+whole plan, with no review gate and no evaluator (see [Differences between editors](#differences-between-editors)).
 
 1. **Triage.** The planner checks the size of the change with CodeGraph. It splits the task into
    child plans only when all three signals agree: the impact set is large (more than 15 symbols in at

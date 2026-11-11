@@ -14,7 +14,7 @@ Arguments: `$ARGUMENTS`
 
 Strip and remember this flag if present (anywhere in `$ARGUMENTS`):
 
-- `--generate` -> allow WhyGraph to generate a missing rationale card (one LLM call per card, charged to the project's budget). Default `false`: cached cards only, no LLM spend.
+- `--generate` -> allow WhyGraph to generate a missing rationale card (LLM calls per card, charged to the project's budget). Default `false`: cached cards only, no LLM spend.
 
 What remains is the optional **base**: at most one token, a branch, tag or commit to review against. It must match `^[A-Za-z0-9][A-Za-z0-9._/^~-]*$` (so it never starts with `-`). If more than one token remains, or the token does not match, respond with:
 `Usage: /whygraph-review [<base>] [--generate]` and stop.

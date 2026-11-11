@@ -26,7 +26,11 @@ from fastapi import APIRouter, Query
 from whygraph.core import get_config
 from whygraph.mcp.area_history import area_history_payload
 from whygraph.mcp.evidence import collect_evidence, evidence_payload
-from whygraph.mcp.rationale import _format_response, whygraph_rationale_brief
+from whygraph.mcp.rationale import (
+    _format_response,
+    _partial_fields,
+    whygraph_rationale_brief,
+)
 from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import _commit_resource, _issue_resource, _pr_resource
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
@@ -193,10 +197,15 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     cached = lookup_cached(target, evidence, provider, pinned_model)
     if cached is None:
         return {"status": "not_generated", "target": target_dict(target)}
-    rationale, cached_at = cached
     return {
         "status": "cached",
-        **_format_response(target, rationale, evidence, cached_at),
+        **_format_response(
+            target,
+            cached.rationale,
+            evidence,
+            cached.cached_at,
+            **_partial_fields(cached),
+        ),
     }
 
 

@@ -68,7 +68,11 @@ from whygraph.mcp.notes import (
     proposal_result,
 )
 from whygraph.mcp.path_history import path_commit_counts
-from whygraph.mcp.rationale import _format_response, whygraph_rationale_brief
+from whygraph.mcp.rationale import (
+    _format_response,
+    _partial_fields,
+    whygraph_rationale_brief,
+)
 from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import (
     _area_owners_resource,
@@ -200,7 +204,8 @@ _SPECS: tuple[ToolSpec, ...] = (
             "Get the structured rationale card for a symbol — purpose, why, "
             "constraints, tradeoffs, risks — synthesized from its commit / PR "
             "/ issue history. Returns a cached card instantly when one "
-            "exists. If none exists, this GENERATES one, which calls an LLM "
+            "exists; a `partial` card is completed in the background. "
+            "If none exists, this GENERATES one, which calls an LLM "
             "and can take tens of seconds; generation is BUDGETED to a small "
             "number of calls per user turn, after which it returns "
             "status='not_generated'. So prefer it for the one or two symbols "
@@ -1482,11 +1487,20 @@ class ToolRegistry:
         provider, pinned_model = get_config().cache_identity("rationale")
         cached = lookup_cached(target, evidence, provider, pinned_model)
         if cached is not None:
-            rationale, cached_at = cached
+            fields = _partial_fields(cached)
+            if fields["partial"] and self.generations_used < self._generation_budget:
+                # The brief serves the cached card at once and may start a
+                # background completion; only a started one spends budget.
+                card = whygraph_rationale_brief(qualified_name=qualified_name)
+                if card.get("completing"):
+                    self.generations_used += 1
+                return {"status": "cached", "generated": False, **card, "notes": notes}
             return {
                 "status": "cached",
                 "generated": False,
-                **_format_response(target, rationale, evidence, cached_at),
+                **_format_response(
+                    target, cached.rationale, evidence, cached.cached_at, **fields
+                ),
                 "notes": notes,
             }
 

@@ -29,8 +29,7 @@ Public API
   underlying ``LlmError`` / ``GitError`` so consumers handle one type.
 * :class:`RationaleError` — subclass of :class:`AnalyzeError`, raised
   when the model's rationale output cannot be parsed or validated.
-* :func:`backfill_commit_description`, :func:`backfill_all` — lazy,
-  per-commit complement to
+* :func:`backfill_commit_description` — lazy, per-commit complement to
   :class:`~whygraph.scan.analyze_crawler.AnalyzeCrawler` for the MCP
   request path. Fill in a ``NULL`` ``commit.llm_description`` on
   demand and persist it.
@@ -61,7 +60,6 @@ scope for this module — both live in the orchestrator that consumes
 """
 
 from .backfill import (
-    backfill_all,
     backfill_commit_description,
     backfill_file_description,
     bulk_commit_stub,
@@ -92,7 +90,6 @@ __all__ = [
     "Rationale",
     "RationaleError",
     "RationaleGenerator",
-    "backfill_all",
     "backfill_commit_description",
     "backfill_file_description",
     "bulk_commit_stub",

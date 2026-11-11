@@ -31,7 +31,6 @@ from typing import Any
 from sqlmodel import Session, col, select
 
 from whygraph.core.import_checks import ImportFormatError, clean_text
-from whygraph.core.usage import usage_blocked
 from whygraph.db import get_session
 from whygraph.db.models.commit import Commit as CommitRow
 from whygraph.db.models.commit_file_change import CommitFileChange
@@ -230,49 +229,6 @@ def backfill_file_description(
             row.llm_description = description.text
             row.llm_description_model = model_label
     return description.text
-
-
-def backfill_all(
-    commits: Iterable[CommitRow],
-    *,
-    repository: Repository,
-    descriptor: LlmDescriptor,
-) -> int:
-    """Apply :func:`backfill_commit_description` to each commit.
-
-    Per-commit failures are swallowed and logged at ``WARNING``: one bad
-    commit must not poison the whole MCP response. The aggregate-raise
-    behaviour of :class:`~whygraph.scan.analyze_crawler.AnalyzeCrawler`
-    is intentionally not mirrored — the crawler can afford to surface
-    failures because it owns the whole scan; an MCP handler cannot.
-
-    Before each commit the bound usage sink is asked whether an exhausted
-    hard-stopped budget now covers the caller
-    (:func:`~whygraph.core.usage.usage_blocked`); the loop stops when one
-    does (M2f-2 plan section 4.7), leaving the rest undescribed.
-
-    Returns
-    -------
-    int
-        The number of commits that were successfully backfilled.
-    """
-    succeeded = 0
-    for commit in commits:
-        if usage_blocked() is not None:
-            _log.info("lazy LLM description backfill stopped: the budget is spent")
-            break
-        try:
-            if backfill_commit_description(
-                commit, repository=repository, descriptor=descriptor
-            ):
-                succeeded += 1
-        except Exception as exc:  # noqa: BLE001 — one bad commit must not poison the batch
-            _log.warning(
-                "lazy LLM description backfill failed for %s: %s",
-                commit.sha[:12],
-                exc,
-            )
-    return succeeded
 
 
 # ---------------------------------------------------------------------------

@@ -8,9 +8,13 @@ synthesize a structured rationale card.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
+import threading
+import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypedDict
 
 import anyio.from_thread
@@ -21,6 +25,8 @@ from whygraph.core import get_config
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
 from whygraph.core.usage import BUDGET_EXCEEDED, budget_message, usage_blocked
+from whygraph.db import get_session
+from whygraph.db.models import Commit
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, SymbolContext
 from whygraph.services.git import Repository
 from whygraph.services.llm import LlmError
@@ -36,6 +42,9 @@ from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 from .evidence import (
+    _db_key,
+    _spawn,
+    _stop_event,
     backfill_evidence_descriptions,
     blame_target,
     collect_evidence,
@@ -43,16 +52,31 @@ from .evidence import (
     split_by_push_status,
 )
 from .rationale_cache import (
+    CachedCard,
     lookup_cached,
     lookup_exact,
     lookup_overlapping,
     store_cached,
+    update_deferred,
 )
 
 _log = logging.getLogger(__name__)
 
 PROGRESS_STEPS = 3
 """The rationale tool's progress steps: evidence, describing, generating."""
+
+COMPLETIONS_MAX = 2
+"""Background completions of partial cards running at once, process-wide."""
+
+CARD_RETRY_COOLDOWN_SEC = 600
+"""Seconds before a partial card's completion is attempted again (plan 49 I17)."""
+
+_CompletionKey = tuple[Path, str, int, int, str, str | None]
+"""``(db_key, path, line_start, line_end, provider, model)``: one card of one project."""
+
+_completions_lock = threading.Lock()
+_completions_running: set[_CompletionKey] = set()
+_completion_attempts: dict[_CompletionKey, float] = {}
 
 
 def _symbol_context(target: Target) -> SymbolContext | None:
@@ -91,6 +115,12 @@ class RationaleCard(_RationaleCardRequired, total=False):
     platform's card (no ``evidence`` / ``generated``) plus ``platform``.
     Everything but ``target`` is therefore optional.
 
+    ``partial`` says the card was built while ``describing`` evidence
+    commits still had no description; ``completing`` that a background
+    completion is running for it (plan 49 section 4.3). Every card carries
+    all three, a cached one too; a linked card has them only when its
+    platform sends them.
+
     ``status`` is therefore absent on a card, ``"not_cached"`` on a
     ``cached_only`` miss, or ``"no_evidence"`` on the MCP tool's answer for
     code with no commits but with confirmed notes. ``notes`` (confirmed
@@ -111,6 +141,9 @@ class RationaleCard(_RationaleCardRequired, total=False):
     evidence_count: dict[str, int]
     evidence: list[dict[str, Any]]
     generated: bool
+    partial: bool
+    describing: int
+    completing: bool
     match: str
     stale: bool
     card_range: dict[str, int]
@@ -160,12 +193,16 @@ def _format_response(
     cached_at: str,
     *,
     generated: bool | None = None,
+    partial: bool = False,
+    describing: int = 0,
+    completing: bool = False,
 ) -> dict:
     """Shape the MCP response payload around a (fresh or cached) rationale.
 
     ``generated`` ``None`` (Explorer, Chat's cached read, the ``/api/v1``
     wire shape) leaves out ``evidence`` and ``generated``; the MCP tool
-    passes a bool and gets both.
+    passes a bool and gets both. ``partial``, ``describing`` and
+    ``completing`` are always emitted (plan 49 section 4.3).
     """
     card = {
         "target": target_dict(target),
@@ -184,6 +221,9 @@ def _format_response(
             "prs": len({pr.number for item in evidence for pr in item.pull_requests}),
             "issues": len({i.number for item in evidence for i in item.issues}),
         },
+        "partial": partial,
+        "describing": describing,
+        "completing": completing,
     }
     if generated is not None:
         card["evidence"] = card_evidence_refs(evidence)
@@ -310,6 +350,237 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
     return {**card, "platform": platform_block(remote)}
 
 
+def _partial_fields(row: CachedCard) -> dict[str, Any]:
+    """``partial`` and ``describing`` of a cache row (``deferred_shas`` empty is final)."""
+    deferred = row.deferred_shas.split()
+    return {"partial": bool(deferred), "describing": len(deferred)}
+
+
+def _may_spend() -> bool:
+    """Whether the bound caller may cause LLM spend now (role and hard-stopped budget)."""
+    ctx = current_project()
+    if ctx is not None and not ctx.llm_allowed:
+        return False
+    return usage_blocked() is None
+
+
+def _reset_completions() -> None:
+    """Forget every running completion and cooldown (the test seam, beside ``drain_describes``)."""
+    with _completions_lock:
+        _completions_running.clear()
+        _completion_attempts.clear()
+
+
+def _start_completion(
+    target: Target,
+    evidence: list[CommitEvidence],
+    provider: str,
+    model: str | None,
+    allow_description: Callable[[], bool] | None,
+    before_generate: Callable[[], None] | None,
+) -> bool:
+    """Start completing a partial card in the background, unless one may not start.
+
+    The running set and the last-attempt map are keyed by
+    ``(db_key, path, line_start, line_end, provider, model)``, so two
+    projects with the same path never share a completion or a cooldown.
+    State is in memory: a restart drops a running completion and the card
+    stays partial until a later hit.
+
+    Parameters
+    ----------
+    target : Target
+        The card's target (its path and range key the cache).
+    evidence : list[CommitEvidence]
+        The request's evidence; its SHAs fingerprint the row.
+    provider : str
+        The cache's provider tag.
+    model : str or None
+        The cache's pinned model.
+    allow_description : callable or None
+        The description budget, passed to the backfill.
+    before_generate : callable or None
+        The card budget, called before the card is generated again.
+
+    Returns
+    -------
+    bool
+        ``True`` when a completion is now running for this card (started
+        here, or already running); ``False`` when :data:`COMPLETIONS_MAX`
+        are running or the last attempt was under
+        :data:`CARD_RETRY_COOLDOWN_SEC` ago.
+    """
+    db_key = _db_key()
+    key: _CompletionKey = (
+        db_key,
+        target.path,
+        target.line_start,
+        target.line_end,
+        provider,
+        model,
+    )
+    now = time.monotonic()
+    with _completions_lock:
+        if key in _completions_running:
+            return True
+        if len(_completions_running) >= COMPLETIONS_MAX:
+            return False
+        last = _completion_attempts.get(key)
+        if last is not None and now - last < CARD_RETRY_COOLDOWN_SEC:
+            return False
+        for old, at in list(_completion_attempts.items()):
+            if now - at >= CARD_RETRY_COOLDOWN_SEC:
+                del _completion_attempts[old]
+        _completion_attempts[key] = now
+        _completions_running.add(key)
+    # Taken now: once the project is removed its event is replaced, and the
+    # completion must see the one that was set.
+    stop = _stop_event(db_key)
+
+    def run() -> None:
+        try:
+            _complete_partial(
+                target,
+                evidence,
+                provider,
+                model,
+                allow_description=allow_description,
+                before_generate=before_generate,
+                stop=stop,
+            )
+        finally:
+            with _completions_lock:
+                _completions_running.discard(key)
+
+    try:
+        _spawn(run)
+    except BaseException:
+        with _completions_lock:
+            _completions_running.discard(key)
+        raise
+    return True
+
+
+def _fresh_evidence(evidence: list[CommitEvidence]) -> list[CommitEvidence]:
+    """``evidence`` over fresh, detached ``Commit`` rows (same PRs, issues and source).
+
+    The completion thread then shares no commit row with the response
+    being serialized, and sees descriptions written since the request.
+    """
+    with get_session() as session:
+        rows = {
+            sha: session.get(Commit, sha) for sha in {i.commit.sha for i in evidence}
+        }
+        session.expunge_all()
+    return [
+        dataclasses.replace(item, commit=rows[item.commit.sha])
+        for item in evidence
+        if rows.get(item.commit.sha) is not None
+    ]
+
+
+def _same_row(row: CachedCard | None, seen: CachedCard) -> bool:
+    """Whether ``row`` is still the row ``seen`` was read from."""
+    return row is not None and (
+        row.cached_at,
+        row.evidence_fingerprint,
+        row.deferred_shas,
+    ) == (seen.cached_at, seen.evidence_fingerprint, seen.deferred_shas)
+
+
+def _complete_partial(
+    target: Target,
+    evidence: list[CommitEvidence],
+    provider: str,
+    model: str | None,
+    *,
+    allow_description: Callable[[], bool] | None,
+    before_generate: Callable[[], None] | None,
+    stop: threading.Event,
+) -> None:
+    """Describe a partial card's deferred commits, then regenerate it once (plan 49 section 4.3).
+
+    Runs on its own daemon thread (:func:`_start_completion`). One
+    describe worker and no wall: background work holds at most
+    :data:`COMPLETIONS_MAX` of the process's describe slots. The card is
+    generated again, and ``before_generate`` charged, only when a
+    deferred commit gained a description and the row has not moved since
+    it was read; a commit still waiting leaves the row partial with the
+    commits that wait. Nothing is read or written once ``stop`` is set
+    (the project was removed or the portal is stopping). Any failure is
+    logged and leaves the row partial.
+
+    Parameters
+    ----------
+    target, evidence, provider, model
+        As for :func:`_start_completion`.
+    allow_description : callable or None
+        The description budget.
+    before_generate : callable or None
+        The card budget; a refusal leaves the row partial.
+    stop : threading.Event
+        The project's stop event, taken when the completion started.
+    """
+    try:
+        if stop.is_set():
+            return
+        seen = lookup_exact(target, provider, model)
+        if seen is None or not seen.deferred_shas or seen.is_stale(evidence):
+            return
+        deferred = frozenset(seen.deferred_shas.split())
+        fresh = _fresh_evidence(evidence)
+        if stop.is_set():
+            return
+        outcome = backfill_evidence_descriptions(
+            fresh,
+            target_path=target.path,
+            allow=allow_description,
+            max_commits=len(fresh),
+            wall_sec=None,
+            workers=1,
+        )
+        if stop.is_set():
+            return
+        if outcome.waiting:
+            update_deferred(
+                target,
+                provider,
+                model,
+                seen=seen,
+                deferred_shas=" ".join(sorted(outcome.waiting)),
+            )
+            return
+        if not deferred - outcome.terminal:
+            # Nothing gained: every deferred commit can never be described.
+            update_deferred(target, provider, model, seen=seen, deferred_shas="")
+            return
+        if not _same_row(lookup_exact(target, provider, model), seen):
+            return
+        if usage_blocked() is not None:
+            return
+        if before_generate is not None:
+            before_generate()
+        rationale = RationaleGenerator.from_config(get_config()).generate(
+            fresh,
+            symbol_context=_symbol_context(target),
+            subject=target.qualified_name or target.path,
+        )
+        if stop.is_set():
+            return
+        # The fingerprint is over SHAs only: the request's evidence is the row's.
+        store_cached(
+            target, evidence, rationale, provider, model, deferred_shas="", only_if=seen
+        )
+    except Exception as exc:  # noqa: BLE001 - the row stays partial
+        _log.warning(
+            "completing the partial rationale card of %s:%d-%d failed: %s",
+            target.path,
+            target.line_start,
+            target.line_end,
+            exc,
+        )
+
+
 def _cached_only_card(
     target: Target,
     evidence: list[CommitEvidence],
@@ -331,13 +602,19 @@ def _cached_only_card(
     -------
     dict or None
         The card plus ``match``, ``stale`` and (overlap) ``card_range``;
-        ``None`` when no row matches.
+        ``None`` when no row matches. ``partial`` / ``describing`` come
+        from the row; nothing is started to complete it.
     """
     generated = False if mark_generated else None
     row = lookup_exact(target, provider, pinned_model)
     if row is not None:
         card = _format_response(
-            target, row.rationale, evidence, row.cached_at, generated=generated
+            target,
+            row.rationale,
+            evidence,
+            row.cached_at,
+            generated=generated,
+            **_partial_fields(row),
         )
         return {**card, "match": "exact", "stale": row.is_stale(evidence)}
     row = lookup_overlapping(target, provider, pinned_model)
@@ -356,7 +633,12 @@ def _cached_only_card(
         # its lines certainly changed since.
         card_evidence = []
     card = _format_response(
-        target, row.rationale, card_evidence, row.cached_at, generated=generated
+        target,
+        row.rationale,
+        card_evidence,
+        row.cached_at,
+        generated=generated,
+        **_partial_fields(row),
     )
     return {
         **card,
@@ -392,7 +674,8 @@ def rationale_card(
         Its evidence (the SHAs fingerprint the cache row).
     before_generate : callable, optional
         Called on a cache miss before anything is spent (the platform's
-        org card budget raises from it).
+        org card budget raises from it), and by a background completion
+        before it generates the card again.
     allow_description : callable, optional
         The description backfill's budget (see
         :func:`~whygraph.mcp.evidence.backfill_evidence_descriptions`).
@@ -420,7 +703,12 @@ def rationale_card(
     Returns
     -------
     dict
-        The card (:func:`_format_response`).
+        The card (:func:`_format_response`). A card generated while
+        evidence commits still lacked a description is stored with them as
+        its deferred SHAs and returned ``partial`` with ``describing`` set;
+        a hit on such a card is served at once, and either case starts a
+        background completion (``completing``) when the caller may spend
+        (:func:`_start_completion`). A ``cached_only`` call starts nothing.
 
     Raises
     ------
@@ -446,15 +734,28 @@ def rationale_card(
         else lookup_cached(target, evidence, provider, pinned_model)
     )
     if cached is not None:
-        rationale, cached_at = cached
         if note is not None:
             note("rationale cache hit")
+        fields = _partial_fields(cached)
+        completing = False
+        if fields["partial"] and not cached_only and _may_spend():
+            # Served at once: a partial-card hit never waits for an LLM call.
+            completing = _start_completion(
+                target,
+                evidence,
+                provider,
+                pinned_model,
+                allow_description,
+                before_generate,
+            )
         card = _format_response(
             target,
-            rationale,
+            cached.rationale,
             evidence,
-            cached_at,
+            cached.cached_at,
             generated=False if mark_generated else None,
+            completing=completing,
+            **fields,
         )
         return {**card, "match": "exact", "stale": False} if cached_only else card
     if cached_only and not force_refresh:
@@ -489,11 +790,14 @@ def rationale_card(
     # rationale prompt sees the richer per-commit summaries. Bulk commits
     # are described per-file against the target's path instead. The cache
     # fingerprint is sha256-over-sorted-SHAs, so backfilling here does
-    # not affect cache keys.
-    backfill_evidence_descriptions(
+    # not affect cache keys. A card may describe every evidence commit;
+    # the wall still bounds the wait, and what it leaves waiting is stored
+    # as the card's deferred SHAs and completed in the background.
+    outcome = backfill_evidence_descriptions(
         evidence,
         target_path=target.path,
         allow=allow_description,
+        max_commits=len(evidence),
         on_start=(
             None
             if progress is None
@@ -515,13 +819,36 @@ def rationale_card(
             "rationale generation failed", exc, code="provider_error"
         )
 
-    cached_at = store_cached(target, evidence, rationale, provider, pinned_model)
+    waiting = sorted(outcome.waiting)
+    cached_at = store_cached(
+        target,
+        evidence,
+        rationale,
+        provider,
+        pinned_model,
+        deferred_shas=" ".join(waiting),
+    )
+    completing = (
+        bool(waiting)
+        and _may_spend()
+        and _start_completion(
+            target,
+            evidence,
+            provider,
+            pinned_model,
+            allow_description,
+            before_generate,
+        )
+    )
     return _format_response(
         target,
         rationale,
         evidence,
         cached_at,
         generated=True if mark_generated else None,
+        partial=bool(waiting),
+        describing=len(waiting),
+        completing=completing,
     )
 
 

@@ -38,9 +38,46 @@ function BulletList({ title, items }: { title: string; items?: string[] }) {
   );
 }
 
-function Card({ card }: { card: RationaleCard }) {
+/** A partial card: what it lacked, a Complete button, and what happened after the last click. */
+function PartialNote({
+  card,
+  canComplete,
+  pending,
+  outcome,
+  onComplete,
+}: {
+  card: RationaleCard;
+  canComplete: boolean;
+  pending: boolean;
+  outcome: RationaleCard | undefined;
+  onComplete: () => void;
+}) {
+  const n = card.describing ?? 0;
+  return (
+    <div className="mb-3 rounded-md border border-border bg-muted/40 p-3" data-testid="rationale-partial">
+      <p className="text-sm text-foreground">
+        Built while {plural(n, "commit")} still had no description
+      </p>
+      {canComplete && (
+        <Button className="mt-2" size="sm" variant="outline" disabled={pending} onClick={onComplete}>
+          {pending ? "Completing…" : "Complete"}
+        </Button>
+      )}
+      {outcome && (
+        <p className="mt-2 text-xs text-muted-foreground" role="status" data-testid="rationale-complete-result">
+          {outcome.completing
+            ? "Completing in the background; reopen this tab in a few minutes"
+            : "Cannot complete it right now; try again later"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function Card({ card, note }: { card: RationaleCard; note?: ReactNode }) {
   return (
     <div className="p-4">
+      {note}
       <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Purpose
       </div>
@@ -108,7 +145,23 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
       />
     );
 
-  if (data?.status === "cached") return <Card card={data} />;
+  if (data?.status === "cached")
+    return (
+      <Card
+        card={data}
+        note={
+          data.partial === true ? (
+            <PartialNote
+              card={data}
+              canComplete={canGenerate && !budgetBlocked && !missingKey}
+              pending={generate.isPending}
+              outcome={generate.data}
+              onComplete={() => generate.mutate()}
+            />
+          ) : undefined
+        }
+      />
+    );
   if (generate.isPending)
     return (
       <div className="p-4">

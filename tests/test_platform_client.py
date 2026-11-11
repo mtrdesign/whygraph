@@ -494,3 +494,66 @@ def test_link_token_never_exposed_in_client_errors(caplog):
 )
 def test_link_status_for(outcome, expected):
     assert link_status_for(outcome) == expected
+
+
+# -- rationale timeout and busy (plan 49, acceptance 8) --------------------
+
+
+def _slow_client(monkeypatch, handler) -> tuple[PlatformHttp, list[float]]:
+    monkeypatch.setattr("whygraph.portal.platform_client.RATIONALE_TIMEOUT_SEC", 0.25)
+    seen: list[float] = []
+
+    def wrapped(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"]["read"])
+        return handler(request)
+
+    client = PlatformHttp(
+        platform_origin=PLATFORM_ORIGIN, transport=httpx.MockTransport(wrapped)
+    )
+    client.bind(ORG, TOKEN)
+    return client, seen
+
+
+def test_a_slow_rationale_is_refused_not_unreachable(monkeypatch):
+    def slow(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    client, seen = _slow_client(monkeypatch, slow)
+    with pytest.raises(PlatformRefused) as err:
+        client.rationale(SLUG, RationaleIn(target=TARGET))
+    assert (err.value.status, err.value.code) == (504, "platform_slow")
+    assert seen == [0.25]
+    assert link_status_for(err.value)[0] == "ok"
+
+
+def test_a_slow_evidence_read_stays_unreachable():
+    fake = FakePlatform()
+    fake.failure = "timeout"
+    client = _client(fake)
+    with pytest.raises(PlatformUnreachable):
+        client.evidence(SLUG, EvidenceIn(target=TARGET))
+
+
+def test_a_busy_503_is_refused_and_keeps_the_link_ok(monkeypatch):
+    client, _ = _slow_client(
+        monkeypatch,
+        lambda r: httpx.Response(503, json=error_body("busy", retry_after=7)),
+    )
+    with pytest.raises(PlatformRefused) as err:
+        client.rationale(SLUG, RationaleIn(target=TARGET))
+    assert (err.value.status, err.value.code, err.value.retry_after) == (503, "busy", 7)
+    assert link_status_for(err.value)[0] == "ok"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(503, json=error_body("other")),
+        httpx.Response(503, text="down"),
+        httpx.Response(502, json=error_body("busy")),
+    ],
+)
+def test_other_5xx_stay_unreachable(monkeypatch, response):
+    client, _ = _slow_client(monkeypatch, lambda r: response)
+    with pytest.raises(PlatformUnreachable):
+        client.rationale(SLUG, RationaleIn(target=TARGET))

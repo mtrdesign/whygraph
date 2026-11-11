@@ -8,7 +8,6 @@ when a commit's ``llm_description`` is ``NULL``.
 
 from __future__ import annotations
 
-import logging
 import subprocess
 from pathlib import Path
 from threading import Lock
@@ -21,7 +20,6 @@ from whygraph import core
 from whygraph.analyze import (
     AnalyzeError,
     Description,
-    backfill_all,
     backfill_commit_description,
     backfill_file_description,
 )
@@ -291,33 +289,3 @@ def test_file_description_noop_on_untouched_path(
 
     assert text is None
     assert descriptor.seen == []
-
-
-def test_backfill_all_swallows_per_commit_failure(
-    isolated_db: Path,
-    repo_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    commits = list(Commits(repo_path, "main"))
-    _insert(commits)
-
-    rows = [_load_detached(c.sha) for c in commits]
-    # The "second" commit's diff is the one that adds "world".
-    descriptor = _StubDescriptor(fail_on="+world")
-
-    with caplog.at_level(logging.WARNING, logger="whygraph.analyze.backfill"):
-        succeeded = backfill_all(
-            rows, repository=Repository(repo_path), descriptor=descriptor
-        )
-
-    # Only the non-failing commit was backfilled; the other was logged.
-    assert succeeded == 1
-    persisted = {c.sha: _persisted(c.sha)[0] for c in commits}
-    described = [sha for sha, text in persisted.items() if text == "DESCRIPTION"]
-    failed = [sha for sha, text in persisted.items() if text is None]
-    assert len(described) == 1
-    assert len(failed) == 1
-    assert any(
-        "lazy LLM description backfill failed" in rec.getMessage()
-        for rec in caplog.records
-    )

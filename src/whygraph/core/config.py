@@ -385,8 +385,9 @@ class AnalyzeConfig:
         ``large_commit_file_count``). Must be ``>= 1``.
     max_workers : int
         Thread-pool size for the LLM-description phase of a scan. Must be
-        ``>= 1``. Default ``2``. Replaces the 1.x ``[scan].max_workers``,
-        which still parses (with a deprecation warning).
+        ``>= 1``. Default ``4``. Also bounds the commits a rationale card
+        describes at once. Replaces the 1.x ``[scan].max_workers``, which
+        still parses (with a deprecation warning).
     agent_descriptions_per_hour : int
         Production only, **org setting** (owners): how many commits the
         lazy description backfill of connected portals' agent requests
@@ -405,7 +406,7 @@ class AnalyzeConfig:
     large_commit_file_count: int = 30
     timeout_sec: int | None = None
     pr_origin_min_commits: int = 5
-    max_workers: int = 2
+    max_workers: int = 4
     agent_descriptions_per_hour: int = 600
     agent_descriptions_per_member_per_hour: int = 150
 

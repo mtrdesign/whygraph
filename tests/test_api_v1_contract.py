@@ -149,18 +149,26 @@ def world(v1: V1World, generator: type[_Generator], monkeypatch) -> V1World:  # 
     really has.
     """
     import whygraph.analyze as analyze_pkg
+    from whygraph.analyze import AnalyzeError
 
     class _Descriptor:
         @classmethod
         def from_config(cls, config: object) -> _Descriptor:
             return cls()
 
+        def describe(self, diff: str, *, subject: str | None = None) -> None:
+            raise AnalyzeError("no provider in the contract tests")
+
+    def backfill_commit(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
+        descriptor.describe("diff", subject=commit.sha)
+        return True
+
+    def backfill_file(commit, path, *, repository, descriptor) -> str:  # noqa: ANN001
+        return descriptor.describe("diff", subject=path).text
+
     monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
-    monkeypatch.setattr(
-        analyze_pkg,
-        "backfill_all",
-        lambda commits, **kwargs: 0,  # noqa: ARG005
-    )
+    monkeypatch.setattr(analyze_pkg, "backfill_commit_description", backfill_commit)
+    monkeypatch.setattr(analyze_pkg, "backfill_file_description", backfill_file)
     head = head_sha(v1)
     with use_project(v1.ctx()), get_session() as session:
         session.add(

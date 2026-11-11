@@ -90,6 +90,24 @@ def _reset_process_globals() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _drain_describes() -> Iterator[None]:
+    """Join every background describe thread a test started (plan 49 section 4.1).
+
+    A describe that outlives its call's wall finishes on a daemon thread;
+    draining after each test keeps it from writing into a later test's DB.
+    A test whose assertions need the thread's result drains it itself.
+    The partial-card completions' running set and cooldowns are cleared
+    after the drain (section 4.3), so no test inherits a cooldown.
+    """
+    yield
+    from whygraph.mcp import evidence as mcp_evidence
+    from whygraph.mcp import rationale as mcp_rationale
+
+    mcp_evidence.drain_describes(timeout=30)
+    mcp_rationale._reset_completions()
+
+
+@pytest.fixture(autouse=True)
 def _restore_whygraph_logger() -> Iterator[None]:
     """Put the ``whygraph`` logger back the way the test found it.
 
@@ -375,6 +393,11 @@ def whygraph_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     try:
         yield db_path
     finally:
+        # Before the config and the test's monkeypatches go: a background
+        # describe or card completion still reads both.
+        from whygraph.mcp import evidence as mcp_evidence
+
+        mcp_evidence.drain_describes(timeout=30)
         db_engine._reset_engine()
         core._reset_config()
 

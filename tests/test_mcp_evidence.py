@@ -907,7 +907,7 @@ def test_describe_false_never_calls_an_llm_and_reports_describing(
     assert all(item["llm_description"] is None for item in result["evidence"])
 
 
-def _undescribed(count: int) -> list:
+def _undescribed(count: int, *, files_changed: int = 1) -> list:
     """``count`` undescribed in-memory evidence items, newest first."""
     from whygraph.analyze import CommitEvidence
 
@@ -916,6 +916,7 @@ def _undescribed(count: int) -> list:
             commit=_db_commit(
                 f"sha{n}",
                 committed_at=f"2026-01-{30 - n:02d}T00:00:00+00:00",
+                files_changed=files_changed,
                 llm_description=None,
             )
         )
@@ -923,29 +924,127 @@ def _undescribed(count: int) -> list:
     ]
 
 
-def _fake_backfill(monkeypatch: pytest.MonkeyPatch, *, sleep: float = 0.0) -> list[str]:
-    """Stub the descriptor and ``backfill_all``; return the described SHAs."""
-    import time
+class _FakeLlm:
+    """What the fakes of :func:`_fake_backfill` record and how they behave.
 
+    ``described`` lists each ``describe()`` call's SHA, in call order;
+    ``peak`` is the most calls running at once. ``diffs`` maps a SHA to its
+    diff (``""`` is an empty diff) or an exception the diff raises;
+    ``errors`` maps a SHA to an exception ``describe()`` raises.
+    """
+
+    def __init__(self, sleep: float) -> None:
+        import threading
+
+        self.sleep = sleep
+        self.described: list[str] = []
+        self.projects: list[str | None] = []
+        self.diffs: dict[str, object] = {}
+        self.errors: dict[str, BaseException] = {}
+        self.started = threading.Event()
+        self.running = 0
+        self.peak = 0
+        self.lock = threading.Lock()
+
+    def diff(self, sha: str) -> str:
+        value = self.diffs.get(sha, "diff")
+        if isinstance(value, BaseException):
+            raise value
+        return str(value)
+
+    def describe(self, sha: str):  # noqa: ANN201
+        import time
+
+        from whygraph.analyze import Description
+        from whygraph.core.context import current_project
+
+        with self.lock:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+            self.described.append(sha)
+            ctx = current_project()
+            self.projects.append(None if ctx is None else ctx.slug)
+        self.started.set()
+        try:
+            time.sleep(self.sleep)
+            if sha in self.errors:
+                raise self.errors[sha]
+            return Description(text=f"described {sha}", model="m", provider="fake")
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def _fake_backfill(monkeypatch: pytest.MonkeyPatch, *, sleep: float = 0.0) -> _FakeLlm:
+    """Stub the descriptor and the two ``backfill_*`` recipes, minus git.
+
+    The fakes follow the real recipes: their own empty-diff check, then
+    ``descriptor.describe(...)`` (the backfill's guard), then the DB write
+    and the local row. ``describe`` records the commit's SHA.
+    """
     import whygraph.analyze as analyze_pkg
+    from whygraph.mcp import evidence as ev
 
-    described: list[str] = []
+    llm = _FakeLlm(sleep)
 
     class _Descriptor:
         @classmethod
         def from_config(cls, _cfg: object) -> "_Descriptor":
             return cls()
 
-    def backfill_all(commits, *, repository, descriptor) -> int:  # noqa: ANN001
-        for commit in commits:
-            time.sleep(sleep)
-            described.append(commit.sha)
-            commit.llm_description = "described"
-        return len(commits)
+        def describe(self, diff: str, *, subject: str | None = None):  # noqa: ANN201
+            return llm.describe(str(subject))
+
+    def backfill_commit(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
+        if commit.llm_description is not None:
+            return False
+        if not llm.diff(commit.sha).strip():
+            return False
+        text = descriptor.describe("diff", subject=commit.sha).text
+        with get_session() as session:
+            row = session.get(Commit, commit.sha)
+            if row is not None:
+                row.llm_description = text
+        commit.llm_description = text
+        return True
+
+    def backfill_file(commit, path, *, repository, descriptor) -> str | None:  # noqa: ANN001
+        cached = ev._cached_file_description(commit.sha, path)
+        if cached is not None:
+            return cached
+        if not llm.diff(commit.sha).strip():
+            return None
+        text = descriptor.describe("diff", subject=commit.sha).text
+        with get_session() as session:
+            for row in session.exec(
+                select(CommitFileChange).where(
+                    CommitFileChange.commit_sha == commit.sha,
+                    CommitFileChange.path == path,
+                )
+            ):
+                row.llm_description = text
+        return text
 
     monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
-    monkeypatch.setattr(analyze_pkg, "backfill_all", backfill_all)
-    return described
+    monkeypatch.setattr(analyze_pkg, "backfill_commit_description", backfill_commit)
+    monkeypatch.setattr(analyze_pkg, "backfill_file_description", backfill_file)
+    return llm
+
+
+def _join_workers() -> None:
+    """Wait for the tracked describe threads, leaving the claims as they are."""
+    from whygraph.mcp import evidence as ev
+
+    for thread in list(ev._threads):
+        thread.join(5)
+
+
+def _released() -> bool:
+    """Once the workers ended: no claim is held and every slot is free."""
+    from whygraph.mcp import evidence as ev
+
+    _join_workers()
+    return ev._claims == set() and ev._DESCRIBE_SLOTS._value == 8  # type: ignore[attr-defined]
 
 
 def test_backfill_describes_at_most_five_commits_newest_first(
@@ -956,17 +1055,18 @@ def test_backfill_describes_at_most_five_commits_newest_first(
     from whygraph.mcp import evidence as ev
 
     assert (ev.MAX_BACKFILL_PER_CALL, ev.BACKFILL_WALL_SEC) == (5, 20)
-    described = _fake_backfill(monkeypatch)
+    llm = _fake_backfill(monkeypatch)
     monkeypatch.chdir(temp_git_repo)
     items = _undescribed(7)
     started: list[int] = []
 
-    left = ev.backfill_evidence_descriptions(
-        items, target_path="sample.py", on_start=started.append
+    outcome = ev.backfill_evidence_descriptions(
+        items, target_path="sample.py", workers=1, on_start=started.append
     )
 
-    assert described == [f"sha{n}" for n in range(5)]
-    assert (left, started) == (2, [5])
+    assert llm.described == [f"sha{n}" for n in range(5)]
+    assert (outcome.left, outcome.described, started) == (2, 5, [5])
+    assert outcome.waiting == {"sha5", "sha6"}
     assert [i.commit.llm_description for i in items[5:]] == [None, None]
 
 
@@ -975,18 +1075,21 @@ def test_backfill_starts_no_description_past_the_wall_clock(
     whygraph_db_initialized: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A slow descriptor: the bound stops the loop, the rest is ``describing``."""
+    """A slow descriptor: the wall returns the call; a running describe finishes."""
     from whygraph.mcp import evidence as ev
 
-    described = _fake_backfill(monkeypatch, sleep=0.3)
+    llm = _fake_backfill(monkeypatch, sleep=0.3)
     monkeypatch.chdir(temp_git_repo)
 
-    left = ev.backfill_evidence_descriptions(
-        _undescribed(4), target_path="sample.py", wall_sec=0.45
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(4), target_path="sample.py", wall_sec=0.45, workers=1
     )
 
-    assert described == ["sha0", "sha1"]
-    assert left == 2
+    # sha1 was still running at the wall: waiting, but it finishes.
+    assert outcome.left == 3
+    assert outcome.waiting == {"sha1", "sha2", "sha3"}
+    assert ev.drain_describes(timeout=5)
+    assert llm.described == ["sha0", "sha1"]
 
 
 def test_evidence_for_reports_what_the_bound_left(
@@ -1004,11 +1107,494 @@ def test_evidence_for_reports_what_the_bound_left(
                     sha, committed_at=f"{at}T00:00:00+00:00", llm_description=None
                 )
             )
-    described = _fake_backfill(monkeypatch)
+    llm = _fake_backfill(monkeypatch)
     monkeypatch.setattr(ev, "MAX_BACKFILL_PER_CALL", 1)
     monkeypatch.chdir(temp_git_repo)
 
     result = whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
 
-    assert described == [newest.sha]  # newest first
+    assert llm.described == [newest.sha]  # newest first
     assert result["describing"] == 1
+    # Acceptance 7: the tool starts no background work.
+    assert ev._threads == set()
+
+
+# ---- plan 49 section 4.1: classification ----------------------------------
+
+
+def test_backfill_classifies_each_result(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty diff and GitError are terminal; AnalyzeError and a diff timeout wait."""
+    from whygraph.analyze import AnalyzeError
+    from whygraph.mcp import evidence as ev
+    from whygraph.services.git import GitError
+
+    llm = _fake_backfill(monkeypatch)
+    llm.diffs = {
+        "sha1": "",
+        "sha2": GitError("bad object"),
+        "sha3": subprocess.TimeoutExpired(["git", "diff"], 1),
+    }
+    llm.errors = {"sha4": AnalyzeError("provider failed")}
+    monkeypatch.chdir(temp_git_repo)
+    asked: list[bool] = []
+
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(5),
+        target_path="sample.py",
+        max_commits=5,
+        workers=1,
+        allow=lambda: asked.append(True) or True,
+    )
+
+    assert outcome.described == 1
+    assert outcome.terminal == {"sha1", "sha2"}
+    assert outcome.waiting == {"sha3", "sha4"}
+    # Only the two commits that reached an LLM call asked the budget.
+    assert llm.described == ["sha0", "sha4"]
+    assert len(asked) == 2
+    assert _released()
+
+
+def test_a_bulk_commit_off_the_path_is_terminal(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch)
+    llm.diffs = {"sha0": ""}
+    monkeypatch.chdir(temp_git_repo)
+    items = _undescribed(1, files_changed=500)
+
+    outcome = ev.backfill_evidence_descriptions(items, target_path="sample.py")
+
+    assert (outcome.terminal, outcome.waiting, llm.described) == ({"sha0"}, set(), [])
+
+
+def test_real_recipes_classify_an_empty_diff_and_a_bad_object_as_terminal(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real ``backfill_*`` recipes: no LLM call and no ``allow()`` for either."""
+    from whygraph.analyze import CommitEvidence
+    from whygraph.mcp import evidence as ev
+
+    _run_git(temp_git_repo, "commit", "--allow-empty", "-m", "empty")
+    empty = _run_git(temp_git_repo, "rev-parse", "HEAD").strip()
+    parent = _run_git(temp_git_repo, "rev-parse", "HEAD~1").strip()
+    with get_session() as session:
+        session.add(
+            _db_commit(
+                empty,
+                committed_at="2026-03-01T00:00:00+00:00",
+                parent_shas=parent,
+                llm_description=None,
+            )
+        )
+    seen = _install_stub_descriptor(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    asked: list[bool] = []
+    items = [
+        CommitEvidence(
+            commit=_db_commit(
+                empty,
+                committed_at="2026-03-01T00:00:00+00:00",
+                parent_shas=parent,
+                llm_description=None,
+            )
+        ),
+        *_undescribed(1),  # "sha0" is no git object
+    ]
+
+    outcome = ev.backfill_evidence_descriptions(
+        items, target_path="sample.py", allow=lambda: asked.append(True) or True
+    )
+
+    assert outcome.terminal == {empty, "sha0"}
+    assert (outcome.left, seen, asked) == (0, [], [])
+
+
+def test_rejected_credentials_stop_the_queue(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.analyze import AnalyzeError
+    from whygraph.mcp import evidence as ev
+    from whygraph.services.llm import LlmAuthError
+
+    llm = _fake_backfill(monkeypatch)
+    rejected = AnalyzeError("describe failed")
+    rejected.__cause__ = LlmAuthError("invalid key")
+    llm.errors = {"sha0": rejected}
+    monkeypatch.chdir(temp_git_repo)
+
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(3), target_path="sample.py", workers=1
+    )
+
+    assert llm.described == ["sha0"]
+    assert outcome.waiting == {"sha0", "sha1", "sha2"}
+
+
+# ---- plan 49 section 4.1: the guard's refusals -----------------------------
+
+
+class _BlockedSink:
+    """A usage sink whose hard-stopped budget is spent after ``after`` checks."""
+
+    def __init__(self, *, after: int = 0) -> None:
+        from whygraph.core.usage import UsageScope
+
+        self.scope = UsageScope(source="chat")
+        self.after = after
+        self.checks = 0
+
+    def record(self, rec: object) -> None:
+        pass
+
+    def blocked_scope(self) -> str | None:
+        self.checks += 1
+        return "member" if self.checks > self.after else None
+
+
+def test_a_spent_budget_leaves_the_rest_waiting(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard asks the sink before each LLM call (M2f-2 plan section 4.7)."""
+    from whygraph.core.usage import use_usage_sink
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+
+    # Open for the first check, spent from the second on.
+    with use_usage_sink(_BlockedSink(after=1)):
+        outcome = ev.backfill_evidence_descriptions(
+            _undescribed(3), target_path="sample.py", workers=1
+        )
+
+    assert llm.described == ["sha0"]
+    assert (outcome.described, outcome.waiting) == (1, {"sha1", "sha2"})
+    assert outcome.terminal == set()
+    assert _released()
+
+
+def test_the_bound_refuses_past_max_commits(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch, sleep=0.1)
+    monkeypatch.chdir(temp_git_repo)
+
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(5), target_path="sample.py", max_commits=2, workers=4
+    )
+
+    assert len(llm.described) == 2
+    assert (outcome.described, outcome.left, outcome.terminal) == (2, 3, set())
+    assert _released()
+
+
+def test_allow_refusal_leaves_the_commit_waiting(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    answers = iter([True, False])
+
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(2),
+        target_path="sample.py",
+        workers=1,
+        allow=lambda: next(answers),
+    )
+
+    assert llm.described == ["sha0"]
+    assert (outcome.waiting, outcome.terminal) == ({"sha1"}, set())
+    assert _released()
+
+
+def test_a_held_claim_times_out_into_waiting(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    held = (whygraph_db_initialized.resolve(), "sha0", None)
+    ev._claims.add(held)
+    try:
+        outcome = ev.backfill_evidence_descriptions(
+            _undescribed(1), target_path="sample.py", wall_sec=0.3
+        )
+        _join_workers()
+    finally:
+        ev._claims.discard(held)
+
+    assert (outcome.waiting, outcome.terminal, llm.described) == ({"sha0"}, set(), [])
+    assert _released()
+
+
+def test_a_slot_timeout_leaves_the_commit_waiting(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    full = threading.BoundedSemaphore(1)
+    assert full.acquire()
+    monkeypatch.setattr(ev, "_DESCRIBE_SLOTS", full)
+
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(1), target_path="sample.py", wall_sec=0.3
+    )
+
+    _join_workers()
+    assert (outcome.waiting, outcome.terminal, llm.described) == ({"sha0"}, set(), [])
+    assert ev._claims == set()
+    full.release()  # the guard released nothing it did not take
+
+
+def test_a_stored_description_is_applied_without_allow(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard's re-read: another caller described it, so no budget is asked."""
+    from whygraph.mcp import evidence as ev
+
+    with get_session() as session:
+        session.add(
+            _db_commit(
+                "sha0",
+                committed_at="2026-01-30T00:00:00+00:00",
+                llm_description="written meanwhile",
+            )
+        )
+    llm = _fake_backfill(monkeypatch)
+    monkeypatch.chdir(temp_git_repo)
+    asked: list[bool] = []
+    items = _undescribed(1)  # the local row still has no description
+
+    outcome = ev.backfill_evidence_descriptions(
+        items, target_path="sample.py", allow=lambda: asked.append(True) or True
+    )
+
+    assert (outcome.described, outcome.left, llm.described, asked) == (1, 0, [], [])
+    assert items[0].commit.llm_description == "written meanwhile"
+    assert _released()
+
+
+# ---- plan 49 section 4.1: parallel workers, claims -------------------------
+
+
+def test_parallel_workers_describe_all_under_the_project_context(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.core.config import Config
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch, sleep=0.05)
+    ctx = ProjectContext(
+        slug="parallel",
+        root=temp_git_repo,
+        config=Config(whygraph_db=whygraph_db_initialized),
+    )
+
+    with use_project(ctx):
+        outcome = ev.backfill_evidence_descriptions(
+            _undescribed(8), target_path="sample.py", max_commits=8, workers=4
+        )
+
+    assert (outcome.described, outcome.left) == (8, 0)
+    assert sorted(llm.described) == sorted(f"sha{n}" for n in range(8))
+    assert llm.projects == ["parallel"] * 8
+    assert llm.peak <= 4
+
+
+def test_the_default_pool_size_is_analyze_max_workers(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.core import get_config
+    from whygraph.mcp import evidence as ev
+
+    llm = _fake_backfill(monkeypatch, sleep=0.2)
+    monkeypatch.chdir(temp_git_repo)
+
+    outcome = ev.backfill_evidence_descriptions(
+        _undescribed(8), target_path="sample.py", max_commits=8
+    )
+
+    assert outcome.left == 0
+    assert llm.peak == get_config().analyze.max_workers
+
+
+def _seed_undescribed(count: int, *, files_changed: int = 1) -> None:
+    """DB rows for :func:`_undescribed`'s SHAs, undescribed, touching sample.py."""
+    from whygraph.analyze import bulk_commit_stub
+
+    with get_session() as session:
+        for item in _undescribed(count, files_changed=files_changed):
+            commit = item.commit
+            if files_changed > 1:
+                commit.llm_description = bulk_commit_stub(files_changed)
+            session.add(commit)
+            session.add(
+                CommitFileChange(
+                    commit_sha=commit.sha,
+                    path="sample.py",
+                    change_type="M",
+                    lines_added=1,
+                    lines_deleted=0,
+                )
+            )
+
+
+def _in_parallel(*calls) -> list:  # noqa: ANN002
+    """Run each call on its own thread (one shared global config); their results."""
+    import threading
+
+    results: list = [None] * len(calls)
+
+    def run(index: int) -> None:
+        results[index] = calls[index]()
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(len(calls))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    return results
+
+
+def test_two_callers_on_the_same_commits_describe_each_once(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim: the second caller waits, re-reads, and copies the text."""
+    from whygraph.mcp import evidence as ev
+
+    _seed_undescribed(4)
+    llm = _fake_backfill(monkeypatch, sleep=0.2)
+    monkeypatch.chdir(temp_git_repo)
+    first, second = _undescribed(4), _undescribed(4)
+
+    outcomes = _in_parallel(
+        lambda: ev.backfill_evidence_descriptions(
+            first, target_path="sample.py", workers=4
+        ),
+        lambda: ev.backfill_evidence_descriptions(
+            second, target_path="sample.py", workers=4
+        ),
+    )
+
+    assert sorted(llm.described) == [f"sha{n}" for n in range(4)]
+    assert [o.left for o in outcomes] == [0, 0]
+    for items in (first, second):
+        assert [i.commit.llm_description for i in items] == [
+            f"described sha{n}" for n in range(4)
+        ]
+    assert _released()
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_a_claim_waiter_copies_the_stored_text_onto_its_row(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bulk: bool,
+) -> None:
+    """Normal commit: the commit's text; bulk commit: the per-file text, not the stub."""
+    from whygraph.mcp import evidence as ev
+
+    files = 500 if bulk else 1
+    _seed_undescribed(1, files_changed=files)
+    llm = _fake_backfill(monkeypatch, sleep=0.3)
+    monkeypatch.chdir(temp_git_repo)
+    first, second = (
+        _undescribed(1, files_changed=files),
+        _undescribed(1, files_changed=files),
+    )
+    if bulk:
+        for items in (first, second):
+            items[0].commit.llm_description = "stub"
+
+    def late_second():  # noqa: ANN202
+        # Start once the first caller's describe is running, so this one
+        # passes its own cache check and waits on the claim.
+        assert llm.started.wait(5)
+        return ev.backfill_evidence_descriptions(second, target_path="sample.py")
+
+    outcomes = _in_parallel(
+        lambda: ev.backfill_evidence_descriptions(first, target_path="sample.py"),
+        late_second,
+    )
+
+    assert llm.described == ["sha0"]
+    assert [(o.described, o.left) for o in outcomes] == [(1, 0), (1, 0)]
+    assert first[0].commit.llm_description == "described sha0"
+    assert second[0].commit.llm_description == "described sha0"
+    if bulk:
+        assert ev._cached_file_description("sha0", "sample.py") == "described sha0"
+        with get_session() as session:
+            assert session.get(Commit, "sha0").llm_description != "described sha0"
+
+
+def test_stop_describes_stops_pulling_and_drops_a_late_result(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import evidence as ev
+
+    _seed_undescribed(3)
+    llm = _fake_backfill(monkeypatch, sleep=0.3)
+    monkeypatch.chdir(temp_git_repo)
+
+    def stop_soon():  # noqa: ANN202
+        assert llm.started.wait(5)
+        ev.stop_describes(whygraph_db_initialized)
+
+    outcome, _ = _in_parallel(
+        lambda: ev.backfill_evidence_descriptions(
+            _undescribed(3), target_path="sample.py", workers=1
+        ),
+        stop_soon,
+    )
+
+    assert llm.described == ["sha0"]
+    assert outcome.waiting == {"sha0", "sha1", "sha2"}
+    with get_session() as session:
+        assert session.get(Commit, "sha0").llm_description is None
+    # A later call gets a fresh event (a re-added project works).
+    again = ev.backfill_evidence_descriptions(_undescribed(1), target_path="sample.py")
+    assert again.left == 0

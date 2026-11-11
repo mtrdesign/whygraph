@@ -94,6 +94,24 @@ def test_rationale_inserts_stamps_and_target_wins(project):
         assert row.purpose == "mine"
 
 
+def test_rationale_deferred_shas_travel_and_a_missing_key_is_final(project):
+    sha = "a" * 40
+    with_it = _card(deferred_shas=f"{sha} {'b' * 40}")
+    without = _card(line_start=2)
+    assert "deferred_shas" not in without
+    assert _rows([with_it, without]).inserted == 2
+    with get_session() as session:
+        a = session.get(RationaleCache, ("src/a.py", 1, 10, "openai", "default"))
+        b = session.get(RationaleCache, ("src/a.py", 2, 10, "openai", "default"))
+        assert a.deferred_shas == f"{sha} {'b' * 40}"
+        assert b.deferred_shas == ""
+
+
+def test_rationale_bad_deferred_shas_refuses(project):
+    with pytest.raises(ImportFormatError):
+        _rows([_card(deferred_shas="not a sha!")])
+
+
 def test_rationale_duplicate_in_bundle_counts_existing(project):
     result = _rows([_card(), _card(purpose="second")])
     assert (result.inserted, result.existing) == (1, 1)

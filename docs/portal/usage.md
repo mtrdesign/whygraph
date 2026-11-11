@@ -181,7 +181,14 @@ Work already in flight stops at its next step:
   monthly budget reached".
 
 A call already sent to the provider finishes, so spend can overshoot by the calls in flight (at most
-`[analyze].max_workers` for a scan, one anywhere else).
+`[analyze].max_workers` for a scan or for one rationale card, plus the card itself, and one
+anywhere else).
+
+A rationale card on a project with undescribed commits describes them first, so with the default
+per-member limits one member's agents get about 7 cold cards per hour (an estimate). A completion of
+a partial card counts as a second card. Cards on commits that are already described cost no
+descriptions, and **Describe core** (coming in a later release) is the remedy. See
+[Agent limits](../deploy/production.md#agent-limits).
 
 Everything the stop refuses answers **`403 budget_exceeded`** with a `scope` of `org`, `project` or
 `member`. The notice on the project's pages, in Chat and beside **Generate rationale** says whose

@@ -1,15 +1,18 @@
 {
   "body": {
     "cached_at": "<time>",
+    "completing": true,
     "constraints": [
       "keep it small"
     ],
+    "describing": 2,
     "evidence_count": {
       "commits": 2,
       "issues": 1,
       "prs": 1
     },
     "model": "fake-1",
+    "partial": true,
     "project": {
       "access_lost": false,
       "clone_url": "http://127.0.0.1:9/acme/api.git",

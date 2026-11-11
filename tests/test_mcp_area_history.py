@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlmodel import select
 
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange
@@ -369,6 +370,54 @@ def test_area_history_payload_keeps_the_nested_explorer_shape(
 
     assert result["evidence"][0]["commit"]["sha"] == "sha_recent"
     assert result["describing"] == 0
+
+
+def test_area_history_describes_at_most_five_and_starts_no_background_work(
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 7 of plan 49: the per-call bound, then ``describing``, nothing left running."""
+    import whygraph.analyze as analyze_pkg
+    from whygraph.analyze import Description
+    from whygraph.mcp import evidence as ev
+
+    with get_session() as session:
+        _seed_rename_history(session)
+        for n in range(2):
+            sha = f"sha_more{n}"
+            session.add(
+                _commit(
+                    sha, subject="edit", committed_at=f"2025-06-0{n + 1}T00:00:00+00:00"
+                )
+            )
+            session.add(_change(commit_sha=sha, path="final.py"))
+        session.commit()
+        for row in session.exec(select(Commit)):
+            row.llm_description = None
+    seen: list[str] = []
+
+    class _Descriptor:
+        @classmethod
+        def from_config(cls, _cfg: object) -> _Descriptor:
+            return cls()
+
+        def describe(self, diff: str, *, subject: str | None = None) -> Description:
+            seen.append(str(subject))
+            return Description(text="described", model="m", provider="fake")
+
+    def backfill_commit(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
+        commit.llm_description = descriptor.describe("diff", subject=commit.sha).text
+        return True
+
+    monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
+    monkeypatch.setattr(analyze_pkg, "backfill_commit_description", backfill_commit)
+
+    result = whygraph_area_history("final.py", limit=10)
+
+    assert len(result["evidence"]) == 7
+    assert len(seen) == 5
+    assert result["describing"] == 2
+    assert ev._threads == set()
 
 
 def test_area_history_full_emits_a_shared_pr_once(

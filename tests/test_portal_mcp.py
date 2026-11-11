@@ -516,3 +516,4 @@ def test_tools_carry_titles_annotations_and_server_instructions() -> None:
         assert "whygraph scan" not in tools[name].description
     assert mcp_server.mcp.instructions == WHYGRAPH_INSTRUCTIONS
     assert WHYGRAPH_INSTRUCTIONS.startswith("WhyGraph")
+    assert "`partial: true`" in WHYGRAPH_INSTRUCTIONS

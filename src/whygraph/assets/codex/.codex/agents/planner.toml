@@ -138,7 +138,7 @@ The `tasks.json` example:
 }
 ```
 
-**1d. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (one LLM call, seconds); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers get the cards inlined (deep mode); warming the cache here also makes any card they fetch later a cache hit instead of a parallel generation.
+**1d. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (up to about a minute when commits still need descriptions); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers get the cards inlined (deep mode); warming the cache here also makes any card they fetch later a cache hit instead of a parallel generation. A card with `partial: true` is usable: note `partial` on the card you pass on, and do not re-ask in a loop.
 
 For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count`, `purpose`, `constraints[]` and `risks[]` (verbatim), and `is_empty` (no rationale recorded, or `purpose` and `why` both blank). Also read `freshness` from `whygraph://repo/overview` once; when `commits_behind` is greater than 0, start the plan with *Note: history is N commits behind HEAD.* (N = `commits_behind`).
 

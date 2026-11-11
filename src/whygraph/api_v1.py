@@ -372,6 +372,11 @@ class RationaleOut(_Out):
     provider: str
     cached_at: str
     evidence_count: EvidenceCountOut
+    # None from a platform that predates them, so it never reports a card
+    # it built under the old 5-commit bound as final.
+    partial: bool | None = None
+    describing: int | None = None
+    completing: bool | None = None
 
 
 class StatusOut(_Out):

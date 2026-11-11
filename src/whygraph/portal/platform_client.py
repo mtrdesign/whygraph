@@ -66,6 +66,9 @@ DEV_PLATFORM_HTTP_ENV = "WHYGRAPH_DEV_PLATFORM_HTTP"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 """The most a platform reply may carry (2 MiB)."""
 
+RATIONALE_TIMEOUT_SEC = 55
+"""Seconds a rationale card may take on the platform (under Cursor's 60 s)."""
+
 MAX_TITLE_CHARS = 1024
 """Cap of a title-like string in a reply (1 KiB)."""
 
@@ -473,8 +476,13 @@ class PlatformHttp:
         bearer: bool,
         body: BaseModel | dict | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> Any:
-        """Send one request and return the parsed, capped JSON body."""
+        """Send one request and return the parsed, capped JSON body.
+
+        ``timeout`` replaces the client's read timeout for this call; a read
+        that exceeds it is a ``504`` ``platform_slow`` refusal, not an outage.
+        """
         if base is None or _origin(base) not in {
             _origin(self.platform_origin),
             *([_origin(self.api_origin)] if self.api_origin else []),
@@ -484,6 +492,8 @@ class PlatformHttp:
         if bearer and self._token and _origin(base) == _origin(self.api_origin or ""):
             headers["Authorization"] = f"Bearer {self._token}"
         kwargs: dict[str, Any] = {"headers": headers, "params": params}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         if body is not None:
             kwargs["json"] = (
                 body.model_dump(mode="json") if isinstance(body, BaseModel) else body
@@ -501,10 +511,27 @@ class PlatformHttp:
                         raise PlatformUnreachable("the platform's reply is too large")
                     chunks.append(chunk)
                 status = response.status_code
+        except httpx.ReadTimeout:
+            if timeout is None:
+                logger.warning("platform request failed: ReadTimeout")
+                raise PlatformUnreachable("the platform could not be reached") from None
+            raise PlatformRefused(
+                504,
+                "platform_slow",
+                None,
+                None,
+                "the platform is still working on it",
+            ) from None
         except httpx.HTTPError as exc:
             logger.warning("platform request failed: %s", type(exc).__name__)
             raise PlatformUnreachable("the platform could not be reached") from None
         raw = b"".join(chunks)
+        if status == 503:
+            busy = self._busy_envelope(raw)
+            if busy is not None:
+                raise PlatformRefused(
+                    503, "busy", busy.reason, busy.retry_after, busy.error
+                )
         if status >= 500 or 300 <= status < 400:
             raise PlatformUnreachable(f"the platform is unavailable ({status})")
         try:
@@ -522,6 +549,15 @@ class PlatformHttp:
                 status, err.code, err.reason, err.retry_after, err.error
             )
         return data
+
+    @staticmethod
+    def _busy_envelope(raw: bytes) -> ErrorOut | None:
+        """The error envelope of a ``503`` when its code is ``busy``, else ``None``."""
+        try:
+            err = ErrorOut.model_validate(cap_strings(json.loads(raw)))
+        except (ValueError, ValidationError):
+            return None
+        return err if err.code == "busy" else None
 
     def _v1(self, method: str, path: str, **kwargs: Any) -> Any:
         return self._call(method, self.api_origin, path, bearer=True, **kwargs)
@@ -633,7 +669,12 @@ class PlatformHttp:
 
     def rationale(self, slug: str, body: RationaleIn) -> RationaleOut:
         """``POST .../rationale``: a rationale card."""
-        data = self._v1("POST", f"{self._slug(slug)}/rationale", body=body)
+        data = self._v1(
+            "POST",
+            f"{self._slug(slug)}/rationale",
+            body=body,
+            timeout=RATIONALE_TIMEOUT_SEC,
+        )
         self._note_project(data)
         return self._model(RationaleOut, data)
 

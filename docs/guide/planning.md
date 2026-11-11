@@ -351,8 +351,9 @@ Every stage runs in your editor, against your own model account.
 | Evaluation | One short evaluator run per step on a fast model, which also reads the Verify record, then one run each for quality and UI on a stronger model. `--no-eval` skips it. |
 | UI evidence | No model run for the capture itself. The UI stage reads the screenshots, and only that stage costs tokens. |
 
-Rationale cards are read from the cache. A card that is missing may be generated on read, one LLM call
-charged to the project's [budget](../portal/usage.md).
+Rationale cards are read from the cache. A card that is missing may be generated on read: a few LLM calls
+(descriptions, then the card), up to about a minute, charged to the project's
+[budget](../portal/usage.md).
 
 ## Evaluation
 

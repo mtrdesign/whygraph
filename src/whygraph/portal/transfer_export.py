@@ -563,6 +563,7 @@ def build_export(
                     actual_provider=r.actual_provider,
                     actual_model=r.actual_model,
                     qualified_name=r.qualified_name,
+                    deferred_shas=r.deferred_shas,
                 )
                 if rec is not None:
                     yield rec

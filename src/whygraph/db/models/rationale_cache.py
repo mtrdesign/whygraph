@@ -23,7 +23,7 @@ under ``"default"`` retain provenance.
 
 from __future__ import annotations
 
-from sqlalchemy import Text
+from sqlalchemy import Text, text
 from sqlmodel import Field
 
 from whygraph.db.base import WhygraphTable
@@ -61,3 +61,13 @@ class RationaleCache(WhygraphTable, table=True):
     actual_model: str | None = Field(default=None, sa_type=Text)
     qualified_name: str | None = Field(default=None, sa_type=Text)
     import_id: int | None = Field(default=None)  # project_import.id; no FK
+    deferred_shas: str = Field(
+        default="",
+        sa_type=Text,
+        sa_column_kwargs={"server_default": text("''")},
+    )
+    """Space-joined SHAs the card was written without a description for.
+
+    Empty means the card is final; a row written before this column existed is
+    final, as it always was.
+    """

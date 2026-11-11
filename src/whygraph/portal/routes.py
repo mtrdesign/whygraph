@@ -64,6 +64,7 @@ from whygraph.core.config import Config, ConfigError, normalize_v2
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.db.engine import dispose_engine
+from whygraph.mcp.evidence import stop_describes
 from whygraph.hooks import (
     LEGACY_HELPER_RELPATH,
     HooksError,
@@ -2595,6 +2596,9 @@ def _remove_project(
     if state.codegraph_host is not None:
         # Drops the project's bridge state; the shared child stays.
         anyio.from_thread.run(state.codegraph_host.retire, project.id)
+    # Before the dispose: a describe or a card completion writing after it
+    # would rebuild the engine and recreate the deleted directory.
+    stop_describes(project.db_path)
     dispose_engine(project.db_path)
     state.migrations.forget(project.db_path)
     state.contexts.invalidate(project.id)

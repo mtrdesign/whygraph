@@ -325,7 +325,9 @@ def test_rationale_brief_backfill_failure_does_not_block_rationale(
 ) -> None:
     from whygraph.services.llm import LlmError
 
-    _seed_two_commits_with_nulls(temp_git_repo)
+    from whygraph.mcp.evidence import drain_describes
+
+    newest_sha, oldest_sha = _seed_two_commits_with_nulls(temp_git_repo)
     monkeypatch.chdir(temp_git_repo)
     monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
 
@@ -339,6 +341,15 @@ def test_rationale_brief_backfill_failure_does_not_block_rationale(
     # Rationale still succeeds — backfill is best-effort.
     result = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
     assert result["purpose"] == "Holds two sample lines."
+    # ... but it is never served as final (plan 49 I6).
+    assert (result["partial"], result["describing"], result["completing"]) == (
+        True,
+        2,
+        True,
+    )
+    assert drain_describes(timeout=30)
+    # The completion could describe nothing either: the row stays partial.
+    assert _row().deferred_shas == " ".join(sorted([newest_sha, oldest_sha]))
 
 
 # ---- a viewer's context never spends (M2f-1 plan section 4.6) ------------
@@ -395,8 +406,9 @@ def test_a_viewer_context_skips_the_description_backfill(
     with use_project(_viewer_ctx(temp_git_repo, whygraph_db_initialized)):
         evidence = collect_evidence(target, limit=20)
         assert len(evidence) == 2
-        backfill_evidence_descriptions(evidence, target_path="sample.py")
+        outcome = backfill_evidence_descriptions(evidence, target_path="sample.py")
 
+    assert outcome.waiting == {newest_sha, oldest_sha}
     assert built == []
     with get_session() as session:
         for sha in (newest_sha, oldest_sha):
@@ -547,31 +559,6 @@ def test_a_budget_spent_mid_request_refuses_the_next_card(
             )
     assert (caught.value.reason, caught.value.scope) == ("budget_exceeded", "org")
     assert (built, charged) == ([], [])
-
-
-def test_the_backfill_stops_before_the_commit_after_the_budget_is_spent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``backfill_all`` asks the sink before each commit (M2f-2 plan section 4.7)."""
-    from types import SimpleNamespace
-
-    from whygraph.analyze import backfill as backfill_mod
-    from whygraph.core.usage import use_usage_sink
-
-    described: list[str] = []
-
-    def fake_backfill(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
-        described.append(commit.sha)
-        return True
-
-    monkeypatch.setattr(backfill_mod, "backfill_commit_description", fake_backfill)
-    commits = [SimpleNamespace(sha=c * 40) for c in "abc"]
-    # Open for the first check, spent from the second on.
-    with use_usage_sink(_BlockedSink("member", after=1)):
-        done = backfill_mod.backfill_all(commits, repository=None, descriptor=None)
-    assert (done, described) == (1, ["a" * 40])
-    described.clear()
-    assert backfill_mod.backfill_all(commits, repository=None, descriptor=None) == 3
 
 
 def test_force_refresh_skips_the_cache_and_stores_the_new_card(
@@ -1038,3 +1025,563 @@ def test_a_generating_call_still_regenerates_a_stale_card(
     assert card["generated"] is True
     assert card["purpose"] == "Holds two sample lines."
     assert "match" not in card and "stale" not in card
+
+
+# ---- partial cards and their background completion (plan 49 section 4.3) --
+
+
+_TARGET_ARGS = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+
+def _target():  # noqa: ANN202
+    from whygraph.mcp.targets import Target
+
+    return Target(**_TARGET_ARGS, qualified_name=None)
+
+
+def _row():  # noqa: ANN202
+    """The cache row of :func:`_target` under the test config, or ``None``."""
+    from whygraph.core import get_config
+    from whygraph.mcp.rationale_cache import lookup_exact
+
+    return lookup_exact(_target(), *get_config().cache_identity("rationale"))
+
+
+class _Describes:
+    """What :func:`_fake_describes` records, and how its describe behaves.
+
+    ``described`` lists each ``describe()`` call's SHA. ``unavailable``
+    makes the descriptor factory raise ``LlmError``; ``fail`` makes every
+    describe raise ``AnalyzeError``; a SHA in ``empty`` has an empty diff
+    (terminal). ``gate`` holds each describe until it is set;
+    ``on_describe`` runs inside each describe.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self.lock = threading.Lock()
+        self.described: list[str] = []
+        self.started = threading.Event()
+        self.gate: threading.Event | None = None
+        self.unavailable = False
+        self.fail = False
+        self.empty: set[str] = set()
+        self.on_describe = None
+
+
+def _fake_describes(monkeypatch: pytest.MonkeyPatch) -> _Describes:
+    """Stub the descriptor and ``backfill_commit_description`` (no git).
+
+    The fake recipe follows the real one: its own empty-diff check, then
+    ``descriptor.describe(...)`` (the backfill's guard), then the DB write
+    and the local row.
+    """
+    import whygraph.analyze as analyze_pkg
+    from whygraph.analyze import Description
+    from whygraph.services.llm import LlmError
+
+    fake = _Describes()
+
+    class _Descriptor:
+        @classmethod
+        def from_config(cls, _cfg: object) -> "_Descriptor":
+            if fake.unavailable:
+                raise LlmError("no provider configured")
+            return cls()
+
+        def describe(self, diff: str, *, subject: str | None = None) -> Description:
+            with fake.lock:
+                fake.described.append(str(subject))
+            fake.started.set()
+            if fake.gate is not None:
+                fake.gate.wait(30)
+            if fake.on_describe is not None:
+                fake.on_describe(str(subject))
+            if fake.fail:
+                raise AnalyzeError("provider down")
+            return Description(text=f"described {subject}", model="m", provider="fake")
+
+    def backfill_commit(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
+        if commit.llm_description is not None or commit.sha in fake.empty:
+            return False
+        text = descriptor.describe("diff", subject=commit.sha).text
+        with get_session() as session:
+            row = session.get(Commit, commit.sha)
+            if row is not None:
+                row.llm_description = text
+        commit.llm_description = text
+        return True
+
+    monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
+    monkeypatch.setattr(analyze_pkg, "backfill_commit_description", backfill_commit)
+    return fake
+
+
+def _counting_generator(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Patch the generator with :class:`_FakeGenerator`; return its call log."""
+    calls: list[int] = []
+
+    class _Counting(_FakeGenerator):
+        def generate(
+            self,
+            evidence: Sequence[CommitEvidence],
+            *,
+            symbol_context: SymbolContext | None = None,
+            subject: str | None = None,
+        ) -> Rationale:
+            calls.append(len(evidence))
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Counting)
+    return calls
+
+
+def _seed_undescribed(count: int) -> list[str]:
+    """``count`` undescribed commit rows; their SHAs, newest first."""
+    shas = [f"{n + 1:040x}" for n in range(count)]
+    with get_session() as session:
+        for n, sha in enumerate(shas):
+            session.add(
+                _db_commit(
+                    sha,
+                    committed_at=f"2026-01-{28 - n:02d}T00:00:00+00:00",
+                    llm_description=None,
+                )
+            )
+    return shas
+
+
+def _evidence(shas: list[str]) -> list[CommitEvidence]:
+    """Fresh detached evidence over the rows of ``shas``, in that order."""
+    with get_session() as session:
+        rows = [session.get(Commit, sha) for sha in shas]
+        session.expunge_all()
+    return [CommitEvidence(commit=row) for row in rows]
+
+
+def _card(shas: list[str], **kwargs: object) -> dict:
+    from whygraph.mcp.rationale import rationale_card
+
+    return rationale_card(_target(), _evidence(shas), mark_generated=True, **kwargs)
+
+
+def _partial_card(
+    monkeypatch: pytest.MonkeyPatch, fake: _Describes, shas: list[str]
+) -> None:
+    """Store a partial card for ``shas`` (no descriptor), then let describes work."""
+    from whygraph.mcp.evidence import drain_describes
+
+    fake.unavailable = True
+    card = _card(shas)
+    assert (card["partial"], card["describing"]) == (True, len(shas))
+    assert drain_describes(timeout=30)  # its completion could do nothing either
+    fake.unavailable = False
+    monkeypatch.setattr("whygraph.mcp.rationale.CARD_RETRY_COOLDOWN_SEC", 0)
+
+
+def test_a_cold_card_describes_every_commit_inside_the_wall(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 1: twelve fast describes, all done before the card."""
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(12)
+
+    card = _card(shas)
+
+    assert (card["partial"], card["describing"], card["completing"]) == (
+        False,
+        0,
+        False,
+    )
+    assert card["generated"] is True
+    assert sorted(fake.described) == sorted(shas)
+    assert calls == [12]
+    assert _row().deferred_shas == ""
+    with get_session() as session:
+        assert all(session.get(Commit, sha).llm_description for sha in shas)
+
+
+def test_a_partial_card_is_completed_in_the_background_once(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 2: stored partial, completed later, then served final."""
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(3)
+
+    _partial_card(monkeypatch, fake, shas)
+    assert _row().deferred_shas == " ".join(sorted(shas))
+    assert calls == [3]
+
+    hit = _card(shas)
+    assert (hit["partial"], hit["describing"], hit["completing"]) == (True, 3, True)
+    assert hit["generated"] is False
+    assert drain_describes(timeout=30)
+
+    assert sorted(fake.described) == sorted(shas)
+    assert len(calls) == 2  # regenerated once
+    final = _card(shas)
+    assert (final["partial"], final["describing"], final["completing"]) == (
+        False,
+        0,
+        False,
+    )
+    assert final["generated"] is False
+    assert len(calls) == 2
+
+
+def test_a_partial_hit_returns_at_once_and_a_second_hit_starts_nothing(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 3: a hit never waits for a describe, and is single-flight."""
+    import threading
+    import time
+
+    from whygraph.mcp import rationale
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    _partial_card(monkeypatch, fake, shas)
+    fake.gate = threading.Event()
+
+    try:
+        started = time.monotonic()
+        first = _card(shas)
+        assert time.monotonic() - started < 1.0
+        assert fake.started.wait(5)  # the completion is describing
+        second = _card(shas)
+        assert first["completing"] is True and second["completing"] is True
+        assert first["partial"] is True and second["partial"] is True
+        assert len(rationale._completions_running) == 1
+    finally:
+        fake.gate.set()
+    assert drain_describes(timeout=30)
+
+    assert sorted(fake.described) == sorted(shas)  # each described once
+    assert len(calls) == 2
+    assert _row().deferred_shas == ""
+
+
+@pytest.mark.parametrize("why", ["terminal", "failing"])
+def test_a_completion_that_gains_no_description_never_regenerates(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    why: str,
+) -> None:
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    _partial_card(monkeypatch, fake, shas)
+    if why == "terminal":
+        fake.empty = set(shas)
+    else:
+        fake.fail = True
+
+    assert _card(shas)["completing"] is True
+    assert drain_describes(timeout=30)
+
+    assert calls == [2]  # only the first card
+    # Terminal commits make the card final; failing ones keep it partial.
+    expected = "" if why == "terminal" else " ".join(sorted(shas))
+    assert _row().deferred_shas == expected
+
+
+def test_ten_hits_on_a_failing_describe_attempt_it_at_most_twice(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 3: the cooldown stops a card re-spending on every hit."""
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(1)
+    fake.fail = True
+
+    miss = _card(shas)  # one inline attempt, then the completion's
+    assert (miss["partial"], miss["completing"]) == (True, True)
+    assert drain_describes(timeout=30)
+    hits = [_card(shas) for _ in range(10)]
+    assert drain_describes(timeout=30)
+
+    assert all(hit["partial"] and not hit["completing"] for hit in hits)
+    assert len(fake.described) == 2
+    assert calls == [1]
+
+
+def test_a_miss_stores_the_commits_allow_refused(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    _counting_generator(monkeypatch)
+    # No completion: the stored row is the miss's own.
+    monkeypatch.setattr("whygraph.mcp.rationale.COMPLETIONS_MAX", 0)
+    shas = _seed_undescribed(12)
+    lock = threading.Lock()
+    refused: list[bool] = []
+
+    def allow() -> bool:
+        with lock:
+            if len(refused) < 3:
+                refused.append(True)
+                return False
+            return True
+
+    card = _card(shas, allow_description=allow)
+
+    waiting = sorted(set(shas) - set(fake.described))
+    assert len(waiting) == 3
+    assert (card["partial"], card["describing"], card["completing"]) == (
+        True,
+        3,
+        False,
+    )
+    assert _row().deferred_shas == " ".join(waiting)
+
+
+def test_a_slow_describe_returns_a_partial_card_at_the_wall(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 4, scaled: a 1 s wall instead of 20 s, a describe that hangs."""
+    import threading
+    import time
+
+    from whygraph.mcp import evidence as ev
+
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setitem(
+        ev.backfill_evidence_descriptions.__kwdefaults__, "wall_sec", 1.0
+    )
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    fake.gate = threading.Event()
+
+    try:
+        started = time.monotonic()
+        card = _card(shas)
+        elapsed = time.monotonic() - started
+    finally:
+        fake.gate.set()
+    assert elapsed < 4.0
+    assert (card["partial"], card["describing"], card["completing"]) == (
+        True,
+        2,
+        True,
+    )
+    assert ev.drain_describes(timeout=30)
+    # The late describes landed; the completion found them and regenerated.
+    assert _row().deferred_shas == ""
+    assert len(calls) == 2
+    assert sorted(fake.described) == sorted(shas)
+
+
+def test_a_cached_only_hit_on_a_partial_card_starts_nothing(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import rationale
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    _counting_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    _partial_card(monkeypatch, fake, shas)
+    fake.described.clear()
+
+    card = _card(shas, cached_only=True)
+
+    assert (card["partial"], card["describing"], card["completing"]) == (
+        True,
+        2,
+        False,
+    )
+    assert card["match"] == "exact"
+    assert rationale._completions_running == set()
+    assert fake.described == []
+
+
+def test_a_completion_stops_when_the_row_moved_before_generating(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.core import get_config
+    from whygraph.mcp.evidence import drain_describes
+    from whygraph.mcp.rationale_cache import store_cached
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    _partial_card(monkeypatch, fake, shas)
+    newer = Rationale(
+        purpose="refreshed meanwhile",
+        why="w",
+        constraints=(),
+        tradeoffs=(),
+        risks=(),
+        model="m",
+        provider="fake",
+    )
+
+    def refresh(_sha: str) -> None:
+        # A forced refresh lands while the completion describes.
+        store_cached(
+            _target(),
+            _evidence(shas),
+            newer,
+            *get_config().cache_identity("rationale"),
+        )
+
+    fake.on_describe = refresh
+    charged: list[bool] = []
+
+    assert _card(shas, before_generate=lambda: charged.append(True))["completing"]
+    assert drain_describes(timeout=30)
+
+    assert charged == []
+    assert calls == [2]
+    row = _row()
+    assert (row.rationale.purpose, row.deferred_shas) == ("refreshed meanwhile", "")
+
+
+def test_a_before_generate_refusal_leaves_the_card_partial(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    _partial_card(monkeypatch, fake, shas)
+    charged: list[bool] = []
+
+    def refuse() -> None:
+        charged.append(True)
+        raise RuntimeError("hourly card limit reached")
+
+    assert _card(shas, before_generate=refuse)["completing"] is True
+    assert drain_describes(timeout=30)
+
+    assert charged == [True]
+    assert calls == [2]
+    assert sorted(fake.described) == sorted(shas)
+    assert _row().deferred_shas == " ".join(sorted(shas))
+
+
+def test_completions_are_per_project_db(
+    temp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance 6: same path and range, own completion and cooldown per project."""
+    import threading
+
+    from whygraph.core.config import Config
+    from whygraph.core.context import ProjectContext, current_project, use_project
+    from whygraph.mcp import rationale
+    from whygraph.mcp.evidence import drain_describes
+
+    gate = threading.Event()
+    ran: list[str] = []
+
+    def complete(*args: object, **kwargs: object) -> None:
+        ran.append(current_project().slug)
+        gate.wait(10)
+
+    monkeypatch.setattr(rationale, "_complete_partial", complete)
+
+    def start(slug: str) -> bool:
+        ctx = ProjectContext(
+            slug=slug,
+            root=temp_git_repo,
+            config=Config(whygraph_db=tmp_path / slug / "whygraph.db"),
+        )
+        with use_project(ctx):
+            return rationale._start_completion(_target(), [], "fake", None, None, None)
+
+    try:
+        assert start("a") is True
+        assert start("b") is True  # not "already running": its own key
+        assert len(rationale._completions_running) == 2
+        assert start("c") is False  # COMPLETIONS_MAX are running
+        assert start("a") is True  # already running for a
+    finally:
+        gate.set()
+    assert drain_describes(timeout=30)
+
+    assert sorted(ran) == ["a", "b"]
+    assert start("a") is False and start("b") is False  # each in its cooldown
+    assert start("c") is True
+    assert drain_describes(timeout=30)
+
+
+def test_stopping_a_project_mid_completion_recreates_nothing(
+    temp_git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance 6: a removed project's completion writes nothing after the stop."""
+    import shutil
+    import threading
+
+    from whygraph.core.config import Config
+    from whygraph.core.context import ProjectContext, use_project
+    from whygraph.db.bootstrap import ensure_initialized
+    from whygraph.db.engine import dispose_engine
+    from whygraph.mcp.evidence import drain_describes, stop_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    calls = _counting_generator(monkeypatch)
+    history = tmp_path / "history"
+    db_path = history / "whygraph.db"
+    ctx = ProjectContext(
+        slug="gone", root=temp_git_repo, config=Config(whygraph_db=db_path)
+    )
+    with use_project(ctx):
+        ensure_initialized()
+        shas = _seed_undescribed(2)
+        _partial_card(monkeypatch, fake, shas)
+        fake.gate = threading.Event()
+        assert _card(shas)["completing"] is True
+    try:
+        assert fake.started.wait(5)  # the completion is describing
+        stop_describes(db_path)
+        dispose_engine(db_path)
+        shutil.rmtree(history)
+    finally:
+        fake.gate.set()
+    assert drain_describes(timeout=30)
+
+    assert not history.exists()
+    assert calls == [2]

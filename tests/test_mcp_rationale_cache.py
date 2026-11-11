@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,14 @@ from whygraph.analyze import CommitEvidence, Rationale
 from whygraph.db import get_session
 from whygraph.db.models import Commit, RationaleCache
 from whygraph.mcp.rationale import whygraph_rationale_brief
-from whygraph.mcp.rationale_cache import _fingerprint, lookup_cached, lookup_overlapping
+from whygraph.mcp.rationale_cache import (
+    _fingerprint,
+    lookup_cached,
+    lookup_exact,
+    lookup_overlapping,
+    store_cached,
+    update_deferred,
+)
 from whygraph.mcp.targets import Target
 from whygraph.services.codegraph import SymbolContext
 from whygraph.services.git import Repository
@@ -318,3 +326,89 @@ def test_cache_key_follows_config_v2_model_resolution(
     _use({})  # back to unpinned: the original row is still there
     _brief()
     assert _CountingGenerator.calls == 3
+
+
+def _stored_card(
+    whygraph_db_initialized: Path, *, deferred_shas: str = ""
+) -> tuple[Target, list[CommitEvidence], Rationale]:
+    """Store one card for a fixed target and return what the caches key on."""
+    del whygraph_db_initialized
+    target = Target(path="a.py", line_start=1, line_end=3, qualified_name="a.f")
+    evidence = [CommitEvidence(commit=_db_commit("aaa", committed_at="t1"))]
+    rationale = Rationale(
+        purpose="p",
+        why="w",
+        constraints=("c",),
+        tradeoffs=(),
+        risks=(),
+        model="m",
+        provider="fake",
+    )
+    store_cached(target, evidence, rationale, "fake", None, deferred_shas=deferred_shas)
+    return target, evidence, rationale
+
+
+def test_lookups_round_trip_deferred_shas(whygraph_db_initialized: Path) -> None:
+    """``lookup_cached`` and ``lookup_exact`` both return the row's ``deferred_shas``."""
+    target, evidence, _ = _stored_card(whygraph_db_initialized, deferred_shas="aaa bbb")
+    hit = lookup_cached(target, evidence, "fake", None)
+    assert hit is not None and hit.deferred_shas == "aaa bbb"
+    assert hit.rationale.purpose == "p"
+    exact = lookup_exact(target, "fake", None)
+    assert exact is not None and exact.deferred_shas == "aaa bbb"
+
+
+def test_update_deferred_sets_the_list_when_the_row_is_unchanged(
+    whygraph_db_initialized: Path,
+) -> None:
+    target, evidence, _ = _stored_card(whygraph_db_initialized, deferred_shas="aaa bbb")
+    seen = lookup_cached(target, evidence, "fake", None)
+    assert seen is not None
+    assert update_deferred(target, "fake", None, seen=seen, deferred_shas="bbb")
+    after = lookup_cached(target, evidence, "fake", None)
+    assert after is not None and after.deferred_shas == "bbb"
+    assert after.cached_at == seen.cached_at
+
+
+def test_update_deferred_after_a_final_store_in_the_same_second_leaves_it_final(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same ``cached_at`` and fingerprint: only ``deferred_shas`` tells them apart."""
+    monkeypatch.setattr(
+        "whygraph.mcp.rationale_cache._now_iso", lambda: "2026-01-01T00:00:00+00:00"
+    )
+    target, evidence, rationale = _stored_card(
+        whygraph_db_initialized, deferred_shas="aaa"
+    )
+    seen = lookup_cached(target, evidence, "fake", None)
+    assert seen is not None and seen.deferred_shas == "aaa"
+    store_cached(target, evidence, rationale, "fake", None)  # final, same second
+    assert not update_deferred(target, "fake", None, seen=seen, deferred_shas="bbb")
+    after = lookup_cached(target, evidence, "fake", None)
+    assert after is not None and after.deferred_shas == ""
+
+
+def test_store_cached_only_if_writes_only_when_the_row_is_unchanged(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "whygraph.mcp.rationale_cache._now_iso", lambda: "2026-01-01T00:00:00+00:00"
+    )
+    target, evidence, rationale = _stored_card(
+        whygraph_db_initialized, deferred_shas="aaa"
+    )
+    seen = lookup_cached(target, evidence, "fake", None)
+    assert seen is not None
+    # a final store lands in the same second, then a stale completion tries to write
+    store_cached(target, evidence, rationale, "fake", None)
+    newer = replace(rationale, purpose="completed")
+    assert store_cached(target, evidence, newer, "fake", None, only_if=seen) is None
+    after = lookup_cached(target, evidence, "fake", None)
+    assert after is not None and after.rationale.purpose == "p"
+    assert after.deferred_shas == ""
+    # against the row as it now is, the write goes through
+    assert (
+        store_cached(target, evidence, newer, "fake", None, only_if=after) is not None
+    )
+    final = lookup_cached(target, evidence, "fake", None)
+    assert final is not None and final.rationale.purpose == "completed"

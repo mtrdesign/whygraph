@@ -83,7 +83,7 @@ serve_codegraph = true        # serve CodeGraph's tools to agents at /mcp/<slug>
 [analyze]
 # provider = "anthropic"      # which [llm.*] adapter writes per-commit descriptions
 # model = "claude-haiku-4-5"  # override the model for analysis only
-max_workers = 2               # parallel LLM calls in the diff-analyzer crawler
+max_workers = 4               # parallel LLM calls in the diff-analyzer crawler; also bounds a card's inline describes
 # max_diff_chars = 50000      # diff truncated past this length before prompting
 # large_commit_file_count = 30  # commits (merges: vs their first parent) touching more files are described per-file on demand
 # pr_origin_min_commits = 5   # recover a squash-merged PR's original commits past this size

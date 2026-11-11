@@ -258,12 +258,19 @@ card's own range. A call without `cached_only` never returns these keys, and tre
 overlapping card as a miss.
 
 !!! note "Calls the LLM on a cache miss"
-    On a miss, this hits the configured provider and may take several seconds. A hit is sub-second.
-    Generation needs a credential - see [Configuration](configuration.md).
+    A hit is sub-second, a partial card included. On a miss, the call first describes the commits that
+    have no description yet (up to `[analyze].max_workers` of them in parallel, within 20 seconds), then
+    generates the card. A card built while some commits were still undescribed comes back with
+    `partial: true`, `describing` (how many commits were still waiting) and `completing` (whether the
+    rest is being described in the background). The completion runs at most once per card, with a
+    10-minute cooldown, and is charged as a second card generation. `whygraph_evidence_for` and
+    `whygraph_area_history` keep their 5-commit / 20-second bound and start no background work; their
+    `describing` counts every commit still waiting. Generation needs a credential - see
+    [Configuration](configuration.md).
 
 **Progress.** When the client sends a progress token, the call reports three steps: "evidence
 collected (n commits)", then on a cache miss "describing k commits" (only when some commit needs a
-description; the same 5-commit / 20-second bound applies) and "generating card". It also logs the
+description; the call describes up to `[analyze].max_workers` commits in parallel within 20 seconds, and the 5-commit bound stays on `whygraph_evidence_for` and `whygraph_area_history`, where it counts LLM calls) and "generating card". It also logs the
 cache hit or miss as an MCP log message.
 
 ## Resources

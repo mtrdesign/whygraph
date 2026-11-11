@@ -582,6 +582,7 @@ class RationaleRecord(BaseModel):
     actual_provider: str | None = None
     actual_model: str | None = None
     qualified_name: str | None = None
+    deferred_shas: str = ""
 
 
 class CommitDescriptionRecord(BaseModel):

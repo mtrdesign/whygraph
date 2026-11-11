@@ -190,6 +190,7 @@ def _seed(session: Any) -> None:
             tradeoffs='["t"]',
             risks="[]",
             import_id=7,
+            deferred_shas="abc1234 def5678",
         )
     )
     session.commit()
@@ -246,6 +247,7 @@ def test_descriptions_skip_stubs_and_rationale_drops_import_id(
     assert [(f.commit_sha, f.path) for f in files] == [(SHA, "a.py")]
     cards = recs(bundle, tb.RATIONALE)
     assert len(cards) == 1 and cards[0].model == "default"
+    assert cards[0].deferred_shas == "abc1234 def5678"
     assert "import_id" not in tb.RationaleRecord.model_fields
 
 

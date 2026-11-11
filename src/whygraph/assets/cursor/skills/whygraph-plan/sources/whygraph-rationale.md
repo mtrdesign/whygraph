@@ -17,4 +17,6 @@ consent: false
 4. Treat thinly evidenced cards (only a commit or two behind them) as hints, not directives - note explicitly when you cite them.
 5. If a working-set node has `purpose: (no rationale recorded)`, do **not** invent constraints for it. Note "no rationale recorded" and move on.
 
+A card with `partial: true` was built while some commits had no description yet: treat it as usable but thinner, and say so when you cite it.
+
 For a symbol outside the working set, call `whygraph_rationale_brief` with `cached_only=True`. If a call errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; use `whygraph_evidence_for` and say so under Limitations.

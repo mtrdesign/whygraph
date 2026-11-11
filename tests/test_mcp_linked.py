@@ -552,8 +552,12 @@ def test_mcp_linked_offline_fallback(
     }
     assert set(sources(payload).values()) == {"local"}
 
+    # A card that times out is a slow platform, not an outage (plan 49, I4).
+    with use_project(linked), pytest.raises(WhyGraphError) as slow:
+        whygraph_rationale_brief(path="a.py", line_start=1, line_end=6)
+    assert "still working" in str(slow.value)
+
     for call in (
-        lambda: whygraph_rationale_brief(path="a.py", line_start=1, line_end=6),
         lambda: whygraph_area_history("a.py"),
         lambda: _repo_overview_resource(),
         lambda: _pr_resource(7),

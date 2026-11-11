@@ -774,8 +774,8 @@ def test_rationale_cache_hit_never_generates(
     monkeypatch.setattr(
         chat_tools,
         "lookup_cached",
-        lambda *a, **k: (
-            Rationale(
+        lambda *a, **k: SimpleNamespace(
+            rationale=Rationale(
                 purpose="cached purpose",
                 why="w",
                 constraints=(),
@@ -784,7 +784,8 @@ def test_rationale_cache_hit_never_generates(
                 model="m",
                 provider="anthropic",
             ),
-            "2026-07-29T00:00:00+00:00",
+            cached_at="2026-07-29T00:00:00+00:00",
+            deferred_shas="",
         ),
     )
 
@@ -798,6 +799,67 @@ def test_rationale_cache_hit_never_generates(
     assert result["status"] == "cached"
     assert result["generated"] is False
     assert result["purpose"] == "cached purpose"
+    assert registry.generations_used == 0
+
+
+def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:
+    from whygraph.analyze import Rationale
+
+    monkeypatch.setattr(
+        chat_tools, "collect_evidence", lambda target, limit=20: [_fake_evidence_item()]
+    )
+    monkeypatch.setattr(
+        chat_tools,
+        "lookup_cached",
+        lambda *a, **k: SimpleNamespace(
+            rationale=Rationale(
+                purpose="partial purpose",
+                why="w",
+                constraints=(),
+                tradeoffs=(),
+                risks=(),
+                model="m",
+                provider="anthropic",
+            ),
+            cached_at="2026-07-29T00:00:00+00:00",
+            deferred_shas="a" * 40 + " " + "b" * 40,
+        ),
+    )
+    monkeypatch.setattr(chat_tools, "whygraph_rationale_brief", spy)
+
+
+@pytest.mark.parametrize(("completing", "used"), [(True, 1), (False, 0)])
+def test_rationale_partial_hit_counts_only_a_started_completion(
+    chat_repo: Path, monkeypatch: pytest.MonkeyPatch, completing: bool, used: int
+) -> None:
+    _partial_hit(
+        monkeypatch,
+        lambda **kw: {"purpose": "p", "partial": True, "completing": completing},
+    )
+    registry = ToolRegistry(max_rationale_generations=2)
+    result = _result(registry, "get_rationale", qualified_name="pkg.a.run_turn")
+    assert result["status"] == "cached"
+    assert result["generated"] is False
+    assert result["completing"] is completing
+    assert registry.generations_used == used
+
+
+def test_rationale_partial_hit_without_budget_starts_nothing(
+    chat_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _spy(**kwargs):  # pragma: no cover -- must never run
+        raise AssertionError("a completion was started without budget")
+
+    _partial_hit(monkeypatch, _spy)
+    registry = ToolRegistry(max_rationale_generations=0)
+    result = _result(registry, "get_rationale", qualified_name="pkg.a.run_turn")
+    assert result["status"] == "cached"
+    assert result["purpose"] == "partial purpose"
+    assert (result["partial"], result["describing"], result["completing"]) == (
+        True,
+        2,
+        False,
+    )
     assert registry.generations_used == 0
 
 
@@ -2850,7 +2912,11 @@ def test_get_rationale_carries_notes_on_every_return(
     monkeypatch.setattr(
         chat_tools,
         "lookup_cached",
-        lambda *a, **k: (SimpleNamespace(), "2026-01-01T00:00:00+00:00"),
+        lambda *a, **k: SimpleNamespace(
+            rationale=SimpleNamespace(),
+            cached_at="2026-01-01T00:00:00+00:00",
+            deferred_shas="",
+        ),
     )
     monkeypatch.setattr(
         chat_tools, "_format_response", lambda *a, **k: {"purpose": "cached"}

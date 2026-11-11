@@ -12,9 +12,12 @@ itself serializes the bundle to JSON.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -74,6 +77,19 @@ the commits it leaves are counted in the result's ``describing``.
 
 MAX_BACKFILL_PER_CALL = 5
 """Commits one call may describe with an LLM, newest first (plan section 5.4)."""
+
+_DESCRIBE_SLOTS = threading.BoundedSemaphore(8)
+"""Process-wide cap on ``describe()`` calls running at once (plan 49 section 4.1)."""
+
+_WAIT_TICK_SEC = 1.0
+"""How often a wait for a claim or a slot wakes up to see a stop or the wall."""
+
+_claims: set[tuple[Path, str, str | None]] = set()
+_claims_cond = threading.Condition()
+_stop_lock = threading.Lock()
+_stop_events: dict[Path, threading.Event] = {}
+_threads_lock = threading.Lock()
+_threads: set[threading.Thread] = set()
 
 Detail = Literal["compact", "full"]
 """How much of each evidence item an MCP tool returns (plan section 5.4, U8)."""
@@ -703,15 +719,370 @@ def _first_parent_of(sha: str) -> str | None:
     return parents[0] if parents else None
 
 
+@dataclass(frozen=True, slots=True)
+class DescribeOutcome:
+    """What one :func:`backfill_evidence_descriptions` call did (plan 49 section 4.1).
+
+    Attributes
+    ----------
+    described : int
+        Descriptions written or applied by this call: new LLM descriptions,
+        stored text another caller wrote meanwhile, and cached per-file
+        descriptions of bulk commits.
+    terminal : frozenset[str]
+        SHAs that can never get a description: an empty diff, a bulk commit
+        that did not touch the target path, a commit whose objects cannot
+        be diffed. They cost no LLM call and never count as waiting.
+    waiting : frozenset[str]
+        SHAs still undescribed for any other reason: the bound, the wall,
+        a refusal (budget, claim, slot, ``allow()``), a gate that stopped
+        the call, or a failed describe.
+    """
+
+    described: int
+    terminal: frozenset[str]
+    waiting: frozenset[str]
+
+    @property
+    def left(self) -> int:
+        """How many commits are still waiting: an MCP result's ``describing``."""
+        return len(self.waiting)
+
+
+class _DescribeRefused(Exception):
+    """The guard refused an LLM call; the commit is always classified waiting."""
+
+
+class _AlreadyDescribed(Exception):
+    """The stored text appeared meanwhile; ``text`` is copied onto the local row."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__("already described")
+        self.text = text
+
+
+def _db_key() -> Path:
+    """The bound project's WhyGraph DB path, resolved (``db/engine.py``'s key)."""
+    from whygraph.core import get_config
+
+    db = get_config().whygraph_db
+    return Path(db).resolve() if db is not None else Path()
+
+
+def _stop_event(db_key: Path) -> threading.Event:
+    """The stop event of one project DB, created on first use."""
+    with _stop_lock:
+        event = _stop_events.get(db_key)
+        if event is None:
+            event = _stop_events[db_key] = threading.Event()
+        return event
+
+
+def stop_describes(db_path: Path) -> None:
+    """Stop every describe running for one project DB.
+
+    Sets that DB's stop event and forgets it, so a later call (a re-added
+    project) gets a fresh one. A worker sees the event before it pulls the
+    next commit, and a describe that returns after it is not written.
+
+    Parameters
+    ----------
+    db_path : Path
+        The project's WhyGraph DB file (resolved before lookup).
+    """
+    with _stop_lock:
+        event = _stop_events.pop(Path(db_path).resolve(), None)
+    if event is not None:
+        event.set()
+
+
+def stop_all_describes() -> None:
+    """Stop every describe of every project (the portal's shutdown)."""
+    with _stop_lock:
+        events = list(_stop_events.values())
+        _stop_events.clear()
+    for event in events:
+        event.set()
+
+
+def _spawn(fn: Callable[[], None]) -> threading.Thread:
+    """Start ``fn`` on a tracked daemon thread under a copy of this context."""
+    ctx = contextvars.copy_context()
+
+    def run() -> None:
+        try:
+            ctx.run(fn)
+        finally:
+            with _threads_lock:
+                _threads.discard(thread)
+
+    thread = threading.Thread(target=run, name="whygraph-describe", daemon=True)
+    with _threads_lock:
+        _threads.add(thread)
+    thread.start()
+    return thread
+
+
+def drain_describes(timeout: float | None = None) -> bool:
+    """Join every tracked describe thread, then clear the claims.
+
+    The test seam: a background thread must not outlive the DB it writes.
+
+    Parameters
+    ----------
+    timeout : float, optional
+        Seconds to wait in all. ``None`` (default) waits for every thread.
+
+    Returns
+    -------
+    bool
+        Whether every tracked thread finished.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        with _threads_lock:
+            threads = list(_threads)
+        if not threads:
+            break
+        for thread in threads:
+            thread.join(
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+    with _claims_cond:
+        _claims.clear()
+        _claims_cond.notify_all()
+    with _threads_lock:
+        return not _threads
+
+
+class _Run:
+    """The shared state of one backfill call: queue, bound, wall and results."""
+
+    def __init__(
+        self,
+        pending: list[tuple[Commit, bool]],
+        *,
+        target_path: str,
+        allow: Callable[[], bool] | None,
+        max_commits: int,
+        deadline: float | None,
+        stop: threading.Event,
+        db_key: Path,
+    ) -> None:
+        self.lock = threading.Lock()
+        self.queue = deque(pending)
+        self.target_path = target_path
+        self.allow = allow
+        self.max_commits = max_commits
+        self.deadline = deadline
+        self.stop = stop
+        self.db_key = db_key
+        self.started = 0
+        self.auth_failed = False
+        self.described: set[str] = set()
+        self.terminal: set[str] = set()
+
+    def wait_sec(self) -> float:
+        """One tick of a wait, or :class:`_DescribeRefused` once stopped or walled."""
+        if self.stop.is_set():
+            raise _DescribeRefused("stopped")
+        if self.deadline is None:
+            return _WAIT_TICK_SEC
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise _DescribeRefused("wall")
+        return min(_WAIT_TICK_SEC, left)
+
+    def next(self) -> tuple[Commit, bool] | None:
+        """The next commit to work on, or ``None`` once the call must stop pulling."""
+        with self.lock:
+            if (
+                not self.queue
+                or self.started >= self.max_commits
+                or self.auth_failed
+                or self.stop.is_set()
+                or (self.deadline is not None and time.monotonic() >= self.deadline)
+            ):
+                return None
+            return self.queue.popleft()
+
+    def record(self, sha: str, kind: str) -> None:
+        """Record one commit's class (``waiting`` needs nothing recorded)."""
+        with self.lock:
+            if kind == "described":
+                self.described.add(sha)
+            elif kind == "terminal":
+                self.terminal.add(sha)
+
+    def outcome(self, everything: frozenset[str], applied: int) -> DescribeOutcome:
+        """A snapshot: whatever has not finished by now counts as waiting."""
+        with self.lock:
+            described = frozenset(self.described)
+            terminal = frozenset(self.terminal)
+        return DescribeOutcome(
+            described=applied + len(described),
+            terminal=terminal,
+            waiting=everything - described - terminal,
+        )
+
+
+class _GuardedDescriptor:
+    """The descriptor a worker hands to ``backfill_*``: every LLM call passes here.
+
+    ``backfill_*`` call :meth:`describe` only after their own empty-diff
+    check, so a terminal commit never reaches the guard. The worker calls
+    :meth:`release` after ``backfill_*`` returned, so the claim covers the
+    DB write.
+    """
+
+    def __init__(self, run: _Run, inner: Any, sha: str, path: str | None) -> None:
+        self._run = run
+        self._inner = inner
+        self._sha = sha
+        self._path = path
+        self._claim: tuple[Path, str, str | None] | None = None
+        self._slot: threading.BoundedSemaphore | None = None
+
+    def describe(self, diff: str, *, subject: str | None = None) -> Any:
+        """Guard, then describe; raises :class:`_DescribeRefused` or :class:`_AlreadyDescribed`."""
+        run = self._run
+        with run.lock:
+            if run.started >= run.max_commits:
+                raise _DescribeRefused("bound")
+        if usage_blocked() is not None:
+            raise _DescribeRefused("budget")
+        self._take_claim()
+        text = self._stored_text()
+        if text is not None:
+            raise _AlreadyDescribed(text)
+        self._take_slot()
+        with run.lock:
+            if run.started >= run.max_commits:
+                raise _DescribeRefused("bound")
+            if run.allow is not None and not run.allow():
+                raise _DescribeRefused("allow")
+            run.started += 1
+        description = self._inner.describe(diff, subject=subject)
+        if run.stop.is_set():
+            raise _DescribeRefused("stopped")
+        return description
+
+    def _take_claim(self) -> None:
+        key = (self._run.db_key, self._sha, self._path)
+        with _claims_cond:
+            while key in _claims:
+                _claims_cond.wait(self._run.wait_sec())
+            _claims.add(key)
+            self._claim = key
+
+    def _take_slot(self) -> None:
+        slots = _DESCRIBE_SLOTS
+        while not slots.acquire(timeout=self._run.wait_sec()):
+            pass
+        self._slot = slots
+
+    def _stored_text(self) -> str | None:
+        """The text stored meanwhile: the commit's, or a bulk commit's per-file one."""
+        if self._path is not None:
+            return _cached_file_description(self._sha, self._path)
+        with get_session() as session:
+            row = session.get(Commit, self._sha)
+            return None if row is None else row.llm_description
+
+    def release(self) -> None:
+        """Release the slot and the claim, if taken."""
+        if self._slot is not None:
+            self._slot.release()
+            self._slot = None
+        if self._claim is not None:
+            with _claims_cond:
+                _claims.discard(self._claim)
+                _claims_cond.notify_all()
+            self._claim = None
+
+
+def _describe_worker(run: _Run, inner: Any, repository: Repository) -> None:
+    """One worker: pull commits newest first until the call must stop."""
+    from whygraph.analyze import backfill_commit_description, backfill_file_description
+
+    while (entry := run.next()) is not None:
+        commit, bulk = entry
+        guard = _GuardedDescriptor(
+            run, inner, commit.sha, run.target_path if bulk else None
+        )
+        try:
+            kind = _describe_one(
+                run,
+                commit,
+                bulk,
+                guard,
+                repository,
+                backfill_commit_description,
+                backfill_file_description,
+            )
+        finally:
+            guard.release()
+        run.record(commit.sha, kind)
+
+
+def _describe_one(
+    run: _Run,
+    commit: Commit,
+    bulk: bool,
+    guard: _GuardedDescriptor,
+    repository: Repository,
+    describe_commit: Callable[..., bool],
+    describe_file: Callable[..., str | None],
+) -> str:
+    """Describe one commit; its class: ``described``, ``terminal`` or ``waiting``."""
+    from whygraph.scan.analyze_crawler import _auth_failure
+
+    try:
+        if not bulk:
+            done = describe_commit(commit, repository=repository, descriptor=guard)
+            return "described" if done else "terminal"
+        text = describe_file(
+            commit, run.target_path, repository=repository, descriptor=guard
+        )
+    except _AlreadyDescribed as exc:
+        # In-memory override for this request (bulk: the per-file text).
+        commit.llm_description = exc.text
+        return "described"
+    except _DescribeRefused:
+        return "waiting"
+    except GitError as exc:
+        _log.info("lazy description skipped for %s: %s", commit.sha[:12], exc)
+        return "terminal"
+    except Exception as exc:  # noqa: BLE001 - one bad commit must not poison the call
+        if _auth_failure(exc) is not None:
+            # Rejected credentials fail every call the same way: stop pulling.
+            with run.lock:
+                run.auth_failed = True
+        _log.warning(
+            "lazy LLM description backfill failed for %s: %s", commit.sha[:12], exc
+        )
+        return "waiting"
+    if text is None:
+        # The bulk commit did not touch the target path: the stub stays.
+        return "terminal"
+    # In-memory override for this request: the serializer and the rationale
+    # prompt read commit.llm_description; the DB row keeps its bulk stub.
+    commit.llm_description = text
+    return "described"
+
+
 def backfill_evidence_descriptions(
     items: list[CommitEvidence],
     *,
     target_path: str,
     allow: Callable[[], bool] | None = None,
     max_commits: int = MAX_BACKFILL_PER_CALL,
-    wall_sec: float = BACKFILL_WALL_SEC,
+    wall_sec: float | None = BACKFILL_WALL_SEC,
+    workers: int | None = None,
     on_start: Callable[[int], None] | None = None,
-) -> int:
+) -> DescribeOutcome:
     """Lazily backfill ``llm_description`` for the commits in ``items``, bounded.
 
     The MCP tools that consume the evidence call this once they're sure
@@ -725,7 +1096,7 @@ def backfill_evidence_descriptions(
     (``analyze.large_commit_file_count``):
 
     * **Normal commits** — described whole-diff via
-      :func:`~whygraph.analyze.backfill_all` when their
+      :func:`~whygraph.analyze.backfill_commit_description` when their
       ``llm_description`` is still ``NULL``.
     * **Bulk commits** (imports / squash merges) — never described
       whole-diff. Instead the slice for ``target_path`` is described via
@@ -738,10 +1109,18 @@ def backfill_evidence_descriptions(
       left in place. An already cached per-file description is applied
       without an LLM call and does not count against the bound.
 
-    The commits that need an LLM call are described in ``items`` order
-    (newest first), at most ``max_commits`` of them and none started after
-    ``wall_sec`` seconds; the rest are left for a later call and counted
-    in the return value.
+    The commits are described by up to ``workers`` daemon threads pulling
+    from one newest-first queue, each under its own copy of the caller's
+    context. At most ``max_commits`` LLM calls start and none after
+    ``wall_sec`` seconds; the caller waits for the workers until the wall
+    and counts whatever has not finished as waiting. A describe already
+    running finishes on its thread and is persisted and metered.
+
+    Every LLM call passes a guard: the bound, the hard-stopped budget
+    (:func:`~whygraph.core.usage.usage_blocked`), a claim per
+    ``(db, sha, path)`` so two callers never describe the same commit
+    twice, a re-read of the stored text, a process-wide cap of 8 running
+    describes, and ``allow()`` last. A refusal leaves the commit waiting.
 
     Silently degrades when the configured analyze provider is unavailable —
     the commit keeps whatever ``llm_description`` it already had (a stub for
@@ -758,45 +1137,46 @@ def backfill_evidence_descriptions(
         evidence this is the file the queried lines live in.
     allow : callable, optional
         A budget (the platform's org limit for agent requests): called
-        once per commit just before its LLM call, and that commit is
-        skipped when it returns ``False``. ``None`` (default) describes
-        everything the bound lets through.
+        once per commit just before its LLM call, after every other check,
+        and that commit stays waiting when it returns ``False``. ``None``
+        (default) describes everything the bound lets through.
     max_commits : int, optional
-        How many commits this call may describe with an LLM. Default
+        How many LLM calls this call may start. Default
         :data:`MAX_BACKFILL_PER_CALL`; ``0`` describes none and only
         counts them (a tool's ``describe=False``).
-    wall_sec : float, optional
+    wall_sec : float or None, optional
         No description starts once this many seconds have passed since
-        the first one. Default :data:`BACKFILL_WALL_SEC`. A description
-        already running finishes (its own bound is the provider timeout).
+        the call started describing, and the caller returns then. Default
+        :data:`BACKFILL_WALL_SEC`; ``None`` means no wall (a background
+        completion only).
+    workers : int, optional
+        How many describes run at once. ``None`` (default) uses
+        ``analyze.max_workers``.
     on_start : callable, optional
-        Called once with the number of commits this call is about to
-        describe, before the first LLM call, only when that number is
-        positive (the rationale tool's progress step).
+        Called once, on the calling thread, with the number of commits
+        this call is about to describe, before any worker starts, only
+        when that number is positive (the rationale tool's progress step).
 
     Returns
     -------
-    int
-        The commits that still need a description because the bound
-        stopped this call: what an MCP result reports as ``describing``.
-        ``0`` when nothing was left, when the caller may not cause LLM
-        spend, or when no provider is configured.
+    DescribeOutcome
+        What was described, what can never be, and what is still waiting:
+        ``outcome.left`` is what an MCP result reports as ``describing``.
 
     Notes
     -----
-    Does nothing when the bound project context has ``llm_allowed`` false
-    (a project viewer's portal request, M2f-1 plan section 4.6): a viewer
-    never causes LLM spend, so commits keep whatever description they have.
-    Stops before the next describe once the bound usage sink reports an
+    Describes nothing when the bound project context has ``llm_allowed``
+    false (a project viewer's portal request, M2f-1 plan section 4.6): a
+    viewer never causes LLM spend, so every pending commit is waiting.
+    A describe stops at the guard once the bound usage sink reports an
     exhausted hard-stopped budget (M2f-2 plan section 4.7).
     """
-    ctx = current_project()
-    if ctx is not None and not ctx.llm_allowed:
-        return 0
     from whygraph.core import get_config
 
-    threshold = get_config().analyze.large_commit_file_count
+    config = get_config()
+    threshold = config.analyze.large_commit_file_count
     pending: list[tuple[Commit, bool]] = []
+    applied = 0
     for item in items:
         commit = item.commit
         if commit.files_changed > threshold:
@@ -804,67 +1184,57 @@ def backfill_evidence_descriptions(
             if cached is not None:
                 # In-memory override for this request (see the docstring).
                 commit.llm_description = cached
+                applied += 1
             else:
                 pending.append((commit, True))
         elif commit.llm_description is None:
             pending.append((commit, False))
+    everything = frozenset(commit.sha for commit, _bulk in pending)
+    unstarted = DescribeOutcome(
+        described=applied, terminal=frozenset(), waiting=everything
+    )
     if not pending:
-        return 0
-    if max_commits <= 0:
-        return len(pending)
+        return unstarted
+    ctx = current_project()
+    if max_commits <= 0 or (ctx is not None and not ctx.llm_allowed):
+        return unstarted
     # Lazy imports mirror the pattern in `whygraph.scan.child`
     # and keep the module's import-time surface free of analyze/LLM deps.
-    from whygraph.analyze import (
-        LlmDescriptor,
-        backfill_all,
-        backfill_file_description,
-    )
+    from whygraph.analyze import LlmDescriptor
     from whygraph.services.llm import LlmError
 
     try:
-        descriptor = LlmDescriptor.from_config(get_config())
+        descriptor = LlmDescriptor.from_config(config)
     except LlmError as exc:
         _log.debug("skipping lazy LLM description backfill: %s", exc)
-        return 0
+        return unstarted
 
     repository = Repository(repo_root())
     if on_start is not None:
         on_start(min(len(pending), max_commits))
-    deadline = time.monotonic() + wall_sec
-    spent = 0
-    for index, (commit, bulk) in enumerate(pending):
-        if spent >= max_commits or time.monotonic() >= deadline:
-            left = len(pending) - index
-            _log.info("lazy LLM description backfill bounded: %d left", left)
-            return left
-        if usage_blocked() is not None:
-            # An exhausted hard-stopped budget (M2f-2 plan section 4.7):
-            # stop before the next describe; backfill_all checks the same.
-            break
-        if allow is not None and not allow():
-            continue
-        spent += 1
-        if not bulk:
-            backfill_all([commit], repository=repository, descriptor=descriptor)
-            continue
-        try:
-            text = backfill_file_description(
-                commit, target_path, repository=repository, descriptor=descriptor
-            )
-        except Exception as exc:  # noqa: BLE001 — one bad file must not poison the batch
-            _log.warning(
-                "lazy per-file description backfill failed for %s @ %s: %s",
-                commit.sha[:12],
-                target_path,
-                exc,
-            )
-            continue
-        if text is not None:
-            # In-memory override for this request: the serializer and the
-            # rationale prompt read commit.llm_description; the DB row
-            # keeps its bulk-commit stub.
-            commit.llm_description = text
-    return 0
+    db_key = _db_key()
+    run = _Run(
+        pending,
+        target_path=target_path,
+        allow=allow,
+        max_commits=max_commits,
+        deadline=None if wall_sec is None else time.monotonic() + wall_sec,
+        stop=_stop_event(db_key),
+        db_key=db_key,
+    )
+    size = min(len(pending), max_commits, workers or config.analyze.max_workers)
+    threads = [
+        _spawn(lambda: _describe_worker(run, descriptor, repository))
+        for _ in range(max(1, size))
+    ]
+    for thread in threads:
+        thread.join(
+            None if run.deadline is None else max(0.0, run.deadline - time.monotonic())
+        )
+    outcome = run.outcome(everything, applied)
+    if outcome.waiting:
+        _log.info("lazy LLM description backfill bounded: %d left", outcome.left)
+    return outcome
 
 
 def _cached_file_description(sha: str, path: str) -> str | None:
@@ -1563,8 +1933,8 @@ def evidence_payload(
     dict
         ``{"target", "evidence", "describing"}``: items in the
         :func:`_evidence_dict` shape plus ``lines``; ``describing`` counts
-        the commits left undescribed by the bound (or by
-        ``describe=False``). A project linked to a WhyGraph platform is
+        the commits still waiting for a description (the bound, a refusal,
+        a failure, or ``describe=False``), never one that cannot get one. A project linked to a WhyGraph platform is
         answered by :func:`linked_evidence`, which adds a ``platform``
         block.
 
@@ -1598,7 +1968,7 @@ def evidence_payload(
         evidence,
         target_path=target.path,
         max_commits=MAX_BACKFILL_PER_CALL if describe else 0,
-    )
+    ).left
     return {
         "target": target_dict(target),
         "evidence": [

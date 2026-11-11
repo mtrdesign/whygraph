@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from whygraph.db.engine import dispose_engine
+from whygraph.mcp.evidence import stop_describes
 
 from .paths import check_project_paths
 
@@ -170,6 +171,7 @@ def discard_clone(
     migrations : ProjectMigrations
         The portal's migration memo (the DB's entry is dropped).
     """
+    stop_describes(db_path)
     dispose_engine(db_path)
     migrations.forget(db_path)
     remove_clone(path, data_dir, depth=2)

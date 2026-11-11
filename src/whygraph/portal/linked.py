@@ -324,7 +324,13 @@ class LinkedProject:
             lambda: RationaleIn(target=_target_in(target), hunks=_hunks_in(hunks))
         )
         card = self._guard(lambda: self._client.rationale(self.slug, body))
-        return card.model_dump(mode="json")
+        out = card.model_dump(mode="json")
+        # An older platform sends none of these: leave them out rather than
+        # report ``partial: false`` for a card it built under the old bound.
+        for key in ("partial", "describing", "completing"):
+            if out.get(key) is None:
+                out.pop(key, None)
+        return out
 
     def history(self, path: str, limit: int, include_renames: bool) -> list[dict]:
         """``GET /history``: the area-history items for ``path``."""

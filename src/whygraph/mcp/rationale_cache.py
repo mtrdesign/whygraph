@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Iterator, Sequence
 
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, col, select
 
@@ -121,6 +121,9 @@ class CachedCard:
         The symbol the card was generated for, when it was targeted by one.
     evidence_fingerprint : str
         The row's fingerprint (see :func:`_fingerprint`).
+    deferred_shas : str
+        Space-joined SHAs the card was written without a description for;
+        empty means the card is final.
     """
 
     rationale: Rationale
@@ -129,6 +132,7 @@ class CachedCard:
     line_end: int
     qualified_name: str | None
     evidence_fingerprint: str
+    deferred_shas: str = ""
 
     @classmethod
     def from_row(cls, row: RationaleCache) -> "CachedCard":
@@ -140,6 +144,7 @@ class CachedCard:
             line_end=row.line_end,
             qualified_name=row.qualified_name,
             evidence_fingerprint=row.evidence_fingerprint,
+            deferred_shas=row.deferred_shas,
         )
 
     def is_stale(self, evidence: Sequence[CommitEvidence]) -> bool:
@@ -164,8 +169,8 @@ def lookup_cached(
     evidence: Sequence[CommitEvidence],
     provider: str,
     config_model: str | None,
-) -> tuple[Rationale, str] | None:
-    """Return ``(rationale, cached_at)`` for ``target`` or ``None`` on miss.
+) -> CachedCard | None:
+    """Return the cached card for ``target`` or ``None`` on miss.
 
     A hit requires the row's ``evidence_fingerprint`` to match the
     fingerprint of ``evidence``; a row with a stale fingerprint is
@@ -188,10 +193,10 @@ def lookup_cached(
 
     Returns
     -------
-    tuple of (Rationale, str), or None
-        Reconstructed :class:`~whygraph.analyze.Rationale` and the ISO
-        timestamp the row was originally cached at. ``None`` if no row
-        matches the key or its fingerprint is stale.
+    CachedCard or None
+        The row (its rationale, the ISO timestamp it was cached at and its
+        ``deferred_shas``). ``None`` if no row matches the key or its
+        fingerprint is stale.
     """
     fp = _fingerprint(evidence)
     model_key = _model_key(config_model)
@@ -202,9 +207,7 @@ def lookup_cached(
         )
         if row is None or row.evidence_fingerprint != fp:
             return None
-        rationale = _rationale_from_row(row)
-        cached_at = row.cached_at
-    return rationale, cached_at
+        return CachedCard.from_row(row)
 
 
 def lookup_exact(
@@ -315,7 +318,10 @@ def store_cached(
     rationale: Rationale,
     provider: str,
     config_model: str | None,
-) -> str:
+    *,
+    deferred_shas: str = "",
+    only_if: CachedCard | None = None,
+) -> str | None:
     """Upsert a freshly generated rationale; return its ``cached_at``.
 
     The PK ``(provider, model)`` columns mirror the *configured* LLM
@@ -324,33 +330,125 @@ def store_cached(
     the LLM is invoked. The LLM-reported model identity is persisted
     separately in :attr:`RationaleCache.actual_model` so rows keyed
     under the ``"default"`` model tag retain provenance.
+
+    Parameters
+    ----------
+    target, evidence, rationale, provider, config_model
+        As above.
+    deferred_shas : str, optional
+        Space-joined SHAs the card was written without a description for;
+        empty (the default) stores a final card.
+    only_if : CachedCard, optional
+        The row the caller read. When given, an existing row is replaced
+        only if its ``cached_at``, ``evidence_fingerprint`` and
+        ``deferred_shas`` still equal this card's (all three, because
+        ``cached_at`` has second resolution and cannot tell a partial row
+        from a final one written the same second).
+
+    Returns
+    -------
+    str or None
+        The new ``cached_at``; ``None`` when ``only_if`` was given and the
+        row had moved, in which case nothing was written.
     """
     fp = _fingerprint(evidence)
     model_key = _model_key(config_model)
     cached_at = _now_iso()
+    values = {
+        "path": target.path,
+        "line_start": target.line_start,
+        "line_end": target.line_end,
+        "provider": provider,
+        "model": model_key,
+        "evidence_fingerprint": fp,
+        "cached_at": cached_at,
+        "purpose": rationale.purpose,
+        "why": rationale.why,
+        "constraints": json.dumps(list(rationale.constraints)),
+        "tradeoffs": json.dumps(list(rationale.tradeoffs)),
+        "risks": json.dumps(list(rationale.risks)),
+        "input_tokens": rationale.input_tokens,
+        "output_tokens": rationale.output_tokens,
+        "actual_provider": rationale.provider,
+        "actual_model": rationale.model,
+        "qualified_name": target.qualified_name,
+        "deferred_shas": deferred_shas,
+    }
     with get_session() as session:
-        session.merge(
-            RationaleCache(
-                path=target.path,
-                line_start=target.line_start,
-                line_end=target.line_end,
-                provider=provider,
-                model=model_key,
-                evidence_fingerprint=fp,
-                cached_at=cached_at,
-                purpose=rationale.purpose,
-                why=rationale.why,
-                constraints=json.dumps(list(rationale.constraints)),
-                tradeoffs=json.dumps(list(rationale.tradeoffs)),
-                risks=json.dumps(list(rationale.risks)),
-                input_tokens=rationale.input_tokens,
-                output_tokens=rationale.output_tokens,
-                actual_provider=rationale.provider,
-                actual_model=rationale.model,
-                qualified_name=target.qualified_name,
-            )
+        if only_if is None:
+            session.merge(RationaleCache(**values))
+            return cached_at
+        pk = ("path", "line_start", "line_end", "provider", "model")
+        stmt = sqlite_insert(RationaleCache).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=list(pk),
+            set_={k: v for k, v in values.items() if k not in pk},
+            where=(
+                (col(RationaleCache.cached_at) == only_if.cached_at)
+                & (
+                    col(RationaleCache.evidence_fingerprint)
+                    == only_if.evidence_fingerprint
+                )
+                & (col(RationaleCache.deferred_shas) == only_if.deferred_shas)
+            ),
         )
+        result = session.exec(stmt)  # type: ignore[call-overload]
+        if not result.rowcount:
+            return None
     return cached_at
+
+
+def update_deferred(
+    target: Target,
+    provider: str,
+    config_model: str | None,
+    *,
+    seen: CachedCard,
+    deferred_shas: str,
+) -> bool:
+    """Set a row's ``deferred_shas`` if it is still the row the caller read.
+
+    A plain ``UPDATE``, never ``session.merge`` (the row's NOT NULL columns
+    are not on hand). The ``WHERE`` compares ``cached_at``,
+    ``evidence_fingerprint`` and ``deferred_shas`` with ``seen``'s, because
+    ``cached_at`` has second resolution and alone cannot tell a partial row
+    from a final one written the same second.
+
+    Parameters
+    ----------
+    target : Target
+        Resolved target; its path and range are the key.
+    provider : str
+        LLM provider tag from ``Config.cache_identity("rationale")``.
+    config_model : str or None
+        Pinned model name (or ``None``), as for :func:`lookup_cached`.
+    seen : CachedCard
+        The card the caller read.
+    deferred_shas : str
+        The new space-joined list (empty marks the card final).
+
+    Returns
+    -------
+    bool
+        ``True`` if the row was updated, ``False`` if it had moved or is gone.
+    """
+    model_key = _model_key(config_model)
+    with get_session() as session:
+        result = session.exec(  # type: ignore[call-overload]
+            update(RationaleCache)
+            .where(
+                col(RationaleCache.path) == target.path,
+                col(RationaleCache.line_start) == target.line_start,
+                col(RationaleCache.line_end) == target.line_end,
+                col(RationaleCache.provider) == provider,
+                col(RationaleCache.model) == model_key,
+                col(RationaleCache.cached_at) == seen.cached_at,
+                col(RationaleCache.evidence_fingerprint) == seen.evidence_fingerprint,
+                col(RationaleCache.deferred_shas) == seen.deferred_shas,
+            )
+            .values(deferred_shas=deferred_shas)
+        )
+        return bool(result.rowcount)
 
 
 def purge_paths(session: Session, paths: Iterable[str]) -> int:
@@ -671,6 +769,21 @@ def import_rows(
     return job.result
 
 
+_SHA_RE = re.compile(r"[0-9a-f]{7,64}")
+
+
+def _import_deferred(value: Any) -> str:
+    """A record's ``deferred_shas``: absent is ``""`` (final); else SHAs, space-joined."""
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > _IMPORT_TEXT_MAX:
+        raise ImportFormatError("deferred_shas", "must be space-separated commit SHAs")
+    tokens = value.split()
+    if not all(_SHA_RE.fullmatch(t) for t in tokens):
+        raise ImportFormatError("deferred_shas", "must be space-separated commit SHAs")
+    return " ".join(tokens)
+
+
 def _check_rationale(
     record: Mapping[str, Any], latest: datetime, paths: dict[str, str | None]
 ) -> dict[str, Any] | str | None:
@@ -732,6 +845,7 @@ def _check_rationale(
                     break
                 items.append(text)
         lists[name] = items
+    deferred_shas = _import_deferred(record.get("deferred_shas"))
     # Format errors above win over skips; the skips follow.
     if path is None:
         return "denied"
@@ -759,6 +873,7 @@ def _check_rationale(
         "actual_provider": actual_provider,
         "actual_model": actual_model,
         "qualified_name": qualified_name,
+        "deferred_shas": deferred_shas,
     }
 
 

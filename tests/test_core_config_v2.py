@@ -157,6 +157,10 @@ def test_defaults_resolve_to_the_1x_pairs() -> None:
     assert cfg.cache_identity("rationale") == ("anthropic", None)
 
 
+def test_analyze_max_workers_defaults_to_four(tmp_path: Path) -> None:
+    assert Config.from_dict({}, tmp_path).analyze.max_workers == 4
+
+
 def test_model_for_rejects_an_unknown_task() -> None:
     with pytest.raises(ValueError, match="unknown task"):
         Config.defaults().model_for("describe")

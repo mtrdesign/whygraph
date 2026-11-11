@@ -771,25 +771,38 @@ def test_member_description_cap_stops_the_backfill(
     assert len(described) == 1, described
 
 
-class _Descriptor:
-    @classmethod
-    def from_config(cls, config: object) -> _Descriptor:
-        return cls()
-
-
 @pytest.fixture
 def described(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stub the description backfill; the returned list collects the SHAs."""
+    """Stub the description backfill; the list collects the SHAs described.
+
+    The fakes call ``descriptor.describe(...)``, so the bound, ``allow()``
+    and the slots of the backfill's guard run; nothing is written, so a
+    commit stays undescribed for the next request.
+    """
     import whygraph.analyze as analyze_pkg
+    from whygraph.analyze import Description
 
     seen: list[str] = []
 
-    def backfill_all(commits, *, repository, descriptor) -> int:  # noqa: ANN001
-        seen.extend(commit.sha for commit in commits)
-        return len(seen)
+    class _Descriptor:
+        @classmethod
+        def from_config(cls, config: object) -> _Descriptor:
+            return cls()
+
+        def describe(self, diff: str, *, subject: str | None = None) -> Description:
+            seen.append(str(subject))
+            return Description(text="described", model="m", provider="fake")
+
+    def backfill_commit(commit, *, repository, descriptor) -> bool:  # noqa: ANN001
+        descriptor.describe("diff", subject=commit.sha)
+        return True
+
+    def backfill_file(commit, path, *, repository, descriptor) -> str:  # noqa: ANN001
+        return descriptor.describe("diff", subject=commit.sha).text
 
     monkeypatch.setattr(analyze_pkg, "LlmDescriptor", _Descriptor)
-    monkeypatch.setattr(analyze_pkg, "backfill_all", backfill_all)
+    monkeypatch.setattr(analyze_pkg, "backfill_commit_description", backfill_commit)
+    monkeypatch.setattr(analyze_pkg, "backfill_file_description", backfill_file)
     return seen
 
 

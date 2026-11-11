@@ -102,6 +102,10 @@ export interface RationaleCard {
   provider?: string;
   cached_at?: string;
   evidence_count?: { commits: number; prs: number; issues: number };
+  // Partial card (plan 49): absent or null (an older platform) means a complete card.
+  partial?: boolean | null;
+  describing?: number | null;
+  completing?: boolean | null;
 }
 
 export interface CommitDict {

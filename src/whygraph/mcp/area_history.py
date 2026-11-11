@@ -171,7 +171,7 @@ def area_history_payload(
     items = area_history_commits(path, limit=limit, include_renames=include_renames)
     describing = backfill_evidence_descriptions(
         items, target_path=path, max_commits=MAX_BACKFILL_PER_CALL if describe else 0
-    )
+    ).left
     return {
         "path": path,
         "include_renames": include_renames,

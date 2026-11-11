@@ -633,6 +633,12 @@ Each also has a **per-member** limit, so one person's agents cannot use the whol
 Every call must fit under both its member limit and the organization limit, which stays the ceiling
 for everyone together.
 
+**Throughput per member.** A cold card has to describe its commits first, so the description limit
+binds before the card limit: with the defaults a member's agents get about 7 cold cards per hour
+(an estimate, against about 15 from the card limit alone). A completion of a partial card counts as a
+second card. Cards on commits that are already described cost no descriptions, so running **Describe
+core** (coming in a later release) is the remedy.
+
 `0` means agents get only what already exists: cached cards and existing descriptions. A card
 already in the cache is always served, and it is shared by every member and by the Explorer, so each
 is paid for once. When a limit is reached an agent is told so (`429 generation_limited`, or `403

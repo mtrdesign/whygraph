@@ -188,7 +188,7 @@ class FakePlatform:
         if self.failure == "timeout":
             raise httpx.ReadTimeout("fake timeout", request=request)
         if self.failure == "unreachable":
-            return httpx.Response(503, json=error_body("busy"))
+            return httpx.Response(503, json=error_body("unavailable"))
         if self.failure == "redirect":
             return httpx.Response(302, headers={"Location": "https://evil.example/"})
         if self.failure == "oversized":

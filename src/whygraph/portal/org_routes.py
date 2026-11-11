@@ -56,6 +56,7 @@ from sqlalchemy import delete
 from sqlmodel import col, select
 
 from whygraph.db.engine import dispose_engine
+from whygraph.mcp.evidence import stop_describes
 
 from . import audit_store, connections
 from .audit import audit
@@ -203,6 +204,8 @@ def _clean_up(state: PortalState, slug: str, deleted: _Deleted) -> None:
     (history), each removed only through the data-dir rmtree guard.
     """
     for project_id, db_path in zip(deleted.project_ids, deleted.project_dbs):
+        # Before the dispose, which a later describe write would undo.
+        stop_describes(db_path)
         dispose_engine(db_path)
         state.migrations.forget(db_path)
         state.contexts.invalidate(project_id)

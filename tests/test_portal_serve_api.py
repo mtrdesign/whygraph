@@ -408,7 +408,11 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
     monkeypatch.setattr(
         routes,
         "lookup_cached",
-        lambda *a, **k: (rationale, "2026-01-01T00:00:00+00:00"),
+        lambda *a, **k: SimpleNamespace(
+            rationale=rationale,
+            cached_at="2026-01-01T00:00:00+00:00",
+            deferred_shas="a" * 40 + " " + "b" * 40,
+        ),
     )
     gen = mock.Mock()
     monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
@@ -418,6 +422,7 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
     assert body["status"] == "cached"
     assert body["purpose"] == "the purpose"
     assert body["constraints"] == ["c1"]
+    assert (body["partial"], body["describing"], body["completing"]) == (True, 2, False)
     gen.assert_not_called()  # cache read is still LLM-free
 
 

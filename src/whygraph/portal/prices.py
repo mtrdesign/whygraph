@@ -8,7 +8,10 @@ Two sources, in order (plan section 4.4):
 2. **The bundled table** - ``prices.json``, shipped in the wheel and
    re-checked every release (``cd-deploy-whygraph.yml`` refuses a release
    more than 120 days after its ``as_of``). Its version is
-   ``"bundled:<as_of>"``.
+   ``"bundled:<as_of>"``. Its rows come from the Anthropic, OpenAI and
+   DeepSeek pricing pages, plus OpenRouter's model listing for ids no
+   vendor page prices (keyed ``("openrouter", "<vendor>/<name>")``); an
+   OpenRouter id tries the vendor's row first (:func:`_bundled_candidates`).
 
 A model in neither is unpriced (tokens only). A provider whose endpoint is
 overridden in the effective config (``base_url`` / ``host``) is **never**
@@ -129,7 +132,25 @@ BUNDLED_AS_OF: str = bundled_prices().as_of
 
 
 def _bundled_candidates(provider: str, model: str) -> list[tuple[str, str]]:
-    """The bundled keys a ``(provider, model)`` pair may be priced under."""
+    """The bundled keys a ``(provider, model)`` pair may be priced under, in order.
+
+    Parameters
+    ----------
+    provider, model : str
+        The provider tag and the model id as configured (or served).
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        The keys to try, first hit wins.
+
+    Notes
+    -----
+    An OpenRouter id (``vendor/name``) tries the vendor's own row first, so
+    a price from the vendor's pricing page wins, and then the table's
+    ``("openrouter", id)`` row, which carries OpenRouter's listed price for
+    a model no vendor page prices. An id without a vendor has no key.
+    """
     if provider == "openrouter":
         # An OpenRouter id is ``vendor/model``: price the underlying model.
         # Its Anthropic ids spell versions with dots (claude-sonnet-4.6).
@@ -139,6 +160,8 @@ def _bundled_candidates(provider: str, model: str) -> list[tuple[str, str]]:
         keys = [(vendor, name)]
         if vendor == "anthropic" and "." in name:
             keys.append((vendor, name.replace(".", "-")))
+        # Then OpenRouter's own listing of the id.
+        keys.append((provider, model))
         return keys
     # A provider-prefixed name (``anthropic/claude-...``) is looked up
     # without its prefix, as the first-scan estimate always did.

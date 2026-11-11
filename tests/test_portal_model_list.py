@@ -293,8 +293,14 @@ def test_the_anthropic_fallback_adds_the_priced_models() -> None:
     assert "claude-opus-5-5" in ids
 
 
-def test_the_openrouter_fallback_is_chats() -> None:
-    assert fallback_listing("openrouter") == fallback_models("openrouter")
+def test_the_openrouter_fallback_adds_the_priced_models() -> None:
+    listing = fallback_listing("openrouter")
+    ids = [m.id for m in listing]
+    assert len(ids) == len(set(ids))
+    chat = fallback_models("openrouter")
+    priced = {m for p, m in bundled_prices().rows if p == "openrouter"}
+    assert listing[: len(chat)] == chat  # Chat's list first, labels kept
+    assert set(ids) == {m.id for m in chat} | priced
 
 
 def test_an_unknown_provider_has_no_fallback() -> None:

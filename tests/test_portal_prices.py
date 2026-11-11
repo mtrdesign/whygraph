@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from whygraph.core.config import Config
+from whygraph.portal import prices
 from whygraph.portal.estimate import ORG_PRICES_LABEL, TokenEstimate, render_estimate
 from whygraph.portal.prices import (
     BUNDLED_AS_OF,
@@ -143,6 +144,36 @@ def test_openrouter_vendor_ids_price_the_underlying_model() -> None:
     assert priced("openrouter/auto") is None
     assert priced("claude-opus-4-7") is None  # no vendor: nothing to price by
     assert priced("anthropic/claude-opus-4-7:free") is None
+
+
+def test_openrouter_only_id_prices_from_its_openrouter_row() -> None:
+    rows = bundled_prices().rows
+    assert ("google", "gemini-2.5-flash") not in rows
+    hit = price_for(
+        "openrouter", "google/gemini-2.5-flash", NO_OVERRIDES, custom_endpoint=False
+    )
+    assert hit == (rows[("openrouter", "google/gemini-2.5-flash")], BUNDLED)
+
+
+def test_vendor_row_beats_an_openrouter_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    table = bundled_prices()
+    listed = Price(input=Decimal("9"), output=Decimal("9"))
+    both = replace(
+        table, rows={**table.rows, ("openrouter", "openai/gpt-4o-mini"): listed}
+    )
+    monkeypatch.setattr(prices, "bundled_prices", lambda: both)
+    hit = price_for(
+        "openrouter", "openai/gpt-4o-mini", NO_OVERRIDES, custom_endpoint=False
+    )
+    assert hit == (table.rows[("openai", "gpt-4o-mini")], BUNDLED)
+
+
+def test_openrouter_override_beats_the_bundled_openrouter_row() -> None:
+    mine = Price(input=Decimal("0.5"), output=Decimal("1"))
+    key = ("openrouter", "google/gemini-2.5-flash")
+    assert key in bundled_prices().rows
+    hit = price_for(*key, {key: (mine, "t")}, custom_endpoint=False)
+    assert hit == (mine, "org:t")
 
 
 def test_custom_endpoint_ignores_bundled_table() -> None:

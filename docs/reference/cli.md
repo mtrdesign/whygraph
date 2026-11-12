@@ -214,5 +214,5 @@ No options. Two reasons you might still invoke it directly:
 
 | Command | Why |
 |---|---|
-| `docker run --rm ghcr.io/mtrdesign/whygraph:2.4.0 whygraph install` | Read exactly what would be written to your `PATH`, without writing it. |
-| `docker run --rm ghcr.io/mtrdesign/whygraph:2.4.0 whygraph install \| sh` | Install with no `curl` - air-gapped hosts, CI images. |
+| `docker run --rm ghcr.io/mtrdesign/whygraph:2.5.0 whygraph install` | Read exactly what would be written to your `PATH`, without writing it. |
+| `docker run --rm ghcr.io/mtrdesign/whygraph:2.5.0 whygraph install \| sh` | Install with no `curl` - air-gapped hosts, CI images. |

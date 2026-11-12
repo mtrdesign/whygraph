@@ -56,6 +56,8 @@ you come from:
 - **From 2.3.0**, `whygraph update`; each project's database is upgraded on first use. `[analyze].max_workers`
   now defaults to 4, so a project that never set it describes twice as many commits at once. See
   [WhyGraph 2.4.0](../releases/2.4.0.md#changes-to-know-about).
+- **From 2.4.0**, `whygraph update`; no database changes. Run **Update agent files** in each project
+  to get the new `/whygraph-implement` and `/whygraph-plan`. See [WhyGraph 2.5.0](../releases/2.5.0.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

@@ -57,12 +57,12 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from cases import CASES, FIXTURES, Case, Workspace, validate
+from cases import CASES, FIXTURES, GIT_IDENTITY, Case, Workspace, validate
 from checks import Context, RunResult, load_transcripts
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,17 +73,11 @@ ALLOWED_TOOLS = (
     "mcp__whygraph__*,mcp__codegraph__*"
 )
 RUN_TIMEOUT_S = 3600
-GIT_IDENTITY = [
-    "-c",
-    "user.name=agent-evals",
-    "-c",
-    "user.email=agent-evals@example.invalid",
-    "-c",
-    "commit.gpgsign=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-]
 LATEST_STAGE = 5
+# The commit plan 50's "before" figure runs on; ``--dry-run`` checks that each
+# ``Case.assets`` transform applies to its asset tree as well.
+BEFORE_REF = "72b7547"
+ASSETS_PATH = "src/whygraph/assets/claude-code"
 
 
 def default_repo() -> Path:
@@ -211,7 +205,11 @@ def refuse_reason(ledger: Path, budget: float, cap: float) -> str | None:
 
 
 def invoke(
-    prompt: str, budget: float, workdir: Path, out_stem: Path | None
+    prompt: str,
+    budget: float,
+    workdir: Path,
+    out_stem: Path | None,
+    env: dict[str, str] | None = None,
 ) -> RunResult:
     """Run one ``claude -p`` and read back its result and transcripts.
 
@@ -225,6 +223,8 @@ def invoke(
         The working directory.
     out_stem : pathlib.Path or None
         Base path for the raw ``.json`` and ``.err`` of this run.
+    env : dict of str to str or None
+        Extra environment for ``claude``, the case's ``env``.
 
     Returns
     -------
@@ -238,6 +238,7 @@ def invoke(
         "SSL_CERT_FILE=",
         "LC_ALL=C",
         "LANG=C",
+        *(f"{key}={value}" for key, value in (env or {}).items()),
         "claude",
         "-p",
         prompt,
@@ -300,6 +301,78 @@ def invoke(
         exit_code=proc.returncode,
         transcripts=load_transcripts(session_id),
     )
+
+
+@contextmanager
+def case_assets(case: Case, assets: Path) -> Iterator[Path]:
+    """Yield the asset tree a case installs: ``assets``, or its transformed copy.
+
+    Parameters
+    ----------
+    case : Case
+        The case; its ``assets`` transform, when set, edits a copy.
+    assets : pathlib.Path
+        The ``--assets`` tree.
+
+    Yields
+    ------
+    pathlib.Path
+        The tree to copy to ``.claude/``.
+    """
+    if case.assets is None:
+        yield assets
+        return
+    tmp = Path(tempfile.mkdtemp(prefix="agent-eval-assets-")).resolve()
+    try:
+        tree = tmp / "claude-code"
+        shutil.copytree(assets, tree, ignore=shutil.ignore_patterns("__pycache__"))
+        case.assets(tree)
+        yield tree
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def assets_problems(cases: list[Case], assets: Path) -> list[str]:
+    """Apply each ``Case.assets`` transform to ``assets`` and to ``BEFORE_REF``'s tree.
+
+    Parameters
+    ----------
+    cases : list of Case
+        The selection.
+    assets : pathlib.Path
+        The ``--assets`` tree.
+
+    Returns
+    -------
+    list of str
+        One line per transform that does not apply to a tree.
+    """
+    problems = []
+    for case in cases:
+        if case.assets is None:
+            continue
+        with tempfile.TemporaryDirectory(prefix="agent-eval-before-") as tmp:
+            archive = subprocess.run(
+                ["git", "archive", BEFORE_REF, ASSETS_PATH],
+                cwd=ROOT,
+                capture_output=True,
+                check=False,
+            )
+            trees = [("--assets", assets)]
+            if archive.returncode == 0:
+                subprocess.run(
+                    ["tar", "-x", "-C", tmp], input=archive.stdout, check=True
+                )
+                trees.append((BEFORE_REF, Path(tmp) / ASSETS_PATH))
+            else:
+                problems.append(f"{case.id}: git archive {BEFORE_REF} failed")
+            for label, tree in trees:
+                try:
+                    with case_assets(case, tree):
+                        pass
+                except (OSError, ValueError) as exc:
+                    problems.append(f"{case.id}: assets transform on {label}: {exc}")
+    return problems
 
 
 @contextmanager
@@ -509,12 +582,13 @@ def run_attempt(
     attempt = Attempt(attempt_no)
     canary = Canary() if case.canary else None
     try:
-        workspace_cm = (
-            portal_workspace(case, args.repo, args.assets, canary)
-            if case.kind == "P"
-            else clone_workspace(case, args.assets, canary)
-        )
-        with workspace_cm as workspace:
+        with ExitStack() as stack:
+            assets = stack.enter_context(case_assets(case, args.assets))
+            workspace = stack.enter_context(
+                portal_workspace(case, args.repo, assets, canary)
+                if case.kind == "P"
+                else clone_workspace(case, assets, canary)
+            )
             spent = 0.0
             for index, template in enumerate(case.prompts):
                 budget = round(case.budget - spent, 2)
@@ -529,7 +603,7 @@ def run_attempt(
                 stem = (
                     out / f"{case.id}-r{args.current_repeat}-a{attempt_no}-p{index + 1}"
                 )
-                run = invoke(prompt, budget, workspace.dir, stem)
+                run = invoke(prompt, budget, workspace.dir, stem, case.env)
                 _ledger_append(
                     args.ledger,
                     {
@@ -558,7 +632,7 @@ def run_attempt(
             _keep_plans(
                 workspace.dir, out, f"{case.id}-r{args.current_repeat}-a{attempt_no}"
             )
-    except (subprocess.CalledProcessError, OSError, RuntimeError) as exc:
+    except (subprocess.CalledProcessError, OSError, RuntimeError, ValueError) as exc:
         attempt.error = f"setup failed: {type(exc).__name__}: {exc}"
     finally:
         if canary:
@@ -675,7 +749,7 @@ def dry_run(cases: list[Case], args: argparse.Namespace) -> int:
     int
         0 when every fixture is in place, otherwise 1.
     """
-    problems = validate()
+    problems = validate() + assets_problems(cases, args.assets)
     for problem in problems:
         print(f"FIXTURE PROBLEM: {problem}")
     total = 0.0
@@ -688,9 +762,16 @@ def dry_run(cases: list[Case], args: argparse.Namespace) -> int:
             print(f"{prefix}: SKIP - {reason}")
             continue
         total += case.estimate
+        extras = "".join(
+            [
+                *(f", env {k}={v}" for k, v in case.env.items()),
+                ", transformed assets" if case.assets else "",
+            ]
+        )
         print(
             f"{prefix}: would run, {len(case.prompts)} prompt(s), budget ${case.budget:.2f}, "
             f"est ${case.estimate:.2f}, checks {len(case.active_checks(args.stage))}/{len(case.checks)}"
+            f"{extras}"
         )
     print(f"{len(cases)} case(s) loaded, estimate for the runnable ones ${total:.2f}")
     if args.ledger:

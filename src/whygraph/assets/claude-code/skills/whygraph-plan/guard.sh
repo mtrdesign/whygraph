@@ -4,13 +4,15 @@
 #   guard.sh reviewer            Bash: only a plain `git diff ...`
 #   guard.sh synthesizer         Bash: only the plan-tool `check` command
 #   guard.sh synthesizer-write   Write|Edit: only .whygraph/plans/*.md
+#   guard.sh amender-write       Edit: only a *.md file in the project, outside
+#                                .git/, .claude/, .cursor/, .github/ and .codex/
 #   guard.sh implementor         Bash: anything but a `git push`
 #
 # Reads the hook's JSON on stdin. Exit 2 blocks, with one line on stderr, and
 # exit 0 allows. An unknown mode blocks.
 #
 # This parses JSON with sed on purpose: a hook must not depend on what the host
-# has installed. The first three modes fail closed, so anything the parse
+# has installed. The first four modes fail closed, so anything the parse
 # cannot read is blocked. The implementor mode fails open, so a parse fault
 # never stops a build or a test run.
 
@@ -111,6 +113,26 @@ synthesizer-write)
     # $root is quoted so it is literal. In a case pattern * crosses slashes.
     "$root"/.whygraph/plans/*.md) ;;
     *) block "$message" ;;
+    esac
+    ;;
+amender-write)
+    message='the amender may only edit a .md file in this project, outside .git/ and the agent directories'
+    root=${CLAUDE_PROJECT_DIR:-}
+    [ -n "$root" ] || block "$message"
+    one_key file_path "$message"
+    path=$(extract file_path)
+    case $path in
+    *..*) block "$message" ;;
+    "$root"/*.md) ;;
+    *) block "$message" ;;
+    esac
+    # A leading / gives the first part a boundary. The brackets also match
+    # another case, which reaches the same folder on a case-insensitive disk.
+    case /${path#"$root"/} in
+    */.[Gg][Ii][Tt]/* | */.[Cc][Ll][Aa][Uu][Dd][Ee]/* | */.[Cc][Uu][Rr][Ss][Oo][Rr]/* | \
+        */.[Gg][Ii][Tt][Hh][Uu][Bb]/* | */.[Cc][Oo][Dd][Ee][Xx]/*)
+        block "$message"
+        ;;
     esac
     ;;
 implementor)

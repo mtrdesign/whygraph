@@ -16,4 +16,6 @@ consent: false
 3. For each working-set symbol, write one or more `Verify:` candidates as literal commands in backticks, the narrowest that proves the symbol still works - e.g. `uv run pytest tests/test_cache.py::test_key_is_content_addressable -q` or `npm test -- src/lib/cache.test.ts`. Build them from the commands in 1 and the tests in 2. Never write prose such as "run the tests" or "check it still works".
 4. Flag every symbol that no test exercises as **uncovered**: name the test to add (file and test name) and the literal command that would run it.
 
+A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
+
 Report the project's full test command first, as `- Test commands: ...`; the synthesizer makes it Acceptance item 1.

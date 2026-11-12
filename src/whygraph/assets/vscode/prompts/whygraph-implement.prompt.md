@@ -19,7 +19,7 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 
 - `--from-step <N>` -> integer >= 1 (consume the next token as `N`). Run step N through the last step. Default: the implementor picks the first step not marked `[x]` in the plan's `## Implementation log`, or step 1 if no log exists.
 - `--commit-each-step` -> boolean flag (default `false`).
-- `--fix-attempts <N>` -> integer 0-2 (consume the next token; default `0`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
+- `--fix-attempts <N>` -> integer 0-2 (consume the next token; default `2`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
 - `--model <model-id>` -> optional override (consume the next token). Default: the implementor subagent's inherited model.
 - `--no-capture` -> pass `CAPTURE: none` to the implementor (Step 2b).
 

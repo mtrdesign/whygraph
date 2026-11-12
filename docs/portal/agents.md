@@ -376,7 +376,10 @@ the implementor, which has no WhyGraph tools, so it ends by telling you to run `
 listed decision.
 
 **Update agent files** brings an existing project up to date. In Claude Code, the `whygraph-implement`
-skill is then allowed to call `whygraph_propose_note`, and nothing else from WhyGraph.
+skill is then allowed to call `whygraph_propose_note`, and nothing else from WhyGraph. It is also
+allowed to run the plan tool, `plan-tool.sh`, which runs every `Verify` and Acceptance Check that a plan
+names. In a permission mode that prompts, no prompt appears for those commands, so run only a plan you
+reviewed.
 
 ## Reviewing a diff (Claude Code) { #whygraph-review }
 

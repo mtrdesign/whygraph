@@ -5,7 +5,7 @@ alwaysApply: false
 
 # Suggest /whygraph-implement for executing a reviewed plan
 
-The user has a plan (typically under `.whygraph/plans/<slug>.md`) that they've reviewed and now want to apply step-by-step. WhyGraph has an implementor subagent (`/whygraph-implement`) that reads the plan as a strict contract, applies each step in order, runs the per-step Verify, halts on the first failure, and logs progress back into the plan. It pins a fast model by default — cheap and quick for executing a well-specified plan.
+The user has a plan (typically under `.whygraph/plans/<slug>.md`) that they've reviewed and now want to apply step-by-step. WhyGraph has an implementor subagent (`/whygraph-implement`) that reads the plan as a strict contract and applies each step in order. It runs the per-step Verify and recovers a failed step on a counted ladder. It stops with a named cause and logs progress back into the plan. It pins a fast model by default — cheap and quick for executing a well-specified plan.
 
 ## What to do
 

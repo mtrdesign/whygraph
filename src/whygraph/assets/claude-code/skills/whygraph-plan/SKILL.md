@@ -1,7 +1,7 @@
 ---
 name: whygraph-plan
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Runs a fan-out/fan-in pipeline (planner -> one researcher per knowledge source -> synthesizer), splits a large task into child plans only when needed, and asks the few plan-shaping questions after research.
-argument-hint: <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]
+argument-hint: <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]
 allowed-tools: Agent, AskUserQuestion, Read, Glob, Bash(git rev-parse *), Bash(git ls-files *), Bash(mkdir *), Bash(test *)
 disable-model-invocation: true
 ---
@@ -20,14 +20,17 @@ Strip and remember these flags if present (any order, anywhere in `$ARGUMENTS`):
 - `--no-split` -> forbid a split.
 - `--sources <a,b>` -> run only these sources, by `name`, comma-separated (consume the next token). A named source runs even when its file says `enabled: false`. Each name must match `^[a-z0-9-]+$`.
 - `--no-questions` -> ask nothing: every consent is `no`, and open questions take their defaults.
+- `--review` -> review the plan before it is handed over, in single-pass mode too.
+- `--no-review` -> skip the plan review.
 - `--refresh-profile` -> derive the UI profile (`.whygraph/profiles/ui.md`) again, even when the cached one is fresh.
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
+- If both `--review` and `--no-review` are passed, respond with `Pass --review OR --no-review, not both.` and stop.
 - If a `--sources` name does not match the pattern, respond with `Unknown source name: <name>` and stop.
 
 ## Step 2 - Resolve the paths
@@ -89,12 +92,14 @@ OUT_PATH: <absolute path resolved in Step 2>
 CAPTURE_PATH: .claude/skills/whygraph-ui-check/capture.mjs
 PLAN_TOOL: sh .claude/skills/whygraph-plan/plan-tool.sh
 REFRESH_PROFILE: <yes | no>
+REVIEW: <yes | no | auto>
 ```
 
 - `MODE` is `shallow` for `--shallow`, `deep` for `--deep`, otherwise `auto`.
 - `SPLIT` is `yes` for `--split`, `no` for `--no-split`, otherwise `auto`.
 - `SOURCES` is the `--sources` list, otherwise `all`.
 - `REFRESH_PROFILE` is `yes` for `--refresh-profile`, otherwise `no`.
+- `REVIEW` is `yes` for `--review`, `no` for `--no-review`, otherwise `auto`.
 
 The planner has its own system prompt and the CodeGraph and WhyGraph MCP tools. Do not inline planning instructions here.
 
@@ -132,7 +137,7 @@ The planner wrote a `tasks.json` and no plan. The reply has the shape `SPLIT: <p
    - `OUT_PATH: <repo root>/<the child's plan>`
    - `CONSENT` and `TERMS` lines as in Step 4 for `t1` only. Every other child gets `CONSENT: none` and no `TERMS` line.
    - `REFRESH_PROFILE` as in Step 4 for `t1` only. Every other child gets `REFRESH_PROFILE: no`.
-   - `MODE`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay the same.
+   - `MODE`, `REVIEW`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay the same.
 3. Print each child's reply verbatim under a line `### <id>: <title>`, with the one exception in Step 8. A child reply that starts `CLARIFY: ` follows **Clarify** for that child only.
 4. After every wave is planned, run Step 7 for each child's reply, one child at a time, in `id` order.
 

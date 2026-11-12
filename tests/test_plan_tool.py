@@ -28,6 +28,10 @@ _GUARD = _SCRIPT.parent / "guard.sh"
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _EM = "\u2014"
 _EN = "\u2013"
+# `sh missing.sh` exits 127 under bash's sh (macOS) and 2 under dash (Linux CI).
+_SH_MISSING = str(
+    subprocess.run(["sh", "./no-such-script.sh"], capture_output=True).returncode
+)
 
 _CLEAN_PLAN = f"""\
 Note: Auto-mode chose single-pass.
@@ -1271,7 +1275,7 @@ def test_end_lists_paths_outside_files(repo: Path, posix: str) -> None:
     [
         ("`nvm use`", "127", 4),
         ("`true && LANG=C nvm use`", "127", 4),
-        ("`sh scripts/nonexist.sh`", "127", 1),
+        ("`sh scripts/nonexist.sh`", _SH_MISSING, 1),
         ("`exit 124`", "124", 1),
         ("`exit 126`", "126", 1),
         ("`exit 3`", "3", 1),
@@ -1804,7 +1808,7 @@ def test_baseline_a_test_first_line_is_never_copied(repo: Path, posix: str) -> N
     [
         ("`nvm use`", 4, "cannot run 127: nvm use"),
         ("`true && LANG=C nvm use`", 4, "cannot run 127: true && LANG=C nvm use"),
-        ("`sh scripts/nonexist.sh`", 0, "fail 127: "),
+        ("`sh scripts/nonexist.sh`", 0, f"fail {_SH_MISSING}: "),
         ("`./bin/new-check`", 0, "fail 127: "),
         ("`echo broken; exit 3`", 0, "fail 3: broken"),
         ("`exit 124`", 0, "fail 124: "),

@@ -21,8 +21,11 @@ flowchart LR
     planner -- "small or mechanical" --> single["Single-pass plan"]
     planner -- "otherwise" --> res["One researcher per source<br/>(in parallel)"]
     res --> synth["Synthesizer writes the plan<br/>and runs the plan check"]
+    synth --> rev["Plan review: a logic reviewer, and a UX/UI<br/>reviewer for a screen change (in parallel)"]
+    rev --> fix["Fixer checks each finding<br/>and applies or refutes it"]
+    single -. "only with --review" .-> rev
     single --> q{"Plan-shaping<br/>questions?"}
-    synth --> q
+    fix --> q
     q -- "yes" --> ask["You answer<br/>(at most 3)"] --> revise["Planner revises the plan"] --> plan[("Plan file")]
     q -- "no" --> plan
 ```
@@ -31,28 +34,37 @@ Implementing it, with `/whygraph-implement` in Claude Code:
 
 ```mermaid
 flowchart TD
-    start(["/whygraph-implement plan.md"]) --> pre{"Open Blockers or a<br/>plan-shaping question?"}
+    start(["/whygraph-implement plan.md<br/>(no flag needed)"]) --> pre{"Open Blockers or a<br/>plan-shaping question?"}
     pre -- "yes" --> refuse(["Refuse"])
-    pre -- "no" --> pick["Pick the first step<br/>not marked done"]
-    pick --> impl["Implementor at the step's model:<br/>baseline, start tree, Test first,<br/>change, Verify, end tree, log"]
-    impl --> ok{"Step complete?"}
-    ok -- "no" --> halt(["Halt: fix it, then run again<br/>with --from-step N"])
-    ok -- "yes" --> review["Review gate: the step's diff<br/>against the cached cards"]
-    review --> risk{"Constraint<br/>at risk?"}
-    risk -- "yes" --> halt
-    risk -- "no" --> spec["Spec evaluation"]
+    pre -- "no" --> flight["Pre-flight: probe every Verify and Check,<br/>run each Verify once as a baseline"]
+    flight -- "a command cannot run,<br/>hangs or changes the tree" --> stop(["Stop block: cause, tried,<br/>state, next action"])
+    flight -- "ok" --> pick["Pick the first step<br/>not marked done"]
+    pick --> s1["S1 Run: implementor at the step's model<br/>(up to 2 bounded fixes inside the run)"]
+    s1 -- "Verify fails or run halts" --> s2["S2 Retry once on the next model up"]
+    s2 -- "fails again" --> s3["S3 Amend: the plan amender may change<br/>the step's Verify or Files line, once"]
+    s3 -- "refused or no amendment" --> stop
+    s3 -- "amended" --> s1b["S1b Run once more"]
+    s1b -- "fails" --> stop
+    s1 -- "ok" --> gate
+    s2 -- "ok" --> gate
+    s1b -- "ok" --> gate
+    gate["S4 Review gate: the step's diff<br/>against the cached cards"] -- "constraint at risk" --> s6["S6 Re-run with the constraint<br/>(once)"] --> gate
+    gate -- "ok" --> spec["S5 Spec evaluation"]
     spec -- "pass" --> more{"More steps?"}
-    spec -- "fix" --> left{"Findings re-run left?<br/>(default 1)"}
-    left -- "yes" --> rerun["Implementor applies<br/>the findings"] --> review
-    left -- "no" --> halt
-    spec -- "escalate" --> halt
-    more -- "yes" --> impl
-    more -- "no" --> acc["Acceptance run"]
-    acc --> qual["Quality and UI evaluations<br/>(advisory)"] --> done(["Done"])
+    spec -- "fix" --> s7["S7 Findings re-run<br/>(default 1)"] --> gate
+    spec -- "escalate" --> s3
+    more -- "yes" --> s1
+    more -- "no" --> acc["Acceptance: the script runs each Check,<br/>then one more implementor run logs it"]
+    acc -- "a Check failed" --> stop
+    acc -- "ok" --> qual["Run summary, then quality and UI<br/>evaluations (advisory)"] --> done(["Done"])
 ```
 
-Cursor runs the same loop without the review gate. VS Code and Codex run one implementor for the
-whole plan, with no review gate and no evaluator (see [Differences between editors](#differences-between-editors)).
+
+The loop needs no flag: the recovery ladder, the pre-flight and the stop block are on by default. A
+stage that runs out of rungs ends the run with a stop block, and running the command again resumes at
+the stopped step (see [Running unattended](#running-unattended)). Cursor runs the same loop without
+the review gate, and on one model. VS Code and Codex run one implementor for the whole plan, with no
+ladder, no review gate and no evaluator (see [Differences between editors](#differences-between-editors)).
 
 1. **Triage.** The planner checks the size of the change with CodeGraph. It splits the task into
    child plans only when all three signals agree: the impact set is large (more than 15 symbols in at
@@ -64,21 +76,64 @@ whole plan, with no review gate and no evaluator (see [Differences between edito
 3. **Synthesis.** One synthesizer merges the reports into one plan: Objective, Non-goals, Working
    set, Prior art, Blockers, Steps, Risks, Acceptance, Open questions and Confidence. Every step names
    its files, its boundaries, a literal `Verify` command and the model that should run it.
-4. **Questions.** You are asked after research, never before it. At most three questions, each with
-   options and a default, and only when your answer changes the shape of the plan. The planner then
+4. **Review.** Before you are asked anything, the planner sends a deep plan to a reviewer that checks it
+   against the code: the **logic** lens (and the **UX/UI** lens when the plan has a `## UI profile`).
+   See [Plan review](#plan-review).
+5. **Questions.** You are asked after the review, never before it. At most three questions, each with
+   options and a default, and only when your answer changes the shape of the plan. A review finding
+   that needs your choice is one of those three, so you are never asked twice. The planner then
    revises the plan with your answers. `--no-questions` takes every default.
-5. **Implement.** `/whygraph-implement` starts a fresh implementor for each step, at that step's model.
-   Before it edits, it runs a baseline of the step's `Verify` commands. A step that begins with a
-   `Test first` line adds that test, sees it fail, and only then changes code.
-6. **Review gate.** After each verified step, a reviewer checks the step's own diff against the
+6. **Implement.** `/whygraph-implement` starts a fresh implementor for each step, at that step's model.
+   Before the first edit, a script probes every `Verify` and Acceptance Check and runs each `Verify`
+   once as a baseline. A step that begins with a `Test first` line adds that test, sees it fail, and
+   only then changes code. A step that fails climbs the [recovery ladder](#running-unattended).
+7. **Review gate.** After each verified step, a reviewer checks the step's own diff against the
    rationale cards already cached. A **Constraint at risk** verdict stops the loop so that you can fix
    it. The gate reads cached cards only and never generates one.
-7. **Acceptance.** A last, separate run walks the plan's `## Acceptance` list: first the project's full
-   test command, then each check. It reports what failed and undoes nothing. A list with only `manual:`
+8. **Acceptance.** A last, separate run walks the plan's `## Acceptance` list: first the project's full
+   test command, then each check. The plan tool runs each check, so a hung one is killed on a deadline.
+   It reports what failed and undoes nothing. A list with only `manual:`
    items is logged as `manual only`, never as passed, because nothing was checked.
 
 The implementor flags files it changed outside the step's **Files**, logs every fix attempt with its
 cause, and never edits a file that the step's **Boundaries** names.
+
+### Plan review
+
+A deep plan is reviewed once before it is handed over, because the recovery ladder can fix a Verify
+line but not a plan whose logic is wrong: a step placed before its dependency, a caller missing from
+**Files**, a `Verify` that never reaches the change, a screen with no error state.
+
+- The **logic** reviewer checks every step against the code. Each **Files** path exists, each symbol
+  the **Change** names exists, no step uses what a later step adds, the callers of a changed signature
+  are in some step's **Files**, the `Verify` reaches the changed symbol and changes no shared state, a
+  **Test first** test can fail, no **Change** contradicts a recorded constraint, **Acceptance** covers
+  the Objective, and each **Model** tag fits the ladder.
+- The **UX/UI** reviewer runs only when the plan has a `## UI profile`. It checks that each route is
+  rendered by the step's files, that each expected state is named, that each error state has a way out,
+  that the profile's conventions are named, and that a UI Acceptance item exists.
+- Both are read-only. Each reports at most 12 findings as `F<n> | blocker | should | ...`, and every
+  finding names a `path:line` as evidence. A reviewer that cannot check something ends its reply with
+  a `not checked:` line.
+- A **fixer** (a fresh synthesizer run) re-checks each finding against the code and **refutes** one whose
+  evidence does not hold. It applies a verified finding by changing only the lines the finding names.
+  It never changes the Objective, Non-goals, resolved decisions or a verbatim quote, and never adds a
+  command to a `Verify` or Check. It may only re-point a `Verify` span at another path or test id that
+  the finding's evidence names.
+- A finding that needs your choice becomes one of the (at most three) plan-shaping questions. A
+  verified blocker the fixer cannot fix goes to `## Blockers`, so `/whygraph-implement` refuses the
+  plan rather than start an unattended run on it.
+- The plan may grow at most 25% in lines. A `should` finding that would go past that is deferred, and a
+  blocker never is.
+- The result is a `## Plan review` section above `## Confidence`: one count line, then one line per
+  finding (`applied`, `refuted`, `asked`, `blocked` or `deferred`). The reviewers' replies are kept in
+  `.whygraph/plans/<name>.review.md`. A revise after your answers keeps the review and does not run a
+  second round.
+
+The review runs by default for a deep plan. A single-pass plan is reviewed only with `--review`; then
+the planner applies the findings itself, under the same rules. `--no-review` skips it. A review that
+cannot run, or a reviewer that is unavailable, is named in the plan's Confidence reason and never
+blocks the plan.
 
 ### The plan check
 
@@ -92,22 +147,25 @@ named in the plan's Confidence reason. When the synthesizer writes the plan, it 
 
 ### Verify evidence
 
-The implementor does not type a step's `Verify` command. It runs `plan-tool.sh verify <plan> <N>`, which
-runs the literal command or commands from the plan and writes a record to
-`.whygraph/plans/<stem>/steps/<N>.verify`: the commands, the exit code, the working tree id and the end
-of the output. A `Verify` that starts with `manual:` is recorded as `not literal`, and the implementor
-then chooses a command that proves the claim.
+The implementor does not type a step's `Verify` command, and does not write the record. The command
+that started the run (`/whygraph-implement`) calls `plan-tool.sh`, and the script runs the literal
+command or commands from the plan and writes a record to `.whygraph/plans/<stem>/steps/<N>.verify`: the
+commands, the exit code, the working tree id and the end of the output. Every command has one bounded
+deadline (540 s by default, see [`WHYGRAPH_VERIFY_TIMEOUT`](#running-unattended)), and a command that
+exceeds it is killed with its children and recorded as exit 124. A `Verify` that starts with `manual:` is
+recorded as `not literal`, and the implementor then chooses a command that proves the claim.
 
 The evaluator reads that record. It checks that the record exists, that its exit code is 0, and that its
 tree id equals the step's end tree. A step with no passing record is **escalated**: the evaluator does
-not trust the implementor's word, and the finding tells you to re-run the step. A `not literal` record
-passes, with a note in the evaluator's Confidence reason.
+not trust the implementor's word. A `not literal` record passes, with a note in the evaluator's
+Confidence reason.
 
-!!! warning "Allowing `plan-tool.sh verify` allows every Verify a plan names"
-    If you add `plan-tool.sh verify` to your editor's allowed commands, you allow whatever command any
-    plan names in a `Verify` line, because the tool runs it as written. WhyGraph ships no allow rule for
-    it. Read a plan's `Verify` lines before you allow the command, and do not allow it for a plan you
-    did not review.
+!!! warning "The implement command pre-approves the plan tool, which runs every Verify and Check"
+    `/whygraph-implement` is allowed to call `plan-tool.sh` without a prompt, and the tool runs whatever
+    command a plan names in a `Verify` line or an Acceptance Check, as written. In a permission mode
+    that prompts, no prompt appears for those commands. The command prints every command before the
+    first edit, but it does not ask. Run only a plan you reviewed, and read its `Verify` and Check
+    lines first. WhyGraph ships no allow rule for `plan-tool.sh` in any other command.
 
 !!! warning "Update all agent files together"
     The implementor writes the record and the evaluator reads it. If you keep an edited implementor and
@@ -124,6 +182,7 @@ passes, with a note in the evaluator's Confidence reason.
 | `--split` / `--no-split` | Force a split into child plans, or forbid one. |
 | `--sources <a,b>` | Run only these sources. A source with `enabled: false` is turned on for this run. |
 | `--no-questions` | Take every default. Every consent question is answered No. |
+| `--review` / `--no-review` | Force the [plan review](#plan-review), also for a single-pass plan, or skip it. Not both. Without either, a deep plan is reviewed and a single-pass plan is not. These are not the implement command's `--no-review`, which skips the review gate after each step. |
 | `--out <path>` | Save the plan at `<path>` instead of `.whygraph/plans/<name>.md`. |
 | `--refresh-profile` | Derive the [UI profile](#ui-evidence) again instead of reusing the cached one. |
 
@@ -134,14 +193,88 @@ passes, with a note in the evaluator's Confidence reason.
 | `--from-step N` | Start at step N, and run step N again even when the log marks it done. |
 | `--step N` | Run only step N. |
 | `--commit-each-step` | Commit after each verified step. |
-| `--fix-attempts N` | How many fix attempts a failing `Verify` gets. |
+| `--fix-attempts N` | How many bounded fix attempts the implementor makes inside one run of a failing step, 0 to 2. Default 2. |
 | `--model sonnet\|opus\|haiku\|fable` | Use this model for every step instead of each step's own. |
-| `--no-review` | Skip the review gate. |
+| `--no-review` | Skip the review gate after each step. It is not the plan command's `--no-review`. |
 | `--no-eval` | Skip the [evaluator](#evaluation). |
 | `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
 | `--eval-fix-attempts N` | How many times a failed spec evaluation sends the step back to the implementor, 0 to 2. Default 1. |
 
-The implementor refuses a plan that has open Blockers or an unanswered plan-shaping question.
+The command refuses a plan that has open Blockers or an unanswered plan-shaping question.
+
+## Running unattended
+
+`/whygraph-implement` is built to finish a plan with no one watching. It needs no flag for that, and
+it stops only when no rung of its ladder can help.
+
+- **Use a permission mode that does not prompt.** A prompt that no one answers is a stop
+  (`permission denied`).
+- **Every Verify runs on your environment before the first edit.** A script probes every `Verify` and
+  Acceptance Check, prints each command, and then runs each `Verify` once as a baseline. It stops at
+  once, before any edit, on a command that does not exist (a shell function such as `nvm use` does not
+  exist under `sh -c`), that hangs, or that changes the working tree. A `Verify` that already fails
+  at baseline is a recorded result, not a stop. The pre-flight runs on every invocation.
+- **Do not edit the working tree during a run.** The script compares tree ids before and after each
+  step, and an edit of yours looks like the step's own.
+- **A Verify must only check.** A `Verify` that migrates a database, writes a file, or waits for input
+  fails this pre-flight or the run. Give such a step a command that only checks.
+- **`WHYGRAPH_VERIFY_TIMEOUT`** sets the deadline of one `Verify` or Check, in seconds. The default is
+  540 and the largest accepted value is 580. Export it before you start your editor.
+  A Check that exceeds it, for example a full suite that takes more than 9 minutes, is recorded as
+  exit 124 and the run stops with `acceptance failed`. Give that item a faster Check, or make it `manual:`.
+
+The **recovery ladder** is counted by the plan tool, never by a model. For one step it allows:
+
+| Rung | What happens |
+|---|---|
+| Run | The step's implementor, at the step's model, with up to `--fix-attempts` (default 2) bounded fixes of the same files. |
+| Retry | One more run on the next model up (`haiku` to `sonnet`, `sonnet` to `opus`). `--model` keeps the same model. |
+| Amend | A plan amender may change the step's `Verify` line or its `Files` line, once. Then the step runs once more. |
+| Findings | After a spec `fix` verdict, a re-run with the evaluator's findings (`--eval-fix-attempts`, default 1). |
+| Constraint | After a review-gate **Constraint at risk** verdict, one re-run with the constraint in the findings. |
+
+An amendment is the only edit a run makes to a reviewed plan. A script checks it and **refuses** any
+amendment that does more than re-point a reviewed command at another path or test id, or add a path the
+step's **Change** names. A `Verify` never becomes a grep, an `echo`, `true` or a narrower test that
+skips the changed symbol. At most three amendments are made per plan. The run restores the plan from a
+saved copy whenever an agent edits it outside the Implementation log. Each amendment is written to a
+`## Amendments` section, and the run summary flags a step whose Verify was amended with **Verify amended**.
+Everything else, the Change, Boundaries, Acceptance and every other step, is never changed.
+
+Every stop prints one block that names the cause, and the next action:
+
+```
+## Run stopped at step 3 of 6
+
+- **Cause:** Verify still fails: 1 failed, 4 passed
+- **Tried:** retry sonnet:opus; amended Verify
+- **State:** steps 1, 2 marked done; step 3's edits are in the working tree
+- **Next:** Read .whygraph/plans/<stem>/steps/3.verify. Fix the code or the step. Then run /whygraph-implement <plan> again.
+```
+
+"Run the command again" is the whole resume procedure: it picks the first step not marked done. Use
+`--from-step N` to run a step that is marked done again. The causes, with the first thing to do:
+
+| Cause | What to do |
+|---|---|
+| `Verify did not finish in <T> s` (also `at baseline`) | Narrow the step's `Verify`, or export a larger `WHYGRAPH_VERIFY_TIMEOUT` (at most 580). |
+| `Verify cannot run: <misses>`, `Check cannot run: <misses>` | Make the command plain. A shell function such as `nvm` does not exist under `sh -c`. |
+| `a Verify changed the working tree at baseline: <paths>` | Add a cache or build output to `.gitignore`, or give the step a `Verify` that only checks. |
+| `Verify still fails: <excerpt>` | Read `steps/<N>.verify`. Fix the code or the step. |
+| `the Test first test passed before the change`, `... was edited`, `... cannot run` | The step's test does not cover the change, or was changed, or is not a plain command. Fix the test or the step. |
+| `permission denied: <command>` | Allow the command, or change the step. An unattended run needs a permission mode that does not prompt. |
+| `spec findings remain`, `escalate after amendment` | Read the evaluation above, then fix the code or edit the step. |
+| `a recorded constraint is at risk` | Read the review above. Change the step or the code, or record that the constraint no longer holds with `/whygraph-note`. |
+| `no amendment`, `amendment refused` | The plan was restored. Edit the step by hand. |
+| `amendment cap` | Review `## Amendments`. The plan needs another look. |
+| `the amendment changed other files`, `the step changed the plan`, `the change touched the plan tool`, `a subagent changed .git/config, .git/hooks or the run records` | An agent changed something it must not. Review `git status` and `git diff`. |
+| `acceptance failed: <items>` | Read the Acceptance report. Give a timed-out item a faster Check, or make it `manual:`. |
+
+A run that reaches Acceptance prints a **run summary** built from files and exit codes, never from a
+model's account: each retry with its models, each amendment's old and new line, a step whose `Verify`
+was not run because it is `manual:` or prose, and the Acceptance status. With nothing to report it
+prints `no recovery was needed`. The plan tool runs each Acceptance Check **before** the last
+implementor run logs the result, so the Acceptance status never depends on that run's report.
 
 ## Sources
 
@@ -381,8 +514,10 @@ Every stage runs in your editor, against your own model account.
 | Research | One researcher per kept source, on a fast model, with the source's `budget` as a cap on tool calls. This is the largest part of a plan. `--shallow` skips it. |
 | Plan check | No model run. A shell script lints the plan. A finding costs one short fix by the planner or synthesizer, at most two. |
 | Synthesis | One synthesizer run. |
+| Plan review | A deep plan only, unless you pass `--review`. One logic reviewer on a strong model and, for a screen change, one UX/UI reviewer on a fast model, each with a budget of 20 tool calls, then one fixer run. `--no-review` skips it. |
 | Questions | No model run. One dialog, then one short revise pass. A revise where you took every default does not run the research again. |
-| Implement | One implementor per step, each at the model the plan names for it. A fresh context per step keeps the runs small, and a cheap step can run on a cheap model. The Verify record is written by a script, so it adds no model cost. |
+| Implement | One implementor per step, each at the model the plan names for it. A fresh context per step keeps the runs small, and a cheap step can run on a cheap model. The pre-flight and the Verify records are scripts, so they add no model cost, only the time your own commands take. |
+| Recovery | Only for a step that fails. At worst: the first run, one retry on the next model up, one short plan-amender run and a final run, plus one findings re-run and one constraint re-run. A step that passes costs none of it. |
 | Review gate | One reviewer run per step. It reads cached cards only, so it adds no WhyGraph LLM spend. `--no-review` skips it. |
 | Acceptance | One more implementor run. |
 | Evaluation | One short evaluator run per step on a fast model, which also reads the Verify record, then one run each for quality and UI on a stronger model. `--no-eval` skips it. |
@@ -403,8 +538,9 @@ code. It runs in three stages:
    **Boundaries** alone, and that the step's `Verify` command really exercises the changed symbol.
    The verdict is `pass`, `fix` or `escalate`. On `fix` the implementor is sent back with the findings,
    at most `--eval-fix-attempts` times (default 1), and then the loop halts. On `escalate` the plan
-   itself is wrong, for example a **Change** that needs a file its **Files** line omits, and the loop
-   halts at once.
+   itself is wrong, for example a **Change** that needs a file its **Files** line omits, and the step
+   goes to the amend rung of the [recovery ladder](#running-unattended). The plan amender may change
+   that step's `Verify` or `Files` line once. A second `escalate` after an amendment stops the run.
 2. **Quality**, once, after the acceptance run. It reads every step's diff against your conventions
    file (when the plan names one) and a fixed list of six checks: surgical changes, no abstraction
    without a second case, names that match their neighbours, errors handled the way the file does,
@@ -525,6 +661,9 @@ after a clone, as you would the `sources/` folder.
 | Source that reaches an outside service | Yes | Yes | No | Yes, unenforced |
 | Web best-practices source (`best-practices.md`) | Yes | No | No | No |
 | One implementor per step, at the step's model | Yes | Yes, but every step on one model unless you pass `--model <model-id>` | No, one run | No, one run |
+| Plan review (logic and UX/UI reviewers, then a fixer) | Yes: the logic reviewer on a strong model, the UX/UI reviewer on a fast one | Yes: both on the model the editor picks | Yes: both on the model the editor picks | Yes: both on the model the editor picks, read-only by written rule only |
+| Recovery ladder and plan amendment | Yes | Yes, on one model (the retry repeats it) | No | No |
+| Pre-flight probe and baseline of every Verify | Yes | Yes | No | No |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
 | Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |
 | UI evidence capture | Yes | Yes | Yes | Yes |
@@ -535,13 +674,17 @@ after a clone, as you would the `sources/` folder.
 
 In VS Code the prompt runs as the planner itself, so it asks its questions in the same conversation
 and has no terminal. In Cursor the plan is run from a skill, and the review gate is skipped; run
-`/whygraph-review` from Claude Code if you want it.
+`/whygraph-review` from Claude Code if you want it. VS Code and Codex run one implementor for the
+whole plan, so the recovery ladder, the plan amender and the pre-flight are not there. They get the
+bounded Verify deadline, the plan tool and the new `--fix-attempts` default of 2. In VS Code the
+plan reviewers are started from the planner's `agents:` list.
 
 !!! warning "What Codex cannot enforce"
     Codex documents no per-agent tool allowlist. In the other editors the researcher is held to a list
     of read-only tools by the editor itself. In Codex the researcher's written rules are the only
     control. A hostile source file could ask a Codex researcher to run a shell command, and a Codex
-    researcher can reach any MCP server you configured. The consent question still protects you from a repo-added source, but
+    researcher can reach any MCP server you configured. The same holds for the plan reviewer: its
+    read-only rule is written, not enforced, so a hostile file could ask it to run a command. The consent question still protects you from a repo-added source, but
     it cannot stop a bundled file that someone edited. Review `sources/` and `.whygraph-overrides/` after a clone, and review
     changes to them in a pull request. A replaced bundled source keeps its bundled name, so it keeps the
     trust that name has.

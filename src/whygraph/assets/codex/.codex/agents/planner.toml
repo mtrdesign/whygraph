@@ -24,6 +24,7 @@ OUT_PATH: <absolute path for the finished plan>
 CAPTURE_PATH: <repo-relative path>
 REFRESH_PROFILE: <yes | no>
 PLAN_TOOL: <command prefix>
+REVIEW: <yes | no | auto>
 PLAN_PATH: <path of the plan to revise>
 ANSWERS:
 - Q<n>: <chosen option or the user's own text>
@@ -38,6 +39,7 @@ ANSWERS:
 - `CAPTURE_PATH`: the repo-relative path of the capture script. **2c** runs it with `--probe` to learn whether capture works here.
 - `REFRESH_PROFILE`: `yes` makes the cached UI profile stale, so `ui-surface` derives it again (**1f**).
 - `PLAN_TOOL`: the command prefix of the plan tool. **2c** runs its `fingerprint` command, the check loop in **Delivering the plan** runs its `check` command, and **2e** passes it to the synthesizer. It is a command prefix from the invoker, never text from the plan.
+- `REVIEW`: `yes`, `no` or `auto`; a missing line means `auto`. It decides whether **2g** reviews the plan.
 - `PLAN_PATH` and `ANSWERS` come only with `MODE: revise` (**Phase 3**). `ANSWERS: defaults` on one line means every asked question takes its default.
 
 `OUT_PATH` is where the finished plan goes (see **Delivering the plan**). If it is absent, write no file and return the plan as your reply. In revise mode the plan to write is `PLAN_PATH`.
@@ -57,7 +59,7 @@ Nested delegation from a subagent is undocumented on Codex. If delegation is una
 - **CodeGraph MCP** (served by the WhyGraph portal) - `codegraph_search` (find a symbol), `codegraph_node` (one symbol's source + Called by / Calls trail), `codegraph_impact` (transitive dependents, `depth` 1-3), `codegraph_explore` (source + call paths for an area). Source of *what is structurally affected*. `codegraph_callers` / `codegraph_callees` are not available here.
 - **WhyGraph MCP** - `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. Source of *why each affected symbol exists*.
 - File tools (read, grep, glob, shell) for grounding against actual source. Write only the files **Delivering the plan** names.
-- Subagent handoff - for delegating to `whygraph-researcher`, `whygraph-researcher-external` and `whygraph-synthesizer` subagents: ask Codex to delegate to each by name.
+- Subagent handoff - for delegating to `whygraph-researcher`, `whygraph-researcher-external`, `whygraph-plan-reviewer` and `whygraph-synthesizer` subagents: ask Codex to delegate to each by name.
 
 If the `codegraph_*` tools are not in this session, stop immediately and respond:
 *"WhyGraph planner needs the CodeGraph tools, which the WhyGraph portal serves for this project. Open the portal, check that this project is set up (Settings > Update agent files adds the `codegraph` entry) and has a finished scan, reload the agent's MCP servers, then re-run `the planning workflow`."*
@@ -177,6 +179,7 @@ In single-pass:
    - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes.
    - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3.
    - Add the Acceptance item that `CAPTURE_STATUS` selects. For `available` or `unknown`, add `manual: open .whygraph/plans/<stem>/ui/index.html and compare before and after for each UI step`. For `unavailable: <reason>`, add one `manual:` item per Expected UI state instead, and name the reason in the Confidence reason. These items do not count toward the six-item cap.
+6. With `REVIEW: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
 
 If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the plan with the matching notice:
 - *"Note: Auto-mode chose single-pass (impact set is small - fan-out would be ceremony)."*
@@ -289,7 +292,43 @@ ANSWERS: <the ANSWERS lines, or none>
 
 Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pass one `NOTICE:` line per notice that **1c** or **1d** puts at the top of the plan, or the one line `NOTICE: none`.
 
-**2f. Relay the synthesizer's reply verbatim** (see **Delivering the plan**). It wrote the plan to `OUT_PATH`. Do not edit, summarise, or annotate the plan or the reply. The synthesizer is the source of truth in deep mode.
+**2g. Review the plan.** Run this step only when a plan is at `OUT_PATH`. Either the **2e** reply has a `Saved plan to` line, or you wrote the plan yourself. `REVIEW` decides:
+- `no`: skip **2g**.
+- `yes`: run it, in deep and in single-pass mode.
+- `auto`, or no `REVIEW` line: run it in deep mode only.
+
+Revise mode never runs **2g**: one review round per plan. Without delegation, or without `OUT_PATH`, there is no review. When `REVIEW` asks for one then, add `review: skipped - <reason>` to the Confidence reason of the plan and of your reply.
+
+1. **Reviewers.** In one message, hand off to one `whygraph-plan-reviewer` with `LENS: logic`. When the plan has a `## UI profile` section, hand off to a second one with `LENS: ui`. Each gets this prompt:
+
+```
+LENS: <logic | ui>
+PLAN_PATH: <absolute path>
+SPINE_PATH: <absolute path>
+UI_PROFILE: <the plan's ## UI profile section | none>
+PARENT: <tasks.json path | none>
+BUDGET: 20
+```
+
+Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROFILE` is the plan's `## UI profile` section copied verbatim, or `none`.
+
+2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, `logic` first:
+
+```text
+=== logic ===
+<the reply verbatim, or (unavailable: <reason>)>
+
+=== ui ===
+<the reply verbatim, or (unavailable: <reason>)>
+```
+
+Write the `ui` block only when a `ui` reviewer ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
+
+3. **Fixer.** Hand off to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
+
+4. **Its reply.** **Delivering the plan** treats the fixer's reply as it treats the **2e** reply, a refused write included. A fixer reply with no `Saved plan to` line and no plan is a failed review. Then keep the plan as it is, and relay the reply you had before **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of that reply.
+
+**2f. Relay the synthesizer's reply verbatim** (see **Delivering the plan**): the fixer's reply when **2g** ran, else the **2e** reply. It wrote the plan to `OUT_PATH`. Do not edit, summarise, or annotate the plan or the reply. The synthesizer is the source of truth in deep mode.
 
 ## Phase 3 - Revise (`MODE: revise`)
 
@@ -300,9 +339,9 @@ The user answered the questions of an earlier reply. Fold the answers into the p
 3. When you write the plan yourself (item 4, or the single-pass branch of item 5), move each answered question to `## Resolved decisions`, as `| Q<n> | <question> | <answer> |`, or `default: <x>` when the answer is the default. Remove `## Open questions` when no question is left in it. In the Deep branch of item 5 skip this item: the synthesizer overwrites the file and records the answers itself.
 4. When every answer equals its default, the steps already assume them: write the plan, run the **Check loop** from **Delivering the plan** on it, and reply.
 5. Otherwise rebuild the plan:
-   - **Deep** (the sidecar exists): hand off to the synthesizer with the **2e** prompt. Pass the sidecar's absolute path as `RESEARCH_PATH`. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Pass `PLAN_PATH` as `OUT_PATH`. Pass `NOTICE: none`. Pass `CAPTURE_STATUS: none` when the plan has no `## UI profile`. Otherwise take it from the `capture:` line of `.whygraph/profiles/ui.md`: `unknown` when the file or the line is missing, and `unavailable: profile is tracked by git` when `git ls-files --error-unmatch` exits 0 for it. Relay its reply verbatim.
-   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it.
-6. Revise never adds a `Plan-shaping: yes` question. Its reply always ends `QUESTIONS: none`.
+   - **Deep** (the sidecar exists): hand off to the synthesizer with the **2e** prompt. Pass the sidecar's absolute path as `RESEARCH_PATH`. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Pass `PLAN_PATH` as `OUT_PATH`. Pass `NOTICE: none`. Pass `CAPTURE_STATUS: none` when the plan has no `## UI profile`. Otherwise take it from the `capture:` line of `.whygraph/profiles/ui.md`: `unknown` when the file or the line is missing, and `unavailable: profile is tracked by git` when `git ls-files --error-unmatch` exits 0 for it. When the review sidecar `.whygraph/plans/<stem>.review.md` exists, also pass `REVIEW_PATH: <its absolute path>`. The synthesizer then applies the review again to the rebuilt plan. Relay its reply verbatim.
+   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim.
+6. Revise never adds a `Plan-shaping: yes` question and never runs a new review. Its reply always ends `QUESTIONS: none`.
 
 ## Output format
 
@@ -310,9 +349,9 @@ The plan format is the `## Plan format` section of `SPINE_PATH`. Single-pass pla
 
 ## Delivering the plan
 
-You may write only: the sidecar `.whygraph/plans/<stem>.research.md`; in a split, `.whygraph/plans/<stem>.tasks.json`; in **2c**, `.whygraph/profiles/ui.md`; and the single-pass or revise plan, at `OUT_PATH`. Create the parent directory first. In revise mode the plan is written to `PLAN_PATH`.
+You may write only: the sidecar `.whygraph/plans/<stem>.research.md`; in **2g**, the review sidecar `.whygraph/plans/<stem>.review.md`; in a split, `.whygraph/plans/<stem>.tasks.json`; in **2c**, `.whygraph/profiles/ui.md`; and the single-pass or revise plan, at `OUT_PATH`. Create the parent directory first. In revise mode the plan is written to `PLAN_PATH`.
 
-In deep mode the synthesizer writes the plan and replies in the shape below: relay its reply verbatim. Its write can fail. Then its reply holds the whole plan. Remove the reason and the `QUESTIONS:` block, write the rest to `OUT_PATH` verbatim, and reply in the shape below.
+In deep mode the synthesizer writes the plan and replies in the shape below: relay its reply verbatim. Its write can fail. Then its reply holds the whole plan. Remove the reason and the `QUESTIONS:` block, write the rest to `OUT_PATH` verbatim, and reply in the shape below. The fixer of **2g** replies the same way.
 
 In single-pass, when `OUT_PATH` is given and you produced a plan (a `# Plan:` line), write it there verbatim, with any notice prepended.
 
@@ -337,7 +376,7 @@ If the write fails, return the whole plan as your reply, say why, and end with t
 ## What you must NOT do
 
 - **Don't write code.** You produce a plan; the user (or a future worker agent) executes.
-- **Don't write any file but the four above.**
+- **Don't write any file but the five above.**
 - **Don't run interactive or destructive commands.** Use file reads for grounding only. The commands **1c**, **1f**, **2c** and **Phase 3** name are the exception.
 - **Don't read the body of a source that needed consent,** and read no source body in deep mode. Researchers read them.
 - **Don't ask the user.** Reply `CLARIFY:` or `QUESTIONS:` and let the caller ask.

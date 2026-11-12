@@ -14,10 +14,14 @@ at any depth, each with an ``agent-*.meta.json`` that names its ``agentType``.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
+import signal
 import subprocess
+import time
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -479,32 +483,160 @@ def plan_log_contains(stem: str, text: str) -> Check:
     return Check(f"log has {text}", fn)
 
 
-def halted(stem: str, step: int, reason: str) -> Check:
-    """Pass when the reply says a step halted for ``reason``."""
+STOP_RE = re.compile(r"^#{1,6} Run stopped at step (\d+) of (\d+)[ \t]*$", re.MULTILINE)
+_FIELD_RE = re.compile(r"^\s*[-*] \*\*(Cause|Tried|State|Next):\*\*[ \t]*(.*)$")
+STOP_FIELDS = ("Cause", "Tried", "State", "Next")
+# Every cause that ends the recovery ladder of section 5.4.
+LADDER_CAUSES = (
+    r"Verify still fails",
+    r"no amendment",
+    r"amendment refused",
+    r"amendment cap",
+    r"the amendment changed other files",
+    r"spec findings remain",
+    r"escalate after amendment",
+    r"some findings fall outside the step's Files",
+    r"a recorded constraint is at risk",
+)
+
+
+@dataclass
+class StopBlock:
+    """One ``## Run stopped at step <N> of <total>`` block.
+
+    Attributes
+    ----------
+    step : int
+        The step the run stopped at.
+    total : int
+        The plan's step count.
+    fields : dict of str to str
+        ``Cause``, ``Tried``, ``State`` and ``Next``, each with its continuation
+        lines, backticks removed.
+    text : str
+        The whole block.
+    """
+
+    step: int
+    total: int
+    fields: dict[str, str]
+    text: str
+
+
+def _main_texts(ctx: Context) -> list[str]:
+    """Return the main sessions' text blocks, or the replies when none was read."""
+    texts = []
+    for transcript in ctx.of_type("main"):
+        for record in transcript.assistant_records():
+            content = (record.get("message") or {}).get("content") or []
+            if isinstance(content, str):
+                texts.append(content)
+                continue
+            texts.extend(
+                str(b.get("text", ""))
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+    return texts or [run.reply for run in ctx.runs]
+
+
+def stop_blocks(texts: list[str]) -> list[StopBlock]:
+    """Return every stop block in the texts, in order.
+
+    Parameters
+    ----------
+    texts : list of str
+        Message texts.
+
+    Returns
+    -------
+    list of StopBlock
+        One per ``Run stopped at step`` heading; a block ends at the next heading.
+    """
+    blocks = []
+    for text in texts:
+        for match in STOP_RE.finditer(text):
+            rest = text[match.end() :]
+            following = re.search(r"^#", rest, re.MULTILINE)
+            body = rest[: following.start()] if following else rest
+            fields: dict[str, str] = {}
+            current = None
+            for line in body.splitlines():
+                field_match = _FIELD_RE.match(line)
+                if field_match:
+                    current = field_match.group(1)
+                    fields[current] = field_match.group(2).replace("`", "")
+                elif current and line.strip():
+                    fields[current] += "\n" + line.strip().replace("`", "")
+            blocks.append(
+                StopBlock(
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    fields,
+                    match.group(0) + body,
+                )
+            )
+    return blocks
+
+
+def stop_block(
+    step: int,
+    causes: tuple[str, ...],
+    tried: tuple[str, ...] = (),
+    names: tuple[str, ...] = (),
+    once: bool = False,
+) -> Check:
+    """Pass when the run ends with the stop block of section 5.7 at ``step``.
+
+    Parameters
+    ----------
+    step : int
+        The step the heading must name.
+    causes : tuple of str
+        Regular expressions; the Cause must start with one (case ignored).
+    tried : tuple of str
+        Regular expressions the Tried line must each hold (case ignored).
+    names : tuple of str
+        Text the block must each hold, for example every miss ``probe`` found.
+    once : bool
+        Fail when the main session printed more than one stop block.
+
+    Returns
+    -------
+    Check
+        Reads the last block; all four fields must be present and Next must
+        name ``/whygraph-implement``.
+    """
 
     def fn(ctx: Context) -> Outcome:
-        reply = ctx.runs[-1].reply.lower()
-        ok = f"halted at step {step}" in reply and reason.lower() in reply
-        return (
-            ok,
-            f"{stem} step {step}: {'halted' if ok else 'no halt line'} ({reason})",
-        )
-
-    return Check(f"halts: {reason}", fn)
-
-
-def verdict_is_only(expected: str) -> Check:
-    """Pass when the evaluators gave exactly one verdict, and it is ``expected``."""
-
-    def fn(ctx: Context) -> Outcome:
-        found = [
-            v
-            for t in ctx.of_type("whygraph-evaluator")
-            for _step, v in VERDICT_RE.findall(t.final_text())
+        blocks = stop_blocks(_main_texts(ctx))
+        if not blocks:
+            return False, "no 'Run stopped at step' block"
+        block = blocks[-1]
+        problems = []
+        if once and len(blocks) != 1:
+            problems.append(f"{len(blocks)} stop blocks")
+        if block.step != step:
+            problems.append(f"stopped at step {block.step}")
+        missing = [f for f in STOP_FIELDS if f not in block.fields]
+        if missing:
+            problems.append(f"no {', '.join(missing)}")
+        cause = block.fields.get("Cause", "").strip()
+        if not any(re.match(p, cause, re.IGNORECASE) for p in causes):
+            problems.append("cause not expected")
+        tried_text = block.fields.get("Tried", "")
+        problems += [
+            f"Tried lacks {p!r}"
+            for p in tried
+            if not re.search(p, tried_text, re.IGNORECASE)
         ]
-        return found == [expected], f"verdicts {found}"
+        problems += [f"block lacks {n!r}" for n in names if n not in block.text]
+        if "/whygraph-implement" not in block.fields.get("Next", ""):
+            problems.append("Next does not name /whygraph-implement")
+        first = cause.splitlines()[0] if cause else ""
+        return not problems, "; ".join([f"cause {first!r}", *problems])
 
-    return Check(f"one verdict, {expected}", fn)
+    return Check(f"stop block at step {step}", fn)
 
 
 def verdicts_per_run(expected: list[str]) -> Check:
@@ -891,3 +1023,818 @@ def outside_evidence_stays_in_prior_art(stem: str) -> Check:
         )
 
     return Check("outside evidence only in Prior art", fn)
+
+
+_AGENT_TOOL = r"^(Agent|Task)$"
+_PLAN_TOOL_RE = re.compile(r"plan-tool\.sh\s+([a-z-]+)\s+(\S+)\s+(\S+)")
+
+
+def _steps_dir(ctx: Context, stem: str) -> Path:
+    """Return ``.whygraph/plans/<stem>/steps``."""
+    return ctx.workdir / ".whygraph" / "plans" / stem / "steps"
+
+
+def _bash_commands(transcripts: list[Transcript]) -> list[str]:
+    """Return every ``Bash`` command of the transcripts, in order."""
+    return [
+        str(u.input.get("command", ""))
+        for t in transcripts
+        for u in t.tool_uses()
+        if _tool_matches(u.name, r"^Bash$")
+    ]
+
+
+def _implementor_prompts(transcripts: list[Transcript]) -> list[str]:
+    """Return the prompt of every implementor dispatch, in order."""
+    return [
+        str(u.input.get("prompt", ""))
+        for t in transcripts
+        for u in t.tool_uses()
+        if _tool_matches(u.name, _AGENT_TOOL)
+        and u.input.get("subagent_type") == "whygraph-implementor"
+    ]
+
+
+def _attempt_lines(ctx: Context, stem: str) -> list[list[str]]:
+    """Return the plan's ``attempts`` lines, split into words."""
+    text = _text(_steps_dir(ctx, stem) / "attempts")
+    return [line.split() for line in text.splitlines() if line.strip()]
+
+
+def _amendment_lines(ctx: Context, stem: str) -> list[str]:
+    """Return the ``- `` lines of the plan's ``## Amendments`` section."""
+    section = _section(_text(_plan_path(ctx, stem)), "Amendments")
+    return [line for line in section.splitlines() if line.startswith("- ")]
+
+
+def _find_processes(pattern: str) -> list[int]:
+    """Return the pids whose command line holds ``pattern``, without this one."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "--", pattern],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        pids = [int(p) for p in out.split()]
+    except FileNotFoundError:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        pids = [
+            int(line.split(None, 1)[0])
+            for line in out.splitlines()
+            if pattern in line and "ps -A" not in line
+        ]
+    return [p for p in pids if p != os.getpid()]
+
+
+def no_process(pattern: str) -> Check:
+    """Pass when no process runs ``pattern`` a few seconds after the run.
+
+    A process still running fails the check and is killed, ``TERM`` and then
+    ``KILL``, so a failed case leaves nothing behind.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        pids: list[int] = []
+        for _ in range(3):
+            pids = _find_processes(pattern)
+            if not pids:
+                return True, f"no process runs {pattern!r}"
+            time.sleep(1)
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in _find_processes(pattern):
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            time.sleep(1)
+        left = _find_processes(pattern)
+        return False, f"pids {pids} ran {pattern!r}; killed, {len(left)} left"
+
+    return Check(f"no {pattern} process", fn)
+
+
+def step_diff_paths(stem: str, expected: dict[int, set[str]]) -> Check:
+    """Pass when each ``steps/<N>.diff`` touches exactly the paths listed for N."""
+
+    def fn(ctx: Context) -> Outcome:
+        found = {}
+        for step in expected:
+            diff = _text(_steps_dir(ctx, stem) / f"{step}.diff")
+            paths = set()
+            for match in re.finditer(r"^diff --git a/(\S+) b/(\S+)$", diff, re.M):
+                paths.update(match.groups())
+            found[step] = paths
+        ok = found == expected
+        return ok, f"diff paths { ({k: sorted(v) for k, v in found.items()}) }"
+
+    return Check("each step diff holds only its paths", fn)
+
+
+def begin_end_around_implementors() -> Check:
+    """Pass when the main session runs ``begin`` before and ``end`` after each step run.
+
+    Every implementor dispatch with ``STEP_RANGE: <N>`` needs a
+    ``plan-tool.sh begin <plan> <N>`` earlier in the main session, and a
+    ``plan-tool.sh end <plan> <N>`` before the next implementor dispatch.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        events: list[tuple[str, str]] = []
+        for transcript in ctx.of_type("main"):
+            for use in transcript.tool_uses():
+                if _tool_matches(use.name, r"^Bash$"):
+                    command = str(use.input.get("command", ""))
+                    for kind, _plan, step in _PLAN_TOOL_RE.findall(command):
+                        if kind in {"begin", "end"}:
+                            events.append((kind, step))
+                elif (
+                    _tool_matches(use.name, _AGENT_TOOL)
+                    and use.input.get("subagent_type") == "whygraph-implementor"
+                ):
+                    prompt = str(use.input.get("prompt", ""))
+                    match = re.search(r"^STEP_RANGE:\s*(\S+)", prompt, re.M)
+                    events.append(("run", match.group(1) if match else "?"))
+        runs, problems = 0, []
+        for index, (kind, step) in enumerate(events):
+            if kind != "run" or step == "acceptance":
+                continue
+            runs += 1
+            if not step.isdigit():
+                problems.append(f"run {runs} has STEP_RANGE {step}")
+                continue
+            later = events[index + 1 :]
+            stop = next((i for i, e in enumerate(later) if e[0] == "run"), len(later))
+            if ("begin", step) not in events[:index]:
+                problems.append(f"run {runs} (step {step}): no begin before")
+            if ("end", step) not in later[:stop]:
+                problems.append(f"run {runs} (step {step}): no end after")
+        ok = runs > 0 and not problems
+        return (
+            ok,
+            f"{runs} step run(s); {'; '.join(problems) or 'begin and end around each'}",
+        )
+
+    return Check("begin before and end after each step run", fn)
+
+
+def reaches_acceptance() -> Check:
+    """Pass when the run got to Acceptance.
+
+    Evidence is any of: the main session ran ``plan-tool.sh accept``, an
+    implementor was dispatched with ``STEP_RANGE: acceptance``, or the session
+    printed ``## Run summary``.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        main = ctx.of_type("main")
+        evidence = []
+        if any(re.search(r"plan-tool\.sh\s+accept\s", c) for c in _bash_commands(main)):
+            evidence.append("accept called")
+        if any("STEP_RANGE: acceptance" in p for p in _implementor_prompts(main)):
+            evidence.append("acceptance run")
+        if any(re.search(r"^#{1,6} Run summary", t, re.M) for t in _main_texts(ctx)):
+            evidence.append("run summary")
+        return bool(evidence), ", ".join(evidence) or "no sign of Acceptance"
+
+    return Check("reaches Acceptance", fn)
+
+
+def amendments(stem: str, count: int, field_name: str | None = None) -> Check:
+    """Pass when ``## Amendments`` holds ``count`` lines, each of ``field_name``."""
+
+    def fn(ctx: Context) -> Outcome:
+        lines = _amendment_lines(ctx, stem)
+        wrong = [
+            line
+            for line in lines
+            if field_name and not re.match(rf"- Step \d+: {field_name} - ", line)
+        ]
+        ok = len(lines) == count and not wrong
+        return ok, f"{len(lines)} amendment(s): {lines}"
+
+    kind = f" of {field_name}" if field_name else ""
+    return Check(f"{count} amendment(s){kind}", fn)
+
+
+def attempt_count(
+    stem: str,
+    step: int,
+    kind: str,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> Check:
+    """Pass when ``attempts`` holds between ``minimum`` and ``maximum`` lines of a kind."""
+
+    def fn(ctx: Context) -> Outcome:
+        count = sum(
+            1 for words in _attempt_lines(ctx, stem) if words[:2] == [str(step), kind]
+        )
+        ok = count >= minimum and (maximum is None or count <= maximum)
+        return ok, f"{count} '{step} {kind}' line(s) in attempts"
+
+    upper = "" if maximum is None else f"..{maximum}"
+    return Check(f"step {step} {kind} attempts {minimum}{upper}", fn)
+
+
+def log_ever_had(stem: str, text: str) -> Check:
+    """Pass when the plan's log holds ``text``, now or in any write to the plan.
+
+    A later run of a step replaces its log entry, so a line an earlier run wrote
+    is looked for in every ``Edit`` and ``Write`` of the plan, too.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        if text in _section(_text(_plan_path(ctx, stem)), "Implementation log"):
+            return True, f"log holds {text!r}"
+        for transcript in ctx.all_transcripts():
+            for use in transcript.tool_uses():
+                if not _tool_matches(use.name, r"^(Edit|Write|MultiEdit)$"):
+                    continue
+                if not str(use.input.get("file_path", "")).endswith(f"/{stem}.md"):
+                    continue
+                if text in json.dumps(use.input, ensure_ascii=False):
+                    return True, f"{transcript.agent_type} wrote {text!r} to the log"
+        return False, f"no write of {text!r} to the log"
+
+    return Check(f"log had {text}", fn)
+
+
+def no_plan_tool_call(subcommand: str) -> Check:
+    """Pass when no session ran ``plan-tool.sh <subcommand>``."""
+
+    def fn(ctx: Context) -> Outcome:
+        pattern = rf"plan-tool\.sh\s+{re.escape(subcommand)}\b"
+        calls = [
+            c for c in _bash_commands(ctx.all_transcripts()) if re.search(pattern, c)
+        ]
+        return not calls, f"{len(calls)} {subcommand} call(s)"
+
+    return Check(f"no plan-tool {subcommand}", fn)
+
+
+def record_ladder(stem: str, expect: str) -> Check:
+    """Record the rungs a run used and how it ended, against an expected end.
+
+    Reads ``attempts``, ``## Amendments``, the ``fix`` lines of the log and the
+    last stop block. Never fails.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        rungs = [
+            " ".join(words[:3])
+            for words in _attempt_lines(ctx, stem)
+            if len(words) > 1 and words[1] not in {"begin", "reset"}
+        ]
+        log = _section(_text(_plan_path(ctx, stem)), "Implementation log")
+        fixes = len(re.findall(r"^\s+- fix ", log, re.M))
+        blocks = stop_blocks(_main_texts(ctx))
+        if blocks:
+            cause = blocks[-1].fields.get("Cause", "").strip()
+            end = f"stopped at step {blocks[-1].step}: {cause.splitlines()[0] if cause else '?'}"
+        else:
+            end = "no stop block"
+        return True, (
+            f"rungs {rungs}; amendments {_amendment_lines(ctx, stem)}; "
+            f"fix lines {fixes}; {end}; expected: {expect}"
+        )
+
+    return Check("ladder record", fn, record=True)
+
+
+# The plan review of section 5.9: the reviewer's reply, its sidecar and the fixer.
+_FINDING_RE = re.compile(
+    r"^\s*-\s*F(\d+)\s*\|\s*(blocker|should)\s*\|\s*([^|]+?)\s*\|\s*(.*?)\s*"
+    r"\|\s*evidence:\s*(.*?)\s*\|\s*fix:\s*(.*)$",
+    re.IGNORECASE,
+)
+_LOCATION_RE = re.compile(r"([\w./@~-]+\.\w+):(\d+)(?:-(\d+))?")
+_REVIEW_LINE_RE = re.compile(r"^- F(\d+) \((\w+)\): (\w+)", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One ``- F<n> | ...`` line of a plan reviewer's reply.
+
+    Attributes
+    ----------
+    number : int
+        The ``F<n>`` number.
+    severity : str
+        ``blocker`` or ``should``.
+    where : str
+        ``step <N>``, ``acceptance`` or ``plan``, lower-cased.
+    defect : str
+        The defect text.
+    evidence : str
+        The text after ``evidence:``.
+    lens : str
+        The reviewer's lens, when known.
+    """
+
+    number: int
+    severity: str
+    where: str
+    defect: str
+    evidence: str
+    lens: str = ""
+
+    def locations(self) -> list[tuple[str, int, int]]:
+        """Return each ``path:line`` or ``path:start-end`` of the evidence."""
+        return [
+            (path, int(start), int(end or start))
+            for path, start, end in _LOCATION_RE.findall(self.evidence)
+        ]
+
+    def label(self) -> str:
+        """Return a short label for a report line."""
+        return f"F{self.number} {self.severity} {self.where}: {self.defect[:60]}"
+
+
+def parse_review(text: str, lens: str = "") -> tuple[str | None, list[Finding]]:
+    """Parse a reviewer reply, or one block of the review sidecar.
+
+    Parameters
+    ----------
+    text : str
+        The reply.
+    lens : str
+        The lens to record on each finding when the text has no ``REVIEW:`` line.
+
+    Returns
+    -------
+    tuple of (str or None, list of Finding)
+        The lens of the first ``REVIEW: <lens>`` line (``None`` without one),
+        and the findings in reply order.
+    """
+    head = re.search(r"^REVIEW: (\w+)", text, re.MULTILINE)
+    found_lens = head.group(1) if head else None
+    findings = []
+    for line in text.splitlines():
+        match = _FINDING_RE.match(line)
+        if match:
+            number, severity, where, defect, evidence, _fix = match.groups()
+            findings.append(
+                Finding(
+                    int(number),
+                    severity.lower(),
+                    where.strip().lower(),
+                    defect,
+                    evidence,
+                    found_lens or lens,
+                )
+            )
+    return found_lens, findings
+
+
+def _review_reply(ctx: Context) -> tuple[str, str]:
+    """Return the plan reviewer's reply and where it came from."""
+    reviewers = ctx.of_type("whygraph-plan-reviewer")
+    if reviewers:
+        text = reviewers[-1].final_text()
+        if text.strip():
+            return text, "reviewer transcript"
+    return (ctx.runs[-1].reply if ctx.runs else ""), "main reply"
+
+
+@dataclass(frozen=True)
+class Seeded:
+    """A defect seeded into a review fixture, and where its evidence may point.
+
+    Attributes
+    ----------
+    label : str
+        The defect, for the report.
+    steps : tuple of int
+        The ``step <N>`` values a finding for it may name.
+    at : tuple of (str, tuple of int)
+        Path suffixes, each with the lines the evidence may name. A range in
+        the evidence counts when it holds one of them.
+    """
+
+    label: str
+    steps: tuple[int, ...]
+    at: tuple[tuple[str, tuple[int, ...]], ...]
+
+    def matched_by(self, finding: Finding) -> bool:
+        """Return whether a finding names this defect's step and seeded line."""
+        named = (
+            re.findall(r"\d+", finding.where)
+            if finding.where.startswith("step")
+            else []
+        )
+        if not any(int(n) in self.steps for n in named):
+            return False
+        return any(
+            path.endswith(suffix) and any(start <= n <= end for n in lines)
+            for path, start, end in finding.locations()
+            for suffix, lines in self.at
+        )
+
+
+def review_findings(expected: tuple[Seeded, ...]) -> Check:
+    """Pass when the reviewer reports every seeded defect, each at its seeded line.
+
+    Each seeded defect needs its own finding that names one of its steps and
+    gives evidence at one of its lines. Other findings are listed, not failed.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text, where = _review_reply(ctx)
+        lens, findings = parse_review(text)
+        if lens is None:
+            return False, f"no REVIEW line in the {where}"
+        used: set[int] = set()
+        parts, missed = [], 0
+        for seed in expected:
+            hit = next(
+                (f for f in findings if f.number not in used and seed.matched_by(f)),
+                None,
+            )
+            if hit is None:
+                missed += 1
+                parts.append(f"missed: {seed.label}")
+            else:
+                used.add(hit.number)
+                parts.append(f"F{hit.number}: {seed.label}")
+        extra = [f.label() for f in findings if f.number not in used]
+        parts.append(f"other findings {len(extra)}: {extra}")
+        return not missed, "; ".join(parts)
+
+    return Check(f"reviewer finds {len(expected)} seeded defects", fn)
+
+
+def review_blocker_count(maximum: int) -> Check:
+    """Pass when the reviewer reports at most ``maximum`` blockers; list every finding."""
+
+    def fn(ctx: Context) -> Outcome:
+        text, where = _review_reply(ctx)
+        lens, findings = parse_review(text)
+        if lens is None:
+            return False, f"no REVIEW line in the {where}"
+        blockers = [f for f in findings if f.severity == "blocker"]
+        shoulds = [f for f in findings if f.severity == "should"]
+        return len(blockers) <= maximum, (
+            f"{len(blockers)} blocker(s), {len(shoulds)} should(s): "
+            f"{[f.label() for f in findings]}"
+        )
+
+    return Check(f"at most {maximum} blocker finding(s)", fn)
+
+
+def agent_model(agent_type: str, tag: str) -> Check:
+    """Pass when every transcript of an agent type ran on a model naming ``tag``."""
+
+    def fn(ctx: Context) -> Outcome:
+        agents = ctx.of_type(agent_type)
+        models = {m for t in agents for m in t.models()}
+        ok = bool(agents) and all(tag in m for m in models)
+        return ok, f"{len(agents)} {agent_type} transcript(s), models {sorted(models)}"
+
+    return Check(f"{agent_type} on {tag}", fn)
+
+
+def plan_tool_check(stem: str) -> Check:
+    """Pass when ``plan-tool.sh check`` exits 0 on the plan."""
+
+    def fn(ctx: Context) -> Outcome:
+        proc = subprocess.run(
+            ["sh", ".claude/skills/whygraph-plan/plan-tool.sh", "check"]
+            + [str(_plan_path(ctx, stem))],
+            cwd=ctx.workdir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        lines = proc.stdout.strip().splitlines()
+        return proc.returncode == 0, f"exit {proc.returncode}; {lines[:3]}"
+
+    return Check("plan-tool check exits 0", fn)
+
+
+def _drop_section(text: str, heading: str) -> str:
+    """Return ``text`` without the ``## <heading>`` section."""
+    match = re.search(rf"^## {re.escape(heading)}.*$", text, re.MULTILINE)
+    if not match:
+        return text
+    rest = text[match.end() :]
+    following = re.search(r"^## ", rest, re.MULTILINE)
+    return text[: match.start()] + (rest[following.start() :] if following else "")
+
+
+def _plan_writes(transcript: Transcript, stem: str) -> list[tuple[str, dict[str, Any]]]:
+    """Return the successful ``Write`` / ``Edit`` / ``MultiEdit`` calls on a plan."""
+    failed = set()
+    for record in transcript.records:
+        content = (record.get("message") or {}).get("content")
+        if record.get("type") != "user" or not isinstance(content, list):
+            continue
+        failed.update(
+            b.get("tool_use_id")
+            for b in content
+            if isinstance(b, dict)
+            and b.get("type") == "tool_result"
+            and b.get("is_error")
+        )
+    writes = []
+    for record in transcript.assistant_records():
+        for block in (record.get("message") or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name", ""))
+            args = block.get("input") or {}
+            if (
+                name in {"Write", "Edit", "MultiEdit"}
+                and str(args.get("file_path", "")).endswith(
+                    f"/.whygraph/plans/{stem}.md"
+                )
+                and block.get("id") not in failed
+            ):
+                writes.append((name, args))
+    return writes
+
+
+def _apply_edit(text: str, args: dict[str, Any]) -> str:
+    """Apply one ``Edit`` as the tool does; an edit the tool would refuse is skipped."""
+    old, new = str(args.get("old_string", "")), str(args.get("new_string", ""))
+    count = text.count(old) if old else 0
+    if count == 0 or (count > 1 and not args.get("replace_all")):
+        return text
+    return (
+        text.replace(old, new) if args.get("replace_all") else text.replace(old, new, 1)
+    )
+
+
+def _replay(text: str | None, writes: list[tuple[str, dict[str, Any]]]) -> str | None:
+    """Return the plan after a transcript's writes, starting from ``text``."""
+    for name, args in writes:
+        if name == "Write":
+            text = str(args.get("content", ""))
+        elif text is not None and name == "Edit":
+            text = _apply_edit(text, args)
+        elif text is not None:
+            for edit in args.get("edits") or []:
+                text = _apply_edit(text, edit)
+    return text
+
+
+def _review_states(ctx: Context, stem: str) -> tuple[str | None, str | None, str]:
+    """Return the plan before the review, after the fixer, and a note on how.
+
+    Before is the first synthesizer that wrote the plan without ``REVIEW_PATH``
+    (the **2e** run), replayed through its own edits, the check loop included.
+    After is that text replayed through the fixer's writes: the first
+    synthesizer with ``REVIEW_PATH`` and ``ANSWERS: none``. A later revise
+    (``--no-questions`` answers its defaults) is therefore left out.
+    """
+    synthesizers = sorted(
+        ctx.of_type("whygraph-synthesizer"), key=Transcript.first_timestamp
+    )
+    plain = [t for t in synthesizers if "REVIEW_PATH:" not in t.first_prompt()]
+    fixers = [
+        t
+        for t in synthesizers
+        if "REVIEW_PATH:" in t.first_prompt()
+        and re.search(r"^ANSWERS: none\s*$", t.first_prompt(), re.MULTILINE)
+    ]
+    before = next(
+        (
+            text
+            for t in plain
+            if (text := _replay(None, _plan_writes(t, stem))) is not None
+        ),
+        None,
+    )
+    if before is None:
+        return None, None, "no synthesizer Write of the plan"
+    if not fixers:
+        return before, None, "no fixer transcript"
+    after = _replay(before, _plan_writes(fixers[0], stem))
+    return before, after, f"{len(plain)} synthesizer(s), {len(fixers)} fixer(s)"
+
+
+def _line_keys(lines: list[str]) -> list[str]:
+    """Return, per line, ``step <N>`` inside ``## Steps`` or the section heading."""
+    keys, section, step = [], "", None
+    for line in lines:
+        heading = re.match(r"^## (\S+(?: \S+)*?)(?::.*)?\s*$", line)
+        if heading:
+            section, step = heading.group(1).lower(), None
+        elif section == "steps" and (item := re.match(r"^(\d+)\. \*\*", line)):
+            step = int(item.group(1))
+        keys.append(f"step {step}" if section == "steps" and step else section)
+    return keys
+
+
+def _applied_blockers(ctx: Context, stem: str, after: str) -> set[str]:
+    """Return the ``where`` of each blocker the fixer applied, as ``step <N>`` or a section."""
+    sidecar = _text(ctx.workdir / ".whygraph" / "plans" / f"{stem}.review.md")
+    blockers = {}
+    for lens, body in re.findall(
+        r"^=== (\w+) ===\s*$(.*?)(?=^=== |\Z)", sidecar, re.MULTILINE | re.DOTALL
+    ):
+        for finding in parse_review(body, lens)[1]:
+            if finding.severity == "blocker":
+                blockers[(lens, finding.number)] = finding.where
+    applied = {
+        (lens, int(number))
+        for number, lens, status in _REVIEW_LINE_RE.findall(
+            _section(after, "Plan review")
+        )
+        if status == "applied"
+    }
+    return {where for key, where in blockers.items() if key in applied}
+
+
+_BLOCKER_ONLY_RE = re.compile(
+    r"^(\s*|## Blockers.*|\*\(.*\)\*|- \*\*Review finding .*)$"
+)
+
+
+def plan_growth(stem: str, pct: float) -> Check:
+    """Pass when the review grew the plan by at most ``pct`` percent in lines.
+
+    Measured from the plan the first synthesizer wrote (``_review_states``) to
+    the fixer's result, both without ``## Plan review``. Exempt: review-finding
+    lines in ``## Blockers``, and every change inside a step or section that an
+    applied ``blocker`` names.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        before, after, note = _review_states(ctx, stem)
+        if before is None or after is None:
+            return False, note
+        exempt_where = _applied_blockers(ctx, stem, after)
+        base = _drop_section(before, "Plan review").splitlines()
+        post = _drop_section(after, "Plan review").splitlines()
+        keys = _line_keys(base) or [""]
+        growth = exempt = 0
+        matcher = difflib.SequenceMatcher(None, base, post, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            net = (j2 - j1) - (i2 - i1)
+            at = i1 - 1 if tag == "insert" and i1 > 0 else min(i1, len(keys) - 1)
+            only_blockers = all(_BLOCKER_ONLY_RE.match(x) for x in post[j1:j2])
+            if net > 0 and (keys[at] in exempt_where or only_blockers):
+                exempt += net
+            else:
+                growth += net
+        share = 100.0 * growth / max(len(base), 1)
+        return share <= pct, (
+            f"{len(base)} -> {len(post)} lines, growth {growth} ({share:.1f}%, "
+            f"cap {pct:g}%), exempt {exempt} for blockers {sorted(exempt_where)}; {note}"
+        )
+
+    return Check(f"review growth at most {pct:g}%", fn)
+
+
+_QUOTED_RE = re.compile(r"\*\*(Constraints to preserve|Risks|Constraint at risk):\*\*")
+
+
+def review_keeps_fixed_text(stem: str) -> Check:
+    """Pass when the fixer left the Objective, Non-goals, Resolved decisions and quotes.
+
+    Compares the same two texts as ``plan_growth``: the Objective and Non-goals
+    lines and the ``## Resolved decisions`` section are byte-identical, and every
+    verbatim-quote line (Constraints to preserve, Risks, Constraint at risk, and
+    the bullets of ``## Risks called out across the change``) is still there.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        before, after, note = _review_states(ctx, stem)
+        if before is None or after is None:
+            return False, note
+
+        def fixed(text: str) -> tuple[list[str], str, Counter[str]]:
+            lines = text.splitlines()
+            heads = [
+                line
+                for line in lines
+                if line.startswith(("**Objective:**", "**Non-goals:**"))
+            ]
+            quotes = Counter(line for line in lines if _QUOTED_RE.search(line))
+            risks = _section(text, "Risks called out across the change")
+            quotes.update(x for x in risks.splitlines() if x.startswith("- "))
+            return heads, _section(text, "Resolved decisions"), quotes
+
+        heads_a, resolved_a, quotes_a = fixed(before)
+        heads_b, resolved_b, quotes_b = fixed(after)
+        problems = []
+        if heads_a != heads_b:
+            problems.append("Objective or Non-goals changed")
+        if resolved_a.strip() != resolved_b.strip():
+            problems.append("Resolved decisions changed")
+        lost = quotes_a - quotes_b
+        if lost:
+            problems.append(
+                f"{sum(lost.values())} quote line(s) changed: {list(lost)[:2]}"
+            )
+        return not problems, "; ".join(problems) or f"unchanged; {note}"
+
+    return Check("review keeps the fixed text", fn)
+
+
+def plan_review_kept(stem: str) -> Check:
+    """Pass when the final plan has ``## Plan review``; name any revise that ran."""
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(_plan_path(ctx, stem))
+        ok = re.search(r"^## Plan review[ \t]*$", text, re.MULTILINE) is not None
+        revises = [
+            u
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if _tool_matches(u.name, _AGENT_TOOL)
+            and u.input.get("subagent_type") == "whygraph-planner"
+            and re.search(r"^MODE: revise", str(u.input.get("prompt", "")), re.M)
+        ]
+        return ok, (
+            f"## Plan review {'present' if ok else 'absent'}; "
+            f"{len(revises)} revise dispatch(es) in this run"
+        )
+
+    return Check("plan has ## Plan review", fn)
+
+
+def _token_count(usage: dict[str, Any]) -> int:
+    """Return the input, cache and output tokens of one ``usage`` record."""
+    return sum(
+        int(usage.get(k) or 0)
+        for k in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        )
+    )
+
+
+def _transcript_tokens(transcript: Transcript) -> dict[str, int]:
+    """Return the tokens of a transcript per model, each API message counted once."""
+    seen: set[str] = set()
+    tokens: Counter[str] = Counter()
+    for record in transcript.assistant_records():
+        message = record.get("message") or {}
+        key = str(message.get("id") or id(record))
+        if key in seen:
+            continue
+        seen.add(key)
+        tokens[str(message.get("model", ""))] += _token_count(
+            message.get("usage") or {}
+        )
+    return dict(tokens)
+
+
+def record_review_cost() -> Check:
+    """Record the review's share of the run cost: the reviewers and the fixer.
+
+    The ledger has one cost per run. Each model's cost per token comes from the
+    run's ``modelUsage``; the review agents' tokens are priced at that rate. It is
+    an estimate: the cache mix of an agent differs from its model's average.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        totals: dict[str, tuple[float, int]] = {}
+        for run in ctx.runs:
+            for model, usage in (run.data.get("modelUsage") or {}).items():
+                cost, count = totals.get(model, (0.0, 0))
+                count += sum(
+                    int(usage.get(k) or 0)
+                    for k in (
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheReadInputTokens",
+                        "cacheCreationInputTokens",
+                    )
+                )
+                totals[model] = (cost + float(usage.get("costUSD") or 0), count)
+        rate = {m: c / n for m, (c, n) in totals.items() if n}
+
+        def priced(transcripts: list[Transcript]) -> float:
+            return sum(
+                count * rate.get(model, 0.0)
+                for t in transcripts
+                for model, count in _transcript_tokens(t).items()
+            )
+
+        fixers = [
+            t
+            for t in ctx.of_type("whygraph-synthesizer")
+            if "REVIEW_PATH:" in t.first_prompt()
+        ]
+        reviewers = priced(ctx.of_type("whygraph-plan-reviewer"))
+        fixer = priced(fixers)
+        total = sum(run.cost for run in ctx.runs)
+        share = 100.0 * (reviewers + fixer) / total if total else 0.0
+        return True, (
+            f"review ~${reviewers + fixer:.2f} of ${total:.2f} ({share:.0f}%): "
+            f"reviewers ${reviewers:.2f}, fixer ${fixer:.2f} (token-share estimate)"
+        )
+
+    return Check("review cost share", fn, record=True)

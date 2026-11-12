@@ -26,7 +26,7 @@ Name the files or behaviours that a step must not touch. Take them from the `Bou
 
 ## Problems before solutions
 
-- A Blocker is a constraint that the change puts at risk. Quote the constraint verbatim.
+- A Blocker is a constraint that the change puts at risk. It can also be a verified review finding that the plan cannot fix. Quote the constraint verbatim.
 - A Risk is any other problem. Give each Risk one mitigation.
 - State the problems before the steps that depend on them.
 
@@ -85,11 +85,15 @@ Fill `Test first` only from an uncovered symbol in the `Verify candidates` repor
 
 Write each Verify as a command in backticks, taken from the `Verify candidates` report. Never write a prose Verify. Use `manual: <what to look at>` only when no command can check the step.
 
+A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
+
 ## Acceptance
 
 - Make item 1 the full test command of the project, as the `Verify candidates` report gives it.
 - Add the user-visible outcomes of the task as the next items. Add at most six items in all.
 - Give each item a **Check**: a literal command, or `manual: <what to look at>`.
+- A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
+- A Check must finish within 9 minutes. For a longer suite, item 1 names the fastest full command, such as a parallel run. Item 1 may instead be `manual:` with the command to run.
 
 ## Self-review checklist
 
@@ -145,6 +149,7 @@ Check each box before you hand the plan over.
 - **Constraint at risk:** <verbatim quote>
 - **Why it's a blocker:** <one-line>
 - **Resolution needed:** <what the user has to confirm before proceeding>
+- **Review finding F<n> (<lens>):** <defect> - **Resolution needed:** <fix>
 
 ## Steps
 
@@ -171,6 +176,12 @@ Check each box before you hand the plan over.
 ## Open questions
 *(forks the user may override; omit the section when there are none)*
 - **Q1.** <question> **Options:** <default> / <alternative>[ / <alternative>] **Default:** <the option the steps assume> **Plan-shaping:** <yes | no> - <why it matters, one line>
+
+## Amendments
+*(written only by /whygraph-implement; omit when planning)*
+
+## Plan review
+*(only after a plan review; written by the fixer; a revise keeps it verbatim)*
 
 ## Confidence: <low | medium | high>
 <one-line reason - e.g. "rationale was rich and consistent" or "5 of 8 nodes had no usable rationale">

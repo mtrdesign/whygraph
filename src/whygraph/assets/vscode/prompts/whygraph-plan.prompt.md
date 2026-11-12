@@ -1,7 +1,7 @@
 ---
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Runs as the planner - one researcher per knowledge source, then a synthesizer - splits a large task into child plans only when needed, and asks the few plan-shaping questions after research.
 name: whygraph-plan
-argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]
+argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]
 agent: whygraph-planner
 ---
 
@@ -13,7 +13,7 @@ You are in the main chat, so you are also the one who asks the user. Wherever yo
 
 You have no terminal here. Find files with the read and search tools. The edit tool creates a file's parent directory, so no directory needs creating first. Leave `created` out of a `tasks.json`.
 
-**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]`
+**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]`
 
 ## Step 1 - Parse arguments
 
@@ -25,14 +25,17 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--no-split` -> forbid a split.
 - `--sources <a,b>` -> run only these sources, by `name`, comma-separated (consume the next token). A named source runs even when its file says `enabled: false`. Each name must match `^[a-z0-9-]+$`.
 - `--no-questions` -> ask nothing: every consent is `no`, and open questions take their defaults.
+- `--review` -> review the plan before it is handed over, in single-pass mode too.
+- `--no-review` -> skip the plan review.
 - `--refresh-profile` -> derive the UI profile (`.whygraph/profiles/ui.md`) again, even when the cached one is fresh.
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--refresh-profile] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
+- If both `--review` and `--no-review` are passed, respond with `Pass --review OR --no-review, not both.` and stop.
 - If a `--sources` name does not match the pattern, respond with `Unknown source name: <name>` and stop.
 
 When the task description is one path that ends in `.tasks.json`, this run plans one child of an earlier split: resolve `SOURCES_DIR` and `SPINE_PATH` (Step 2), then go to **Step 6 - Plan a child**.
@@ -95,12 +98,14 @@ OUT_PATH: <absolute path resolved in Step 2>
 CAPTURE_PATH: .github/whygraph/capture.mjs
 PLAN_TOOL: sh .github/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>
+REVIEW: <yes | no | auto>
 ```
 
 - `MODE` is `shallow` for `--shallow`, `deep` for `--deep`, otherwise `auto`.
 - `SPLIT` is `yes` for `--split`, `no` for `--no-split`, otherwise `auto`.
 - `SOURCES` is the `--sources` list, otherwise `all`.
 - `REFRESH_PROFILE` is `yes` for `--refresh-profile`, otherwise `no`.
+- `REVIEW` is `yes` for `--review`, `no` for `--no-review`, otherwise `auto`.
 
 Now follow your planner instructions with this input, from Phase 0. Do not restate them here.
 
@@ -153,6 +158,7 @@ The task description is the path of a `tasks.json` that an earlier run wrote. Pl
    - `SPLIT: no`
    - `PARENT: <absolute path of the tasks.json>`
    - `OUT_PATH: <workspace root>/<the child's plan>`
+   - `MODE`, `REVIEW`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay as Step 4 sets them from this run's flags.
 5. Print `### <id>: <title>`, then follow Step 5 for this child. A child never splits.
 
 ## Step 7 - Print the result

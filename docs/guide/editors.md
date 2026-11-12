@@ -39,7 +39,7 @@ your editor how to use WhyGraph's tools. Re-initializing leaves your existing fi
 agent files** in the project's Settings overwrites them.
 
 The planning commands take flags: `/whygraph-plan` accepts `--shallow`, `--deep`, `--split`,
-`--no-split`, `--sources <a,b>`, `--no-questions` and `--out <path>`; `/whygraph-implement` accepts
+`--no-split`, `--sources <a,b>`, `--no-questions`, `--review`, `--no-review` and `--out <path>`; `/whygraph-implement` accepts
 `--from-step N`, `--step N`, `--commit-each-step`, `--fix-attempts N`, `--model`, `--no-review`,
 `--no-eval`, `--no-capture` and `--eval-fix-attempts N`. See
 [Planning a change](planning.md).

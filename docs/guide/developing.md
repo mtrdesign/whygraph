@@ -285,7 +285,7 @@ make agent-eval ARGS="--cases O1 --stage 1"
 !!! warning "It costs money, and it never runs in CI"
     Every case calls a paid model on your own `claude` login. A full suite costs about $14 to $16. Run it by hand before you trust a change to a harness prompt. CI never runs it, and `scripts/` is linted but not collected by pytest.
 
-- **Cases with an `O` or `C` prefix** run in a throwaway clone of `scripts/agent_evals/fixtures/mini` and need only the `claude` login.
+- **Cases with an `O`, `C` or `U` prefix** run in a throwaway clone of `scripts/agent_evals/fixtures/mini` and need only the `claude` login.
 - **Cases with a `P` prefix** run in a real repo, by default the clean `ui-demo` repo at `~/.local/state/whygraph-dev/repos/ui-demo` (`--repo DIR` to change it). They need the dev portal (`make dev-local`, port 8777) with that repo registered and scanned. A `P` case refuses a dirty work tree, works on the temporary branch `eval-tmp`, and restores the repo afterwards. Without the portal it prints a skip reason and spends nothing.
 - **The ledger** is one JSON line per run, with the case, the stage and the cost. `make agent-eval` writes it to `plans/47-eval/spend.jsonl` (`AGENT_EVAL_LEDGER` to change it) and caps the total at $50 (`AGENT_EVAL_MAX_USD`). Before each run, the sum of the ledger plus the run's budget is checked against the cap, and the run is refused when it would exceed it. A run with no cost in its result is charged its budget.
 

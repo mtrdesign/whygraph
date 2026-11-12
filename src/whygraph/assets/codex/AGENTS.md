@@ -31,7 +31,7 @@ The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_thi
 
 ## Planning a non-trivial change
 
-For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. The planner writes the plan file in single-pass mode; in deep mode the synthesizer writes it. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.
+For multi-file changes, migrations, feature additions, or anything that ripples across the codebase, hand off to the `whygraph-planner` agent (ask Codex to delegate to it by name). The planner builds a CodeGraph impact set, splits a large task into child plans only when needed, warms the rationale cache, and produces an ordered step-by-step plan with verbatim constraint/risk quotes. For richer changes it fans out to one researcher per knowledge source, then a synthesizer. Then a logic reviewer and, for a screen change, a UX/UI reviewer check the plan against the code. A fixer applies what holds. The planner writes the plan file in single-pass mode; in deep mode the synthesizer writes it. Research for a plan comes from the files under `.codex/whygraph/sources/`; add a knowledge source by adding a file there (see its README). A plan that changes a screen captures the affected routes before and after each step (`.whygraph/plans/<plan>/ui/index.html`); write your UI standards under a `## UI conventions` heading and the planner reads them.
 
 The planner never asks the user anything. You do, in chat, before and after it runs:
 
@@ -53,10 +53,11 @@ OUT_PATH: <absolute path>
 CAPTURE_PATH: .codex/whygraph/capture.mjs
 PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>   # yes when the user asks for `--refresh-profile`: derive the UI profile (`.whygraph/profiles/ui.md`) again
+REVIEW: <yes | no | auto>     # from the user's words: yes when they ask for a plan review, no when they ask for none; default auto
 ```
 
 4. **Clarify.** A reply `CLARIFY: <question> | options: <a>; <b>` means no plan was written. Ask the question in chat, then delegate again with the same prompt plus `CLARIFICATION: <answer>`. Ask once per plan.
-5. **Split.** A reply `SPLIT: <path>` followed by lines `t<N> (wave <W>): <title>` means the planner wrote a `tasks.json` and no plan. Validate it: it is under `.whygraph/plans/` and not tracked by git (`git ls-files -- <path>` prints nothing), has `version: 1`, 1 to 6 children with ids `t1`-`t6`, every `plan` matching `^\.whygraph/plans/[a-z0-9-]+-t[1-6]\.md$`, and every `depends_on` naming an existing id with no cycle; refuse with the reason otherwise. Then delegate one fresh `whygraph-planner` per child, wave by wave, with `TASK: <the child's task>`, `SPLIT: no`, `PARENT: <the tasks.json path>`, `OUT_PATH: <repo root>/<the child's plan>`, and the `CONSENT` / `TERMS` lines for `t1` only (every other child gets `CONSENT: none`), plus `REFRESH_PROFILE` for `t1` only (every other child gets `REFRESH_PROFILE: no`).
+5. **Split.** A reply `SPLIT: <path>` followed by lines `t<N> (wave <W>): <title>` means the planner wrote a `tasks.json` and no plan. Validate it: it is under `.whygraph/plans/` and not tracked by git (`git ls-files -- <path>` prints nothing), has `version: 1`, 1 to 6 children with ids `t1`-`t6`, every `plan` matching `^\.whygraph/plans/[a-z0-9-]+-t[1-6]\.md$`, and every `depends_on` naming an existing id with no cycle; refuse with the reason otherwise. Then delegate one fresh `whygraph-planner` per child, wave by wave, with `TASK: <the child's task>`, `SPLIT: no`, `PARENT: <the tasks.json path>`, `OUT_PATH: <repo root>/<the child's plan>`, and the `CONSENT` / `TERMS` lines for `t1` only (every other child gets `CONSENT: none`), plus `REFRESH_PROFILE` for `t1` only (every other child gets `REFRESH_PROFILE: no`). `MODE`, `REVIEW` and the other lines stay the same.
 6. **Questions.** A plan reply is `Saved plan to <path>` plus its Blockers and Confidence lines, and ends with a `QUESTIONS:` block: `QUESTIONS: none`, or lines `Q<n>. <question> | options: <default>; <alt> | default: <default> | why: <one line>`. Ask at most 3 in one chat message, the default option first and labelled `(default)`; the user may answer in their own words. Then delegate again with the same prompt, `MODE: revise` in place of its mode, plus `REFRESH_PROFILE: no`, `PLAN_PATH: <the plan>` and `ANSWERS:` followed by `- Q<n>: <answer>` lines. If the user asked for no questions, delegate the revise with `ANSWERS: defaults` instead. A revise reply ends `QUESTIONS: none`; never ask again for the same plan.
 
 Print each planner reply verbatim. The one exception: when the user asked for no questions, do not print a plan reply whose `QUESTIONS:` block has questions, because its revise reply replaces it. Don't draft a parallel plan yourself - that defeats the cost gate. Either invoke `whygraph-planner` or plan inline without WhyGraph.
@@ -74,7 +75,7 @@ PLAN_PATH: <absolute path>
 STEP_RANGE: auto      # or "<N>-" to start at step N
 ACCEPTANCE: inline
 COMMIT_EACH_STEP: <true | false>
-FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 0
+FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 2
 TASKS_PATH: none      # or the tasks.json path, for one child of a split
 TASK_ID: none         # or that child's id
 CAPTURE: none         # or "node .codex/whygraph/capture.mjs", see below

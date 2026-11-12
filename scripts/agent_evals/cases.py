@@ -14,49 +14,83 @@ skipped, so a baseline never tests what is not built yet.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from checks import (
+    LADDER_CAUSES,
     Check,
+    Seeded,
+    agent_model,
     agent_dispatched,
+    amendments,
     at_stage,
+    attempt_count,
+    begin_end_around_implementors,
     children_in_order,
     file_contains,
     file_exists,
     file_lacks,
-    halted,
     implementor_model,
     listener_got_no_bytes,
     external_reaches_synthesizer,
+    log_ever_had,
     outside_evidence_stays_in_prior_art,
     no_edit,
     no_implementor,
+    no_plan_tool_call,
+    no_process,
     plan_log_contains,
+    plan_growth,
     plan_note,
+    plan_review_kept,
+    plan_tool_check,
     plan_tool_check_or_confidence,
+    reaches_acceptance,
     record_comparison,
+    record_ladder,
     record_rationale_before_edit,
+    record_review_cost,
     reply_contains,
     reply_starts_with,
     researchers_reached_mcp,
     resolved_decisions_has,
+    review_blocker_count,
+    review_findings,
+    review_keeps_fixed_text,
     reviewer_codegraph_node,
     sidecar_blocks_match_researchers,
+    step_diff_paths,
+    stop_block,
     tasks_done,
     tool_called,
     transcript_exists,
-    verdict_is_only,
     verdicts_per_run,
     verify_record,
     web_search_only_in_external,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+PLAN_TOOL = (
+    Path(__file__).resolve().parents[2]
+    / "src/whygraph/assets/claude-code/skills/whygraph-plan/plan-tool.sh"
+)
 EVALUATOR_KINDS = ("pass", "fix", "escalate")
+GIT_IDENTITY = [
+    "-c",
+    "user.name=agent-evals",
+    "-c",
+    "user.email=agent-evals@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+]
 
 
 @dataclass
@@ -103,6 +137,12 @@ class Case:
         A case that must run earlier in the same invocation.
     canary : bool
         Start a local listener for this case.
+    env : dict of str to str
+        Extra environment for each ``claude -p`` of the case.
+    assets : callable or None
+        Edits a copy of the ``--assets`` tree in place before it is installed,
+        for a case that tests a broken agent. Raises ``ValueError`` when the
+        tree does not have what it edits.
     """
 
     id: str
@@ -116,6 +156,8 @@ class Case:
     same_run_as: str | None = None
     after: str | None = None
     canary: bool = False
+    env: dict[str, str] = field(default_factory=dict)
+    assets: Callable[[Path], None] | None = None
 
     @property
     def kind(self) -> str:
@@ -201,6 +243,40 @@ SPINE = "{dir}/.claude/skills/whygraph-plan/plan-spine.md"
 CAPTURE = ".claude/skills/whygraph-ui-check/capture.mjs"
 
 
+def plan_reviewer_prompt(
+    stem: str, lens: str, model: str, ui_profile: str = "none"
+) -> str:
+    """Return a plan reviewer dispatch prompt, modelled on ``evaluator_prompt``.
+
+    Parameters
+    ----------
+    stem : str
+        The plan's stem under ``.whygraph/plans/``.
+    lens : str
+        ``logic`` or ``ui``.
+    model : str
+        The Agent tool model, as planner 2g sets it (``opus`` for ``logic``).
+    ui_profile : str
+        The plan's ``## UI profile`` section, or ``none``.
+
+    Returns
+    -------
+    str
+        The prompt in planner 2g's shape, with ``{dir}`` left for the runner.
+    """
+    return (
+        "Dispatch the whygraph-plan-reviewer subagent once, with the Agent tool model "
+        f"{model}, and this exact prompt. Then print its reply verbatim and do nothing "
+        "else.\n\n"
+        f"LENS: {lens}\n"
+        f"PLAN_PATH: {{dir}}/.whygraph/plans/{stem}.md\n"
+        f"SPINE_PATH: {SPINE}\n"
+        f"UI_PROFILE: {ui_profile}\n"
+        "PARENT: none\n"
+        "BUDGET: 20"
+    )
+
+
 def setup_evaluator(ws: Workspace) -> None:
     """Install the three canned evaluator cases, with their diffs applied."""
     plans = ws.dir / ".whygraph" / "plans"
@@ -238,8 +314,184 @@ def setup_revise(ws: Workspace) -> None:
     shutil.copy(FIXTURES / "plans" / "p7.md", plans / "eval-p2.md")
 
 
+def copy_plan(fixture: str, stem: str) -> Callable[[Workspace], None]:
+    """Return a setup hook that copies a plan fixture to ``.whygraph/plans/<stem>.md``.
+
+    A ``P`` case runs in ``--repo`` and copies no ``Case.plans``; an ``eval-``
+    stem is removed by ``_cleanup_portal_plans`` at the end of the invocation.
+    """
+
+    def setup(ws: Workspace) -> None:
+        plans = ws.dir / ".whygraph" / "plans"
+        plans.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURES / "plans" / fixture, plans / f"{stem}.md")
+
+    return setup
+
+
+def step_field_line(name: str, step: int, field_name: str) -> tuple[int, ...]:
+    """Return the 1-based line of a step's ``**<field_name>:**`` in a plan fixture.
+
+    Empty when the fixture, the step or the field is missing; ``validate``
+    reports that.
+    """
+    path = FIXTURES / "plans" / name
+    if not path.is_file():
+        return ()
+    current = None
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if line.startswith("## "):
+            current = None
+        elif match := re.match(r"^(\d+)\. \*\*", line):
+            current = int(match.group(1))
+        elif current == step and f"**{field_name}:**" in line:
+            return (number,)
+    return ()
+
+
+# P9's seeded lines, as (step, field, text the line must hold).
+P9_SEEDED = {
+    "order": (1, "Change", "when `isOn` gives `false`"),
+    "isOn added": (2, "Change", "Add `export function isOn(name)`"),
+    "unrelated verify": (3, "Verify", "--test-name-pattern=isOn"),
+    "export files": (4, "Files", "src/flags.js:1, src/flags.test.js"),
+    "export change": (4, "Change", "Remove `export` from `flags`"),
+}
+P9_PLAN = "eval-p9.md"
+
+
+def _p9(*keys: str) -> tuple[int, ...]:
+    """Return the p9.md lines of ``P9_SEEDED`` entries."""
+    return tuple(
+        line for key in keys for line in step_field_line("p9.md", *P9_SEEDED[key][:2])
+    )
+
+
+# ``App`` in ui-demo's src/main.jsx: the import of ``flags`` and its three reads.
+MAIN_FLAGS_LINES = (3, 6, 9, 10)
+P9_SEEDS = (
+    Seeded(
+        "step 1 calls isOn, which step 2 adds",
+        (1,),
+        ((P9_PLAN, _p9("order", "isOn added")), ("src/flags.js", (1,))),
+    ),
+    Seeded(
+        "step 3's Verify runs only the isOn test",
+        (3,),
+        ((P9_PLAN, _p9("unrelated verify")),),
+    ),
+    Seeded(
+        "step 4 drops the flags export; App in src/main.jsx is in no Files",
+        (4,),
+        (
+            (P9_PLAN, _p9("export files", "export change")),
+            ("src/main.jsx", MAIN_FLAGS_LINES),
+        ),
+    ),
+)
+REVIEW_FIXTURES = ("p9.md", "p10.md")
+
+
+GREET_TEST = """import unittest
+
+from mini.greet import greet
+
+
+class GreetTest(unittest.TestCase):
+    def test_greet(self) -> None:
+        self.assertEqual(greet("Ada"), "Hello, Ada!")
+"""
+DIRTY_LINE = "Local note, not committed.\n"
+UNTRACKED = {"notes.txt": "a scratch note\n", "scratch/draft.md": "# Draft\n"}
+# The implementor sub-steps U7 deletes: the start tree, Verify and the end tree.
+STRIPPED_SUBSTEPS = ((1, "Start tree"), (6, "Verify"), (8, "End tree and diff"))
+# Shell functions that U8's commands start with; none may be a command here.
+U8_FUNCTIONS = ("nvm", "workon", "use_python")
+# The commands ``probe`` must report missing in each U fixture.
+PROBE_MISSES = {
+    "u8.md": {
+        "missing: nvm (step 1)",
+        "missing: workon (step 2)",
+        "missing: use_python (acceptance 2)",
+    },
+}
+
+
+def _commit(ws: Workspace, message: str) -> None:
+    """Commit every change in the workspace with the eval identity."""
+    for args in (["add", "-A"], ["commit", "-q", "-m", message]):
+        subprocess.run(
+            ["git", *GIT_IDENTITY, *args], cwd=ws.dir, check=True, capture_output=True
+        )
+
+
+def setup_greet_test(ws: Workspace) -> None:
+    """Commit U2's existing test, which ``fixtures/mini`` must not hold."""
+    (ws.dir / "tests" / "test_greet.py").write_text(GREET_TEST, encoding="utf-8")
+    _commit(ws, "eval: the greeting test")
+
+
+def setup_dirty_tree(ws: Workspace) -> None:
+    """Leave a tracked edit and untracked files that no step touches."""
+    with (ws.dir / "README.md").open("a", encoding="utf-8") as handle:
+        handle.write(DIRTY_LINE)
+    for rel, body in UNTRACKED.items():
+        path = ws.dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+
+def strip_substeps(text: str) -> str:
+    """Delete the ``STRIPPED_SUBSTEPS`` items from an implementor's Phase 2.
+
+    Parameters
+    ----------
+    text : str
+        The implementor body.
+
+    Returns
+    -------
+    str
+        The body without those numbered items and their indented lines.
+
+    Raises
+    ------
+    ValueError
+        When Phase 2, or one of the items, is not found exactly once.
+    """
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.startswith("## Phase 2 - ")]
+    if len(starts) != 1:
+        raise ValueError(f"'## Phase 2 - ' found {len(starts)} times")
+    start = starts[0]
+    end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+        len(lines),
+    )
+    drop: set[int] = set()
+    for number, title in STRIPPED_SUBSTEPS:
+        head = f"{number}. **{title}.**"
+        found = [i for i in range(start, end) if lines[i].startswith(head)]
+        if len(found) != 1:
+            raise ValueError(f"sub-step {head!r} found {len(found)} times")
+        stop = found[0] + 1
+        while stop < end and (not lines[stop].strip() or lines[stop][0] in " \t"):
+            stop += 1
+        drop.update(range(found[0], stop))
+    return "".join(line for i, line in enumerate(lines) if i not in drop)
+
+
+def strip_implementor(tree: Path) -> None:
+    """U7's ``assets`` transform: an implementor without sub-steps 1, 6 and 8."""
+    path = tree / "agents" / "implementor.md"
+    if not path.is_file():
+        raise ValueError(f"no {path.relative_to(tree)} in the assets tree")
+    path.write_text(strip_substeps(path.read_text(encoding="utf-8")), "utf-8")
+
+
 PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
+REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
 
 CASES: tuple[Case, ...] = (
     Case(
@@ -259,7 +511,8 @@ CASES: tuple[Case, ...] = (
         estimate=0.4,
         plans=("g7b.md",),
         checks=(
-            halted("g7b", 1, "passed before the change"),
+            stop_block(1, (r"the Test first test passed before the change",)),
+            attempt_count("g7b", 1, "retry", maximum=0),
             file_lacks("mini/pricing.py", "GATE_B"),
         ),
     ),
@@ -267,12 +520,13 @@ CASES: tuple[Case, ...] = (
         id="O3",
         name="fix and scope",
         prompts=(implement("g7c", "--fix-attempts 1"),),
-        budget=1.2,
-        estimate=0.7,
+        budget=3.0,
+        estimate=1.8,
         plans=("g7c.md",),
         checks=(
-            plan_log_contains("g7c", "fix 1/1"),
-            plan_log_contains("g7c", "out of scope:"),
+            log_ever_had("g7c", "fix 1/1"),
+            log_ever_had("g7c", "out of scope:"),
+            stop_block(1, LADDER_CAUSES),
         ),
     ),
     Case(
@@ -305,15 +559,6 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
-        id="O6",
-        name="spec escalate",
-        prompts=(implement("c15"),),
-        budget=0.9,
-        estimate=0.5,
-        plans=("c15.md",),
-        checks=(verdict_is_only("escalate"),),
-    ),
-    Case(
         id="O7",
         name="evaluator verdicts",
         prompts=tuple(evaluator_prompt(f"o7-{kind}") for kind in EVALUATOR_KINDS),
@@ -341,6 +586,116 @@ CASES: tuple[Case, ...] = (
         checks=(children_in_order(), tasks_done("o9", ["t1", "t2"])),
     ),
     Case(
+        id="U1",
+        name="Verify never returns",
+        prompts=(implement("u1"),),
+        budget=0.9,
+        estimate=0.5,
+        plans=("u1.md",),
+        env={"WHYGRAPH_VERIFY_TIMEOUT": "5"},
+        checks=(
+            stop_block(
+                1,
+                (r"Verify did not finish in \d+ s at baseline",),
+                tried=(r"nothing|before any edit",),
+            ),
+            no_implementor(0),
+            no_edit(),
+            no_process("sleep 100037"),
+        ),
+    ),
+    Case(
+        id="U2",
+        name="unattended fix",
+        prompts=(implement("u2"),),
+        budget=2.5,
+        estimate=1.4,
+        plans=("u2.md",),
+        setup=setup_greet_test,
+        checks=(
+            reaches_acceptance(),
+            file_contains("mini/greet.py", "def greet"),
+            record_ladder("u2", "reaches Acceptance, with or without a fix"),
+        ),
+    ),
+    Case(
+        id="U3",
+        name="Files amendment",
+        prompts=(implement("c15"),),
+        budget=3.5,
+        estimate=2.0,
+        plans=("c15.md",),
+        checks=(
+            amendments("c15", 1, "Files"),
+            reaches_acceptance(),
+            file_contains("mini/flags.py", "gate"),
+        ),
+    ),
+    Case(
+        id="U4",
+        name="Verify never passes",
+        prompts=(implement("u4"),),
+        budget=2.5,
+        estimate=1.5,
+        plans=("u4.md",),
+        env={"WHYGRAPH_VERIFY_TIMEOUT": "5"},
+        checks=(
+            # Tried names only an amendment that was made, so a declined one
+            # shows in the Cause; the amender's transcript proves the rung ran.
+            stop_block(1, LADDER_CAUSES, tried=(r"retr",)),
+            transcript_exists("whygraph-plan-amender"),
+            attempt_count("u4", 1, "retry", minimum=1, maximum=1),
+        ),
+    ),
+    Case(
+        id="U6",
+        name="dirty tree diffs",
+        prompts=(implement("clean3"),),
+        budget=3.5,
+        estimate=2.2,
+        plans=("clean3.md",),
+        setup=setup_dirty_tree,
+        checks=(
+            step_diff_paths(
+                "clean3",
+                {1: {"mini/pricing.py"}, 2: {"mini/report.py"}, 3: {"mini/flags.py"}},
+            ),
+            file_contains("README.md", DIRTY_LINE.strip()),
+            *(file_exists(rel) for rel in UNTRACKED),
+            reaches_acceptance(),
+        ),
+    ),
+    Case(
+        id="U7",
+        name="implementor skips the trees",
+        prompts=(implement("clean3"),),
+        budget=3.5,
+        estimate=2.2,
+        plans=("clean3.md",),
+        assets=strip_implementor,
+        checks=(reaches_acceptance(), begin_end_around_implementors()),
+    ),
+    Case(
+        id="U8",
+        name="shell-function commands",
+        prompts=(implement("u8"),),
+        budget=0.9,
+        estimate=0.5,
+        plans=("u8.md",),
+        checks=(
+            stop_block(
+                1,
+                (r"(Verify|Check) cannot run",),
+                tried=(r"nothing|before any edit",),
+                names=U8_FUNCTIONS,
+                once=True,
+            ),
+            no_plan_tool_call("baseline"),
+            no_implementor(0),
+            no_edit(),
+        ),
+    ),
+    Case(
         id="P1",
         name="single-pass plan",
         prompts=(f"/whygraph-plan {RENAME_TASK} --no-questions --out {PLAN_P1}",),
@@ -362,8 +717,8 @@ CASES: tuple[Case, ...] = (
         prompts=(
             f"/whygraph-plan {EMPTY_STATE_TASK} --deep --no-questions --out {PLAN_P2}",
         ),
-        budget=4.5,
-        estimate=3.0,
+        budget=6.5,
+        estimate=3.5,
         checks=(
             sidecar_blocks_match_researchers("eval-p2"),
             researchers_reached_mcp(),
@@ -387,7 +742,8 @@ CASES: tuple[Case, ...] = (
                 "OUT_PATH: {dir}/.whygraph/plans/eval-p3.md\n"
                 f"CAPTURE_PATH: {CAPTURE}\n"
                 "PLAN_TOOL: sh .claude/skills/whygraph-plan/plan-tool.sh\n"
-                "REFRESH_PROFILE: no"
+                "REFRESH_PROFILE: no\n"
+                "REVIEW: no"
             ),
         ),
         budget=3.5,
@@ -464,6 +820,7 @@ CASES: tuple[Case, ...] = (
             for c in (
                 transcript_exists("whygraph-synthesizer"),
                 resolved_decisions_has("eval-p2", "Nothing here yet"),
+                plan_review_kept("eval-p2"),
             )
         ),
     ),
@@ -484,7 +841,8 @@ CASES: tuple[Case, ...] = (
                 "OUT_PATH: {dir}/.whygraph/plans/eval-p8.md\n"
                 f"CAPTURE_PATH: {CAPTURE}\n"
                 "PLAN_TOOL: sh .claude/skills/whygraph-plan/plan-tool.sh\n"
-                "REFRESH_PROFILE: no"
+                "REFRESH_PROFILE: no\n"
+                "REVIEW: no"
             ),
         ),
         budget=3.5,
@@ -494,6 +852,46 @@ CASES: tuple[Case, ...] = (
             external_reaches_synthesizer("eval-p8", "best-practices"),
             web_search_only_in_external(),
             outside_evidence_stays_in_prior_art("eval-p8"),
+        ),
+    ),
+    Case(
+        id="P9",
+        name="plan review: seeded defects",
+        prompts=(plan_reviewer_prompt("eval-p9", "logic", "opus"),),
+        budget=2.0,
+        estimate=1.0,
+        setup=copy_plan("p9.md", "eval-p9"),
+        checks=(
+            review_findings(P9_SEEDS),
+            agent_model("whygraph-plan-reviewer", "opus"),
+        ),
+    ),
+    Case(
+        id="P10",
+        name="plan review: clean plan",
+        prompts=(plan_reviewer_prompt("eval-p10", "logic", "opus"),),
+        budget=2.0,
+        estimate=1.0,
+        setup=copy_plan("p10.md", "eval-p10"),
+        checks=(
+            review_blocker_count(0),
+            agent_model("whygraph-plan-reviewer", "opus"),
+        ),
+    ),
+    Case(
+        id="P11",
+        name="plan review in a deep plan",
+        prompts=(),
+        budget=0.0,
+        estimate=0.0,
+        same_run_as="P2",
+        checks=(
+            plan_review_kept("eval-p2"),
+            plan_tool_check("eval-p2"),
+            plan_growth("eval-p2", 25),
+            review_keeps_fixed_text("eval-p2"),
+            plan_note(REVIEW_P2, r"(?m)^=== ui ===[ \t]*$", "review sidecar ui block"),
+            record_review_cost(),
         ),
     ),
     Case(
@@ -518,10 +916,17 @@ CASES: tuple[Case, ...] = (
         id="C3",
         name="defect3, arm A",
         prompts=(implement("defect3"),),
-        budget=2.5,
-        estimate=1.6,
+        budget=3.5,
+        estimate=2.3,
         plans=("defect3.md",),
-        checks=(record_comparison(2),),
+        checks=(
+            record_comparison(2),
+            record_ladder(
+                "defect3",
+                "Acceptance after one Files amendment of step 2 (.dockerignore), "
+                "or a stop at step 2: some findings fall outside the step's Files",
+            ),
+        ),
     ),
     Case(
         id="C4",
@@ -571,4 +976,96 @@ def validate() -> list[str]:
         problems.append("P3: fixtures/sources/evil.md has no canary placeholder")
     if not (FIXTURES / "mini" / ".gitignore").is_file():
         problems.append("fixtures/mini/.gitignore missing")
+    for case in CASES:
+        for key, value in case.env.items():
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key) or "\n" in value:
+                problems.append(f"{case.id}: bad env entry {key!r}")
+    for rel in ("tests/test_greet.py", "mini/greet.py"):
+        if (FIXTURES / "mini" / rel).exists():
+            problems.append(f"U2: fixtures/mini/{rel} exists; U2's setup adds it")
+    for name in U8_FUNCTIONS:
+        found = subprocess.run(
+            ["sh", "-c", 'command -v -- "$1"', "probe", name],
+            capture_output=True,
+            check=False,
+        )
+        if found.returncode == 0:
+            problems.append(f"U8: {name} is a command here, so probe finds no miss")
+    problems.extend(_probe_problems())
+    problems.extend(_review_fixture_problems())
+    return problems
+
+
+def _review_fixture_problems() -> list[str]:
+    """Check the plan review fixtures: present, well formed, and P9's seeds in place.
+
+    Returns
+    -------
+    list of str
+        One line per missing fixture, ``plan-tool.sh check`` finding, or seeded
+        text that is not on exactly one line of ``p9.md``.
+    """
+    problems = []
+    for name in REVIEW_FIXTURES:
+        path = FIXTURES / "plans" / name
+        if not path.is_file():
+            problems.append(f"P9/P10: missing fixtures/plans/{name}")
+            continue
+        out = subprocess.run(
+            ["sh", str(PLAN_TOOL), "check", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if out.returncode != 0:
+            problems.append(f"{name}: plan-tool.sh check exit {out.returncode}")
+    p9 = FIXTURES / "plans" / "p9.md"
+    lines = p9.read_text(encoding="utf-8").splitlines() if p9.is_file() else []
+    for key, (step, field_name, text) in P9_SEEDED.items():
+        found = _p9(key)
+        if not found or text not in lines[found[0] - 1]:
+            problems.append(f"P9: step {step} {field_name} does not hold {text!r}")
+    return problems
+
+
+def _probe_problems() -> list[str]:
+    """Run ``plan-tool.sh probe`` on each U fixture in a scratch clone of mini.
+
+    Returns
+    -------
+    list of str
+        One line per fixture whose missing commands differ from ``PROBE_MISSES``.
+    """
+    names = sorted(
+        {n for c in CASES if c.id.startswith("U") for n in c.plans if n.endswith(".md")}
+    )
+    if not PLAN_TOOL.is_file():
+        return [f"missing {PLAN_TOOL}"]
+    problems = []
+    with tempfile.TemporaryDirectory(prefix="agent-eval-probe-") as tmp:
+        repo = Path(tmp) / "repo"
+        shutil.copytree(FIXTURES / "mini", repo)
+        plans = repo / ".whygraph" / "plans"
+        plans.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        for name in names:
+            if not (FIXTURES / "plans" / name).is_file():
+                continue
+            shutil.copy(FIXTURES / "plans" / name, plans / name)
+            out = subprocess.run(
+                ["sh", str(PLAN_TOOL), "probe", f".whygraph/plans/{name}"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            misses = {
+                line for line in out.stdout.splitlines() if line.startswith("missing:")
+            }
+            expected = PROBE_MISSES.get(name, set())
+            if out.returncode not in (0, 4) or misses != expected:
+                problems.append(
+                    f"{name}: probe exit {out.returncode}, misses {sorted(misses)}, "
+                    f"expected {sorted(expected)}"
+                )
     return problems

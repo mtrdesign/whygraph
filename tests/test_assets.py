@@ -37,6 +37,8 @@ def test_packaged_claude_assets_present() -> None:
         "agents/implementor.md",
         "agents/whygraph-reviewer.md",
         "agents/evaluator.md",
+        "agents/plan-reviewer.md",
+        "agents/plan-amender.md",
         "skills/whygraph-plan/SKILL.md",
         "skills/whygraph-plan/plan-spine.md",
         "skills/whygraph-plan/plan-tool.sh",
@@ -98,6 +100,8 @@ def test_packaged_cursor_assets_present() -> None:
         "agents/synthesizer.md",
         "agents/implementor.md",
         "agents/evaluator.md",
+        "agents/plan-reviewer.md",
+        "agents/plan-amender.md",
     )
     for rel in expected:
         leaf = root
@@ -134,6 +138,8 @@ def test_packaged_codex_assets_present() -> None:
         ".codex/agents/researcher-external.toml",
         ".codex/agents/synthesizer.toml",
         ".codex/agents/implementor.toml",
+        ".codex/agents/plan-reviewer.toml",
+        ".codex/agents/plan-amender.toml",
     )
     for rel in expected:
         leaf = root
@@ -176,6 +182,8 @@ def test_packaged_vscode_assets_present() -> None:
         "agents/researcher.agent.md",
         "agents/synthesizer.agent.md",
         "agents/implementor.agent.md",
+        "agents/plan-reviewer.agent.md",
+        "agents/plan-amender.agent.md",
     )
     for rel in expected:
         leaf = root
@@ -326,10 +334,10 @@ def test_install_from_packaged_source(tmp_path: Path) -> None:
     assert (project / ".claude" / "agents" / "planner.md").is_file()
     assert (project / ".claude" / "skills" / "rationale" / "SKILL.md").is_file()
     assert (project / ".claude" / "skills" / "pre-edit" / "SKILL.md").is_file()
-    # 7 agents + 7 skills + CLAUDE.md (merge file, written fresh) = 15 files,
+    # 9 agents + 7 skills + CLAUDE.md (merge file, written fresh) = 17 files,
     # plus the plan skill's spine, plan tool, guard, sources README and 6 sources = 10,
-    # plus the UI check skill's capture script = 26 files.
-    assert len(result.written) == 26
+    # plus the UI check skill's capture script = 28 files.
+    assert len(result.written) == 28
 
 
 # ---- install_assets: defensive guard -------------------------------------
@@ -745,6 +753,7 @@ def _frontmatter(path: Path) -> dict[str, str]:
 
 def test_frontmatter_allowlist() -> None:
     """Every asset's frontmatter keys and ``model`` values are documented ones."""
+    assert "allowed-tools" not in _FRONTMATTER_KEYS["cursor"]
     for tree, keys in _FRONTMATTER_KEYS.items():
         for path in (_ASSET_ROOT / tree).rglob("*"):
             if path.suffix not in {".md", ".mdc"}:
@@ -770,6 +779,7 @@ _GUARD_HOOKS = {
         ("Bash", "synthesizer"),
         ("Write|Edit", "synthesizer-write"),
     ],
+    "agents/plan-amender.md": [("Edit", "amender-write")],
 }
 _GUARD_COMMAND = (
     r'sh "\$CLAUDE_PROJECT_DIR/\.claude/skills/whygraph-plan/guard\.sh" ([a-z-]+)'
@@ -826,6 +836,7 @@ def test_harness_frontmatter_wiring() -> None:
     assert _frontmatter(cc / "agents/synthesizer.md")["tools"] == (
         "Read, Grep, Glob, Bash, Write, Edit, TaskStop"
     )
+    assert _frontmatter(cc / "agents/synthesizer.md")["maxTurns"] == "30"
     planner = _frontmatter(cc / "agents/planner.md")
     assert "disallowedTools" not in planner
     assert planner["tools"] == (
@@ -844,7 +855,9 @@ def test_harness_frontmatter_wiring() -> None:
     assert cursor_external["model"] == "inherit"
     assert _frontmatter(cc / "skills/whygraph-implement/SKILL.md")["allowed-tools"] == (
         "Agent, Read, mcp__whygraph__whygraph_propose_note, "
-        "Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe)"
+        "Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe), "
+        "Bash(sh .claude/skills/whygraph-plan/plan-tool.sh *), "
+        "Bash(git hash-object --no-filters .claude/skills/whygraph-plan/plan-tool.sh)"
     )
     assert _frontmatter(_ASSET_ROOT / "cursor/agents/planner.md")["readonly"] == "false"
     assert (
@@ -866,7 +879,17 @@ def test_harness_frontmatter_wiring() -> None:
     assert _frontmatter(vs / "agents/synthesizer.agent.md")["tools"] == (
         "['read', 'search', 'edit']"
     )
-    for name in ("researcher", "synthesizer", "implementor"):
+    assert (
+        "'whygraph-plan-reviewer'"
+        in _frontmatter(vs / "agents/planner.agent.md")["agents"]
+    )
+    for name in (
+        "researcher",
+        "synthesizer",
+        "implementor",
+        "plan-reviewer",
+        "plan-amender",
+    ):
         fm = _frontmatter(vs / f"agents/{name}.agent.md")
         assert fm["user-invocable"] == "false" and fm["agents"] == "[]"
     for name in ("researcher", "synthesizer"):
@@ -900,7 +923,14 @@ _AGENT_PATHS = {
     "vscode": "vscode/agents/{n}.agent.md",
     "codex": "codex/.codex/agents/{n}.toml",
 }
-_AGENT_NAMES = ("planner", "synthesizer", "implementor", "researcher")
+_AGENT_NAMES = (
+    "planner",
+    "synthesizer",
+    "implementor",
+    "researcher",
+    "plan-reviewer",
+    "plan-amender",
+)
 
 
 def _agent_body(tree: str, name: str) -> list[str]:
@@ -971,8 +1001,9 @@ _PARITY_PLATFORM = (
 _PARITY_TREE_ONLY = (
     r"(?i)<DISPATCH> is unavailable|nested (?:subagents|<DISPATCH>)"
     r"|no terminal is available"
+    r"|In Claude Code, set the <AGENT-TOOL>'s model"
 )
-_PARITY_TOOLS = {"Read", "Edit", "Write", "Grep", "Glob", "Bash"}
+_PARITY_TOOLS = {"Read", "Edit", "Write", "Grep", "Glob", "Bash", "TaskStop"}
 
 
 def _parity_norm(line: str) -> str:
@@ -1062,6 +1093,14 @@ def test_pipeline_streamlining_texts_in_every_tree() -> None:
             "steps/<N>.diff",
             "## Acceptance",
             "at most 20 words",
+            "BASELINE: done",
+            "accept <PLAN_PATH> <i>",
+            "probe <PLAN_PATH>",
+            "Never write `<N>.done`",
+            "**Halt:**",
+            "permission denied:",
+            "Verify timed out after",
+            "the Test first test cannot run",
         ):
             assert phrase in implementor, (tree, phrase)
     for tree in _SOURCE_DIRS:
@@ -1161,6 +1200,26 @@ def test_sources_and_spine_identical_across_trees() -> None:
     assert "verbatim" in section
 
 
+def test_spine_unattended_verify_rule_and_new_sections() -> None:
+    """Every spine and repo-tests lens carries the unattended-Verify rule.
+
+    The spine also documents the two sections written after planning and the
+    review-finding Blocker form.
+    """
+    for tree, folder in _SOURCE_DIRS.items():
+        base = _ASSET_ROOT / folder
+        spine = (base / "plan-spine.md").read_text()
+        lens = (base / "sources" / "repo-tests.md").read_text()
+        for name, text in (("spine", spine), ("repo-tests", lens)):
+            assert "never use a shell function or alias" in text, (tree, name)
+        assert "## Amendments" in spine, tree
+        assert "## Plan review" in spine, tree
+        assert spine.index("## Amendments") < spine.index("## Plan review"), tree
+        assert spine.index("## Plan review") < spine.index("## Confidence:"), tree
+        assert "- **Review finding F<n> (<lens>):**" in spine, tree
+        assert "A Check must finish within 9 minutes." in spine, tree
+
+
 _SOURCE_KEYS = {
     "name",
     "description",
@@ -1233,6 +1292,8 @@ def test_lenses_live_in_sources() -> None:
             "SPLIT:",
             "MODE: revise",
             "Writing rules",
+            "REVIEW:",
+            "REVIEW_PATH:",
         ):
             assert phrase in planner, (tree, phrase)
         synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
@@ -1538,9 +1599,14 @@ def test_reviewer_wiring() -> None:
     for bad in ("--output=x", "-p", "main;rm", "$(id)", "a b"):
         assert not base.match(bad), bad
 
-    # Claude Code first: the other trees get a reviewer after Step 9.
+    # Claude Code first: the other trees get a diff reviewer after Step 9.
     for tree in ("cursor", "vscode", "codex"):
-        assert not [p for p in (_ASSET_ROOT / tree).rglob("*review*")], tree
+        found = [
+            p
+            for p in (_ASSET_ROOT / tree).rglob("*review*")
+            if not p.name.startswith("plan-reviewer")
+        ]
+        assert not found, tree
 
 
 # ---- planning harness v2: entry points, reply shapes, researcher limits -----
@@ -1561,13 +1627,232 @@ def test_implement_entry_points() -> None:
         "GENERATE: false",
         "--no-review",
         "Plan-shaping",
+        # Plan 50: the plan tool does the bookkeeping, the ladder recovers.
+        "plan-tool.sh begin",
+        "plan-tool.sh end",
+        "plan-tool.sh pass",
+        "plan-tool.sh next",
+        "plan-tool.sh probe",
+        "plan-tool.sh accept",
+        "plan-tool.sh log-check",
+        "plan-tool.sh amend-check",
+        "MODE: amend",
+        'subagent_type: "whygraph-plan-amender"',
+        "BASELINE: done",
+        "**Halt:**",
+        "Pass `timeout: 600000` to the Bash tool.",
+        "a Verify changed the working tree at baseline",
+        '`- <path>:<start> - constraint at risk: "<verbatim quote>" '
+        "- keep the constraint`",
+        "Replace each line break in the quote with one space.",
+        "| S1 Run |",
+        "| S1b Run once more |",
+        "| S7 Findings |",
+        "## Run stopped at step <N> of <total>",
+        "## Run summary",
     ):
         assert phrase in cc, phrase
-    assert "the gate is skipped" in _text(_IMPLEMENT_ENTRY["cursor"])
+    flag = _line_starting(cc.splitlines(), "- `--fix-attempts <N>`")
+    assert "default `2`" in flag, flag
+    description = _frontmatter(_ASSET_ROOT / _IMPLEMENT_ENTRY["claude-code"])
+    assert "halts on the first failure" not in description["description"]
+    cursor = _text(_IMPLEMENT_ENTRY["cursor"])
+    assert "the gate is skipped" in cursor
+    for phrase in (
+        "STEP_RANGE: acceptance",
+        "plan-tool.sh begin",
+        "plan-tool.sh end",
+        "plan-tool.sh pass",
+        "plan-tool.sh next",
+        "plan-tool.sh probe",
+        "plan-tool.sh accept",
+        "plan-tool.sh log-check",
+        "plan-tool.sh amend-check",
+        "plan-tool.sh attempt <plan> <N> retry same:same",
+        "MODE: amend",
+        "BASELINE: done",
+        "**Halt:**",
+        "Give each plan-tool call a 600 s timeout where your shell tool takes one.",
+        "a Verify changed the working tree at baseline",
+        "| S1 Run |",
+        "| S1b Run once more |",
+        "| S7 Findings |",
+        "## Run stopped at step <N> of <total>",
+        "## Run summary",
+    ):
+        assert phrase in cursor, phrase
+    for absent in (
+        "| S4",
+        "| S6",
+        'whygraph-reviewer"',
+        "allowed-tools",
+        "timeout: 600000",
+    ):
+        assert absent not in cursor, absent
+    flag = _line_starting(cursor.splitlines(), "- `--fix-attempts <N>`")
+    assert "default `2`" in flag, flag
+    assert "allowed-tools" not in _frontmatter(_ASSET_ROOT / _IMPLEMENT_ENTRY["cursor"])
+    assert "halts on the first failure" not in cursor
+    vs = _text(_IMPLEMENT_ENTRY["vscode"])
+    flag = _line_starting(vs.splitlines(), "- `--fix-attempts <N>`")
+    assert "default `2`" in flag, flag
+    assert "failed-Verify fix attempts per step, default 2" in _text(
+        _IMPLEMENT_ENTRY["codex"]
+    )
     for tree in ("vscode", "codex"):
         text = _text(_IMPLEMENT_ENTRY[tree])
         assert "STEP_RANGE: auto" in text and "ACCEPTANCE: inline" in text, tree
         assert "FROM_STEP" not in text, tree
+        # No ladder here: only the default changed.
+        assert "plan-tool.sh begin" not in text and "S1b" not in text, tree
+
+
+_PLAN_TOOL_SUBCOMMANDS = (
+    "snapshot|begin|end|pass|next|changed|probe|baseline|accept|attempt|amends"
+    "|save|restore|log-check|state|amend-check"
+)
+
+
+def test_implement_skill_spells_every_plan_tool_call_one_way() -> None:
+    """Every plan-tool call matches the allowed-tools rule: no cd, no variable."""
+    cc = _text(_IMPLEMENT_ENTRY["claude-code"])
+    prefix = "sh .claude/skills/whygraph-plan/plan-tool.sh "
+    calls = re.findall(
+        r"`([^`\n]*plan-tool\.sh (?:" + _PLAN_TOOL_SUBCOMMANDS + r")\b[^`\n]*)`", cc
+    )
+    assert len(calls) > 20, calls
+    for call in calls:
+        assert call.startswith(prefix), call
+        # Placeholders such as <plan> are filled with printed ids and paths.
+        words = re.sub(r"<[^<>]*>", "X", call)
+        assert "$" not in words and "cd " not in words and "=" not in words, call
+        assert not set("|<>;&'\"") & set(words), call
+    # The self-hash is the second exact rule, spelled as the rule says.
+    assert (
+        cc.count(
+            "`git hash-object --no-filters .claude/skills/whygraph-plan/plan-tool.sh`"
+        )
+        == 3
+    )
+
+
+def _placeholder_regex(cause: str) -> re.Pattern[str]:
+    """A cause with each `<placeholder>` as a wildcard."""
+    parts = re.split(r"<[^<>]*>", cause)
+    return re.compile(".+".join(re.escape(part) for part in parts))
+
+
+@pytest.mark.parametrize("tree", ["claude-code", "cursor"])
+def test_implement_stop_block_and_causes(tree: str) -> None:
+    """Every stop prints the plan 50 block and names one row of the cause table."""
+    cc = _text(_IMPLEMENT_ENTRY[tree])
+    assert "Stopped at step <N>: <cause>" not in cc
+    stop = cc.split("## Step 6 - Stop\n", 1)[1].split("\n## Step 7 - ", 1)[0]
+    assert stop.split("```")[1].strip().splitlines() == [
+        "## Run stopped at step <N> of <total>",
+        "",
+        "- **Cause:** <the cause>",
+        "- **Tried:** <the rungs used>",
+        "- **State:** <the steps marked done>; <where the edits are>",
+        "- **Next:** <the Next of the cause's row> "
+        "Then run /whygraph-implement <plan> again.",
+    ]
+    for phrase in (
+        "`nothing: this stop comes before any edit`",
+        "`no edits yet`",
+        "`step <N>'s edits are in the working tree`",
+        "after the last `reset` line",
+        "`amended <Verify | Files>`",
+    ):
+        assert phrase in stop, phrase
+    rows = [ln for ln in stop.splitlines() if ln.startswith("| `")]
+    # (row index, cause pattern); a row may give two forms of one cause.
+    causes = [
+        (i, _placeholder_regex(c))
+        for i, r in enumerate(rows)
+        for c in re.findall(r"`([^`]+)`", r.split(" | ")[0])
+    ]
+    for row in rows:
+        next_text = re.sub(r"`[^`]*`", "X", row.rsplit(" | ", 1)[1].rstrip(" |"))
+        assert next_text.endswith("."), row
+        for sentence in re.split(r"(?<=[.;])\s+", next_text):
+            assert len(sentence.split()) <= 20, (row, sentence)
+    for wanted in (
+        # Step 8's exit paths that the plan's table did not name.
+        "plan-tool.sh <subcommand> exited <code>: <first stderr line>",
+        "the <agent name> run failed: <first line of the error>",
+        "a subagent changed .git/config, .git/hooks or the run records",
+        "Check cannot run: <misses>",
+        "a Verify changed the working tree at baseline: <paths>",
+        "acceptance failed: <items>",
+    ):
+        assert any(c.fullmatch(wanted) for _, c in causes), wanted
+    # The Next of a baseline change says how to keep the Verify a pure check.
+    baseline = _line_starting(rows, "| `a Verify changed the working tree")
+    assert "add it to `.gitignore`" in baseline and "only checks" in baseline
+    # Every full cause this file stops with fits exactly one row.
+    own_text = ("Stopped at <id>:", "<id> has no plan at")
+    full = re.findall(r"[Ss]tops? with `([^`]+)`", cc)
+    assert len(full) > 25, full
+    for cause in full:
+        if cause.startswith(own_text):
+            continue
+        hits = {i for i, c in causes if c.fullmatch(cause)}
+        assert len(hits) == 1, (cause, [rows[i] for i in hits])
+    # The ladder table names each stop by the row's text before its colon.
+    for short in re.findall(r"stop: `([^`]+)`", cc):
+        assert any(c.pattern.startswith(re.escape(short)) for _, c in causes), short
+    # The Test first halts reach their rows by their fixed prefix.
+    for halt in (
+        "the Test first test passed before the change; "
+        "the step's test does not cover it",
+        "the Test first test cannot run: uv not found",
+        "the Test first test was edited",
+        "permission denied: uv run pytest",
+    ):
+        assert len({i for i, c in causes if c.match(halt)}) == 1, halt
+
+
+@pytest.mark.parametrize("tree", ["claude-code", "cursor"])
+def test_implement_run_summary(tree: str) -> None:
+    """The run summary is built from the plan tool's files, never a report."""
+    cc = _text(_IMPLEMENT_ENTRY[tree])
+    summary = cc.split("## Step 7 - Run summary\n", 1)[1]
+    summary = summary.split("\nThis command's only job", 1)[0]
+    for phrase in (
+        "## Run summary",
+        "`- Step <N>: retry <old>:<new>`",
+        "`- Step <N>: **Verify amended** - <old> -> <new>`",
+        "`- Step <N>: Files amended - <old> -> <new>`",
+        "`exit: not literal`",
+        "`- Step <N>: Verify not run (manual or prose): <Verify text>`",
+        "`- no recovery was needed`",
+        "`accept` ran before the Acceptance log run",
+        "`- Acceptance: failed: <item numbers>`",
+    ):
+        assert phrase in summary, phrase
+    acceptance = cc.split("### Step 3d - Acceptance", 1)[1].split("\n### ", 1)[0]
+    print_at = acceptance.index("Print the run summary (Step 7).")
+    assert acceptance.index("`STEP_RANGE: acceptance`") < print_at
+    assert print_at < acceptance.index("`acceptance failed: <item numbers>`")
+
+
+def test_implement_constraint_line_only_where_the_gate_runs() -> None:
+    """The constraint line form lives in the Claude Code skill; Cursor has no gate."""
+    form = (
+        '`- <path>:<start> - constraint at risk: "<verbatim quote>" '
+        "- keep the constraint`"
+    )
+    assert form in _text(_IMPLEMENT_ENTRY["claude-code"])
+    cursor = _text(_IMPLEMENT_ENTRY["cursor"])
+    assert "constraint at risk:" not in cursor
+    assert "constraint" not in cursor.lower()
+
+
+def test_no_implement_entry_point_says_a_problem_in_the_plan() -> None:
+    """A spec escalation goes to the amender, not to a vague plan-problem stop."""
+    for tree, rel in _IMPLEMENT_ENTRY.items():
+        assert "found a problem in the plan" not in _text(rel), tree
 
 
 def test_tasks_json_example_parses() -> None:
@@ -1638,6 +1923,61 @@ def test_researchers_cannot_write_or_run() -> None:
         for line in _agent_body(tree, "researcher"):
             if "**File tools**" in line:
                 assert not re.search(r"(?i)\b(?:bash|shell)\b", line), (tree, line)
+
+
+def test_plan_reviewer_is_read_only() -> None:
+    """The plan reviewer cannot write, run, fan out or propose a note."""
+    cc = _frontmatter(_ASSET_ROOT / "claude-code/agents/plan-reviewer.md")
+    assert cc["name"] == "whygraph-plan-reviewer"
+    granted = {t.strip() for t in cc["tools"].split(",")}
+    assert granted == {
+        "Read",
+        "Grep",
+        "Glob",
+        "ToolSearch",
+        "mcp__whygraph__whygraph_rationale_brief",
+        "mcp__whygraph__whygraph_evidence_for",
+        "mcp__whygraph__whygraph_area_history",
+        "mcp__codegraph__*",
+    }
+    assert not granted & {"Bash", "Write", "Edit", "Agent", "WebFetch", "WebSearch"}
+    disallowed = {t.strip() for t in cc["disallowedTools"].split(",")}
+    assert disallowed == {"Agent", "mcp__whygraph__whygraph_propose_note"}
+    assert cc["maxTurns"] == "30" and cc["model"] == "sonnet"
+    assert cc["omitClaudeMd"] == "true"
+    assert "hooks" not in cc
+    cursor = _frontmatter(_ASSET_ROOT / "cursor/agents/plan-reviewer.md")
+    assert cursor["readonly"] == "true" and cursor["is_background"] == "false"
+    assert cursor["model"] == "inherit"
+    vs = _frontmatter(_ASSET_ROOT / "vscode/agents/plan-reviewer.agent.md")
+    assert _vscode_tool_list(vs["tools"]) == {
+        "read",
+        "search",
+        "whygraph/whygraph_rationale_brief",
+        "whygraph/whygraph_evidence_for",
+        "whygraph/whygraph_area_history",
+        "codegraph/*",
+    }
+    assert vs["agents"] == "[]" and vs["user-invocable"] == "false"
+    # Cursor and Codex grant no per-agent tools; Codex relies on the written rule.
+    toml = (_ASSET_ROOT / "codex/.codex/agents/plan-reviewer.toml").read_text()
+    assert 'name = "whygraph-plan-reviewer"' in toml
+    assert "propose_note" not in toml.split("developer_instructions", 1)[0]
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "plan-reviewer"))
+        for phrase in (
+            "You run no command and change no file.",
+            "**Don't write or edit files.**",
+            "**Don't run a command.**",
+            "**Don't read the research sidecar.**",
+            "cached_only=True",
+            "Never pass `force_refresh`.",
+            "BUDGET: 20",
+            "PARENT: <tasks.json path | none>",
+            "- not checked: <steps or checks>",
+        ):
+            assert phrase in body, (tree, phrase)
+        assert not re.search(r"\bcodegraph_(?:callers|callees)\b", body), tree
 
 
 _EXTERNAL_TREES = ("claude-code", "cursor", "codex")
@@ -1754,6 +2094,186 @@ def test_reply_shapes_match() -> None:
     assert "at most 4 consent questions" in skill
 
 
+def test_plan_reviewer_reply_shape() -> None:
+    """The four plan reviewers carry one reply shape: a ``REVIEW:`` line, then ``F<n>`` lines."""
+    finding = (
+        "- F<n> | <blocker | should> | <step <N> | acceptance | plan> "
+        "| <defect, at most 20 words> | evidence: <path:line>[, <the tool call>] "
+        "| fix: <one action, at most 20 words>"
+    )
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "plan-reviewer"))
+        for phrase in (
+            "LENS: <logic | ui>",
+            "REVIEW: <logic | ui>",
+            "`REVIEW: <lens> none`",
+            "`REVIEW: ui none`",
+            finding,
+            "Report at most 12 findings, blockers first.",
+        ):
+            assert phrase in body, (tree, phrase)
+        shape = body.split("## Reply format", 1)[1].split("```", 2)[1]
+        assert shape.strip().splitlines() == ["REVIEW: <logic | ui>", finding], tree
+        logic = body.split("## Lens logic", 1)[1].split("## Lens ui", 1)[0]
+        ui = body.split("## Lens ui", 1)[1].split("## Reply format", 1)[0]
+        assert re.findall(r"^(\d+)\. ", logic, re.M) == [str(i) for i in range(1, 10)]
+        assert re.findall(r"^(\d+)\. ", ui, re.M) == [str(i) for i in range(1, 7)]
+
+
+def test_plan_amender_tools() -> None:
+    """The plan amender can read and edit, never run, fan out or call MCP."""
+    cc = _frontmatter(_ASSET_ROOT / "claude-code/agents/plan-amender.md")
+    assert cc["name"] == "whygraph-plan-amender"
+    granted = [t.strip() for t in cc["tools"].split(",")]
+    assert granted == ["Read", "Grep", "Glob", "Edit"]
+    assert cc["disallowedTools"] == "Agent"
+    assert cc["model"] == "opus" and cc["maxTurns"] == "10"
+    assert cc["omitClaudeMd"] == "true"
+    # The amender-write hook is pinned in _GUARD_HOOKS.
+    cursor = _frontmatter(_ASSET_ROOT / "cursor/agents/plan-amender.md")
+    assert cursor["name"] == "whygraph-plan-amender"
+    assert cursor["model"] == "inherit"
+    assert cursor["readonly"] == "false" and cursor["is_background"] == "false"
+    vs = _frontmatter(_ASSET_ROOT / "vscode/agents/plan-amender.agent.md")
+    assert vs["name"] == "whygraph-plan-amender"
+    assert _vscode_tool_list(vs["tools"]) == {"read", "search", "edit"}
+    assert vs["agents"] == "[]" and vs["user-invocable"] == "false"
+    # Codex grants no per-agent tools; it relies on the written rules.
+    toml = (_ASSET_ROOT / "codex/.codex/agents/plan-amender.toml").read_text()
+    head = toml.split("developer_instructions", 1)[0]
+    assert 'name = "whygraph-plan-amender"' in head
+    assert 'model_reasoning_effort = "high"' in head
+    assert "mcp" not in head.lower() and "sandbox" not in head
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "plan-amender"))
+        for phrase in (
+            "You run no command.",
+            "**Don't run a command.**",
+            "**Don't start an agent.**",
+            "**Don't edit any file but `PLAN_PATH`.**",
+            "Never run it yourself.",
+        ):
+            assert phrase in body, (tree, phrase)
+
+
+def test_plan_amender_reply_shape() -> None:
+    """The four plan amenders carry Phase 4's two reply shapes and its rules."""
+    amended = "Amended step <N>: <Verify | Files> - <reason, at most 20 words>"
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "plan-amender"))
+        for phrase in (
+            "MODE: amend",
+            "PLAN_PATH: <absolute path>",
+            "SPINE_PATH: <absolute path>",
+            "PLAN_TOOL: <plan-tool command>",
+            "STEP: <N>",
+            "FINDINGS:",
+            "`No amendment: fails at baseline`",
+            "If the Verify is right and the code is wrong, reply `No amendment`.",
+            "Never replace a test command with a grep, an import or an echo.",
+            "Never replace it with a narrower test that skips the changed symbol.",
+            "Never add a path that the step's **Change** does not name.",
+            "Never edit `## Amendments`.",
+            # amend-check's rules, as plan-tool.sh applies them.
+            "At most one command changes.",
+            "It never changes the program, a subcommand or a flag.",
+            "Names a new path that git tracks, or that some step's **Files** "
+            "names exactly.",
+            "Adds only a path that step `STEP`'s **Change** names, word for word.",
+            "A step gets at most one amendment. A plan gets at most three.",
+        ):
+            assert phrase in body, (tree, phrase)
+        reply = body.split("## Reply format", 1)[1]
+        shapes = [block.strip() for block in reply.split("```")[1::2]]
+        assert shapes == [amended, "No amendment: <reason>"], tree
+    # The Claude Code slash command reads the same two shapes (step 8).
+    for tree in ("claude-code", "cursor"):
+        skill = _text(_IMPLEMENT_ENTRY[tree])
+        assert f"- `{amended}`" in skill, tree
+        assert "- `No amendment: <reason>`" in skill, tree
+    # The amend mode lives in the amender, not the planner (D16).
+    for tree in _AGENT_PATHS:
+        assert "MODE: amend" not in "\n".join(_agent_body(tree, "planner")), tree
+
+
+_OPUS_OVERRIDE = (
+    "In Claude Code, set the Agent tool's model to opus for the logic lens."
+)
+
+
+def test_plan_review_fan_out() -> None:
+    """Planner 2g sends the reviewer its own input block and writes the sidecar."""
+    for tree in _AGENT_PATHS:
+        planner = "\n".join(_agent_body(tree, "planner"))
+        reviewer = "\n".join(_agent_body(tree, "plan-reviewer"))
+        wanted = reviewer.split("Your prompt has this shape:", 1)[1].split("```")[1]
+        review = planner.split("**2g. Review the plan.**", 1)[1].split("**2f.", 1)[0]
+        assert review.split("```")[1] == wanted, tree
+        for phrase in (
+            "`whygraph-plan-reviewer`",
+            "`LENS: logic`",
+            "`LENS: ui`",
+            "`.whygraph/plans/<stem>.review.md`",
+            "one `=== <lens> ===` block per reviewer",
+            "=== logic ===\n<the reply verbatim, or (unavailable: <reason>)>",
+            "`(unavailable: no REVIEW line)`",
+            "`REVIEW_PATH: <absolute path of the review sidecar>`",
+            "`review: failed - <reason>`",
+            "`review: skipped - <reason>`",
+            "Revise mode never runs **2g**",
+        ):
+            assert phrase in review, (tree, phrase)
+        # 2g sits between 2e and 2f, so 2f relays the fixer's reply.
+        assert planner.index("**2e.") < planner.index("**2g.") < planner.index("**2f.")
+        assert "the fixer's reply when **2g** ran" in planner, tree
+        tools = planner.split("## Tools", 1)[1].split("## Phase 0", 1)[0]
+        assert "`whygraph-plan-reviewer`" in tools, tree
+        assert "in **2g**, the review sidecar `.whygraph/plans/<stem>.review.md`" in (
+            planner
+        )
+        assert "**Don't write any file but the five above.**" in planner, tree
+        revise = planner.split("## Phase 3", 1)[1].split("## Output format", 1)[0]
+        assert "`REVIEW_PATH: <its absolute path>`" in revise, tree
+        assert "Keep `## Plan review`" in revise, tree
+        assert (_OPUS_OVERRIDE in planner.splitlines()) == (tree == "claude-code")
+
+
+def test_plan_review_fan_in() -> None:
+    """The four synthesizers carry step 9, the fixer, and its reply forms."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "synthesizer"))
+        assert "REVIEW_PATH: <absolute path of the review sidecar>" in body, tree
+        fixer = body.split("**9. Fix from the review.**", 1)[1].split("## Output", 1)[0]
+        rules = re.findall(r"^(\d+a?)\. ", fixer, re.M)
+        assert rules == ["1", "2", "3", "3a", "4", "5", "6", "7", "8"], tree
+        for phrase in (
+            # Rule 3: only the named lines, never the fixed sections.
+            "Apply a verified finding by changing only the lines it names.",
+            "Never change the Objective, Non-goals, Resolved decisions or a "
+            "verbatim quote.",
+            "Never add a command span to a Verify or Check.",
+            # Rule 5: the spine's second Blocker form.
+            "goes to `## Blockers` as `- **Review finding F<n> (<lens>):** "
+            "<defect> - **Resolution needed:** <fix>`",
+            "is **refuted**",
+            "`deferred: size`",
+            "A `blocker` is never deferred.",
+            "`- applied <a>, refuted <r>, asked <q>, blocked <b>, deferred <d>`",
+            "`- F<n> (<lens>): <applied | refuted: <why> | asked Q<n> | blocked "
+            "| deferred: <why>>`",
+            "`- F<n> (<lens>): applied - <field> step <N>: <old> -> <new>`",
+            "Copy each reviewer's `- not checked:` line.",
+        ):
+            assert phrase in fixer, (tree, phrase)
+        # The scoped exceptions to "trust their evidence" and "don't invent".
+        assert "Step 9 is the exception: trust no review finding" in body, tree
+        assert "Step 9's rule 3a is the one exception." in body, tree
+        assert "read `SPINE_PATH` only, never `RESEARCH_PATH`" in body, tree
+        # Step 8's reply shape is unchanged; step 9 ends in it.
+        assert "Run step 7 and reply in step 8's shape." in fixer, tree
+        assert "**Don't fan out.**" in body, tree
+
+
 def test_plan_entry_points() -> None:
     """All four plan entry points carry the sources, consent and split inputs."""
     for tree, rel in _PLAN_ENTRY.items():
@@ -1770,6 +2290,28 @@ def test_plan_entry_points() -> None:
         ):
             assert phrase in text, (tree, phrase)
         assert "or the word `web`" in text, tree
+        assert "REVIEW: <yes | no | auto>" in text, tree
+    stay = {
+        "claude-code": "`MODE`, `REVIEW`, `SOURCES_DIR`",
+        "cursor": "`MODE`, `REVIEW`, `SOURCES_DIR`",
+        "vscode": "`MODE`, `REVIEW`, `SOURCES_DIR`",
+        "codex": "`MODE`, `REVIEW` and the other lines stay the same.",
+    }
+    for tree, rel in _PLAN_ENTRY.items():
+        text = _text(rel)
+        assert stay[tree] in text, tree
+        if tree == "codex":
+            continue
+        for phrase in (
+            "[--review|--no-review]",
+            "- `--review` -> ",
+            "- `--no-review` -> ",
+            "`Pass --review OR --no-review, not both.`",
+            "`REVIEW` is `yes` for `--review`, `no` for `--no-review`",
+        ):
+            assert phrase in text, (tree, phrase)
+    hint = _frontmatter(_ASSET_ROOT / _PLAN_ENTRY["claude-code"])["argument-hint"]
+    assert "[--review|--no-review]" in hint
 
 
 def test_outside_evidence_ranks_below_the_repo() -> None:
@@ -1996,8 +2538,10 @@ def test_implementor_saves_both_step_trees() -> None:
         body = "\n".join(_agent_body(tree, "implementor"))
         assert "write it to `.whygraph/plans/<stem>/steps/<N>.t1`" in body, tree
         assert "A `complete` step always lists both trees" in body, tree
+    # The command carries the trees that begin and end print (plan 50).
     skill = (_ASSET_ROOT / "claude-code/skills/whygraph-implement/SKILL.md").read_text()
-    assert "If the line is missing or has no `<t1>`, read the trees" in skill
+    assert "Never read `<N>.t0` back." in skill
+    assert "Never take them from the report's `- Step <N>: <t0> <t1>` line." in skill
 
 
 def test_acceptance_with_only_manual_items_is_not_logged_as_passed() -> None:
@@ -2007,6 +2551,38 @@ def test_acceptance_with_only_manual_items_is_not_logged_as_passed() -> None:
         assert "- Acceptance: manual only: <item numbers> (<timestamp>)" in body, tree
         assert "| acceptance manual only |" in body, tree
         assert "`done` (acceptance passed or manual only)" in body, tree
+
+
+def test_acceptance_results_reach_the_log_run() -> None:
+    """The command runs `accept` first, so the log and status follow its exits."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "implementor"))
+        for phrase in (
+            "ACCEPTANCE_RESULTS:\n- <i>: <pass | fail <code> | not literal>\n",
+            "`ACCEPTANCE: separate needs ACCEPTANCE_RESULTS.`",
+            "`ACCEPTANCE_RESULTS needs STEP_RANGE: acceptance and "
+            "ACCEPTANCE: separate.`",
+            "With `ACCEPTANCE: separate`, run no Check: take each item's result "
+            "from `ACCEPTANCE_RESULTS`.",
+            "An item with no result line, or an unknown one, fails.",
+        ):
+            assert phrase in body, (tree, phrase)
+        # VS Code and Codex keep running `accept` themselves.
+        assert "With `ACCEPTANCE: inline`, run each literal **Check**" in body, tree
+    for tree in ("claude-code", "cursor"):
+        skill = _text(_IMPLEMENT_ENTRY[tree])
+        section = skill.split("### Step 3d - Acceptance", 1)[1].split("\n### ", 1)[0]
+        accept = section.index("plan-tool.sh accept <plan> <i> <blob>")
+        spawn = section.index("`STEP_RANGE: acceptance`")
+        assert accept < spawn, (tree, "accept must run before the Acceptance log run")
+        assert "`ACCEPTANCE_RESULTS:` as the last line" in section, tree
+        assert "`- <i>: <result>`" in section, tree
+        assert "stop with `acceptance failed: <item numbers>`" in section, tree
+        assert "The Acceptance run adds `ACCEPTANCE_RESULTS:` as the last line" in skill
+        for result in ("`pass`", "`not literal`", "`fail <code>`"):
+            assert result in section, (tree, result)
+    for tree in ("vscode", "codex"):
+        assert "ACCEPTANCE_RESULTS" not in _text(_IMPLEMENT_ENTRY[tree]), tree
 
 
 def test_review_reply_starts_at_its_heading() -> None:
@@ -2754,13 +3330,18 @@ def test_overlay_still_referenced_warns() -> None:
     assert warning.detail.startswith(
         ".claude/skills/whygraph-plan/guard.sh is used by .claude/agents/"
     )
-    assert warning.detail.endswith(" and 2 more")
+    assert warning.detail.endswith(" and 3 more")
 
     together = "\n".join(
         [guard]
         + [
             f"claude-code/agents/{name}.md"
-            for name in ("implementor", "synthesizer", "whygraph-reviewer")
+            for name in (
+                "implementor",
+                "synthesizer",
+                "whygraph-reviewer",
+                "plan-amender",
+            )
         ]
     )
     _, _, warnings = run(together)

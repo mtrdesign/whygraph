@@ -1,0 +1,502 @@
+{
+  "analyze/prompts/llm_descriptor/default/synthesis.system.md": {
+    "dash": 4,
+    "long-sentence": 3
+  },
+  "analyze/prompts/llm_descriptor/default/system.md": {
+    "dash": 4,
+    "long-sentence": 2
+  },
+  "analyze/prompts/project_purpose/default/system.md": {
+    "long-sentence": 5,
+    "semicolon": 1
+  },
+  "analyze/prompts/rationale_generator/default/system.md": {
+    "dash": 8,
+    "long-sentence": 5,
+    "semicolon": 4
+  },
+  "assets/claude-code/CLAUDE.md": {
+    "long-sentence": 4,
+    "semicolon": 8,
+    "two-actions": 2
+  },
+  "assets/claude-code/agents/evaluator.md": {
+    "long-sentence": 12,
+    "semicolon": 9
+  },
+  "assets/claude-code/agents/implementor.md": {
+    "long-sentence": 19,
+    "semicolon": 18,
+    "two-actions": 2
+  },
+  "assets/claude-code/agents/plan-reviewer.md": {
+    "two-actions": 1
+  },
+  "assets/claude-code/agents/planner.md": {
+    "long-sentence": 41,
+    "semicolon": 33,
+    "two-actions": 3
+  },
+  "assets/claude-code/agents/researcher-external.md": {
+    "long-sentence": 3,
+    "semicolon": 2
+  },
+  "assets/claude-code/agents/researcher.md": {
+    "long-sentence": 4,
+    "semicolon": 3
+  },
+  "assets/claude-code/agents/synthesizer.md": {
+    "long-sentence": 13,
+    "semicolon": 13,
+    "two-actions": 5
+  },
+  "assets/claude-code/agents/whygraph-reviewer.md": {
+    "long-sentence": 10,
+    "semicolon": 10,
+    "two-actions": 2
+  },
+  "assets/claude-code/skills/pre-edit/SKILL.md": {
+    "long-sentence": 5,
+    "semicolon": 8,
+    "two-actions": 1
+  },
+  "assets/claude-code/skills/rationale/SKILL.md": {
+    "long-sentence": 2,
+    "two-actions": 1
+  },
+  "assets/claude-code/skills/whygraph-implement/SKILL.md": {
+    "long-sentence": 7,
+    "semicolon": 8,
+    "two-actions": 9
+  },
+  "assets/claude-code/skills/whygraph-note/SKILL.md": {
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "assets/claude-code/skills/whygraph-plan/SKILL.md": {
+    "long-sentence": 5,
+    "semicolon": 12,
+    "two-actions": 2
+  },
+  "assets/claude-code/skills/whygraph-plan/plan-spine.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 2
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/README.md": {
+    "long-sentence": 4,
+    "semicolon": 3
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/best-practices.md": {
+    "long-sentence": 1
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/code-structure.md": {
+    "long-sentence": 1
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/repo-history.md": {
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/repo-tests.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 1
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/ui-surface.md": {
+    "long-sentence": 1
+  },
+  "assets/claude-code/skills/whygraph-plan/sources/whygraph-rationale.md": {
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "assets/claude-code/skills/whygraph-review/SKILL.md": {
+    "long-sentence": 3
+  },
+  "assets/claude-code/skills/whygraph-ui-check/SKILL.md": {
+    "two-actions": 2
+  },
+  "assets/codex/.codex/agents/implementor.toml": {
+    "long-sentence": 19,
+    "semicolon": 18,
+    "two-actions": 2
+  },
+  "assets/codex/.codex/agents/plan-reviewer.toml": {
+    "two-actions": 1
+  },
+  "assets/codex/.codex/agents/planner.toml": {
+    "long-sentence": 41,
+    "semicolon": 32,
+    "two-actions": 4
+  },
+  "assets/codex/.codex/agents/researcher-external.toml": {
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "assets/codex/.codex/agents/researcher.toml": {
+    "long-sentence": 3,
+    "semicolon": 3
+  },
+  "assets/codex/.codex/agents/synthesizer.toml": {
+    "long-sentence": 13,
+    "semicolon": 13,
+    "two-actions": 5
+  },
+  "assets/codex/.codex/whygraph/plan-spine.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 2
+  },
+  "assets/codex/.codex/whygraph/sources/README.md": {
+    "long-sentence": 4,
+    "semicolon": 3
+  },
+  "assets/codex/.codex/whygraph/sources/best-practices.md": {
+    "long-sentence": 1
+  },
+  "assets/codex/.codex/whygraph/sources/code-structure.md": {
+    "long-sentence": 1
+  },
+  "assets/codex/.codex/whygraph/sources/repo-history.md": {
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "assets/codex/.codex/whygraph/sources/repo-tests.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 1
+  },
+  "assets/codex/.codex/whygraph/sources/ui-surface.md": {
+    "long-sentence": 1
+  },
+  "assets/codex/.codex/whygraph/sources/whygraph-rationale.md": {
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "assets/codex/AGENTS.md": {
+    "dash": 9,
+    "long-sentence": 28,
+    "semicolon": 22,
+    "two-actions": 7
+  },
+  "assets/cursor/agents/evaluator.md": {
+    "long-sentence": 12,
+    "semicolon": 9
+  },
+  "assets/cursor/agents/implementor.md": {
+    "long-sentence": 19,
+    "semicolon": 18,
+    "two-actions": 2
+  },
+  "assets/cursor/agents/plan-reviewer.md": {
+    "two-actions": 1
+  },
+  "assets/cursor/agents/planner.md": {
+    "long-sentence": 41,
+    "semicolon": 32,
+    "two-actions": 3
+  },
+  "assets/cursor/agents/researcher-external.md": {
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "assets/cursor/agents/researcher.md": {
+    "long-sentence": 3,
+    "semicolon": 3
+  },
+  "assets/cursor/agents/synthesizer.md": {
+    "long-sentence": 13,
+    "semicolon": 13,
+    "two-actions": 5
+  },
+  "assets/cursor/rules/whygraph-ask-why.mdc": {
+    "dash": 8,
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "assets/cursor/rules/whygraph-codegraph.mdc": {
+    "long-sentence": 2,
+    "semicolon": 7,
+    "two-actions": 2
+  },
+  "assets/cursor/rules/whygraph-implement-plan.mdc": {
+    "dash": 9,
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "assets/cursor/rules/whygraph-plan-change.mdc": {
+    "dash": 6,
+    "long-sentence": 3,
+    "semicolon": 1
+  },
+  "assets/cursor/rules/whygraph-pre-edit.mdc": {
+    "dash": 21,
+    "long-sentence": 3,
+    "semicolon": 4,
+    "two-actions": 1
+  },
+  "assets/cursor/skills/rationale/SKILL.md": {
+    "dash": 2,
+    "long-sentence": 1,
+    "two-actions": 1
+  },
+  "assets/cursor/skills/whygraph-implement/SKILL.md": {
+    "long-sentence": 8,
+    "semicolon": 12,
+    "two-actions": 10
+  },
+  "assets/cursor/skills/whygraph-note/SKILL.md": {
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "assets/cursor/skills/whygraph-plan/SKILL.md": {
+    "long-sentence": 6,
+    "semicolon": 13,
+    "two-actions": 3
+  },
+  "assets/cursor/skills/whygraph-plan/plan-spine.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 2
+  },
+  "assets/cursor/skills/whygraph-plan/sources/README.md": {
+    "long-sentence": 4,
+    "semicolon": 3
+  },
+  "assets/cursor/skills/whygraph-plan/sources/best-practices.md": {
+    "long-sentence": 1
+  },
+  "assets/cursor/skills/whygraph-plan/sources/code-structure.md": {
+    "long-sentence": 1
+  },
+  "assets/cursor/skills/whygraph-plan/sources/repo-history.md": {
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "assets/cursor/skills/whygraph-plan/sources/repo-tests.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 1
+  },
+  "assets/cursor/skills/whygraph-plan/sources/ui-surface.md": {
+    "long-sentence": 1
+  },
+  "assets/cursor/skills/whygraph-plan/sources/whygraph-rationale.md": {
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "assets/cursor/skills/whygraph-ui-check/SKILL.md": {
+    "two-actions": 2
+  },
+  "assets/vscode/agents/implementor.agent.md": {
+    "long-sentence": 19,
+    "semicolon": 18,
+    "two-actions": 2
+  },
+  "assets/vscode/agents/plan-reviewer.agent.md": {
+    "two-actions": 1
+  },
+  "assets/vscode/agents/planner.agent.md": {
+    "long-sentence": 43,
+    "semicolon": 33,
+    "two-actions": 4
+  },
+  "assets/vscode/agents/researcher.agent.md": {
+    "long-sentence": 3,
+    "semicolon": 3
+  },
+  "assets/vscode/agents/synthesizer.agent.md": {
+    "long-sentence": 13,
+    "semicolon": 13,
+    "two-actions": 5
+  },
+  "assets/vscode/copilot-instructions.md": {
+    "dash": 3,
+    "long-sentence": 4,
+    "semicolon": 9,
+    "two-actions": 2
+  },
+  "assets/vscode/instructions/ask-why.instructions.md": {
+    "dash": 8,
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "assets/vscode/instructions/implement-plan.instructions.md": {
+    "dash": 8,
+    "long-sentence": 3,
+    "semicolon": 1
+  },
+  "assets/vscode/instructions/plan-change.instructions.md": {
+    "dash": 6,
+    "long-sentence": 4,
+    "semicolon": 1
+  },
+  "assets/vscode/instructions/pre-edit.instructions.md": {
+    "dash": 21,
+    "long-sentence": 3,
+    "semicolon": 5,
+    "two-actions": 1
+  },
+  "assets/vscode/prompts/rationale.prompt.md": {
+    "dash": 2,
+    "long-sentence": 1,
+    "two-actions": 1
+  },
+  "assets/vscode/prompts/whygraph-implement.prompt.md": {
+    "long-sentence": 7,
+    "semicolon": 4,
+    "two-actions": 3
+  },
+  "assets/vscode/prompts/whygraph-note.prompt.md": {
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "assets/vscode/prompts/whygraph-plan.prompt.md": {
+    "long-sentence": 9,
+    "semicolon": 18,
+    "two-actions": 6
+  },
+  "assets/vscode/whygraph/plan-spine.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 2
+  },
+  "assets/vscode/whygraph/sources/README.md": {
+    "long-sentence": 4,
+    "semicolon": 3
+  },
+  "assets/vscode/whygraph/sources/best-practices.md": {
+    "long-sentence": 1
+  },
+  "assets/vscode/whygraph/sources/code-structure.md": {
+    "long-sentence": 1
+  },
+  "assets/vscode/whygraph/sources/repo-history.md": {
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "assets/vscode/whygraph/sources/repo-tests.md": {
+    "long-sentence": 4,
+    "semicolon": 2,
+    "two-actions": 1
+  },
+  "assets/vscode/whygraph/sources/ui-surface.md": {
+    "long-sentence": 1
+  },
+  "assets/vscode/whygraph/sources/whygraph-rationale.md": {
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "chat.tools.compare_refs": {
+    "long-sentence": 2,
+    "semicolon": 2,
+    "two-actions": 1
+  },
+  "chat.tools.find_changes": {
+    "dash": 4,
+    "long-sentence": 3,
+    "semicolon": 1
+  },
+  "chat.tools.find_notes": {
+    "long-sentence": 1,
+    "semicolon": 2
+  },
+  "chat.tools.get_area_outline": {
+    "dash": 4,
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "chat.tools.get_area_owners": {
+    "long-sentence": 1,
+    "semicolon": 2
+  },
+  "chat.tools.get_commit": {
+    "dash": 1
+  },
+  "chat.tools.get_evidence": {
+    "long-sentence": 1
+  },
+  "chat.tools.get_issue": {
+    "dash": 1
+  },
+  "chat.tools.get_milestones": {
+    "long-sentence": 2
+  },
+  "chat.tools.get_pr": {
+    "dash": 1
+  },
+  "chat.tools.get_rationale": {
+    "dash": 2,
+    "long-sentence": 2,
+    "semicolon": 2
+  },
+  "chat.tools.get_repo_overview": {
+    "dash": 1,
+    "long-sentence": 2
+  },
+  "chat.tools.get_symbol": {
+    "dash": 1,
+    "long-sentence": 1
+  },
+  "chat.tools.get_work_in_flight": {
+    "long-sentence": 2,
+    "semicolon": 4
+  },
+  "chat.tools.list_dir": {
+    "dash": 1,
+    "long-sentence": 1
+  },
+  "chat.tools.list_recent_activity": {
+    "dash": 3,
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "chat.tools.propose_note": {
+    "long-sentence": 2,
+    "semicolon": 1
+  },
+  "chat.tools.render_chart": {
+    "dash": 5,
+    "long-sentence": 1,
+    "semicolon": 3
+  },
+  "chat.tools.run_graph_stats": {
+    "dash": 9,
+    "long-sentence": 11,
+    "semicolon": 3
+  },
+  "chat.tools.run_project_stats": {
+    "dash": 21,
+    "long-sentence": 18,
+    "semicolon": 8
+  },
+  "chat.tools.search_symbols": {
+    "dash": 1
+  },
+  "chat/prompts/modes/engineer.md": {
+    "long-sentence": 1
+  },
+  "chat/prompts/modes/lead.md": {
+    "long-sentence": 5,
+    "semicolon": 3,
+    "two-actions": 1
+  },
+  "chat/prompts/system.md": {
+    "dash": 29,
+    "long-sentence": 25,
+    "semicolon": 6,
+    "two-actions": 1
+  },
+  "mcp.descriptions.AREA_HISTORY_DESCRIPTION": {
+    "long-sentence": 1
+  },
+  "mcp.descriptions.EVIDENCE_FOR_DESCRIPTION": {
+    "long-sentence": 2
+  },
+  "mcp.descriptions.PROPOSE_NOTE_DESCRIPTION": {
+    "long-sentence": 1
+  },
+  "mcp.descriptions.WHYGRAPH_INSTRUCTIONS": {
+    "long-sentence": 1
+  }
+}

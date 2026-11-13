@@ -253,12 +253,24 @@ horizontally (except an element marked `data-scroll-x`, an opted-in scroller) an
 
 ## Writing harness prompts
 
-The agent, skill and rule files under `src/whygraph/assets/` are prompts that a model reads and follows. New and changed prompt text should follow the small subset of ASD-STE100 (Simplified Technical English) below, so that a model has one way to read each instruction. Existing prompts were not rewritten to it: `plan-tool.sh check` applies the sentence rules to plan text, and a test enforces the glossary across the prompts.
+Five kinds of source are prompts that a model reads and follows:
+
+- The agent, skill and rule files in the four asset trees under `src/whygraph/assets/`.
+- The Chat prompts in `src/whygraph/chat/prompts/`.
+- The analyze prompts in `src/whygraph/analyze/prompts/`.
+- The MCP descriptions in `src/whygraph/mcp/descriptions.py`.
+- Chat's tool specs in `src/whygraph/chat/tools.py`.
+
+New and changed prompt text should follow the small subset of ASD-STE100 (Simplified Technical English) below. A model then has one way to read each instruction.
 
 - **One action per sentence.** Do not join two actions with "and then", "and also" or "then".
 - **At most 20 words per sentence.** A backticked span counts as one word.
 - **One name for one thing.** Use the same word each time, and do not swap in a synonym.
 - **Start each instruction with its verb.** Write "Run the check", not "The check should be run".
+- **No semicolons.** Write two sentences.
+- **Keep the modality of the source.** A rewrite keeps every "may", "might" and "can". A generator keeps the strength that its evidence states.
+- **At most three nouns in a row.** Break a longer chain with a preposition or a verb.
+- **Use a list for three or more steps or conditions.** Do not pack them into one sentence.
 
 Use these words for the harness terms:
 
@@ -271,6 +283,15 @@ Use these words for the harness terms:
 | reply | - | The text any agent returns. |
 | halt | - | The implementor stops on a failure. |
 | stop | - | A slash command ends its run. |
+
+Existing prompts were not rewritten to these rules. A ratchet keeps them from getting worse. `tests/test_prompt_style.py` counts these in every source:
+
+- Sentences over 20 words.
+- Two actions joined by "and then", "and also" or ", then".
+- Semicolons.
+- Em and en dashes.
+
+The ", then" pattern also flags "If X, then Y". The counts for each source live in `tests/fixtures/prompt_style_baseline.json`. A rise or a fall fails the test. Rewrite the baseline in the same change with `uv run python tests/prompt_style.py --write-baseline`. The change then shows in review. A new prompt file must start clean.
 
 A change to a prompt lands in all four trees (`claude-code`, `cursor`, `vscode`, `codex`), so that `test_body_parity` stays true. `test_harness_prompts_use_glossary_terms` in `tests/test_assets.py` fails when an asset uses a banned term. The plan checker applies the same length and one-action rules to a plan.
 

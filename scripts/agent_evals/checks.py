@@ -667,6 +667,16 @@ def implementor_model(run: int, tag: str) -> Check:
     return Check(f"run {run}: implementor at {tag}", fn)
 
 
+def recorded(check: Check) -> Check:
+    """Wrap a check so it records ``held`` or ``MISSED`` and never fails the case."""
+
+    def fn(ctx: Context) -> Outcome:
+        ok, detail = check.run(ctx)
+        return True, f"{'held' if ok else 'MISSED'}: {detail}"
+
+    return Check(check.name, fn, check.min_stage, record=True)
+
+
 def no_implementor(run: int) -> Check:
     """Pass when a run spawned no implementor."""
 

@@ -28,6 +28,14 @@ Effort (``request.effort``) maps per provider: ``reasoning_effort`` for
 on a request that runs with thinking disabled), ``extra_body.reasoning.effort``
 for ``openrouter``. A 400 that names the parameter becomes
 ``LlmError(code="effort_unsupported")``.
+
+DeepSeek models sometimes write a tool call as **DSML markup** in the text
+channel (``<｜｜DSML｜｜ invoke name="...">``) instead of ``tool_calls``. The
+adapter holds that markup back from :class:`TextDelta` and turns each
+complete ``invoke`` into a :class:`ToolCallMade`, so the call runs and the
+reader never sees the markup. Markup with no complete invoke is shown as
+text, as before. This applies to every provider here, because OpenRouter
+serves DeepSeek models too.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -72,6 +81,84 @@ _EFFORT_PARAMS = frozenset({"reasoning_effort", "reasoning", "thinking"})
 
 _EFFORT_MESSAGE = re.compile(r"reasoning_effort|reasoning\.effort")
 """Fallback when a compat endpoint names the parameter only in the message."""
+
+_DSML_MARK = re.compile("<｜+DSML｜+")
+"""The start of DeepSeek's DSML tool-call markup (one or more U+FF5C bars)."""
+
+_DSML_PREFIX = re.compile("<(?:｜+(?:D(?:S(?:M(?:L｜*)?)?)?)?)?$")
+"""A text tail that may still grow into :data:`_DSML_MARK`; held back."""
+
+_DSML_INVOKE = re.compile(
+    '<｜+DSML｜+\\s*invoke\\s+name="([^"]+)"\\s*>(.*?)</｜+DSML｜+\\s*invoke\\s*>',
+    re.DOTALL,
+)
+_DSML_PARAMETER = re.compile(
+    '<｜+DSML｜+\\s*parameter\\s+name="([^"]+)"'
+    '(?:\\s+string="(true|false)")?\\s*>(.*?)'
+    "</｜+DSML｜+\\s*parameter\\s*>",
+    re.DOTALL,
+)
+
+
+def _dsml_arguments(body: str) -> dict[str, Any]:
+    """Parse one invoke's parameters; ``string="false"`` values are JSON."""
+    arguments: dict[str, Any] = {}
+    for name, is_string, value in _DSML_PARAMETER.findall(body):
+        if is_string == "false":
+            try:
+                arguments[name] = json.loads(value)
+                continue
+            except json.JSONDecodeError:
+                pass
+        arguments[name] = value
+    return arguments
+
+
+@dataclass(slots=True)
+class _DsmlText:
+    """Keep DeepSeek's DSML tool-call markup out of the text channel.
+
+    :meth:`feed` returns the text that is safe to show now. It holds back a
+    tail that may start the marker, and everything from the marker on.
+    :meth:`finish` returns the text still owed to the reader, and the tool
+    calls parsed from the markup. Markup with no complete invoke comes back
+    as text.
+    """
+
+    pending: str = ""
+    markup: str | None = None
+
+    def feed(self, text: str) -> str:
+        """Take one text delta; return the part that is safe to show."""
+        if self.markup is not None:
+            self.markup += text
+            return ""
+        pending = self.pending + text
+        found = _DSML_MARK.search(pending)
+        if found is not None:
+            self.markup, self.pending = pending[found.start() :], ""
+            return pending[: found.start()]
+        held = _DSML_PREFIX.search(pending)
+        cut = held.start() if held is not None else len(pending)
+        self.pending = pending[cut:]
+        return pending[:cut]
+
+    def finish(self) -> tuple[str, list[ToolCall]]:
+        """Return the text still owed and the calls the markup holds."""
+        tail, self.pending = self.pending, ""
+        if self.markup is None:
+            return tail, []
+        calls = [
+            ToolCall(
+                id=f"dsml_{uuid.uuid4().hex[:12]}",
+                name=name,
+                arguments=_dsml_arguments(body),
+            )
+            for name, body in _DSML_INVOKE.findall(self.markup)
+        ]
+        if not calls:
+            return tail + self.markup, []
+        return tail, calls
 
 
 @dataclass(slots=True)
@@ -462,6 +549,7 @@ class OpenAIChatAdapter(ChatClient):
         flushed = False
         reasoning_parts: list[str] = []
         reasoning_details: list[dict] = []
+        dsml = _DsmlText()
 
         try:
             stream = self._client.chat.completions.create(**kwargs)
@@ -496,7 +584,9 @@ class OpenAIChatAdapter(ChatClient):
                             yield ReasoningDelta(text=shown)
                     text = getattr(delta, "content", None)
                     if text:
-                        yield TextDelta(text=text)
+                        shown = dsml.feed(text)
+                        if shown:
+                            yield TextDelta(text=shown)
                     for entry in getattr(delta, "tool_calls", None) or []:
                         index = getattr(entry, "index", 0) or 0
                         accumulators.setdefault(index, _CallAccumulator()).absorb(entry)
@@ -529,6 +619,18 @@ class OpenAIChatAdapter(ChatClient):
         # truncated connection) still owes its accumulated calls.
         if not flushed:
             yield from _finished_calls(accumulators, finish_reason)
+
+        tail, recovered = dsml.finish()
+        if tail:
+            yield TextDelta(text=tail)
+        if recovered and finish_reason not in REFUSAL_REASONS:
+            _log.info(
+                "%s: recovered %d tool call(s) from DSML markup in the text",
+                self.provider,
+                len(recovered),
+            )
+            for call in recovered:
+                yield ToolCallMade(call=call)
 
         replay: dict[str, Any] = {}
         if reasoning_parts:

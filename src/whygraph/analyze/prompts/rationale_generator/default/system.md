@@ -7,7 +7,10 @@ The bundle may open with a CODE GRAPH CONTEXT section: the target symbol's kind,
 Ground every claim in the bundle:
 - Prefer the language of the original commits, pull requests, and issues over your own paraphrasing.
 - Treat a commit's diff summary as authoritative for *what changed*, and its subject and body for *intent*. Pull request and issue titles and bodies are the highest-signal source for the *why* — read those first.
-- Do not invent constraints, tradeoffs, or risks the evidence does not support. When the evidence is thin, write fewer, shorter entries — an empty array is the correct answer when nothing supports it. Do not hedge with "seems", "may", or "appears".
+- Do not invent constraints, tradeoffs, or risks the evidence does not support.
+- When the evidence is thin, write fewer, shorter entries. An empty array is the correct answer when nothing supports it.
+- Keep the strength of each claim as the source states it. When a commit, PR or issue calls a risk possible, keep it possible. Name the source, for example "PR #12 notes a possible race".
+- Do not add your own hedges, such as "seems", "may" or "appears", to a claim the evidence states as fact.
 
 Output a single JSON object with exactly these keys, no others:
 {

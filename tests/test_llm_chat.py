@@ -1045,6 +1045,79 @@ def test_deepseek_stream_reads_both_cache_hit_shapes(usage: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# DeepSeek DSML markup in the text channel
+# ---------------------------------------------------------------------------
+
+_BAR = "｜｜"
+_DSML_CALLS = (
+    f"\n\n<{_BAR}DSML{_BAR} calls>\n"
+    f'<{_BAR}DSML{_BAR} invoke name="find_changes">\n'
+    f'<{_BAR}DSML{_BAR} parameter name="path" string="true">crates/biome_lsp'
+    f"</{_BAR}DSML{_BAR} parameter>\n"
+    f'<{_BAR}DSML{_BAR} parameter name="since_days" string="false">180'
+    f"</{_BAR}DSML{_BAR} parameter>\n"
+    f"</{_BAR}DSML{_BAR} invoke>\n"
+    f'<{_BAR}DSML{_BAR} invoke name="find_notes">\n\n</{_BAR}DSML{_BAR} invoke>\n'
+    f"</{_BAR}DSML{_BAR} calls>"
+)
+
+
+def _split(text: str, size: int) -> list[str]:
+    return [text[i : i + size] for i in range(0, len(text), size)]
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "openrouter"])
+def test_dsml_markup_in_text_becomes_tool_calls(provider: str) -> None:
+    """Leaked DSML never reaches the text channel; its invokes become calls."""
+    text = "Let me look." + _DSML_CALLS
+    chunks = [_oa_chunk(content=part) for part in _split(text, 7)]
+    adapter, _ = _compat_adapter(provider, [*chunks, _oa_chunk(finish_reason="stop")])
+
+    events = list(adapter.stream_turn(_request()))
+
+    shown = "".join(e.text for e in events if isinstance(e, TextDelta))
+    # The blank lines before the marker were already shown when it arrived.
+    assert shown == "Let me look.\n\n"
+    calls = [e.call for e in events if isinstance(e, ToolCallMade)]
+    assert [(c.name, c.arguments) for c in calls] == [
+        ("find_changes", {"path": "crates/biome_lsp", "since_days": 180}),
+        ("find_notes", {}),
+    ]
+    assert len({c.id for c in calls}) == 2 and all(c.id for c in calls)
+    assert isinstance(events[-1], TurnDone)
+
+
+def test_dsml_markup_that_does_not_parse_is_shown_as_text() -> None:
+    """Markup with no complete invoke falls back to plain text, as before."""
+    text = f"Partial <{_BAR}DSML{_BAR} calls> <{_BAR}DSML{_BAR} invoke name="
+    adapter, _ = _compat_adapter(
+        "deepseek",
+        [_oa_chunk(content=part) for part in _split(text, 5)]
+        + [_oa_chunk(finish_reason="stop")],
+    )
+
+    events = list(adapter.stream_turn(_request()))
+
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == text
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+
+
+def test_text_with_angle_brackets_streams_unchanged() -> None:
+    """A '<' that does not start the marker is held at most until it cannot."""
+    text = "Use a < b, then <div> and <｜not DSML here>."
+    adapter, _ = _compat_adapter(
+        "deepseek",
+        [_oa_chunk(content=part) for part in _split(text, 3)]
+        + [_oa_chunk(finish_reason="stop")],
+    )
+
+    events = list(adapter.stream_turn(_request()))
+
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == text
+    assert not [e for e in events if isinstance(e, ToolCallMade)]
+
+
+# ---------------------------------------------------------------------------
 # Turn-ending fixes (plan 37, phase 0): transport errors, truncation and
 # refusals, tool_choice, reasoning replay, request ids
 # ---------------------------------------------------------------------------

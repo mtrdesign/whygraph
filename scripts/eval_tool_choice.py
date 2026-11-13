@@ -706,8 +706,16 @@ def _get_json(url: str) -> dict:
 
 
 def _spent(args) -> float:
-    """The org's spend this month, from ``GET /api/budgets``."""
-    return _get_json(f"{args.base.rstrip('/')}/api/budgets")["org"]["spent_usd"]
+    """The org's spend this month, from ``GET /api/budgets``.
+
+    An org with no budget has ``org: null`` there, so the spend then comes
+    from ``GET /api/usage``, whose default range is the current month.
+    """
+    base = args.base.rstrip("/")
+    org = _get_json(f"{base}/api/budgets")["org"]
+    if org is not None:
+        return org["spent_usd"]
+    return _get_json(f"{base}/api/usage")["totals"]["cost_usd"]
 
 
 # ---------------------------------------------------------------------------
@@ -2667,6 +2675,26 @@ def _self_test_judge() -> bool:
     return bool(ok)
 
 
+def _self_test_spend() -> bool:
+    """``_spent`` reads the org budget, or this month's usage when there is none."""
+    import argparse
+
+    args = argparse.Namespace(base="http://x/")
+    answers = {
+        "http://x/api/budgets": {"org": None},
+        "http://x/api/usage": {"totals": {"cost_usd": 2.5}},
+    }
+    saved = globals()["_get_json"]
+    globals()["_get_json"] = lambda url: answers[url]
+    try:
+        ok = _spent(args) == 2.5
+        answers["http://x/api/budgets"] = {"org": {"spent_usd": 1.25}}
+        ok &= _spent(args) == 1.25
+    finally:
+        globals()["_get_json"] = saved
+    return ok
+
+
 def _self_test() -> int:
     """Run both judge halves on an inline fake report; exit 0 on the expected table."""
     import tempfile
@@ -2742,6 +2770,7 @@ def _self_test() -> int:
         ("window elision", _self_test_window),
         ("replay", _self_test_replay),
         ("judge", _self_test_judge),
+        ("spend", _self_test_spend),
     ):
         passed = part()
         print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
@@ -2796,7 +2825,8 @@ def main() -> int:
         default=None,
         metavar="USD",
         help="Stop before any trial that could push the org's month spend above "
-        "this (checked against GET /api/budgets). The check reserves about "
+        "this (checked against GET /api/budgets, or this month's GET /api/usage "
+        "when the org has no budget). The check reserves about "
         "$0.30 per turn of the NEXT case, so the ceiling (spend just before "
         "the run + allowance) must cover the expected spend plus about $0.30 "
         "per turn of the longest remaining case, or the run stops early. "

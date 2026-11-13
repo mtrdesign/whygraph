@@ -259,6 +259,7 @@ The agent, skill and rule files under `src/whygraph/assets/` are prompts that a 
 - **At most 20 words per sentence.** A backticked span counts as one word.
 - **One name for one thing.** Use the same word each time, and do not swap in a synonym.
 - **Start each instruction with its verb.** Write "Run the check", not "The check should be run".
+- **Keep the modality of the source.** A rewrite keeps every "may", "might" and "can". A generator keeps the strength that its evidence states.
 
 Use these words for the harness terms:
 

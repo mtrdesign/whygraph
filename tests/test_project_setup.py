@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import tomllib
 from pathlib import Path
@@ -1279,19 +1280,19 @@ def test_outcomes_carry_the_override_and_the_switched_off_reasons(
 
 
 def test_a_behind_override_gets_the_upstream_reasons(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _team_planner(repo)
     _init(repo)
     monkeypatch.setattr(assets, "package_version", lambda: "9.9.9")
-    bundled = assets.packaged_assets_for(_target("claude"))
-    planner_src = next(p for p in bundled.rglob("planner.md"))
-    original = planner_src.read_text()
-    try:
-        planner_src.write_text(original + "\nNEW UPSTREAM LINE\n")
-        result = _init(repo, dry_run=True)
-    finally:
-        planner_src.write_text(original)
+    # Change a copy of the bundled tree, never the shipped file: a write to
+    # src/ races parallel tests that read it and restarts a dev portal.
+    upstream = tmp_path / "bundled"
+    shutil.copytree(Path(str(assets.packaged_assets_for(_target("claude")))), upstream)
+    planner_src = upstream / "agents" / "planner.md"
+    planner_src.write_text(planner_src.read_text() + "\nNEW UPSTREAM LINE\n")
+    monkeypatch.setattr(assets, "packaged_assets_for", lambda target: upstream)
+    result = _init(repo, dry_run=True)
 
     row = next(f for f in result.asset_files if f.file == ".claude/agents/planner.md")
     assert row.override == "replace"

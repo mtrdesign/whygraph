@@ -17,6 +17,6 @@
   new card keeps it possible and names the source, for example "PR #12 notes a possible race". The
   card still adds no hedges of its own. Cards already cached are unchanged until they are generated
   again.
-- **Plainer WhyGraph MCP tool descriptions.** The tool descriptions and server instructions an agent
-  reads are split into shorter sentences. The `whygraph_propose_note` line now says what the tool does.
+- **The MCP server instructions now say what `whygraph_propose_note` does.** It proposes a team note
+  for a decision or constraint the code does not show, and the note waits for a person to confirm it.
   Nothing to update: a connected agent reads the new text on its next session.

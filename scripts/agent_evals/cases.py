@@ -19,7 +19,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from checks import (
@@ -56,7 +56,6 @@ from checks import (
     record_ladder,
     record_rationale_before_edit,
     record_review_cost,
-    recorded,
     reply_contains,
     reply_starts_with,
     researchers_reached_mcp,
@@ -938,31 +937,6 @@ CASES: tuple[Case, ...] = (
         plans=("defect3.md",),
         checks=(record_comparison(2),),
     ),
-)
-
-_BY_ID = {c.id: c for c in CASES}
-
-
-def _ste_case(case_id: str, source: str, name: str, budget: float, flags: str = ""):
-    """Return the Haiku A/B copy of an ``O`` case (plan 51, section 4.7)."""
-    src = _BY_ID[source]
-    stem = src.plans[0].removesuffix(".md")
-    return replace(
-        src,
-        id=case_id,
-        name=f"STE A/B: {name} (haiku)",
-        prompts=(implement(stem, f"{flags} --model haiku".strip()),),
-        budget=budget,
-        checks=tuple(recorded(c) for c in src.checks)
-        + (recorded(implementor_model(0, "haiku")),),
-    )
-
-
-CASES = CASES + (
-    _ste_case("C5", "O1", "boundaries", 1.3),
-    _ste_case("C6", "O2", "test first", 1.6),
-    _ste_case("C7", "O3", "fix and scope", 6.0, "--fix-attempts 1"),
-    _ste_case("C8", "O4", "old-format plan", 2.8),
 )
 
 

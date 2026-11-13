@@ -38,7 +38,7 @@ Every case line in the report is one of:
 | `pass` | Every check at this `--stage` held. |
 | `flaky pass` | The first attempt failed and the re-run passed. Both are in the report. |
 | `FAIL` | Two attempts failed. Look at the check lines, and at the raw `.json` and the plans in `--out`. |
-| `recorded` | The case only records a value (C1 to C8, P6). It never fails. |
+| `recorded` | The case only records a value (C1 to C4, P6). It never fails. |
 | `refused` | The ledger cap would have been exceeded. No run happened. |
 | `skip` | Portal down, dirty repo, or every check needs a later `--stage`. No run happened. |
 
@@ -77,7 +77,6 @@ A failing check names the missing end state, so read it as a finding about the h
 | P10 | The same spawn on `p10.md`, a plan with no defect: no `blocker` finding. Every `should` finding is listed: that count is the false-positive figure. |
 | P11 | Same run as P2: the plan has `## Plan review` and `plan-tool.sh check` exits 0; the review grew it by at most 25%; the Objective, Non-goals, Resolved decisions and quote lines are unchanged; the review sidecar has an `=== ui ===` block. Records the review's share of the cost. |
 | C1 to C4 | Records the per-step versus final-evaluation comparison for `clean3` and `defect3`. Never fails. C3 also records the rungs and how the run ended; expected: Acceptance after one Files amendment of step 2, or a stop at step 2 with `some findings fall outside the step's Files`. |
-| C5 to C8 | The Haiku A/B copies of O1 to O4 (plan 51 section 4.7), run with `--model haiku`. Every check, plus the implementor's model, is recorded as `held` or `MISSED` and never fails. Run with and without `--assets plans/51-eval/ste-assets`. |
 
 A stop block is the `## Run stopped at step <N> of <total>` block with its Cause, Tried, State and Next lines. Its check reads the last one the main session printed.
 

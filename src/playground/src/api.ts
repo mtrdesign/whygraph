@@ -90,14 +90,29 @@ export interface OverviewGraph {
   edges: OverviewEdgeDto[];
 }
 
+export interface RationaleItemRef {
+  kind: "commit" | "pr" | "issue";
+  /** Full commit SHA, or the PR / issue number as a string. */
+  id: string;
+  url?: string;
+}
+
+/** One constraint or risk, with where it came from. */
+export interface RationaleItem {
+  text: string;
+  basis: "quoted" | "cited" | "inferred" | "unknown";
+  refs: RationaleItemRef[];
+  quote?: string;
+}
+
 export interface RationaleCard {
   status: "cached" | "not_generated" | "no_evidence";
   target?: { path: string; line_start: number; line_end: number };
   purpose?: string;
   why?: string;
-  constraints?: string[];
+  constraints?: RationaleItem[];
   tradeoffs?: string[];
-  risks?: string[];
+  risks?: RationaleItem[];
   model?: string;
   provider?: string;
   cached_at?: string;

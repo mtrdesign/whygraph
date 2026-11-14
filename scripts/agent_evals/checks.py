@@ -958,6 +958,122 @@ def record_rationale_before_edit() -> Check:
     return Check("pre-edit rationale", fn, record=True)
 
 
+HIDDEN_TESTS = Path(__file__).resolve().parent / "fixtures" / "why" / "hidden"
+_HISTORY_READ_RE = re.compile(r"\bgit\b[^|;&\n]*\b(log|show|blame)\b")
+
+
+def hidden_test(name: str) -> Check:
+    """Record whether a hidden benchmark test passes on the case's end state.
+
+    The test lives under ``fixtures/why/hidden/`` and never in the fixture
+    repository, so the agent cannot see it. It is copied to the work directory
+    root after the last prompt, run with ``python3 -m unittest`` and removed.
+
+    Parameters
+    ----------
+    name : str
+        The test module's name without ``.py``, for example ``test_hidden_s1``.
+
+    Returns
+    -------
+    Check
+        A recording check whose ``ok`` is whether the hidden test passed.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        source = HIDDEN_TESTS / f"{name}.py"
+        target = ctx.workdir / f"{name}.py"
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        target.write_bytes(source.read_bytes())
+        try:
+            out = subprocess.run(
+                ["python3", "-m", "unittest", name],
+                cwd=ctx.workdir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**env, "PYTHONDONTWRITEBYTECODE": "1"},
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "hidden test timed out after 120 s"
+        finally:
+            target.unlink(missing_ok=True)
+        tail = (out.stderr.strip().splitlines() or ["no output"])[-1]
+        return (
+            out.returncode == 0,
+            f"{'pass' if out.returncode == 0 else 'fail'}: {tail}",
+        )
+
+    return Check(f"hidden test {name}", fn, record=True)
+
+
+def record_card_read() -> Check:
+    """Record whether any transcript of the case called ``whygraph_rationale_brief``."""
+
+    def fn(ctx: Context) -> Outcome:
+        calls = [
+            t.agent_type
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if "whygraph_rationale_brief" in u.name
+        ]
+        return bool(calls), f"{len(calls)} rationale call(s) in {sorted(set(calls))}"
+
+    return Check("card read", fn, record=True)
+
+
+def record_history_reads() -> Check:
+    """Record whether a ``Bash`` call ran ``git log``, ``git show`` or ``git blame``."""
+
+    def fn(ctx: Context) -> Outcome:
+        hits = [
+            c
+            for c in _bash_commands(ctx.all_transcripts())
+            if _HISTORY_READ_RE.search(c)
+        ]
+        return bool(hits), f"{len(hits)} history read(s)" + (
+            f", first: {hits[0][:80]!r}" if hits else ""
+        )
+
+    return Check("history read", fn, record=True)
+
+
+def record_plan_keeps(stem: str, patterns: tuple[str, ...]) -> Check:
+    """Record whether a plan names a constraint under its constraints or its blockers.
+
+    Parameters
+    ----------
+    stem : str
+        The plan's stem under ``.whygraph/plans/``.
+    patterns : tuple of str
+        Case-insensitive regexes; any one on a **Constraints to preserve** line
+        or in ``## Blockers`` counts.
+
+    Returns
+    -------
+    Check
+        A recording check whose ``ok`` is whether either place names it.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(_plan_path(ctx, stem))
+        if not text:
+            return False, "no plan written"
+        preserve = "\n".join(
+            line for line in text.splitlines() if "Constraints to preserve" in line
+        )
+        blockers = _section(text, "Blockers")
+
+        def named(body: str) -> bool:
+            return any(re.search(p, body, re.IGNORECASE) for p in patterns)
+
+        kept, blocked = named(preserve), named(blockers)
+        return kept or blocked, f"constraints to preserve: {kept}; blocker: {blocked}"
+
+    return Check("plan keeps the constraint", fn, record=True)
+
+
 def record_comparison(defect_step: int | None) -> Check:
     """Record, for the section 6.4 comparison, what the evaluators caught."""
 

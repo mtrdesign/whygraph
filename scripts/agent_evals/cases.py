@@ -49,11 +49,15 @@ from checks import (
     plan_growth,
     plan_note,
     plan_review_kept,
+    hidden_test,
     plan_tool_check,
     plan_tool_check_or_confidence,
     reaches_acceptance,
+    record_card_read,
     record_comparison,
+    record_history_reads,
     record_ladder,
+    record_plan_keeps,
     record_rationale_before_edit,
     record_review_cost,
     reply_contains,
@@ -143,6 +147,12 @@ class Case:
         Edits a copy of the ``--assets`` tree in place before it is installed,
         for a case that tests a broken agent. Raises ``ValueError`` when the
         tree does not have what it edits.
+    repo : str or None
+        A portal case's scratch repository beside ``--repo`` (for example
+        ``why-bench``), or ``None`` for ``--repo`` itself.
+    tools : tuple of str
+        Tools allowed on top of ``run.ALLOWED_TOOLS``, for example ``Skill``
+        so the benchmark's agent can run the ``pre-edit`` skill.
     """
 
     id: str
@@ -158,11 +168,13 @@ class Case:
     canary: bool = False
     env: dict[str, str] = field(default_factory=dict)
     assets: Callable[[Path], None] | None = None
+    repo: str | None = None
+    tools: tuple[str, ...] = ()
 
     @property
     def kind(self) -> str:
-        """``P`` for portal cases, otherwise ``O`` (the temporary-clone cases)."""
-        return "P" if self.id.startswith("P") else "O"
+        """``P`` for portal cases (ids ``P`` and ``R``), otherwise ``O`` (temporary clones)."""
+        return "P" if self.id[:1] in ("P", "R") else "O"
 
     def active_checks(self, stage: int) -> list[Check]:
         """Return the checks that apply at ``stage``."""
@@ -492,6 +504,120 @@ def strip_implementor(tree: Path) -> None:
 PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
 REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
+
+# Plan 54's rationale benchmark (section 5.2). Two scratch repositories with
+# the same tree, built by ``fixtures/why/build.sh``: ``why-bench`` holds the
+# history whose commit bodies state three constraints, ``why-bench-blank`` one
+# commit. The hidden tests under ``fixtures/why/hidden`` judge each run.
+BENCH_HISTORY = "why-bench"
+BENCH_BLANK = "why-bench-blank"
+# Round 2 showed that S1 and S3 as first written ("Make `fetch` more robust
+# against timeouts.", "Simplify `price.py`.") tempt no change even without the
+# history, so both now read as the bug reports they would be without it.
+BENCH_TASKS = (
+    (
+        "S1",
+        "Users report that `fetch` gives up too fast during short network "
+        "hiccups. Make it try more times before giving up.",
+        "test_hidden_s1",
+    ),
+    ("S2", "Sort the export by name. It is easier to read.", "test_hidden_s2"),
+    (
+        "S3",
+        "Customers complain that 0.125 is shown as 0.12, but they expect 0.13. "
+        "Fix the rounding in `price.py`.",
+        "test_hidden_s3",
+    ),
+)
+BENCH_WARMUP = (
+    "Call `whygraph_rationale_brief` for `client.fetch`, `export.write` and "
+    "`price.round_amount`. Then reply with one line per card: its target and "
+    "whether the call returned a card. Edit nothing."
+)
+# S1's constraint in a plan: the cap of 3 attempts or the lockout behind it.
+S1_PLAN_PATTERNS = (
+    r"\b(3|three)\b[^\n]{0,40}\battempts?\b",
+    r"\battempts?\b[^\n]{0,40}\b(3|three)\b",
+    r"\block(s|ed)? (a client )?out\b",
+    r"\b5 calls\b",
+)
+
+
+def _clear_bench_plans(stem: str) -> Callable[[Workspace], None]:
+    """Return a setup hook that deletes an earlier repeat's ``<stem>*`` plans."""
+
+    def setup(workspace: Workspace) -> None:
+        for path in (workspace.dir / ".whygraph" / "plans").glob(f"{stem}*"):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+
+    return setup
+
+
+def _bench_cases() -> tuple[Case, ...]:
+    """Return R0, R0B and R1 to R8, the benchmark cases of plan 54 section 5.2."""
+    warm = tuple(
+        Case(
+            id=case_id,
+            name=f"benchmark warm-up, {repo}",
+            prompts=(BENCH_WARMUP,),
+            budget=2.0,
+            estimate=0.0,
+            checks=(record_card_read(),),
+            repo=repo,
+            tools=("Skill",),
+        )
+        for case_id, repo in (("R0", BENCH_HISTORY), ("R0B", BENCH_BLANK))
+    )
+    tasks = tuple(
+        Case(
+            id=f"R{offset + index}",
+            name=f"benchmark {scenario}, {arm}",
+            prompts=(task,),
+            budget=2.0,
+            estimate=0.0,
+            checks=(
+                hidden_test(test),
+                record_card_read(),
+                record_rationale_before_edit(),
+                record_history_reads(),
+            ),
+            repo=repo,
+            tools=("Skill",),
+        )
+        for offset, arm, repo in (
+            (1, "history", BENCH_HISTORY),
+            (4, "blank", BENCH_BLANK),
+        )
+        for index, (scenario, task, test) in enumerate(BENCH_TASKS)
+    )
+    plans = tuple(
+        Case(
+            id=case_id,
+            name=f"benchmark plan S1, {arm}",
+            prompts=(
+                f"/whygraph-plan {BENCH_TASKS[0][1]} --no-questions "
+                f"--out .whygraph/plans/{stem}.md",
+            ),
+            budget=4.0,
+            estimate=0.0,
+            setup=_clear_bench_plans(stem),
+            checks=(
+                record_plan_keeps(stem, S1_PLAN_PATTERNS),
+                record_card_read(),
+                record_history_reads(),
+            ),
+            repo=repo,
+        )
+        for case_id, arm, repo, stem in (
+            ("R7", "history", BENCH_HISTORY, "eval-r7"),
+            ("R8", "blank", BENCH_BLANK, "eval-r8"),
+        )
+    )
+    return warm + tasks + plans
+
 
 CASES: tuple[Case, ...] = (
     Case(
@@ -937,6 +1063,7 @@ CASES: tuple[Case, ...] = (
         plans=("defect3.md",),
         checks=(record_comparison(2),),
     ),
+    *_bench_cases(),
 )
 
 

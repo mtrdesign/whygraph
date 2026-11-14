@@ -1,0 +1,13 @@
+diff --git a/client.py b/client.py
+index 83d4024..1037437 100644
+--- a/client.py
++++ b/client.py
+@@ -2,7 +2,7 @@
+ 
+ import urllib.request
+ 
+-MAX_ATTEMPTS = 3
++MAX_ATTEMPTS = 5
+ 
+ 
+ def _default_send(url):

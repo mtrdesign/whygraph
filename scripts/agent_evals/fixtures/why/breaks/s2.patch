@@ -1,0 +1,13 @@
+diff --git a/export.py b/export.py
+index cf49e15..dd751fc 100644
+--- a/export.py
++++ b/export.py
+@@ -2,7 +2,7 @@
+ 
+ 
+ def _by_id(row):
+-    return row["id"]
++    return row["name"]
+ 
+ 
+ def write(rows, out, key=None):

@@ -112,7 +112,7 @@ Each constraint and risk a plan quotes from a rationale card ends with a tag tha
 | `(note #<id>)` | A [project note](notes.md) that a person confirmed. |
 | none | The card was cached before cards recorded sources. |
 
-`<ref>` is a commit id, `PR #<n>` or `Issue #<n>`. A guess informs you but never stops a run. A
+`<ref>` is the first 8 characters of a commit id, `PR #<n>` or `Issue #<n>`. A guess informs you but never stops a run. A
 constraint tagged `(inferred)` alone never becomes a Blocker: the plan lists it under Risks. In
 Claude Code, a review-gate **Constraint at risk** verdict that ends `(inferred)` is printed and does
 not hold the step.

@@ -1204,3 +1204,29 @@ def test_every_table_is_exported_or_named() -> None:
 def test_every_wire_model_is_inventoried() -> None:
     inventoried = {wire for wire, _ in EXPORTED.values()}
     assert set(tb.MEMBER_MODELS.values()) - inventoried == {ActorRecord}
+
+
+def test_rationale_record_takes_items_and_plain_strings() -> None:
+    item = {"text": "t", "basis": "quoted", "refs": [{"kind": "pr", "id": "1"}]}
+    rec = RationaleRecord.model_validate(
+        {
+            **RationaleRecord(
+                path="a.py",
+                line_start=1,
+                line_end=2,
+                provider="p",
+                model="m",
+                evidence_fingerprint=KEY,
+                cached_at="2026-10-01T10:00:00Z",
+                purpose="p",
+                why="w",
+                constraints=[],
+                tradeoffs=[],
+                risks=[],
+            ).model_dump(),
+            "constraints": [item, "plain"],
+            "risks": ["plain"],
+        }
+    )
+    assert rec.constraints == [item, "plain"]
+    assert rec.risks == ["plain"]

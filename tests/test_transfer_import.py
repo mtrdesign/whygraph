@@ -83,7 +83,9 @@ def test_rationale_inserts_stamps_and_target_wins(project):
     with get_session() as session:
         rows = session.exec(select(RationaleCache)).all()
         assert {r.import_id for r in rows} == {7}
-        assert json.loads(rows[0].constraints) == ["c"]
+        assert json.loads(rows[0].constraints) == [
+            {"text": "c", "basis": "unknown", "refs": []}
+        ]
         row = session.get(RationaleCache, ("src/a.py", 1, 10, "openai", "default"))
         row.purpose = "mine"
         session.add(row)
@@ -124,6 +126,52 @@ def test_rationale_inactive_model_uses_model_key(project):
     assert result.inserted == 3 and result.inactive_model == 2
     assert (
         _rows([_card(model="gpt-x")], cache_key=("openai", "gpt-x")).inactive_model == 0
+    )
+
+
+def test_rationale_items_round_trip_both_forms(project):
+    item = {
+        "text": "keep it",
+        "basis": "quoted",
+        "refs": [{"kind": "pr", "id": "4", "url": "https://x/4"}],
+        "quote": "q",
+    }
+    result = _rows([_card(constraints=[item, "old words"], risks=[item])])
+    assert result.inserted == 1
+    with get_session() as session:
+        (row,) = session.exec(select(RationaleCache)).all()
+        constraints, risks = row.constraints, row.risks
+    assert json.loads(constraints) == [
+        item,
+        {"text": "old words", "basis": "unknown", "refs": []},
+    ]
+    assert json.loads(risks) == [item]
+    from whygraph.mcp.rationale_cache import decode_items
+
+    assert [i.as_dict() for i in decode_items(constraints)][0] == item
+
+
+def test_rationale_item_malformed_follows_the_decoder(project):
+    odd = {
+        "text": "t",
+        "basis": "made-up",
+        "refs": [{"kind": "nope", "id": "1"}, "junk", {"kind": "pr", "id": "2"}],
+    }
+    assert _rows([_card(risks=[odd])]).inserted == 1
+    with get_session() as session:
+        (row,) = session.exec(select(RationaleCache)).all()
+        risks = row.risks
+    assert json.loads(risks) == [
+        {"text": "t", "basis": "unknown", "refs": [{"kind": "pr", "id": "2"}]}
+    ]
+    for bad in ({"basis": "quoted"}, 3, {"text": 5}):
+        with pytest.raises(ImportFormatError):
+            _rows([_card(line_start=40, constraints=[bad])])
+    assert (
+        _rows(
+            [_card(line_start=41, constraints=[{"text": "x" * 4_001}])]
+        ).skipped_oversize
+        == 1
     )
 
 

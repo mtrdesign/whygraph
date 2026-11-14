@@ -558,6 +558,7 @@ _IMPORT_SPAN_MAX = 5_000
 _IMPORT_TEXT_MAX = 32_000
 _IMPORT_LIST_ITEMS = 50
 _IMPORT_ITEM_MAX = 4_000
+_IMPORT_REF_MAX = 500
 _IMPORT_IDENT_MAX = 200
 _IMPORT_FUTURE_SLACK = timedelta(minutes=5)
 _IMPORT_INT_MAX = 2**31
@@ -852,6 +853,35 @@ def _import_deferred(value: Any) -> str:
     return " ".join(tokens)
 
 
+def _import_list_element(name: str, element: Any) -> Any:
+    """One imported list element as the value to store; ``None`` when too long.
+
+    ``tradeoffs`` stay strings. A constraint or risk is read by the one
+    decoder (:func:`decode_item`): a plain string becomes basis ``unknown``,
+    an object keeps its basis and well-formed refs, anything else is a format
+    error. The stored value is :meth:`Item.as_dict`.
+    """
+    if name == "tradeoffs":
+        return clean_text(
+            element, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
+        )
+    item = decode_item(element)
+    if item is None:
+        raise ImportFormatError(name, "must be a list of text or item objects")
+    text = clean_text(item.text, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name)
+    quote = clean_text(
+        item.quote, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
+    )
+    if text is None or quote is None:
+        return None
+    refs = tuple(
+        ref
+        for ref in item.refs
+        if len(ref.id) <= _IMPORT_REF_MAX and len(ref.url or "") <= _IMPORT_REF_MAX
+    )
+    return Item(text, item.basis, refs, quote).as_dict()
+
+
 def _check_rationale(
     record: Mapping[str, Any], latest: datetime, paths: dict[str, str | None]
 ) -> dict[str, Any] | str | None:
@@ -895,23 +925,21 @@ def _check_rationale(
         texts[name] = clean_text(
             record.get(name), multiline=True, max_chars=_IMPORT_TEXT_MAX, field=name
         )
-    lists: dict[str, list[str] | None] = {}
+    lists: dict[str, list[Any] | None] = {}
     for name in ("constraints", "tradeoffs", "risks"):
         value = record.get(name)
         if not isinstance(value, list | tuple):
             raise ImportFormatError(name, "must be a list of text")
-        items: list[str] | None = []
+        items: list[Any] | None = []
         if len(value) > _IMPORT_LIST_ITEMS:
             items = None
         else:
-            for item in value:
-                text = clean_text(
-                    item, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
-                )
-                if text is None:
+            for element in value:
+                cleaned = _import_list_element(name, element)
+                if cleaned is None:
                     items = None
                     break
-                items.append(text)
+                items.append(cleaned)
         lists[name] = items
     deferred_shas = _import_deferred(record.get("deferred_shas"))
     # Format errors above win over skips; the skips follow.

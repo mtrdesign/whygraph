@@ -559,10 +559,9 @@ def build_export(
                     cached_at=r.cached_at,
                     purpose=r.purpose,
                     why=r.why,
-                    # Only the words until the record carries the items (B2).
-                    constraints=[i.text for i in decode_items(r.constraints)],
+                    constraints=[i.as_dict() for i in decode_items(r.constraints)],
                     tradeoffs=_json_list(r.tradeoffs) or [],
-                    risks=[i.text for i in decode_items(r.risks)],
+                    risks=[i.as_dict() for i in decode_items(r.risks)],
                     input_tokens=r.input_tokens,
                     output_tokens=r.output_tokens,
                     actual_provider=r.actual_provider,

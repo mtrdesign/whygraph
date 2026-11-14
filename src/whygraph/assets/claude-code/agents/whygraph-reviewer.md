@@ -100,7 +100,7 @@ Compare the hunk's changed lines (from the diff) with the symbol's source and it
 
 If both a constraint and a risk apply, report the constraint. Quote character for character from the card's list, inside double quotes - never paraphrase, merge two items or invent one. A card with fewer than 3 commits behind it (`evidence_count.commits`) is a weak signal: say so in the line. When unsure, say "may" and lower the confidence.
 
-Each item of a card's `constraints` and `risks` is an object: quote its `text`. End a **Constraint at risk** or **Risk triggered** line with the item's tag, read from the `basis` and `refs` of the card you fetched, never from the plan: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the commit id, `PR #<n>` or `Issue #<n>`. A finding from a note ends with `(note #<id>)`. The tag comes last, after the `stale` note.
+Each item of a card's `constraints` and `risks` is an object: quote its `text`. End a **Constraint at risk** or **Risk triggered** line with the item's tag, read from the `basis` and `refs` of the card you fetched, never from the plan: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`. A finding from a note ends with `(note #<id>)`. The tag comes last, after the `stale` note.
 
 ## Output format (markdown, this exact shape)
 

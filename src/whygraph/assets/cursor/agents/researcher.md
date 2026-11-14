@@ -85,7 +85,7 @@ You do **not** delegate further. Researchers don't fan out further.
 - "<the `text` of a card's risks[] item, verbatim>" <tag> - from `qualified.name`
 - "<a note body, verbatim>" (note #<id>) - from `qualified.name`
 
-*(`<tag>` comes from the item's `basis` and `refs`: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the commit id, `PR #<n>` or `Issue #<n>`.)*
+*(`<tag>` comes from the item's `basis` and `refs`: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`.)*
 
 ## Prior art
 *(example: only for the source whose section is Prior art)*

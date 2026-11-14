@@ -2154,6 +2154,15 @@ export interface ImportResult {
 }
 
 /** One note as `/notes` serves it (`mcp.notes.NoteView` plus the proposer's and confirmer's names). */
+/** A text check on a confirmed constraint note (`absent`: must not appear, `present`: must appear). */
+export interface NoteCheck {
+  kind: "absent" | "present";
+  text: string;
+  glob: string;
+}
+
+export type NoteCheckState = "holds" | "broken" | "unknown";
+
 export interface Note {
   id: number;
   kind: NoteKind;
@@ -2185,6 +2194,10 @@ export interface Note {
   duplicate?: boolean;
   /** `GET /notes/{id}` only. */
   superseded_by_ids?: number[];
+  /** The text check of a constraint note, or `null`. */
+  check?: NoteCheck | null;
+  /** Only on a single-note view and the for-target view; absent from list views. */
+  check_state?: NoteCheckState | null;
 }
 
 export interface NotesSummary {
@@ -2206,6 +2219,7 @@ export interface NoteProposal {
   anchor: NoteAnchor;
   refs?: string[];
   supersedes_id?: number;
+  check?: NoteCheck;
 }
 
 /** One recorded purpose run (`GET .../purpose` `last_run`); `cost_usd` is `null` without `project.usage`. */
@@ -2308,7 +2322,7 @@ export function projectApi(slug: string) {
       get<Note[]>(`${base}/notes/for-target?qualified_name=${q(qualified_name)}`),
     note: (id: number) => get<Note>(`${base}/notes/${id}`),
     proposeNote: (body: NoteProposal) => send<Note>("POST", `${base}/notes`, body),
-    confirmNote: (id: number, body: { body?: string; kind?: NoteKind } = {}) =>
+    confirmNote: (id: number, body: { body?: string; kind?: NoteKind; check?: NoteCheck | null } = {}) =>
       send<Note>("POST", `${base}/notes/${id}/confirm`, body),
     reconfirmNote: (id: number, body: { line_start?: number; line_end?: number } = {}) =>
       send<Note>("POST", `${base}/notes/${id}/reconfirm`, body),

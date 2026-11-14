@@ -10,6 +10,7 @@ import {
   SOURCE_LABEL,
   STATUS_LABEL,
   anchorText,
+  checkText,
   chatSessionOf,
   isAgentNote,
   isProjectWide,
@@ -340,6 +341,19 @@ export function NoteCard({
       <div className="break-all font-mono text-xs text-muted-foreground" data-testid="note-anchor">
         {anchorText(note.anchor)}
       </div>
+      {note.check && (
+        <p className="flex flex-wrap items-center gap-1.5 break-all text-xs text-muted-foreground" data-testid="note-check">
+          <span>Check - {checkText(note.check)}</span>
+          {note.check_state && (
+            <Badge
+              variant={note.check_state === "holds" ? "success" : note.check_state === "broken" ? "destructive" : "outline"}
+              data-testid="check-state"
+            >
+              {note.check_state === "holds" ? "Check holds" : note.check_state === "broken" ? "Check broken" : "Check unknown"}
+            </Badge>
+          )}
+        </p>
+      )}
       {note.commits_since ? (
         <p className="text-xs text-muted-foreground">{plural(note.commits_since, "commit")} touched this since it was confirmed.</p>
       ) : null}

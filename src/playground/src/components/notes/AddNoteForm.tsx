@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import type { NoteAnchor, NoteKind } from "../../api";
-import { KIND_LABEL, NOTE_BODY_MAX, NOTE_KINDS, useInvalidateNotes } from "../../lib/notes";
+import type { NoteAnchor, NoteCheck, NoteKind } from "../../api";
+import { KIND_LABEL, NOTE_BODY_MAX, checkProblem, NOTE_KINDS, useInvalidateNotes } from "../../lib/notes";
 import { useProjectApi } from "../../lib/project";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { ErrorState } from "../state/ErrorState";
 import { nativeSelect } from "../portal/Field";
@@ -15,13 +16,29 @@ export function AddNoteForm({ anchor }: { anchor: NoteAnchor }) {
   const [body, setBody] = useState("");
   const [kind, setKind] = useState<NoteKind>("decision");
   const [open, setOpen] = useState(false);
+  const [checkKind, setCheckKind] = useState<"" | NoteCheck["kind"]>("");
+  const [checkText, setCheckText] = useState("");
+  const [checkGlob, setCheckGlob] = useState("");
   const [existing, setExisting] = useState<number | null>(null);
 
+  const withCheck = kind === "constraint" && checkKind !== "";
+  const problem = withCheck ? checkProblem(checkText, checkGlob) : null;
   const add = useMutation({
-    mutationFn: () => api.proposeNote({ body: body.trim(), kind, anchor }),
+    mutationFn: () =>
+      api.proposeNote({
+        body: body.trim(),
+        kind,
+        anchor,
+        ...(kind === "constraint" && checkKind !== ""
+          ? { check: { kind: checkKind, text: checkText.trim(), glob: checkGlob.trim() } }
+          : {}),
+      }),
     onSuccess: (note) => {
       setExisting(note.duplicate ? note.id : null);
       setBody("");
+      setCheckKind("");
+      setCheckText("");
+      setCheckGlob("");
       setOpen(false);
       void invalidate();
     },
@@ -64,9 +81,53 @@ export function AddNoteForm({ anchor }: { anchor: NoteAnchor }) {
           </option>
         ))}
       </select>
+      {kind === "constraint" && (
+        <div className="flex flex-col gap-2" data-testid="check-row">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Check"
+              className={nativeSelect("w-48")}
+              value={checkKind}
+              onChange={(e) => setCheckKind(e.target.value as "" | NoteCheck["kind"])}
+            >
+              <option value="">No check</option>
+              <option value="absent">Must not appear</option>
+              <option value="present">Must appear</option>
+            </select>
+            {checkKind !== "" && (
+              <>
+                <Input
+                  aria-label="Check text"
+                  className="w-56"
+                  placeholder="Text to look for"
+                  maxLength={200}
+                  value={checkText}
+                  onChange={(e) => setCheckText(e.target.value)}
+                />
+                <Input
+                  aria-label="Check glob"
+                  className="w-56"
+                  placeholder="Files, for example src/**/*.py"
+                  maxLength={200}
+                  value={checkGlob}
+                  onChange={(e) => setCheckGlob(e.target.value)}
+                />
+              </>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            A check is a text search in git-tracked files; it never runs a command. It starts once the note is confirmed.
+          </p>
+          {problem && checkText !== "" && checkGlob !== "" && (
+            <p className="text-xs text-destructive" data-testid="check-hint">
+              {problem}
+            </p>
+          )}
+        </div>
+      )}
       <p className="text-xs text-muted-foreground">Everyone who can open this project can see it.</p>
       <div className="flex gap-2">
-        <Button size="sm" type="submit" disabled={add.isPending || body.trim().length === 0}>
+        <Button size="sm" type="submit" disabled={add.isPending || body.trim().length === 0 || (withCheck && problem !== null)}>
           Propose note
         </Button>
         <Button size="sm" type="button" variant="ghost" onClick={() => setOpen(false)}>

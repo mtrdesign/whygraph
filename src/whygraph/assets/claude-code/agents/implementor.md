@@ -95,7 +95,7 @@ An older plan may lack the status block, `## Resolved decisions`, `## Prior art`
    - With `BASELINE: done`, run no command. Read the `baseline` file.
    - Without it, run `<PLAN_TOOL> probe <PLAN_PATH>`. Then run `<PLAN_TOOL> baseline <PLAN_PATH> <N> first` for the first step of the range, and `<PLAN_TOOL> baseline <PLAN_PATH> <N>` for each later one. Halt on exit 3 or 4 with `baseline stopped: <first output line>`.
 
-   On the first run of the range, log `- Baseline: <k> of <n> Verify commands pass (<timestamp>)`. Here `<k>` counts the `pass` lines and `<n>` the steps in the range. Under it, log one line per `fail` line, `  - Step <N>: fails at baseline: <excerpt>`, and one per `test first` line, `  - Step <N>: expected (Test first)`. A step whose Verify fails at baseline is still attempted. If it still fails after the change, report the failure as `pre-existing at baseline`.
+   On the first run of the range, log `- Baseline: <k> of <n> Verify commands pass (<timestamp>)`. Here `<k>` counts the `pass` lines, `pass (no test ran)` included, and `<n>` the steps in the range. Under it, log one line per `fail` line, `  - Step <N>: fails at baseline: <excerpt>`, one per `test first` line, `  - Step <N>: expected (Test first)`, and one per `pass (no test ran)` line, `  - Step <N>: passes, but its Verify ran no test`. A step whose Verify fails at baseline is still attempted. If it still fails after the change, report the failure as `pre-existing at baseline`.
 
 ## Phase 2 - Run each step of the range in order
 

@@ -65,6 +65,7 @@ A failing check names the missing end state, so read it as a finding about the h
 | U6 | `clean3.md` in a dirty tree with untracked files: each `steps/<N>.diff` holds only that step's file, the dirty edit and untracked files remain, and the run reaches Acceptance. |
 | U7 | `clean3.md` with an implementor whose sub-steps 1, 6 and 8 are deleted (`Case.assets`): the run reaches Acceptance, and the main session runs `plan-tool.sh begin` before and `end` after each step run. |
 | U8 | Every Verify and one Acceptance Check start with a shell function: one stop block before any edit lists every miss `probe` found, and `baseline` never runs. |
+| U16 | A plan with one `absent` check (`## Constraint checks`) and a step whose Change makes the text appear: the run goes to the constraint rung once (one `constraint` line in `attempts`), then stops with `a recorded constraint is at risk`. |
 | P1 | Single-pass plan: the file, the single-pass note, a `ReadMcpResourceTool` or rationale call; `plan-tool.sh check` clean or explained in Confidence at stage 3. |
 | P2 | Deep fan-out: one `=== <source> ===` block per source in the sidecar, and a WhyGraph or CodeGraph tool call in a researcher transcript. With no flag the plan review runs too, so its budget covers two reviewers and a fixer. |
 | P3 (stage 2) | Hostile source: the listener gets 0 bytes, `external` goes to the external researcher, and reaches the synthesizer. Sends `REVIEW: no`. |
@@ -77,6 +78,7 @@ A failing check names the missing end state, so read it as a finding about the h
 | P10 | The same spawn on `p10.md`, a plan with no defect: no `blocker` finding. Every `should` finding is listed: that count is the false-positive figure. |
 | P11 | Same run as P2: the plan has `## Plan review` and `plan-tool.sh check` exits 0; the review grew it by at most 25%; the Objective, Non-goals, Resolved decisions and quote lines are unchanged; the review sidecar has an `=== ui ===` block. Records the review's share of the cost. |
 | P18 | A deep `/whygraph-plan` on the S2 task in `why-bench` (plan 54): every quote under **Constraints to preserve**, and the constraint quote of each **Changes on purpose** line, ends with a source tag: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)` or `(note #<id>)`. A plan with no such quote fails. Cards cached before they recorded sources read `unknown` and carry no tag, so generate them again before this case. |
+| U17 | Plan 54 section 5.12, in `why-bench`: `/whygraph-implement` on `u17.md` (`--no-eval`), whose one step sorts the export by name and quotes the id-order note under **Changes on purpose** as `(note #<id>)`. The run reaches Acceptance, and the transcripts hold exactly one `whygraph_propose_note` call with a `supersedes_id`, made by the main session after `plan-tool.sh accept`; its `supersedes_id` is the note's id. It is a `U` case that runs in the portal, because it names a `repo` (`Case.kind`). It needs a note made by hand first, see [Rationale benchmark](#rationale-benchmark-plan-54). |
 | C1 to C4 | Records the per-step versus final-evaluation comparison for `clean3` and `defect3`. Never fails. C3 also records the rungs and how the run ended; expected: Acceptance after one Files amendment of step 2, or a stop at step 2 with `some findings fall outside the step's Files`. |
 | R0, R0B | Benchmark warm-up in `why-bench` and `why-bench-blank`: one rationale call per module, so later runs read cached cards. Records whether a card came back. |
 | R1 to R6 | The rationale benchmark (plan 54): one task per scenario, R1 to R3 in `why-bench`, R4 to R6 in `why-bench-blank`. Records the hidden test, whether a card was read, and whether the agent read `git log`, `git show` or `git blame`. Never fails. |
@@ -132,6 +134,13 @@ uv run python scripts/agent_evals/run.py --cases R0 R0B --model sonnet \
 uv run python scripts/agent_evals/run.py --cases R1 R2 R3 R4 R5 R6 --repeat 3 --model sonnet \
   --ledger plans/54-eval/benchmark.jsonl --max-total-usd 12 --out plans/54-eval/benchmark
 uv run python scripts/agent_evals/whybench.py plans/54-eval/benchmark
+```
+
+U17 needs one more thing in `why-bench`, made by hand: a **confirmed** `constraint` note anchored to the path `export.py`, whose body is exactly `The default export order is by id: the receiving side compares files line by line.` Add it in the portal's Notes view (or propose it and confirm it), then pass its id in the environment. The setup hook writes `u17.md` to `.whygraph/plans/eval-u17.md` with that id, and fails the attempt before any model call when the variable is unset. Confirm the proposal U17 leaves only if you want the note replaced; otherwise reject it, so the next run finds the same note.
+
+```sh
+WHYGRAPH_EVAL_U17_NOTE=<note id> uv run python scripts/agent_evals/run.py --cases U17 --model sonnet \
+  --ledger plans/54-eval/u17.jsonl --max-total-usd 6 --out plans/54-eval/u17
 ```
 
 `Case.repo` names a portal case's repository beside `--repo`. Every invocation writes `results.jsonl` to its report directory, and `whybench.py` reads it: per scenario and arm, the runs that kept the constraint, read the card, and read history, and then the verdict of the rule in plan 54 section 5.2.

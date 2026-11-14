@@ -1900,6 +1900,70 @@ def test_baseline_reads_the_plan_from_a_blob(repo: Path, posix: str) -> None:
     assert _baseline(repo, posix, "1", "c" * 40).returncode == 65
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "collected 0 items",
+        "No tests ran",
+        "===== no tests ran in 0.01s =====",
+        "  0 passing (2ms)",
+        "running 0 tests",
+        "No tests to run",
+        "no tests found",
+        "Ran 0 tests in 0.000s",
+        "COLLECTED 0 ITEMS",
+    ],
+)
+def test_baseline_a_pass_that_ran_no_test(repo: Path, posix: str, output: str) -> None:
+    """Plan 54 section 5.13: the first word stays ``pass``."""
+    _write_plan(repo, _full_plan(("a.txt", f'`echo "{output}"`', "none")))
+    run = _baseline(repo, posix, "1", "first")
+    assert run.returncode == 0, run.stderr
+    assert _result(_baseline_lines(repo)[0]) == "pass (no test ran)"
+    assert run.stdout.rstrip("\n").endswith(": pass (no test ran)")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "collected 10 items",
+        "10 passing (2ms)",
+        "running 10 tests",
+        "Ran 20 tests in 0.1s",
+        "100 tests passed",
+        "0 testsuites",
+        "a0 tests",
+        "ok",
+    ],
+)
+def test_baseline_a_pass_that_ran_a_test_stays_pass(
+    repo: Path, posix: str, output: str
+) -> None:
+    _write_plan(repo, _full_plan(("a.txt", f'`echo "{output}"`', "none")))
+    assert _baseline(repo, posix, "1", "first").returncode == 0
+    assert _result(_baseline_lines(repo)[0]) == "pass"
+
+
+def test_baseline_a_failure_that_ran_no_test_stays_a_failure(
+    repo: Path, posix: str
+) -> None:
+    _write_plan(repo, _full_plan(("a.txt", '`echo "no tests ran"; exit 5`', "none")))
+    assert _baseline(repo, posix, "1", "first").returncode == 0
+    assert _result(_baseline_lines(repo)[0]) == "fail 5: no tests ran"
+
+
+def test_baseline_copies_a_pass_that_ran_no_test(repo: Path, posix: str) -> None:
+    verify = '`echo "collected 0 items" >> runs.txt; cat runs.txt`'
+    _write_plan(repo, _full_plan(("a.txt", verify, "none"), ("a.txt", verify, "none")))
+    assert _baseline(repo, posix, "1", "first").returncode == 0
+    assert _baseline(repo, posix, "2").returncode == 0
+    assert [_result(line) for line in _baseline_lines(repo)] == [
+        "pass (no test ran)",
+        "pass (no test ran)",
+    ]
+    assert (repo / "runs.txt").read_text() == "collected 0 items\n"
+
+
 def _accept(
     repo: Path, posix: str, item: str, *extra: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -3341,6 +3405,110 @@ def test_constraints_runs_from_the_repo_root(repo: Path, posix: str) -> None:
     run = _tool(repo / "src", "constraints", "../plans/p.md", shell=_SHELLS[posix])
     assert run.returncode == 1, run.stdout + run.stderr
     assert run.stdout.splitlines()[0] == "broken: note #7 src/a.py:1"
+
+
+# ---- brief (plan 54 section 5.15) -------------------------------------------------
+
+_BRIEF_PLAN = """\
+# Plan: Sort the export
+
+**Status:** PROPOSAL - nothing implemented yet.
+**Objective:** Sort the export by name.
+**Non-goals:** none
+
+## Working set
+1 symbol analyzed.
+
+```
+## Steps
+1. **A fenced step**
+   - **Model:** haiku
+```
+
+## Blockers
+
+- **Constraint at risk:** "Rows leave in id order." (note #7)
+- **Why it's a blocker:** the task sorts by name
+
+## Constraint checks
+- note #7 - absent: "sorted(" in src/**
+
+## Steps
+
+1. **Sort the rows**
+   - **Files:** src/export.py:10-20, src/sort.py (new, a helper)
+   - **Change:** Sort the rows by name.
+   - **Changes on purpose:** "Rows leave in id order." (note #7) - the task asks for it
+   - **Model:** Sonnet - a small change
+   - **Verify:** `touch ran`
+2. **Show the order**
+   - **Files:** src/page.py:3
+   - **Model:** opus - new design
+   - **Verify:** manual: look at the page
+3. **Document it**
+   - **Change:** Write it down.
+
+## Risks called out across the change
+- "a risk"
+
+## Acceptance
+1. The suite passes - **Check:** `touch ran`
+2. The page shows the order
+   - **Check:** manual: open the page
+
+## Open questions
+- **Q1.** Which order? **Options:** name / date **Default:** name **Plan-shaping:** no - one line
+
+## Confidence: high
+A reason.
+"""
+
+_BRIEF_PAGE = """\
+Plan: Sort the export
+Objective: Sort the export by name.
+Blockers:
+  - **Constraint at risk:** "Rows leave in id order." (note #7)
+  - **Why it's a blocker:** the task sorts by name
+Open questions:
+  - **Q1.** Which order? **Options:** name / date **Default:** name **Plan-shaping:** no - one line
+Constraint checks:
+  - note #7 - absent: "sorted(" in src/**
+Steps:
+  1. Sort the rows - 2 files, sonnet, changes a constraint on purpose
+  2. Show the order - 1 file, opus
+  3. Document it - 0 files, no model
+Acceptance:
+  1. The suite passes - **Check:** `touch ran`
+  2. The page shows the order
+"""
+
+
+def test_brief_prints_the_page_and_runs_nothing(repo: Path, posix: str) -> None:
+    _write_plan(repo, _BRIEF_PLAN)
+    run = _run(repo, posix, "brief", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout == _BRIEF_PAGE
+    assert not (repo / "ran").exists()
+    assert not (repo / ".whygraph").exists()
+
+
+def test_brief_prints_only_what_the_plan_has(tmp_path: Path) -> None:
+    """Outside a repository too: brief reads the plan file and nothing else."""
+    (tmp_path / "p.md").write_text(_steps_plan(("a.txt", "`true`")))
+    run = _tool(tmp_path, "brief", "p.md")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout == (
+        "Plan: Test\nSteps:\n  1. Step 1 - 1 file, no model\n"
+        "Acceptance:\n  1. Done - **Check:** `true`\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "args", [("brief",), ("brief", "missing.md"), ("brief", "p.md", "1")]
+)
+def test_brief_usage_errors_exit_64(tmp_path: Path, args: tuple[str, ...]) -> None:
+    (tmp_path / "p.md").write_text(_BRIEF_PLAN)
+    assert _tool(tmp_path, *args).returncode == 64
 
 
 # ---- refusals -------------------------------------------------------------------

@@ -1149,6 +1149,57 @@ def constraint_quotes_tagged(stem: str) -> Check:
     return Check("constraint quotes carry a source tag", fn)
 
 
+def note_revision_proposed(note_env: str) -> Check:
+    """Pass when the run proposes exactly one note revision, after Acceptance.
+
+    Parameters
+    ----------
+    note_env : str
+        The environment variable that holds the id of the note the plan
+        changes on purpose. When it is set, the call's ``supersedes_id`` must
+        equal it.
+
+    Returns
+    -------
+    Check
+        Fails when the transcripts hold no ``whygraph_propose_note`` call with
+        a ``supersedes_id``, or more than one, or when the main session made it
+        before its first ``plan-tool.sh accept``.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        calls = [
+            u
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if _tool_matches(u.name, r"^whygraph_propose_note$")
+            and u.input.get("supersedes_id") not in (None, "")
+        ]
+        if len(calls) != 1:
+            return False, f"{len(calls)} propose call(s) with supersedes_id"
+        call = calls[0]
+        accepted = False
+        after = False
+        for t in ctx.of_type("main"):
+            for u in t.tool_uses():
+                command = str(u.input.get("command", ""))
+                if _tool_matches(u.name, r"^Bash$") and re.search(
+                    r"plan-tool\.sh\s+accept\s", command
+                ):
+                    accepted = True
+                elif u == call:
+                    after = accepted
+        if not after:
+            return False, "the propose call is not in the main session after accept"
+        found = str(call.input["supersedes_id"]).strip()
+        expected = os.environ.get(note_env, "").strip()
+        if expected and found != expected:
+            return False, f"supersedes_id {found}, expected {expected}"
+        return True, f"one revision of note #{found}, kind {call.input.get('kind')}"
+
+    return Check("one note revision proposed after Acceptance", fn)
+
+
 def record_comparison(defect_step: int | None) -> Check:
     """Record, for the section 6.4 comparison, what the evaluators caught."""
 

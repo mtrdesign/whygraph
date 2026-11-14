@@ -14,6 +14,7 @@ skipped, so a baseline never tests what is not built yet.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -46,6 +47,7 @@ from checks import (
     no_implementor,
     no_plan_tool_call,
     no_process,
+    note_revision_proposed,
     plan_log_contains,
     plan_growth,
     plan_note,
@@ -174,8 +176,12 @@ class Case:
 
     @property
     def kind(self) -> str:
-        """``P`` for portal cases (ids ``P`` and ``R``), otherwise ``O`` (temporary clones)."""
-        return "P" if self.id[:1] in ("P", "R") else "O"
+        """``P`` for portal cases, otherwise ``O`` (temporary clones).
+
+        A portal case has an id that starts with ``P`` or ``R``, or names a
+        scratch ``repo``, as U17 does: a ``U`` case on ``why-bench``.
+        """
+        return "P" if self.id[:1] in ("P", "R") or self.repo else "O"
 
     def active_checks(self, stage: int) -> list[Check]:
         """Return the checks that apply at ``stage``."""
@@ -558,6 +564,41 @@ def _clear_bench_plans(stem: str) -> Callable[[Workspace], None]:
     return setup
 
 
+# Plan 54 section 8, U17: a plan on ``why-bench`` whose one step changes a
+# confirmed note on purpose. The note is made by hand in the portal (see the
+# README), so its id comes from the environment and fills the fixture's
+# ``(note #{{NOTE_ID}})``.
+U17_STEM = "eval-u17"
+U17_NOTE_ENV = "WHYGRAPH_EVAL_U17_NOTE"
+
+
+def _u17_plan(note_id: str) -> str:
+    """Return the U17 fixture plan with the note id filled in."""
+    text = (FIXTURES / "plans" / "u17.md").read_text(encoding="utf-8")
+    return text.replace("{{NOTE_ID}}", note_id)
+
+
+def setup_u17(workspace: Workspace) -> None:
+    """Write the U17 plan to ``.whygraph/plans/eval-u17.md``, with the note's id.
+
+    Raises
+    ------
+    RuntimeError
+        When ``WHYGRAPH_EVAL_U17_NOTE`` does not hold a note id. The attempt
+        then fails before any model call.
+    """
+    note_id = os.environ.get(U17_NOTE_ENV, "").strip()
+    if not re.fullmatch(r"[1-9][0-9]*", note_id):
+        raise RuntimeError(
+            f"set {U17_NOTE_ENV} to the id of the confirmed constraint note on "
+            "export.py in why-bench (see the README)"
+        )
+    _clear_bench_plans(U17_STEM)(workspace)
+    plans = workspace.dir / ".whygraph" / "plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / f"{U17_STEM}.md").write_text(_u17_plan(note_id), encoding="utf-8")
+
+
 def _bench_cases() -> tuple[Case, ...]:
     """Return R0, R0B and R1 to R8, the benchmark cases of plan 54 section 5.2."""
     warm = tuple(
@@ -824,6 +865,22 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="U16",
+        name="a step breaks a recorded constraint",
+        prompts=(implement("u16"),),
+        budget=1.5,
+        estimate=1.0,
+        plans=("u16.md",),
+        checks=(
+            # The check is on plan line "## Constraint checks": the step makes
+            # DEBUG_TRACE appear, so the run goes to the constraint rung once
+            # and then stops on the second break.
+            stop_block(1, (r"a recorded constraint is at risk",), once=True),
+            attempt_count("u16", 1, "constraint", minimum=1, maximum=1),
+            record_ladder("u16", "the constraint rung, then a stop at step 1"),
+        ),
+    ),
+    Case(
         id="P1",
         name="single-pass plan",
         prompts=(f"/whygraph-plan {RENAME_TASK} --no-questions --out {PLAN_P1}",),
@@ -1039,6 +1096,20 @@ CASES: tuple[Case, ...] = (
         repo=BENCH_HISTORY,
         tools=("Skill",),
     ),
+    # Plan 54 section 8: a run whose step changes a confirmed note on purpose
+    # proposes one revision of that note once Acceptance passed. A U case that
+    # names a repo runs in the portal (Case.kind).
+    Case(
+        id="U17",
+        name="a change on purpose proposes the note's revision",
+        prompts=(implement(U17_STEM, "--no-eval"),),
+        budget=6.0,
+        estimate=0.0,
+        setup=setup_u17,
+        checks=(reaches_acceptance(), note_revision_proposed(U17_NOTE_ENV)),
+        repo=BENCH_HISTORY,
+        tools=("Skill",),
+    ),
     Case(
         id="C1",
         name="clean3, arm A",
@@ -1139,7 +1210,35 @@ def validate() -> list[str]:
             problems.append(f"U8: {name} is a command here, so probe finds no miss")
     problems.extend(_probe_problems())
     problems.extend(_review_fixture_problems())
+    problems.extend(_u17_fixture_problems())
     return problems
+
+
+def _u17_fixture_problems() -> list[str]:
+    """Check U17's plan: it has the id placeholder and passes ``plan-tool.sh check``.
+
+    Returns
+    -------
+    list of str
+        One line per problem.
+    """
+    path = FIXTURES / "plans" / "u17.md"
+    if not path.is_file():
+        return ["U17: missing fixtures/plans/u17.md"]
+    if "(note #{{NOTE_ID}})" not in path.read_text(encoding="utf-8"):
+        return ["U17: fixtures/plans/u17.md has no (note #{{NOTE_ID}})"]
+    with tempfile.TemporaryDirectory(prefix="agent-eval-u17-") as tmp:
+        plan = Path(tmp) / "u17.md"
+        plan.write_text(_u17_plan("7"), encoding="utf-8")
+        out = subprocess.run(
+            ["sh", str(PLAN_TOOL), "check", str(plan)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if out.returncode != 0:
+        return [f"u17.md: plan-tool.sh check exit {out.returncode}"]
+    return []
 
 
 def _review_fixture_problems() -> list[str]:

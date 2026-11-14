@@ -6,13 +6,22 @@
   bundle the generator explains.
 * :class:`Rationale` — the *output*: a structured "why this code exists"
   card returned by :meth:`whygraph.analyze.RationaleGenerator.generate`.
+* :class:`Item` and :class:`ItemRef` — one constraint or risk of a card,
+  with the evidence it names and how well that evidence supports it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from whygraph.db.models import Commit, Issue, PullRequest
+
+ITEM_BASES = ("quoted", "cited", "inferred", "unknown")
+"""The values of :attr:`Item.basis`, strongest first."""
+
+REF_KINDS = ("commit", "pr", "issue")
+"""The values of :attr:`ItemRef.kind`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +82,81 @@ class CommitEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemRef:
+    """One piece of evidence an :class:`Item` names as its source.
+
+    Attributes
+    ----------
+    kind : str
+        ``"commit"``, ``"pr"`` or ``"issue"`` (:data:`REF_KINDS`).
+    id : str
+        The commit's full SHA, or the pull request's or issue's number.
+    url : str or None
+        The pull request's or issue's ``html_url``; ``None`` for a commit
+        and when the evidence has none.
+    """
+
+    kind: str
+    id: str
+    url: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """The ref as ``{"kind", "id"}`` plus ``"url"`` when it has one."""
+        out: dict[str, Any] = {"kind": self.kind, "id": self.id}
+        if self.url:
+            out["url"] = self.url
+        return out
+
+
+@dataclass(frozen=True, slots=True)
+class Item:
+    """One constraint or risk of a :class:`Rationale`, with its source.
+
+    ``basis`` is assigned by code, never by the model
+    (:func:`whygraph.analyze.rationale_generator._item`): the model names
+    refs and a quote, and the generator checks them against the evidence
+    bundle.
+
+    Attributes
+    ----------
+    text : str
+        The constraint or the risk.
+    basis : str
+        One of :data:`ITEM_BASES`. ``"quoted"``: a cited source holds
+        ``quote``. ``"cited"``: a source in the bundle is named, but holds
+        no quote. ``"inferred"``: no source in the bundle is named, so the
+        item is the model's reading of the evidence. ``"unknown"``: the
+        card predates sources (an old cache row or bundle).
+    refs : tuple[ItemRef, ...]
+        The named sources that are in the evidence bundle. Empty for
+        ``"inferred"`` and ``"unknown"``.
+    quote : str
+        The checked quote, whitespace runs collapsed to one space. Empty
+        unless ``basis`` is ``"quoted"``.
+    """
+
+    text: str
+    basis: str
+    refs: tuple[ItemRef, ...] = ()
+    quote: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        """The item as ``{"text", "basis", "refs"}`` plus ``"quote"`` when set.
+
+        The shape the cache stores and the card serves; a plain string
+        decodes back as basis ``"unknown"``.
+        """
+        out: dict[str, Any] = {
+            "text": self.text,
+            "basis": self.basis,
+            "refs": [ref.as_dict() for ref in self.refs],
+        }
+        if self.quote:
+            out["quote"] = self.quote
+        return out
+
+
+@dataclass(frozen=True, slots=True)
 class Rationale:
     """One LLM-written explanation of why a piece of code exists.
 
@@ -87,12 +171,12 @@ class Rationale:
     why : str
         A short paragraph of historical and contextual rationale drawn from
         the evidence bundle.
-    constraints : tuple[str, ...]
-        Invariants the next editor must preserve.
+    constraints : tuple[Item, ...]
+        Invariants the next editor must preserve, each with its source.
     tradeoffs : tuple[str, ...]
         Notable design decisions visible in the evidence.
-    risks : tuple[str, ...]
-        Risks of modifying this code.
+    risks : tuple[Item, ...]
+        Risks of modifying this code, each with its source.
     model : str
         Model identifier as reported by the provider — echoed from
         :attr:`CompletionResponse.model`.
@@ -107,9 +191,9 @@ class Rationale:
 
     purpose: str
     why: str
-    constraints: tuple[str, ...]
+    constraints: tuple[Item, ...]
     tradeoffs: tuple[str, ...]
-    risks: tuple[str, ...]
+    risks: tuple[Item, ...]
     model: str
     provider: str
     input_tokens: int | None = None

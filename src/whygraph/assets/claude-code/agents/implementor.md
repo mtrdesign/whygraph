@@ -95,7 +95,7 @@ An older plan may lack the status block, `## Resolved decisions`, `## Prior art`
    - With `BASELINE: done`, run no command. Read the `baseline` file.
    - Without it, run `<PLAN_TOOL> probe <PLAN_PATH>`. Then run `<PLAN_TOOL> baseline <PLAN_PATH> <N> first` for the first step of the range, and `<PLAN_TOOL> baseline <PLAN_PATH> <N>` for each later one. Halt on exit 3 or 4 with `baseline stopped: <first output line>`.
 
-   On the first run of the range, log `- Baseline: <k> of <n> Verify commands pass (<timestamp>)`. Here `<k>` counts the `pass` lines and `<n>` the steps in the range. Under it, log one line per `fail` line, `  - Step <N>: fails at baseline: <excerpt>`, and one per `test first` line, `  - Step <N>: expected (Test first)`. A step whose Verify fails at baseline is still attempted. If it still fails after the change, report the failure as `pre-existing at baseline`.
+   On the first run of the range, log `- Baseline: <k> of <n> Verify commands pass (<timestamp>)`. Here `<k>` counts the `pass` lines, `pass (no test ran)` included, and `<n>` the steps in the range. Under it, log one line per `fail` line, `  - Step <N>: fails at baseline: <excerpt>`, one per `test first` line, `  - Step <N>: expected (Test first)`, and one per `pass (no test ran)` line, `  - Step <N>: passes, but its Verify ran no test`. A step whose Verify fails at baseline is still attempted. If it still fails after the change, report the failure as `pre-existing at baseline`.
 
 ## Phase 2 - Run each step of the range in order
 
@@ -107,7 +107,7 @@ For each step of the range, **strictly in sequence**, first print `Starting step
 > Step 3 risks:
 > - "Changing the bundle signature invalidates the entire rationale cache"
 
-Use those quotes as guards while you edit. If the `**Change:**` paragraph appears to violate a constraint, **stop immediately** and report that as a blocker - do not edit the file.
+Use those quotes as guards while you edit. If the `**Change:**` paragraph appears to violate a constraint, **stop immediately** and report that as a blocker - do not edit the file. A constraint that the step's **Changes on purpose** line quotes is not a guard: the plan changes it.
 
 The **snapshot command** is `<PLAN_TOOL> snapshot`. It writes the working tree into a tree object through a throwaway index seeded from the real one, and prints the 40-hex tree id. Run it from the repo root.
 
@@ -146,6 +146,8 @@ Then run these sub-steps in this order:
    - A record with `exit: 124` halts with `Verify timed out after <T> s`, with no fix attempts. `<T>` is the budget in the record.
 
    Verify **passes** iff the exit code is `0` (and the prose intent is clearly satisfied - e.g. a `grep` for a string returns the string).
+
+   With `ACCEPTANCE: inline`, a passing Verify has one more check. Run `<PLAN_TOOL> constraints <PLAN_PATH> <N>`. Exit 0 or 6 keeps the pass. Exit 1 is a failed Verify, with the first `broken:` line as its cause. Any other exit halts with `plan-tool.sh constraints exited <code>: <first stderr line>`. With `ACCEPTANCE: separate`, the command runs this check itself after `end`.
 
    On a failure, if fewer than `FIX_ATTEMPTS` fix attempts were used on this step, record a fix line and go back to 4 for one bounded fix, confined to the step's files. The fix line is `  - fix <i>/<FIX_ATTEMPTS>: <cause> - <files>`. In a `FINDINGS:` run, record `  - fix (findings) <i>: <cause> - <files>` instead, where `<i>` is the number of the finding the fix serves; record one such line for each finding applied in 4, too. With no attempts left, halt. When the step failed at baseline, mark the failure `pre-existing at baseline`.
 7. **Capture after.** Once Verify passes, run the command of 2 with `--tag after` in place of `--tag before`. Exit `2` counts as a failed Verify: go back to 4 while attempts remain, with the cause `capture after: exit 2 - <first stderr line>`; with none left, halt. Exits `0`, `3` and any other code are handled as in 2.

@@ -142,6 +142,53 @@ rules as any other note: it is a proposal until it is confirmed, and no model re
   `whygraph://note/<id>`, and can propose with `whygraph_propose_note`; the `/whygraph-note` command
   wraps that. See [Using WhyGraph](mcp-usage.md#notes) and [Connecting agents](../portal/agents.md).
 
+## A check on a constraint { #a-check-on-a-constraint }
+
+A note of kind **Constraint** can carry one **check**: a text search that says whether the constraint
+still holds in the code. It is optional, and you set it when you add the note or when you confirm it.
+
+- **Must not appear** (`absent`): the text must be found nowhere in the files the glob names.
+- **Must appear** (`present`): the text must be found in at least one of them.
+
+The check has three parts: the kind, the text and a glob, for example `must not appear: "eval(" in
+src/**/*.py`. The rules:
+
+| Part | Rule |
+|---|---|
+| Text | 3 to 200 characters, on one line, with no `"`, backtick or backslash. Matched exactly, with case, as plain text (not a regular expression). |
+| Glob | 1 to 200 characters of letters, digits, `.`, `_`, `-`, `/` and `*`. It is relative: no leading `/`, no `..` part, and at most two `**`. |
+
+The portal refuses a check that breaks a rule with `note_check_invalid`. When you confirm a note,
+the confirm form shows the proposal's check: keep it, change it, or choose **No check** to remove it
+(through the API, leaving `check` out keeps it and `null` removes it). A check counts only on a
+**confirmed** note: a proposal's check does nothing until a person confirms it.
+
+### Where a check runs
+
+- **In the portal.** A confirmed note with a check shows a tag: `holds`, `broken`, or `unknown` when
+  the check could not be run. The portal searches git-tracked files only, up to 500 of them. The Notes
+  list fetches the tag for each checked note on screen, so notes without a check cost nothing.
+- **In the plan tool, at plan time and after each step.** `/whygraph-plan` copies each check into the
+  plan under **Constraint checks**, and `/whygraph-implement` searches for each text with `git grep`
+  after every step (`plan-tool.sh constraints`). It searches tracked **and untracked** files, so a
+  new file the step just created counts here even though the portal would not see it yet. Ignored and
+  binary files never count.
+
+### When a check breaks
+
+In Claude Code a broken check sends the step to the constraint rung of the recovery ladder: one more
+attempt with the broken line as a finding, and if it breaks again the run stops with `a recorded
+constraint is at risk`. In Cursor, VS Code and Codex there is no ladder, so a broken check fails the
+step's Verify.
+
+If the plan is meant to change the constraint, the step's **Changes on purpose** line names the note
+as `(note #<id>)`, and the check is skipped for that step and the ones after it (see
+[Planning a change](planning.md#where-a-constraint-comes-from)). Afterwards the run proposes a
+revision or a new decision, which a person confirms.
+
+A check is a text search and nothing more: it never runs a command. See
+[Project notes](../portal/security.md#project-notes).
+
 ## Limits on agent proposals
 
 Agents cannot flood the review queue. Each of these is a `note_limit` refusal, and none of them applies
@@ -153,6 +200,15 @@ to a note a person adds:
 | Agent proposals per member per day (UTC) | 20 |
 | Agent proposals per project per day (UTC) | 50 |
 | Proposals per Chat turn | 2 (a third is answered "the proposal budget for this turn is used", which is not an error) |
+| Proposals a `/whygraph-implement` run makes for changes on purpose | 3 |
+
+A `/whygraph-implement` run in Claude Code or Cursor makes one kind of proposal on its own: after its
+Acceptance passed, for each step whose **Changes on purpose** line changed a recorded constraint (see
+[Planning a change](planning.md#where-a-constraint-comes-from)). When the step changed a note, the
+proposal is a revision of that note; otherwise it is a `decision` note that says the old constraint
+no longer holds. At most three per run, and the limits above still apply. A person confirms each one
+in the portal like any other proposal, and confirming a revision retires the note it replaces. In
+VS Code and Codex the run only prints a line per step and proposes nothing.
 
 If an agent floods the queue, **Reject all from this origin** on any of its rows discards every pending
 proposal from that member's agent in that one origin (one Chat session, or their MCP client) and

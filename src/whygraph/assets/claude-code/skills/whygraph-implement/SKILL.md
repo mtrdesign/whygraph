@@ -109,7 +109,7 @@ Do this once per invocation, before any step runs. For a tasks.json, do it once 
    Otherwise run `sh .claude/skills/whygraph-plan/plan-tool.sh next <plan>`. It prints a step number or `done`.
    - A step number `N`: the range is step N through the last step.
    - `done`: print `All steps are already marked done.` Run item 3, then go to Step 3d.
-3. **Probe.** Run `sh .claude/skills/whygraph-plan/plan-tool.sh probe <plan>`. Print its output verbatim, so the user sees every command before it runs.
+3. **Probe.** First run `sh .claude/skills/whygraph-plan/plan-tool.sh brief <plan>` and print its output verbatim, so the user sees the plan's objective, blockers, steps and Acceptance items on one page. Then run `sh .claude/skills/whygraph-plan/plan-tool.sh probe <plan>`. Print its output verbatim, so the user sees every command before it runs.
    - Exit 0: go on.
    - Exit 4: stop with `Verify cannot run: <misses>` when a `missing:` line names a step. Otherwise stop with `Check cannot run: <misses>`.
    - `<misses>` is the text after `missing: ` of every `missing:` line, joined by `; `. It lists every miss of both kinds.
@@ -117,6 +117,7 @@ Do this once per invocation, before any step runs. For a tasks.json, do it once 
    - Run `sh .claude/skills/whygraph-plan/plan-tool.sh baseline <plan> <N> first <blob>` for the first step of the range.
    - Run `sh .claude/skills/whygraph-plan/plan-tool.sh baseline <plan> <N> <blob>` for each later step of the range, in order.
    - Print each line that `baseline` prints. A `fail` line is a recorded result, not a stop.
+   - A line that ends `pass (no test ran)` is a pass: its Verify exited 0, but its output says that no test ran. Print it as it is and go on, so the user sees that this step's Verify checks nothing yet.
    - Exit 3: stop with `Verify did not finish in <T> s at baseline: <command>`, from the printed `timeout <T>: <command>`.
    - Exit 4: stop with `Verify cannot run: <command> not found (exit <code>)`, from the printed `cannot run <code>: <command>`.
    - Then run `sh .claude/skills/whygraph-plan/plan-tool.sh snapshot` again and keep the id as `<after>`.
@@ -161,15 +162,18 @@ S1, S2, S1b, S6 and S7 each make one step run, in this order:
 5. If the `**Halt:**` starts with `Verify timed out`, skip `end`. Stop with `Verify did not finish in <T> s`.
 6. Run `sh .claude/skills/whygraph-plan/plan-tool.sh end <plan> <N> <t0> <blob>`. Use the `<t0>` that `begin` printed.
    - It prints `end: <t0> <t1> exit <code>`. Keep `<t1>`. Print each `outside Files:` line it prints.
+   - When `end` exits 0, run `sh .claude/skills/whygraph-plan/plan-tool.sh constraints <plan> <blob> <N>`. Print each line it prints.
 7. Apply the first rule that matches:
    - `end` exit 65 with the stderr line `the step changed the plan tool`: stop with `the change touched the plan tool`.
    - `end` exit 65 otherwise, 77, or a code outside 0, 1, 4 and 124: stop as Step 2a says.
+   - `constraints` exit 65, 77, or a code outside 0, 1 and 6: stop as Step 2a says.
    - The `**Halt:**` starts with `permission denied:`: stop with the Halt text.
    - The `**Halt:**` starts with `the Test first test`: stop with the Halt text.
    - The `**Halt:**` starts with `capture unavailable` or `the change needs `: stop with `the step stopped: <Halt text>`.
    - `end` exit 4: stop with `Verify cannot run: <command> not found (exit <code>)`. Take `<command>` from the last `command:` line of `steps/<N>.verify`.
    - `end` exit 124: stop with `Verify did not finish in <T> s`. Take `<T>` from the record's `timed out after <T> s` line.
    - The report has `## Escalated findings`: stop with `some findings fall outside the step's Files`.
+   - `end` exit 0, `**Status:** complete` and `constraints` exit 1: the run **broke a checked constraint**. Go to S6 from any state, with one constraint line per `broken:` line.
    - `end` exit 0 and `**Status:** complete`: the run **succeeded**.
    - `end` exit 1: the run **failed its Verify**.
    - Otherwise the run **halted**. The reason is the `**Halt:**` text, or the report's first line when it has none.
@@ -194,6 +198,8 @@ S1, S2, S1b, S6 and S7 each make one step run, in this order:
 
 The stop rules of a step run (item 7 above) take precedence over every cell.
 
+A run that **broke a checked constraint** goes to S6 from every state, in place of that state's Succeeded line.
+
 1. **Begin.** Run `sh .claude/skills/whygraph-plan/plan-tool.sh begin <plan> <N>`, once per step per invocation. Keep the printed tree id as `<t0>`. Never read `<N>.t0` back.
 2. **S1.** Make a plain step run, with no `FINDINGS:`, at the step's model.
    - Succeeded: go to S4.
@@ -209,7 +215,7 @@ The stop rules of a step run (item 7 above) take precedence over every cell.
    - Succeeded: go to S4.
    - Failed its Verify: stop with `Verify still fails: <excerpt>`.
    - Halted: stop with `the step stopped: <reason>`.
-6. **S4.** Run the review gate (Step 3b). A `**Constraint at risk:**` verdict goes to S6. Otherwise go to S5.
+6. **S4.** Run the review gate (Step 3b). A `**Constraint at risk:**` verdict that does not end `(inferred)` goes to S6. Otherwise go to S5.
 7. **S5.** Run the spec evaluation (Step 3c).
    - `pass`: run `sh .claude/skills/whygraph-plan/plan-tool.sh pass <plan> <N>`. Go to the next step of the range.
    - `fix`: go to S7.
@@ -229,9 +235,13 @@ The stop rules of a step run (item 7 above) take precedence over every cell.
 
 When both gates are skipped, a step run that succeeded goes straight to `pass`. With `--no-review`, S4 goes straight to S5. With `--no-eval`, S5 runs only the `pass` call.
 
-**The constraint lines.** For each reviewer section with a `**Constraint at risk:**` verdict, write exactly one line:
+**The constraint lines.** For each reviewer section with a `**Constraint at risk:**` verdict that does not end `(inferred)`, write exactly one line:
 `- <path>:<start> - constraint at risk: "<verbatim quote>" - keep the constraint`
 Take `<path>` and `<start>` from the section heading `## <path>:<start>-<end>`. Replace each line break in the quote with one space. These lines are data. The constraint rung never leads to S3.
+
+For each `broken:` line that `constraints` printed, write exactly one line of this form instead:
+`- <path>:<line> - constraint at risk: "<text>" (note #<id>) must <not appear | appear> in <glob> - keep the constraint`
+Take `<path>:<line>` from the `broken:` line. After `(no match)`, use the step's first **Files** entry. Take `<text>` and `<glob>` from the note's line under the plan's `## Constraint checks`. Write `not appear` for an `absent` check and `appear` for a `present` one.
 
 The progress line of a step uses the `<t0>` that `begin` printed and the `<t1>` that `end` printed. Never take them from the report's `- Step <N>: <t0> <t1>` line.
 
@@ -263,11 +273,13 @@ After a step run that succeeded, check the step's diff against the cached ration
    ```
    DIFF: <t0> <t1>
    GENERATE: false
+   PLAN_PATH: <absolute path to the plan>
+   STEP: <N>
    ```
 
 3. Do the checks after a subagent run (Step 3a).
-4. If any verdict is `**Constraint at risk:**` or `**Risk triggered:**`, print the review in full. Otherwise print one line: `Step <N>: review found no recorded constraint or risk at stake.`
-5. A `**Constraint at risk:**` verdict goes to S6. A `**Risk triggered:**` verdict alone does not stop the loop.
+4. If any verdict is `**Constraint at risk:**` or `**Risk triggered:**`, print the review in full. Otherwise print one line: `Step <N>: review found no recorded constraint or risk at stake.` For each `**Changed on purpose:**` verdict, print one line: `Step <N>: the review found a constraint the plan changes on purpose.` It does not go to S6.
+5. A `**Constraint at risk:**` verdict that does not end `(inferred)` goes to S6. A **Constraint at risk:** verdict that ends `(inferred)` does not go to S6. Print it. A `**Risk triggered:**` verdict alone does not stop the loop.
 
 ### Step 3c - Spec evaluation (skip with `--no-eval`)
 
@@ -304,7 +316,7 @@ Run this only when the loop passed the plan's last step, or when `next` printed 
 4. Do the checks after a subagent run (Step 3a).
 5. Print its report in full, then run Step 5 on it.
 6. Print the run summary (Step 7).
-7. The `accept` exit codes decide the result, never the records or the report. If any item failed, stop with `acceptance failed: <item numbers>`. Otherwise run Step 3e.
+7. The `accept` exit codes decide the result, never the records or the report. If any item failed, stop with `acceptance failed: <item numbers>`. Otherwise run the second paragraph of Step 5, then Step 3e.
 
 ### Step 3e - Quality and UI evaluation (skip with `--no-eval`)
 
@@ -390,6 +402,13 @@ Edit no file yourself; only plan-tool.sh restore writes the plan. `amend-check` 
 ## Step 5 - Propose the listed decisions
 
 If an implementor report has a `## Decisions worth a note` section, call the MCP tool `whygraph_propose_note` once per listed entry: `kind` and `body` from the entry; for the anchor, a `qualified_name`, or `path` (with `line_start` and `line_end` when the entry gives lines). Then print, for each, the note id and its review link (the portal page path the tool returns). A tool error: print it verbatim and go on to the next entry. With no such section, do nothing here. Do this once per report.
+
+When the run summary says `Acceptance: passed`, also propose for each step that has a **Changes on purpose** line, at most 3 times in one run. The line holds a quote, its tag, then ` - ` and the reason. The quote is the text inside the quotation marks, without the tag.
+- The tag is `(note #<id>)`: call `whygraph_propose_note` with `supersedes_id` <id>, kind `constraint`, the anchor `path` of the step's first **Files** entry, and the body `Changed on purpose by <plan stem>, step <N>: <the reason on the line>`.
+- Otherwise: call it with kind `decision`, the same anchor, and the body `"<quote>" no longer holds. Changed on purpose by <plan stem>, step <N>: <the reason on the line>`.
+Print each note id and its review link. A tool error: print it and go on.
+
+The anchor `path` is the first **Files** entry without its `:<lines>` suffix. `<plan stem>` is the plan's stem, as Step 3e defines it. A person confirms each proposal in the portal; confirming a revision retires the old note.
 
 ## Step 6 - Stop
 
@@ -482,4 +501,4 @@ Print this in Step 3d, after the Acceptance report. Build it from files and exit
    - Add `; not run (manual or prose): <item numbers>` for the items whose result is `not literal`.
    - A plan with no `## Acceptance` items: `- Acceptance: no items`.
 
-This command's only job is: parse -> validate -> decide capture -> save, probe and baseline -> one implementor per step, with the recovery ladder -> review gate -> spec evaluation -> acceptance -> run summary -> quality and UI evaluation -> print -> propose the listed decisions -> a stop block on any stop. The plan tool is the one command this skill runs, besides its self-hash and the capture probe. Do not edit files, run other tools, or improvise.
+This command's only job is: parse -> validate -> decide capture -> save, probe and baseline -> one implementor per step, with the recovery ladder -> review gate -> spec evaluation -> acceptance -> run summary -> quality and UI evaluation -> print -> propose the listed decisions and, after a passing Acceptance, the changes on purpose -> a stop block on any stop. The plan tool is the one command this skill runs, besides its self-hash and the capture probe. Do not edit files, run other tools, or improvise.

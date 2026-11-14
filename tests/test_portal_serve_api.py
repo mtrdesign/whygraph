@@ -389,12 +389,12 @@ def test_rationale_get_not_generated_makes_no_llm_call(
 
 
 def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
-    from whygraph.analyze import Rationale
+    from whygraph.analyze import Item, Rationale
 
     rationale = Rationale(
         purpose="the purpose",
         why="the why",
-        constraints=("c1",),
+        constraints=(Item("c1", "inferred"),),
         tradeoffs=(),
         risks=(),
         model="test-model",
@@ -421,7 +421,7 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
 
     assert body["status"] == "cached"
     assert body["purpose"] == "the purpose"
-    assert body["constraints"] == ["c1"]
+    assert body["constraints"] == [{"text": "c1", "basis": "inferred", "refs": []}]
     assert (body["partial"], body["describing"], body["completing"]) == (True, 2, False)
     gen.assert_not_called()  # cache read is still LLM-free
 

@@ -14,6 +14,7 @@ skipped, so a baseline never tests what is not built yet.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -33,8 +34,10 @@ from checks import (
     attempt_count,
     begin_end_around_implementors,
     children_in_order,
+    constraint_quotes_tagged,
     file_contains,
     file_exists,
+    either,
     file_lacks,
     implementor_model,
     listener_got_no_bytes,
@@ -45,15 +48,20 @@ from checks import (
     no_implementor,
     no_plan_tool_call,
     no_process,
+    note_revision_proposed,
     plan_log_contains,
     plan_growth,
     plan_note,
     plan_review_kept,
+    hidden_test,
     plan_tool_check,
     plan_tool_check_or_confidence,
     reaches_acceptance,
+    record_card_read,
     record_comparison,
+    record_history_reads,
     record_ladder,
+    record_plan_keeps,
     record_rationale_before_edit,
     record_review_cost,
     reply_contains,
@@ -143,6 +151,12 @@ class Case:
         Edits a copy of the ``--assets`` tree in place before it is installed,
         for a case that tests a broken agent. Raises ``ValueError`` when the
         tree does not have what it edits.
+    repo : str or None
+        A portal case's scratch repository beside ``--repo`` (for example
+        ``why-bench``), or ``None`` for ``--repo`` itself.
+    tools : tuple of str
+        Tools allowed on top of ``run.ALLOWED_TOOLS``, for example ``Skill``
+        so the benchmark's agent can run the ``pre-edit`` skill.
     """
 
     id: str
@@ -158,11 +172,17 @@ class Case:
     canary: bool = False
     env: dict[str, str] = field(default_factory=dict)
     assets: Callable[[Path], None] | None = None
+    repo: str | None = None
+    tools: tuple[str, ...] = ()
 
     @property
     def kind(self) -> str:
-        """``P`` for portal cases, otherwise ``O`` (the temporary-clone cases)."""
-        return "P" if self.id.startswith("P") else "O"
+        """``P`` for portal cases, otherwise ``O`` (temporary clones).
+
+        A portal case has an id that starts with ``P`` or ``R``, or names a
+        scratch ``repo``, as U17 does: a ``U`` case on ``why-bench``.
+        """
+        return "P" if self.id[:1] in ("P", "R") or self.repo else "O"
 
     def active_checks(self, stage: int) -> list[Check]:
         """Return the checks that apply at ``stage``."""
@@ -493,6 +513,156 @@ PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
 REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
 
+# Plan 54's rationale benchmark (section 5.2). Two scratch repositories with
+# the same tree, built by ``fixtures/why/build.sh``: ``why-bench`` holds the
+# history whose commit bodies state three constraints, ``why-bench-blank`` one
+# commit. The hidden tests under ``fixtures/why/hidden`` judge each run.
+BENCH_HISTORY = "why-bench"
+BENCH_BLANK = "why-bench-blank"
+P18_STEM = "eval-p18"
+# Round 2 showed that S1 and S3 as first written ("Make `fetch` more robust
+# against timeouts.", "Simplify `price.py`.") tempt no change even without the
+# history, so both now read as the bug reports they would be without it.
+BENCH_TASKS = (
+    (
+        "S1",
+        "Users report that `fetch` gives up too fast during short network "
+        "hiccups. Make it try more times before giving up.",
+        "test_hidden_s1",
+    ),
+    ("S2", "Sort the export by name. It is easier to read.", "test_hidden_s2"),
+    (
+        "S3",
+        "Customers complain that 0.125 is shown as 0.12, but they expect 0.13. "
+        "Fix the rounding in `price.py`.",
+        "test_hidden_s3",
+    ),
+)
+BENCH_WARMUP = (
+    "Call `whygraph_rationale_brief` for `client.fetch`, `export.write` and "
+    "`price.round_amount`. Then reply with one line per card: its target and "
+    "whether the call returned a card. Edit nothing."
+)
+# S1's constraint in a plan: the cap of 3 attempts or the lockout behind it.
+S1_PLAN_PATTERNS = (
+    r"\b(3|three)\b[^\n]{0,40}\battempts?\b",
+    r"\battempts?\b[^\n]{0,40}\b(3|three)\b",
+    r"\block(s|ed)? (a client )?out\b",
+    r"\b5 calls\b",
+)
+
+
+def _clear_bench_plans(stem: str) -> Callable[[Workspace], None]:
+    """Return a setup hook that deletes an earlier repeat's ``<stem>*`` plans."""
+
+    def setup(workspace: Workspace) -> None:
+        for path in (workspace.dir / ".whygraph" / "plans").glob(f"{stem}*"):
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+
+    return setup
+
+
+# Plan 54 section 8, U17: a plan on ``why-bench`` whose one step changes a
+# confirmed note on purpose. The note is made by hand in the portal (see the
+# README), so its id comes from the environment and fills the fixture's
+# ``(note #{{NOTE_ID}})``.
+U17_STEM = "eval-u17"
+U17_NOTE_ENV = "WHYGRAPH_EVAL_U17_NOTE"
+
+
+def _u17_plan(note_id: str) -> str:
+    """Return the U17 fixture plan with the note id filled in."""
+    text = (FIXTURES / "plans" / "u17.md").read_text(encoding="utf-8")
+    return text.replace("{{NOTE_ID}}", note_id)
+
+
+def setup_u17(workspace: Workspace) -> None:
+    """Write the U17 plan to ``.whygraph/plans/eval-u17.md``, with the note's id.
+
+    Raises
+    ------
+    RuntimeError
+        When ``WHYGRAPH_EVAL_U17_NOTE`` does not hold a note id. The attempt
+        then fails before any model call.
+    """
+    note_id = os.environ.get(U17_NOTE_ENV, "").strip()
+    if not re.fullmatch(r"[1-9][0-9]*", note_id):
+        raise RuntimeError(
+            f"set {U17_NOTE_ENV} to the id of the confirmed constraint note on "
+            "export.py in why-bench (see the README)"
+        )
+    _clear_bench_plans(U17_STEM)(workspace)
+    plans = workspace.dir / ".whygraph" / "plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    (plans / f"{U17_STEM}.md").write_text(_u17_plan(note_id), encoding="utf-8")
+
+
+def _bench_cases() -> tuple[Case, ...]:
+    """Return R0, R0B and R1 to R8, the benchmark cases of plan 54 section 5.2."""
+    warm = tuple(
+        Case(
+            id=case_id,
+            name=f"benchmark warm-up, {repo}",
+            prompts=(BENCH_WARMUP,),
+            budget=2.0,
+            estimate=0.0,
+            checks=(record_card_read(),),
+            repo=repo,
+            tools=("Skill",),
+        )
+        for case_id, repo in (("R0", BENCH_HISTORY), ("R0B", BENCH_BLANK))
+    )
+    tasks = tuple(
+        Case(
+            id=f"R{offset + index}",
+            name=f"benchmark {scenario}, {arm}",
+            prompts=(task,),
+            budget=2.0,
+            estimate=0.0,
+            checks=(
+                hidden_test(test),
+                record_card_read(),
+                record_rationale_before_edit(),
+                record_history_reads(),
+            ),
+            repo=repo,
+            tools=("Skill",),
+        )
+        for offset, arm, repo in (
+            (1, "history", BENCH_HISTORY),
+            (4, "blank", BENCH_BLANK),
+        )
+        for index, (scenario, task, test) in enumerate(BENCH_TASKS)
+    )
+    plans = tuple(
+        Case(
+            id=case_id,
+            name=f"benchmark plan S1, {arm}",
+            prompts=(
+                f"/whygraph-plan {BENCH_TASKS[0][1]} --no-questions "
+                f"--out .whygraph/plans/{stem}.md",
+            ),
+            budget=4.0,
+            estimate=0.0,
+            setup=_clear_bench_plans(stem),
+            checks=(
+                record_plan_keeps(stem, S1_PLAN_PATTERNS),
+                record_card_read(),
+                record_history_reads(),
+            ),
+            repo=repo,
+        )
+        for case_id, arm, repo, stem in (
+            ("R7", "history", BENCH_HISTORY, "eval-r7"),
+            ("R8", "blank", BENCH_BLANK, "eval-r8"),
+        )
+    )
+    return warm + tasks + plans
+
+
 CASES: tuple[Case, ...] = (
     Case(
         id="O1",
@@ -696,6 +866,28 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="U16",
+        name="a step breaks a recorded constraint",
+        prompts=(implement("u16"),),
+        budget=1.5,
+        estimate=1.0,
+        plans=("u16.md",),
+        checks=(
+            # The check is on plan line "## Constraint checks": the step makes
+            # DEBUG_TRACE appear, so the run goes to the constraint rung once.
+            # After it the run either breaks the check again and stops, or
+            # keeps the constraint and finishes without the text: both are
+            # right. The Verify does not need the text, so neither is forced.
+            either(
+                stop_block(1, (r"a recorded constraint is at risk",), once=True),
+                file_lacks("mini/pricing.py", "DEBUG_TRACE"),
+                "stops on a second break, or keeps the constraint",
+            ),
+            attempt_count("u16", 1, "constraint", minimum=1, maximum=1),
+            record_ladder("u16", "the constraint rung, then a stop at step 1"),
+        ),
+    ),
+    Case(
         id="P1",
         name="single-pass plan",
         prompts=(f"/whygraph-plan {RENAME_TASK} --no-questions --out {PLAN_P1}",),
@@ -894,6 +1086,37 @@ CASES: tuple[Case, ...] = (
             record_review_cost(),
         ),
     ),
+    # Plan 54 section 8: a deep plan on the S2 task, whose constraint (the
+    # export stays in id order) the task asks to change. Each quote under
+    # Constraints to preserve or Changes on purpose must carry its source tag.
+    Case(
+        id="P18",
+        name="sourced constraint quotes in a deep plan",
+        prompts=(
+            f"/whygraph-plan {BENCH_TASKS[1][1]} --deep --no-questions "
+            f"--out .whygraph/plans/{P18_STEM}.md",
+        ),
+        budget=4.0,
+        estimate=0.0,
+        setup=_clear_bench_plans(P18_STEM),
+        checks=(constraint_quotes_tagged(P18_STEM),),
+        repo=BENCH_HISTORY,
+        tools=("Skill",),
+    ),
+    # Plan 54 section 8: a run whose step changes a confirmed note on purpose
+    # proposes one revision of that note once Acceptance passed. A U case that
+    # names a repo runs in the portal (Case.kind).
+    Case(
+        id="U17",
+        name="a change on purpose proposes the note's revision",
+        prompts=(implement(U17_STEM, "--no-eval"),),
+        budget=6.0,
+        estimate=0.0,
+        setup=setup_u17,
+        checks=(reaches_acceptance(), note_revision_proposed(U17_NOTE_ENV)),
+        repo=BENCH_HISTORY,
+        tools=("Skill",),
+    ),
     Case(
         id="C1",
         name="clean3, arm A",
@@ -937,6 +1160,7 @@ CASES: tuple[Case, ...] = (
         plans=("defect3.md",),
         checks=(record_comparison(2),),
     ),
+    *_bench_cases(),
 )
 
 
@@ -993,7 +1217,35 @@ def validate() -> list[str]:
             problems.append(f"U8: {name} is a command here, so probe finds no miss")
     problems.extend(_probe_problems())
     problems.extend(_review_fixture_problems())
+    problems.extend(_u17_fixture_problems())
     return problems
+
+
+def _u17_fixture_problems() -> list[str]:
+    """Check U17's plan: it has the id placeholder and passes ``plan-tool.sh check``.
+
+    Returns
+    -------
+    list of str
+        One line per problem.
+    """
+    path = FIXTURES / "plans" / "u17.md"
+    if not path.is_file():
+        return ["U17: missing fixtures/plans/u17.md"]
+    if "(note #{{NOTE_ID}})" not in path.read_text(encoding="utf-8"):
+        return ["U17: fixtures/plans/u17.md has no (note #{{NOTE_ID}})"]
+    with tempfile.TemporaryDirectory(prefix="agent-eval-u17-") as tmp:
+        plan = Path(tmp) / "u17.md"
+        plan.write_text(_u17_plan("7"), encoding="utf-8")
+        out = subprocess.run(
+            ["sh", str(PLAN_TOOL), "check", str(plan)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if out.returncode != 0:
+        return [f"u17.md: plan-tool.sh check exit {out.returncode}"]
+    return []
 
 
 def _review_fixture_problems() -> list[str]:

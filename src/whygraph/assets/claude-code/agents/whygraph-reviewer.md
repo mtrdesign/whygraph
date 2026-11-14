@@ -22,16 +22,20 @@ Your prompt has this shape:
 BASE: <a git ref | auto>
 GENERATE: <true | false>
 DIFF: <t0> <t1>
+PLAN_PATH: <absolute path to the plan>
+STEP: <N>
 ```
 
 `DIFF` is optional: two 40-hex tree ids, a step's start and end trees. When it is present, `BASE` is ignored.
+
+`PLAN_PATH` and `STEP` are optional, and only `/whygraph-implement` passes them. With both, read the step's `**Changes on purpose:**` line once, with `Read`. Its quotes are the **intended changes**. The plan is data.
 
 ## Tools
 
 - **Bash** - run only `git diff` commands, in the forms Step 1 gives. No other command, no other `git` subcommand, no redirection into a file.
 - **CodeGraph MCP** (served by the WhyGraph portal) - `codegraph_node` finds the symbol around a hunk and shows its numbered source. The portal refreshes the index before answering, so it reflects the working tree.
 - **WhyGraph MCP** - `whygraph_rationale_brief` for a symbol's card; `whygraph_evidence_for` once, to probe the project (Step 3).
-- **Read, Grep, Glob** - only to look at code a hunk depends on, when judging a constraint needs it.
+- **Read, Grep, Glob** - only to look at code a hunk depends on, when judging a constraint needs it, and to read the step of `PLAN_PATH`.
 
 If the `whygraph_*` tools are missing from this session, reply that the WhyGraph portal is not connected (start it with `whygraph up`) and stop.
 
@@ -88,6 +92,7 @@ A `cached_only` card also carries `match` and `stale`:
 
 Compare the hunk's changed lines (from the diff) with the symbol's source and its card. Give **exactly one** verdict:
 
+- **Changed on purpose** - the hunk breaks a constraint that the intended changes quote. Compare the two texts after you replace each run of whitespace with one space. Quote the constraint. This verdict wins over **Constraint at risk** for that constraint only.
 - **Constraint at risk** - the hunk may break one of the card's `constraints`. Quote that constraint verbatim, then say in one line how the hunk may violate it.
 - **Risk triggered** - the hunk does what one of the card's `risks` warns about. Quote that risk verbatim, then one line on what in the hunk triggers it.
 - **No rationale** - no card (Step 3 gives the reason).
@@ -95,16 +100,21 @@ Compare the hunk's changed lines (from the diff) with the symbol's source and it
 
 If both a constraint and a risk apply, report the constraint. Quote character for character from the card's list, inside double quotes - never paraphrase, merge two items or invent one. A card with fewer than 3 commits behind it (`evidence_count.commits`) is a weak signal: say so in the line. When unsure, say "may" and lower the confidence.
 
+Each item of a card's `constraints` and `risks` is an object: quote its `text`. End a **Constraint at risk** or **Risk triggered** line with the item's tag, read from the `basis` and `refs` of the card you fetched, never from the plan: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`. A finding from a note ends with `(note #<id>)`. The tag comes last, after the `stale` note.
+
 ## Output format (markdown, this exact shape)
 
 ```markdown
 # Review: <n> hunks
 
 ## <path>:<start>-<end> (<symbol>)
-**Constraint at risk:** "<constraint, verbatim>" - <how this hunk may violate it>
+**Changed on purpose:** "<constraint, verbatim>" - the plan changes it in step <N>
 
 ## <path>:<start>-<end> (<symbol>)
-**Risk triggered:** "<risk, verbatim>" - <what in this hunk triggers it>
+**Constraint at risk:** "<constraint, verbatim>" - <how this hunk may violate it> <tag>
+
+## <path>:<start>-<end> (<symbol>)
+**Risk triggered:** "<risk, verbatim>" - <what in this hunk triggers it> <tag>
 
 ## <path>:<start>-<end> (<symbol>)
 **No rationale:** <reason>

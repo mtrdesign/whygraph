@@ -16,12 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.analyze import CommitEvidence, Rationale
+from whygraph.analyze import CommitEvidence, Item, ItemRef, Rationale
 from whygraph.db import get_session
 from whygraph.db.models import Commit, RationaleCache
 from whygraph.mcp.rationale import whygraph_rationale_brief
 from whygraph.mcp.rationale_cache import (
     _fingerprint,
+    decode_item,
+    decode_items,
     lookup_cached,
     lookup_exact,
     lookup_overlapping,
@@ -83,6 +85,11 @@ def _add_third_commit(repo_root: Path) -> None:
         session.add(_db_commit(newest.sha, committed_at="2026-03-01T00:00:00+00:00"))
 
 
+_SOURCED = Item(
+    "keep it small", "quoted", (ItemRef("pr", "4", "https://x/pull/4"),), "small"
+)
+
+
 class _CountingGenerator:
     """Stub for :class:`RationaleGenerator` — counts how often it's called."""
 
@@ -107,9 +114,9 @@ class _CountingGenerator:
         return Rationale(
             purpose="Holds two sample lines.",
             why="Built up across two commits.",
-            constraints=("keep it small",),
+            constraints=(_SOURCED,),
             tradeoffs=(),
-            risks=("none worth noting",),
+            risks=(Item("none worth noting", "inferred"),),
             model="fake-1",
             provider="fake",
         )
@@ -131,7 +138,13 @@ def test_second_call_returns_cached(
     assert _CountingGenerator.calls == 1
     assert first["cached_at"] == second["cached_at"]
     assert first["purpose"] == second["purpose"] == "Holds two sample lines."
-    assert first["constraints"] == second["constraints"] == ["keep it small"]
+    # The item round-trips through the cache row as an object.
+    assert first["constraints"] == second["constraints"] == [_SOURCED.as_dict()]
+    assert (
+        first["risks"]
+        == second["risks"]
+        == [{"text": "none worth noting", "basis": "inferred", "refs": []}]
+    )
     assert first["model"] == second["model"] == "fake-1"
 
 
@@ -258,7 +271,8 @@ def test_lookup_overlapping_ranks_rows(whygraph_db_initialized: Path) -> None:
         12,
         20,
     )
-    assert found.rationale.constraints == ("c",)
+    # A row of plain strings (written before items had sources) decodes.
+    assert found.rationale.constraints == (Item("c", "unknown"),)
     assert found.evidence_fingerprint == "fp-inner"
     # The symbol's own card first, even though it only overlaps.
     assert best(14, 18, "mod.f").rationale.purpose == "overlap short"
@@ -338,7 +352,7 @@ def _stored_card(
     rationale = Rationale(
         purpose="p",
         why="w",
-        constraints=("c",),
+        constraints=(Item("c", "inferred"),),
         tradeoffs=(),
         risks=(),
         model="m",
@@ -412,3 +426,53 @@ def test_store_cached_only_if_writes_only_when_the_row_is_unchanged(
     )
     final = lookup_cached(target, evidence, "fake", None)
     assert final is not None and final.rationale.purpose == "completed"
+
+
+# ---- the item codec (plan 54 section 5.5) ---------------------------------
+
+
+def test_decode_item_round_trips_as_dict() -> None:
+    assert decode_item(_SOURCED.as_dict()) == _SOURCED
+    commit = Item("c", "cited", (ItemRef("commit", "a" * 40),))
+    assert decode_item(commit.as_dict()) == commit
+
+
+def test_decode_item_plain_string_is_unknown() -> None:
+    assert decode_item("old words") == Item("old words", "unknown", (), "")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ({"text": "t", "basis": "made-up"}, Item("t", "unknown")),
+        ({"text": "t"}, Item("t", "unknown")),
+        (
+            {
+                "text": "t",
+                "basis": "cited",
+                "refs": [
+                    {"kind": "pr", "id": "3"},
+                    {"kind": "tag", "id": "v1"},
+                    {"kind": "issue"},
+                    "PR #3",
+                    {"kind": "issue", "id": "9", "url": 5},
+                ],
+                "quote": 7,
+            },
+            Item("t", "cited", (ItemRef("pr", "3"), ItemRef("issue", "9"))),
+        ),
+        ({"basis": "quoted"}, None),
+        ({"text": 3}, None),
+        (42, None),
+    ],
+)
+def test_decode_item_tolerates_malformed_objects(value, expected) -> None:
+    assert decode_item(value) == expected
+
+
+def test_decode_items_mixed_and_malformed_columns() -> None:
+    raw = json.dumps(["old", _SOURCED.as_dict(), 5])
+    assert decode_items(raw) == (Item("old", "unknown"), _SOURCED)
+    assert decode_items("not json") == ()
+    assert decode_items('{"text": "x"}') == ()
+    assert decode_items(None) == ()

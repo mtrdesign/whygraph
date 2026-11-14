@@ -23,6 +23,8 @@ interface Fake {
   source: string;
   /** Answer to POST /confirm, when set. */
   confirmError?: { status: number; code: string };
+  /** `check_state` the single-note view reports, by note id (list views never carry it). */
+  checkStates?: Record<number, "holds" | "broken" | "unknown">;
 }
 
 let fake: Fake;
@@ -124,7 +126,7 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (one) {
     const found = fake.notes.find((n) => n.id === Number(one[1]));
     if (!found) return Promise.resolve(json({ error: "gone", code: "note_not_found" }, 404));
-    if (method === "GET") return Promise.resolve(json({ ...found, superseded_by_ids: [] }));
+    if (method === "GET") return Promise.resolve(json({ ...found, superseded_by_ids: [], check_state: fake.checkStates?.[found.id] }));
     if (one[2] === "/confirm" && fake.confirmError) {
       return Promise.resolve(json({ error: "second", code: fake.confirmError.code }, fake.confirmError.status));
     }
@@ -325,6 +327,81 @@ describe("Notes page", () => {
     expect(within(card).queryByLabelText("Note text")).toBeNull();
   });
 
+  it("fetches the check state of a confirmed note from a list and shows its badge", async () => {
+    const check = { kind: "absent" as const, text: "eval(", glob: "src/**" };
+    fake.checkStates = { 1: "holds" };
+    fake.notes = [
+      note({ id: 1, kind: "constraint", status: "confirmed", check }),
+      note({ id: 2, kind: "decision", status: "confirmed" }),
+    ];
+    await renderIn(<NotesTab qualifiedName="pkg.mod.fn" />);
+    const one = await screen.findByTestId("note-1");
+    expect(await within(one).findByTestId("check-state")).toHaveTextContent("Check holds");
+    expect(within(screen.getByTestId("note-2")).queryByTestId("check-state")).toBeNull();
+    const singles = calls.filter((c) => c.method === "GET" && /\/notes\/\d+$/.test(c.url));
+    expect(singles.map((c) => c.url)).toEqual(["/api/projects/alpha/notes/1"]);
+  });
+
+  it("does not fetch a check state for a proposed note", async () => {
+    const check = { kind: "present" as const, text: "retry", glob: "src/**" };
+    fake.notes = [note({ id: 1, kind: "constraint", check })];
+    await renderIn(<NotesTab qualifiedName="pkg.mod.fn" />);
+    await screen.findByTestId("note-1");
+    expect(calls.some((c) => c.method === "GET" && /\/notes\/\d+$/.test(c.url))).toBe(false);
+  });
+
+  describe("check on confirm", () => {
+    const check = { kind: "absent" as const, text: "eval(", glob: "src/**" };
+    async function openEditor() {
+      fake.notes = [note({ id: 1, kind: "constraint", check })];
+      mount("/p/alpha/notes");
+      const card = await screen.findByTestId("note-1");
+      await userEvent.click(within(card).getByRole("button", { name: "Confirm" }));
+      return card;
+    }
+
+    it("prefills the check row and sends nothing about it when untouched", async () => {
+      const card = await openEditor();
+      expect(within(card).getByLabelText("Check")).toHaveValue("absent");
+      expect(within(card).getByLabelText("Check text")).toHaveValue("eval(");
+      expect(within(card).getByLabelText("Check glob")).toHaveValue("src/**");
+      await userEvent.click(within(card).getByRole("button", { name: "Confirm" }));
+      await waitFor(() => expect(posts("/notes/1/confirm")).toHaveLength(1));
+      expect(posts("/notes/1/confirm")[0].body).toEqual({});
+    });
+
+    it("sends a changed check", async () => {
+      const card = await openEditor();
+      const text = within(card).getByLabelText("Check text");
+      await userEvent.clear(text);
+      await userEvent.type(text, "exec(");
+      await userEvent.click(within(card).getByRole("button", { name: "Confirm" }));
+      await waitFor(() => expect(posts("/notes/1/confirm")).toHaveLength(1));
+      expect(posts("/notes/1/confirm")[0].body).toEqual({ check: { kind: "absent", text: "exec(", glob: "src/**" } });
+    });
+
+    it("sends null for No check", async () => {
+      const card = await openEditor();
+      await userEvent.selectOptions(within(card).getByLabelText("Check"), "");
+      await userEvent.click(within(card).getByRole("button", { name: "Confirm" }));
+      await waitFor(() => expect(posts("/notes/1/confirm")).toHaveLength(1));
+      expect(posts("/notes/1/confirm")[0].body).toEqual({ check: null });
+    });
+
+    it("sends null when the kind leaves constraint, and blocks a bad check", async () => {
+      const card = await openEditor();
+      const text = within(card).getByLabelText("Check text");
+      await userEvent.clear(text);
+      await userEvent.type(text, "x");
+      expect(within(card).getByRole("button", { name: "Confirm" })).toBeDisabled();
+      await userEvent.selectOptions(within(card).getByLabelText("Kind"), "decision");
+      expect(within(card).queryByTestId("check-row")).toBeNull();
+      await userEvent.click(within(card).getByRole("button", { name: "Confirm" }));
+      await waitFor(() => expect(posts("/notes/1/confirm")).toHaveLength(1));
+      expect(posts("/notes/1/confirm")[0].body).toEqual({ body: "Body of note 1", kind: "decision", check: null });
+    });
+  });
+
   it("is read-only for a viewer", async () => {
     fake.notes = [note({ id: 1 }), note({ id: 2, source: "mcp", origin: "mcp:x" })];
     fake.permissions = ["project.read"];
@@ -363,6 +440,54 @@ describe("Notes tab", () => {
       body: "Never retry here",
       anchor: { kind: "symbol", qualified_name: "pkg.mod.fn" },
     });
+  });
+
+  it("offers a check row for a constraint and sends it in the proposal", async () => {
+    await renderIn(<NotesTab qualifiedName="pkg.mod.fn" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Add note" }));
+    expect(screen.queryByTestId("check-row")).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText("Kind"), "constraint");
+    expect(screen.getByTestId("check-row")).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText("Note text"), "Never call eval");
+    await userEvent.selectOptions(screen.getByLabelText("Check"), "absent");
+    await userEvent.type(screen.getByLabelText("Check text"), 'ev"al');
+    await userEvent.type(screen.getByLabelText("Check glob"), "src/**/*.py");
+    expect(screen.getByTestId("check-hint")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Propose note" })).toBeDisabled();
+    await userEvent.clear(screen.getByLabelText("Check text"));
+    await userEvent.type(screen.getByLabelText("Check text"), "eval(");
+    expect(screen.queryByTestId("check-hint")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Propose note" }));
+    await waitFor(() => expect(posts("/notes")).toHaveLength(1));
+    expect(posts("/notes")[0].body).toMatchObject({
+      kind: "constraint",
+      check: { kind: "absent", text: "eval(", glob: "src/**/*.py" },
+    });
+  });
+
+  it("sends no check for a constraint without one", async () => {
+    await renderIn(<NotesTab qualifiedName="pkg.mod.fn" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Add note" }));
+    await userEvent.selectOptions(screen.getByLabelText("Kind"), "constraint");
+    await userEvent.type(screen.getByLabelText("Note text"), "Keep it small");
+    await userEvent.click(screen.getByRole("button", { name: "Propose note" }));
+    await waitFor(() => expect(posts("/notes")).toHaveLength(1));
+    expect(posts("/notes")[0].body).not.toHaveProperty("check");
+  });
+
+  it("shows the check in one line, with a state tag only when the server sent one", async () => {
+    const check = { kind: "absent" as const, text: "eval(", glob: "src/**" };
+    fake.notes = [
+      note({ id: 1, kind: "constraint", status: "confirmed", check, check_state: "broken" }),
+      note({ id: 2, kind: "constraint", status: "confirmed", check }),
+    ];
+    await renderIn(<NotesTab qualifiedName="pkg.mod.fn" />);
+    const one = await screen.findByTestId("note-1");
+    expect(within(one).getByTestId("note-check")).toHaveTextContent('must not appear: "eval(" in src/**');
+    expect(within(one).getByTestId("check-state")).toHaveTextContent("Check broken");
+    const two = screen.getByTestId("note-2");
+    expect(within(two).getByTestId("note-check")).toBeInTheDocument();
+    expect(within(two).queryByTestId("check-state")).toBeNull();
   });
 
   it("is read-only for a viewer", async () => {

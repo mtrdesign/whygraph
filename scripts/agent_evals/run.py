@@ -18,8 +18,12 @@ The two limits below are enforced here rather than left to the operator:
   exceeds ``--max-total-usd``. An unreadable ledger refuses too, because a cap
   that cannot be computed cannot be held.
 * **The working copy.** An ``O`` case runs in a throwaway clone of
-  ``fixtures/mini``. A ``P`` case runs in ``--repo``, in place: it refuses a
-  dirty tree, works on a temporary branch ``eval-tmp`` and puts everything back.
+  ``fixtures/mini``. A ``P`` case (ids ``P`` and ``R``) runs in ``--repo``, or
+  in the sibling its ``Case.repo`` names, in place: it refuses a dirty tree,
+  works on a temporary branch ``eval-tmp`` and puts everything back.
+
+Each invocation also writes ``results.jsonl`` to the report directory: one line
+per attempt and case with its check results, which ``whybench.py`` summarises.
 
 Usage
 -----
@@ -210,6 +214,8 @@ def invoke(
     workdir: Path,
     out_stem: Path | None,
     env: dict[str, str] | None = None,
+    model: str = "opus",
+    tools: tuple[str, ...] = (),
 ) -> RunResult:
     """Run one ``claude -p`` and read back its result and transcripts.
 
@@ -225,6 +231,10 @@ def invoke(
         Base path for the raw ``.json`` and ``.err`` of this run.
     env : dict of str to str or None
         Extra environment for ``claude``, the case's ``env``.
+    model : str
+        The main session's ``--model``, from ``--model`` on the command line.
+    tools : tuple of str
+        Tools allowed on top of ``ALLOWED_TOOLS``, the case's ``tools``.
 
     Returns
     -------
@@ -243,7 +253,7 @@ def invoke(
         "-p",
         prompt,
         "--model",
-        "opus",
+        model,
         "--output-format",
         "json",
         "--max-budget-usd",
@@ -256,7 +266,7 @@ def invoke(
         "--permission-mode",
         "acceptEdits",
         "--allowedTools",
-        ALLOWED_TOOLS,
+        ",".join((ALLOWED_TOOLS, *tools)),
     ]
     try:
         proc = subprocess.run(
@@ -423,6 +433,24 @@ def clone_workspace(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def case_repo(case: Case, repo: Path) -> Path:
+    """Return the directory a ``P`` case runs in: ``repo``, or ``Case.repo`` beside it.
+
+    Parameters
+    ----------
+    case : Case
+        The case.
+    repo : pathlib.Path
+        The ``--repo`` directory.
+
+    Returns
+    -------
+    pathlib.Path
+        ``repo`` itself, or its sibling named by ``case.repo``.
+    """
+    return repo.parent / case.repo if case.repo else repo
+
+
 def portal_skip_reason(case: Case, repo: Path) -> str | None:
     """Return why a ``P`` case cannot run, or ``None``.
 
@@ -440,6 +468,7 @@ def portal_skip_reason(case: Case, repo: Path) -> str | None:
     """
     if case.kind != "P":
         return None
+    repo = case_repo(case, repo)
     probe = subprocess.run(
         ["curl", "-s", "-m", "2", "-o", os.devnull, PORTAL_URL],
         capture_output=True,
@@ -585,7 +614,7 @@ def run_attempt(
         with ExitStack() as stack:
             assets = stack.enter_context(case_assets(case, args.assets))
             workspace = stack.enter_context(
-                portal_workspace(case, args.repo, assets, canary)
+                portal_workspace(case, case_repo(case, args.repo), assets, canary)
                 if case.kind == "P"
                 else clone_workspace(case, assets, canary)
             )
@@ -603,7 +632,15 @@ def run_attempt(
                 stem = (
                     out / f"{case.id}-r{args.current_repeat}-a{attempt_no}-p{index + 1}"
                 )
-                run = invoke(prompt, budget, workspace.dir, stem, case.env)
+                run = invoke(
+                    prompt,
+                    budget,
+                    workspace.dir,
+                    stem,
+                    case.env,
+                    args.model,
+                    case.tools,
+                )
                 _ledger_append(
                     args.ledger,
                     {
@@ -638,6 +675,28 @@ def run_attempt(
         if canary:
             canary.close()
     return attempt
+
+
+def _results_append(
+    path: Path, repeat: int, attempts: list[Attempt], involved: list[Case]
+) -> None:
+    """Append one JSON line per attempt and case: the check results, for summaries."""
+    for attempt in attempts:
+        for current in involved:
+            _ledger_append(
+                path,
+                {
+                    "case": current.id,
+                    "repeat": repeat,
+                    "attempt": attempt.number,
+                    "cost": round(sum(r.cost for r in attempt.runs), 4),
+                    "error": attempt.error or attempt.refused,
+                    "checks": [
+                        {"name": r.name, "ok": r.ok, "detail": r.detail}
+                        for r in attempt.results.get(current.id, [])
+                    ],
+                },
+            )
 
 
 def _keep_plans(workdir: Path, out: Path, name: str) -> None:
@@ -765,6 +824,7 @@ def dry_run(cases: list[Case], args: argparse.Namespace) -> int:
         extras = "".join(
             [
                 *(f", env {k}={v}" for k, v in case.env.items()),
+                *(f", +{tool}" for tool in case.tools),
                 ", transformed assets" if case.assets else "",
             ]
         )
@@ -818,7 +878,15 @@ def main(argv: list[str] | None = None) -> int:
         "--out", type=Path, help="Report directory. Default: a new temp directory."
     )
     parser.add_argument(
-        "--repo", type=Path, default=default_repo(), help="The repo for P cases."
+        "--repo",
+        type=Path,
+        default=default_repo(),
+        help="The repo for P cases; a Case.repo is its sibling.",
+    )
+    parser.add_argument(
+        "--model",
+        default="opus",
+        help="The main session's model (default opus). Subagents keep their own.",
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="Call no model; report what would run."
@@ -841,7 +909,7 @@ def main(argv: list[str] | None = None) -> int:
     summary: list[str] = []
     failed = False
     ran: set[str] = set()
-    ran_portal = False
+    portal_repos: set[Path] = set()
     invocation_spend = 0.0
     try:
         for case in cases:
@@ -879,7 +947,9 @@ def main(argv: list[str] | None = None) -> int:
                     for current in involved:
                         _print_attempt(current.id, attempt, current.name)
                 ran.add(case.id)
-                ran_portal = ran_portal or case.kind == "P"
+                if case.kind == "P":
+                    portal_repos.add(case_repo(case, args.repo))
+                _results_append(out / "results.jsonl", repeat, attempts, involved)
                 for current in involved:
                     fails = [a.failed(current.id) for a in attempts]
                     all_failed = all(fails)
@@ -908,8 +978,8 @@ def main(argv: list[str] | None = None) -> int:
                     if tag in {"FAIL", "refused"}:
                         failed = True
     finally:
-        if ran_portal:
-            _cleanup_portal_plans(args.repo)
+        for repo in sorted(portal_repos):
+            _cleanup_portal_plans(repo)
     print("\nSummary")
     for line in summary:
         print(f"  {line}")

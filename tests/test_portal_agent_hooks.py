@@ -604,3 +604,38 @@ def test_the_routes_need_the_client_header_and_a_known_project(
 ) -> None:
     gone = hooked.client.post("/api/projects/nope/agent-hooks/post-tool", json={})
     assert gone.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# A broken check on a constraint note (plan 54 section 5.8)
+# ---------------------------------------------------------------------------
+
+
+def test_post_tool_marks_a_broken_check_and_session_start_runs_none(
+    hooked: SimpleNamespace,
+) -> None:
+    # sample.py holds "line one": the first check is broken, the second holds.
+    check = {"check_kind": "absent", "check_glob": "*.py"}
+    hooked.note(
+        anchor_kind="path",
+        anchor_path="sample.py",
+        body="never write line one",
+        check_text="line one",
+        **check,
+    )
+    hooked.note(
+        anchor_kind="path",
+        anchor_path="sample.py",
+        body="never write line nine",
+        check_text="line nine",
+        **check,
+    )
+    hooked.note(body="project rule", check_text="line one", **check)
+    text = context_of(read(hooked, hooked.root / "sample.py"))
+    lines = {line.split(" ", 3)[2]: line for line in text.split("\n")[1:]}
+    assert lines["#1"].endswith('"never write line one" [check: broken]')
+    assert lines["#2"].endswith('"never write line nine"')
+    # SessionStart reads a list: no check runs there, so no tag.
+    start = post(hooked, SESSION, {"session_id": "sess-2", "source": "startup"})
+    project_line = context_of(start.json()).split("\n")[-1]
+    assert project_line.endswith('"project rule"')

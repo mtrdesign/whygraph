@@ -109,4 +109,6 @@ Do not edit the plan file or the tasks.json from this prompt - the implementor o
 
 If the report has a `## Decisions worth a note` section, end by telling the user to run `/whygraph-note` once for each listed entry (this prompt has no WhyGraph tools, so it cannot record them itself).
 
+If the report's `**Status:**` is `acceptance passed`, also print one line for each step of the plan that has a **Changes on purpose** line, at most 3: `Step <N> changed a recorded constraint on purpose: run /whygraph-note to record that "<quote>" no longer holds, then confirm it in the portal.` The quote is the text inside the quotation marks on that line, without its tag. When the tag is `(note #<id>)`, add `It replaces note #<id>.` Call no tool for it.
+
 This prompt's only job is: parse -> validate -> dispatch -> print. Do not edit other files, run other tools, or improvise.

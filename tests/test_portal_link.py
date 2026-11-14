@@ -383,7 +383,7 @@ def test_link_refuses_foreign_api_origin(
             "token": TOKEN,
             "org": ORG,
             "project": status_body(),
-            "api_version": 1,
+            "api_version": 2,
             "api_origin": "https://acme.evil.example",
         },
     )
@@ -447,7 +447,7 @@ ORG_URL = f"https://{ORG}.wg.example.com"
 def meta_body(fake: FakePlatform, **over: Any) -> dict:
     """A ``MetaOut``-shaped dict for ``fake``; ``base_origin=None`` drops it."""
     body: dict[str, Any] = {
-        "api_version": 1,
+        "api_version": 2,
         "min_client": "0.0.0",
         "capabilities": ["evidence"],
         "base_origin": fake.platform_origin,

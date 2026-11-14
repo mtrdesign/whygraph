@@ -151,6 +151,10 @@ Check each box before you hand the plan over.
 - **Resolution needed:** <what the user has to confirm before proceeding>
 - **Review finding F<n> (<lens>):** <defect> - **Resolution needed:** <fix>
 
+## Constraint checks
+*(only when a confirmed note carries a check - otherwise omit this section entirely; the implement command searches for each text after every step)*
+- note #<id> - <absent | present>: "<text>" in <glob>
+
 ## Steps
 
 1. **<short step name>**
@@ -158,6 +162,7 @@ Check each box before you hand the plan over.
    - **Change:** <one-paragraph description>
    - **Boundaries:** <files or behaviours this step must not touch, or "none">
    - **Constraints to preserve:** <verbatim quotes, or "none recorded">
+   - **Changes on purpose:** <verbatim quote of a recorded constraint this step changes> - <why>, or omit this line
    - **Risks:** <verbatim quotes, or "none recorded">
    - **Test first:** <`<test file>::<test name>` to add before the change, run by this step's Verify, or "none">
    - **Model:** <haiku | sonnet | opus> - <one-line why>

@@ -16,6 +16,8 @@ Public API
   with the pull requests and issues linked to it.
 * :class:`Rationale` — the value object returned by
   :meth:`RationaleGenerator.generate`.
+* :class:`Item`, :class:`ItemRef` — one constraint or risk of a
+  :class:`Rationale`, with the evidence it names and its basis.
 * :class:`Prompt`, :func:`resolve_prompt`, :func:`render_prompt`,
   :data:`PLACEHOLDER`, :data:`SYNTHESIS_PLACEHOLDER`,
   :data:`RATIONALE_PLACEHOLDER` — the resolved ``system`` + ``task``
@@ -75,7 +77,7 @@ from .prompt import (
     render as render_prompt,
     resolve as resolve_prompt,
 )
-from .rationale import CommitEvidence, Rationale
+from .rationale import CommitEvidence, Item, ItemRef, Rationale
 from .rationale_generator import RationaleGenerator
 
 __all__ = [
@@ -85,6 +87,8 @@ __all__ = [
     "AnalyzeError",
     "CommitEvidence",
     "Description",
+    "Item",
+    "ItemRef",
     "LlmDescriptor",
     "Prompt",
     "Rationale",

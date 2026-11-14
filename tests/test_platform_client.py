@@ -14,7 +14,7 @@ from platform_fake import (
     error_body,
     status_body,
 )
-from whygraph.api_v1 import EvidenceIn, RationaleIn, StatusOut, TargetIn
+from whygraph.api_v1 import API_VERSION, EvidenceIn, RationaleIn, StatusOut, TargetIn
 from whygraph.portal.platform_client import (
     DEV_PLATFORM_HTTP_ENV,
     MAX_BODY_CHARS,
@@ -236,7 +236,7 @@ def test_client_reaches_localhost_platform_through_rewrite(monkeypatch):
         platform_origin=fake.platform_origin,
         transport=httpx.MockTransport(fake.handle),
     )
-    assert client.meta().api_version == 1
+    assert client.meta().api_version == 2
     client.bind(ORG, TOKEN)
     assert client.status(SLUG).slug == SLUG
     assert {r.url.host for r in fake.requests} == {"127.0.0.1"}
@@ -366,8 +366,13 @@ def test_5xx_timeout_and_garbage_are_unreachable():
 
 def test_update_required():
     fake = FakePlatform()
-    fake.api_version = 2
+    fake.api_version = API_VERSION + 1
     with pytest.raises(UpdateRequired):
+        _client(fake).meta()
+    # A platform of the old contract (card items as plain strings, plan 54
+    # D5) is refused at `meta`, before any card could fail to parse.
+    fake = FakePlatform(api_version=1)
+    with pytest.raises(UpdateRequired, match="speaks API version 1"):
         _client(fake).meta()
     fake = FakePlatform(min_client="999.0.0")
     with pytest.raises(UpdateRequired, match="999.0.0"):
@@ -398,7 +403,7 @@ def test_exchange_validates_org_and_binds():
             "token": TOKEN,
             "org": "Not Valid",
             "project": status_body(),
-            "api_version": 1,
+            "api_version": 2,
         },
     )
     with pytest.raises(PlatformUnreachable, match="invalid org"):

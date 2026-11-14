@@ -5,6 +5,8 @@
 #
 #   <repos>/whygraph   a --no-hardlinks clone of this checkout (real history to dogfood)
 #   <repos>/demo       a tiny three-commit Python repo (fast scans)
+#   <repos>/why-bench        a twelve-commit repo with constraints in commit bodies
+#   <repos>/why-bench-blank  the same final tree as one `init` commit
 #
 # Delete a repo to get a fresh copy on the next run; one that is no longer a
 # working repository (say, its files were deleted but its directories kept) is
@@ -38,4 +40,16 @@ if ! healthy "$repos/demo"; then
     c -am "feat: add mul"
     printf '\n\ndef sub(a, b):\n    return a - b\n' >> "$d/src/calc.py"
     c -am "feat: add sub"
+fi
+
+if ! healthy "$repos/why-bench"; then
+    echo "dev fixtures: creating $repos/why-bench"
+    rm -rf "$repos/why-bench"
+    sh "$checkout/scripts/agent_evals/fixtures/why/build.sh" "$repos/why-bench" history
+fi
+
+if ! healthy "$repos/why-bench-blank"; then
+    echo "dev fixtures: creating $repos/why-bench-blank"
+    rm -rf "$repos/why-bench-blank"
+    sh "$checkout/scripts/agent_evals/fixtures/why/build.sh" "$repos/why-bench-blank" blank
 fi

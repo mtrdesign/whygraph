@@ -44,17 +44,23 @@ anchored on whichever arrived first.
 """
 
 RATIONALE_BRIEF_DESCRIPTION = (
-    "What: the 5-section rationale card for a symbol or line range (purpose, "
-    "why, constraints, trade-offs, risks) with its top evidence. "
-    "When: before editing existing code, not for new code or trivia. "
-    "Target by `qualified_name` (CodeGraph's bare or `Class::method` form, "
-    "not dotted) or `path` + `line_start` / `line_end`. "
-    "Cost: up to a minute on a miss, cached after. "
-    "`force_refresh=True` regenerates. `cached_only=True` never generates. "
-    "With it, the tool may return an overlapping (`card_range`) or `stale` "
-    "card, else `status: not_cached`. `notes`: team notes. "
-    "Scan from the WhyGraph portal first."
+    "What: the rationale card for a symbol or line range. "
+    "When: before editing existing code. "
+    "Target: `qualified_name` (CodeGraph's bare or `Class::method` form, not "
+    "dotted) or `path` + `line_start` / `line_end`. "
+    "`force_refresh=True` regenerates; `cached_only=True` never generates "
+    "(it may give a `stale` or `card_range` card, or `status: not_cached`). "
+    "Each constraint and risk has a `basis`: `quoted` (a source in `refs` "
+    "holds `quote`), `cited`, `inferred` (the model's reading of the diffs, "
+    "not a recorded statement) or `unknown` (old card). `notes`: team notes."
 )
+"""At most 600 characters (``tests/test_portal_mcp.py``).
+
+The ``basis`` sentence (plan 54) took the room of the section list, the
+cost line and the scan hint: the output schema lists the sections, and the
+``no_evidence`` and unscanned errors say to scan from the portal. The
+``qualified_name`` form stays: agents reach for a dotted name without it.
+"""
 
 RATIONALE_BRIEF_ANNOTATIONS = ToolAnnotations(
     title="Rationale card",
@@ -106,14 +112,18 @@ AREA_HISTORY_ANNOTATIONS = ToolAnnotations(
 )
 
 PROPOSE_NOTE_DESCRIPTION = (
-    "What: propose a short team note (decision, constraint, gotcha or "
-    "convention) anchored to a symbol, line range, path, area or the whole "
-    "project. It waits for a person to confirm it. "
-    "When: a decision or constraint the code does not show and a future "
-    "reader needs. Never use it to restate code or commit text. "
-    "Give exactly one of `qualified_name`, `path` (+ `line_start` / "
-    "`line_end`), `area` or `project_wide`. "
-    "Cost: a database write, capped per day."
+    "What: propose a short note (decision, constraint, gotcha or "
+    "convention) anchored to a symbol, line range, path, area or the "
+    "project; a person confirms it. "
+    "When: a decision or constraint the code does not show and readers "
+    "need; never restate code or commit text. "
+    "Give exactly one of `qualified_name`, `path` (+ `line_start` / `line_end`), "
+    "`area` or `project_wide`. "
+    "A `constraint` may carry a check: `check_kind` (`absent` or `present`), "
+    "a fixed `check_text` and `check_glob`, all or none. "
+    "A revision names the note it replaces in `supersedes_id`; confirming "
+    "retires the old note. "
+    "Cost: a capped write."
 )
 
 PROPOSE_NOTE_ANNOTATIONS = ToolAnnotations(

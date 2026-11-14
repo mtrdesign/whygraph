@@ -46,7 +46,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     signed_in,
 )
 from test_portal_hosts_isolation import _insert_project
-from whygraph.analyze import AnalyzeError, Rationale
+from whygraph.analyze import AnalyzeError, Item, ItemRef, Rationale
 from whygraph.api_v1 import (
     EvidenceReplyOut,
     RationaleOut,
@@ -250,6 +250,24 @@ def labels(items: Sequence[dict]) -> list[tuple[str, str]]:
     return [(item["commit"]["sha"], item["source"]) for item in items]
 
 
+CONSTRAINTS = (
+    Item(
+        "keep it small",
+        "quoted",
+        (
+            ItemRef("commit", "c" * 40),
+            ItemRef("pr", "7", "https://github.com/acme/api/pull/7"),
+        ),
+        quote="keep it small",
+    ),
+    Item("no network in the hot path", "inferred"),
+)
+"""The stub card's constraints: one quoted with two refs, one inferred."""
+
+RISKS = (Item("callers pass bytes", "cited", (ItemRef("issue", "3"),)),)
+"""The stub card's risks: one cited."""
+
+
 class _Generator:
     """Stub :class:`~whygraph.analyze.RationaleGenerator`; counts generations."""
 
@@ -264,9 +282,9 @@ class _Generator:
         return Rationale(
             purpose="Holds the sample lines.",
             why="Two commits built it up.",
-            constraints=("keep it small",),
+            constraints=CONSTRAINTS,
             tradeoffs=(),
-            risks=(),
+            risks=RISKS,
             model="fake-1",
             provider="fake",
         )
@@ -508,6 +526,10 @@ def test_rationale_keyed_by_platform_symbol_range(
     assert card.evidence_count.commits > 0
     assert generator.calls == 1
     assert StatusOut.model_validate(body["project"]).slug == SLUG
+    # Each item travels as an object with its source (plan 54 D5).
+    assert body["constraints"] == [item.as_dict() for item in CONSTRAINTS]
+    assert body["risks"] == [item.as_dict() for item in RISKS]
+    assert [item.basis for item in card.constraints] == ["quoted", "inferred"]
 
 
 def test_rationale_cache_shared_across_working_trees(
@@ -532,6 +554,9 @@ def test_rationale_cache_shared_across_working_trees(
     assert (first.status_code, second.status_code) == (200, 200), second.text
     assert generator.calls == 1
     assert first.json()["cached_at"] == second.json()["cached_at"]
+    # The cache hit serves the same items, sources and all.
+    assert second.json()["constraints"] == [item.as_dict() for item in CONSTRAINTS]
+    assert second.json()["risks"] == first.json()["risks"]
 
 
 def test_rationale_without_a_symbol_uses_the_requested_range(

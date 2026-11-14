@@ -274,7 +274,7 @@ def test_connect_code_single_use_and_pkce(cn: SimpleNamespace) -> None:
     assert response.status_code == 200, response.text
     reply = TokenReply.model_validate(response.json())
     assert connections.TOKEN_RE.fullmatch(reply.token)
-    assert reply.org == "acme" and reply.api_version == API_VERSION == 1
+    assert reply.org == "acme" and reply.api_version == API_VERSION == 2
     project = reply.project
     assert (project.slug, project.name, project.role) == ("api", "Api project", "owner")
     assert project.github_full_name == "acme/api"
@@ -1207,7 +1207,7 @@ def test_meta_is_public_on_every_host(cn: SimpleNamespace) -> None:
         response = cn.client.get(prefix + "/api/v1/meta")
         assert response.status_code == 200, (prefix, response.text)
         assert response.json() == {
-            "api_version": 1,
+            "api_version": 2,
             "min_client": MIN_CLIENT_VERSION,
             "capabilities": ["evidence", "rationale", "history", "resources"],
             "base_origin": PROD_BASE,  # the same on every host

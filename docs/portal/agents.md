@@ -386,7 +386,8 @@ reviewed.
 Claude Code gets one more slash command, `/whygraph-review [<base>] [--generate]`. It checks a diff
 against the recorded rationale: for each hunk it finds the enclosing symbol with CodeGraph, reads that
 symbol's rationale card, and reports exactly one verdict - **Constraint at risk** or **Risk triggered**
-(each quoting the card verbatim), **No rationale**, or **Consistent** - followed by a
+(each quoting the card verbatim and ending with the item's source tag, such as `(quoted: 1a2b3c4d)` or
+`(inferred)`), **No rationale**, or **Consistent** - followed by a
 `## Confidence: high|medium|low` line. It runs as the `whygraph-reviewer` subagent, which may run only
 `git diff` and writes no files.
 

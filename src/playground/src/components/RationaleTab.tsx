@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { portalApi, projectKey, type RationaleCard } from "../api";
+import { portalApi, projectKey, type RationaleCard, type RationaleItem, type RationaleItemRef } from "../api";
 import { providerLabel } from "../lib/labels";
 import { formatDateTime } from "../lib/format";
 import { plural } from "../lib/plural";
@@ -21,6 +21,75 @@ const withArticle = (name: string) => `${/^[aeiou]/i.test(name) ? "an" : "a"} ${
 // (`GET`, never an LLM call). A cached card renders directly; otherwise a
 // "Generate" button fires the `POST`, which runs the same MCP generation flow —
 // so passive viewing never spends an LLM call, and the card can't drift.
+
+const refLabel = (r: RationaleItemRef) =>
+  r.kind === "commit" ? r.id.slice(0, 8) : `${r.kind === "pr" ? "PR" : "issue"} #${r.id}`;
+
+function ItemRef({ r }: { r: RationaleItemRef }) {
+  if (r.url)
+    return (
+      <a
+        href={r.url}
+        target="_blank"
+        rel="noreferrer"
+        className="text-primary-text underline-offset-4 hover:underline"
+        data-testid="rationale-ref"
+      >
+        {refLabel(r)}
+      </a>
+    );
+  return (
+    <span className={r.kind === "commit" ? "font-mono" : undefined} data-testid="rationale-ref">
+      {refLabel(r)}
+    </span>
+  );
+}
+
+/** A constraint or risk: its text, a basis tag (none for an old card) and its sources. */
+function ItemRow({ item }: { item: RationaleItem }) {
+  const refs = item.refs ?? [];
+  const tagged = item.basis !== "unknown" && item.basis !== undefined;
+  return (
+    <li>
+      {item.text}
+      {tagged && (
+        <span
+          className="ml-2 rounded border border-border px-1.5 py-0.5 align-middle text-[10px] uppercase tracking-wide text-muted-foreground"
+          data-testid="rationale-basis"
+          title={item.basis === "quoted" && item.quote ? item.quote : undefined}
+        >
+          {item.basis}
+        </span>
+      )}
+      {refs.length > 0 && (
+        <span className="ml-2 text-xs text-muted-foreground">
+          {refs.map((r, i) => (
+            <span key={`${r.kind}-${r.id}`}>
+              {i > 0 && ", "}
+              <ItemRef r={r} />
+            </span>
+          ))}
+        </span>
+      )}
+    </li>
+  );
+}
+
+function ItemList({ title, items }: { title: string; items?: RationaleItem[] }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </div>
+      <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-foreground">
+        {items.map((item, i) => (
+          <ItemRow key={i} item={item} />
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function BulletList({ title, items }: { title: string; items?: string[] }) {
   if (!items || items.length === 0) return null;
@@ -88,9 +157,9 @@ function Card({ card, note }: { card: RationaleCard; note?: ReactNode }) {
       </div>
       <p className="mt-1 text-sm text-foreground">{card.why}</p>
 
-      <BulletList title="Constraints" items={card.constraints} />
+      <ItemList title="Constraints" items={card.constraints} />
       <BulletList title="Tradeoffs" items={card.tradeoffs} />
-      <BulletList title="Risks" items={card.risks} />
+      <ItemList title="Risks" items={card.risks} />
 
       <div className="mt-4 border-t border-border pt-2 text-[11px] text-muted-foreground">
         {card.provider}

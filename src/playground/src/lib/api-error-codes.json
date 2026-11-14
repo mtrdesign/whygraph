@@ -102,6 +102,7 @@
   "not_member",
   "not_shared",
   "not_testable",
+  "note_check_invalid",
   "note_invalid",
   "note_limit",
   "note_linked",

@@ -37,6 +37,7 @@ from whygraph.db.models import (
     RationaleCache,
 )
 from whygraph.mcp.notes import AGENT_SOURCES, IMPORTED_UID_PREFIX
+from whygraph.mcp.rationale_cache import decode_items
 from whygraph.serve.chat import native_origin_key
 from whygraph.serve.errors import ServeError
 from whygraph.services.git.credentials import (
@@ -302,6 +303,9 @@ def _note_record(
         retired_by=_strip(row.retired_by),
         retired_at=row.retired_at,
         retire_reason=row.retire_reason,
+        check_kind=row.check_kind,
+        check_text=row.check_text,
+        check_glob=row.check_glob,
     )
 
 
@@ -555,9 +559,9 @@ def build_export(
                     cached_at=r.cached_at,
                     purpose=r.purpose,
                     why=r.why,
-                    constraints=_json_list(r.constraints) or [],
+                    constraints=[i.as_dict() for i in decode_items(r.constraints)],
                     tradeoffs=_json_list(r.tradeoffs) or [],
-                    risks=_json_list(r.risks) or [],
+                    risks=[i.as_dict() for i in decode_items(r.risks)],
                     input_tokens=r.input_tokens,
                     output_tokens=r.output_tokens,
                     actual_provider=r.actual_provider,

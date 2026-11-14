@@ -117,7 +117,11 @@ def _pre_edit_brief(
         f"2. If purpose / why / constraints / risks come back thin or empty, "
         f"also call `whygraph_evidence_for` with the same arguments for richer "
         f"historical context (commits, PRs, issues).\n"
-        f"3. Summarize: purpose, constraints to preserve, and edit risks.\n"
+        f"3. Summarize: purpose, constraints to preserve, and edit risks. "
+        f"Name each one's `basis`: `quoted` (a source in its `refs` holds "
+        f"its `quote`), `cited` (a source is named, no quote), `inferred` "
+        f"(none is named) or `unknown` (an old card). An `inferred` item is "
+        f"the model's reading of the diffs, not a recorded statement.\n"
         f"4. Ask me to describe my proposed change before writing any code."
     )
 
@@ -198,7 +202,8 @@ def register(mcp: FastMCP) -> None:
         description=(
             "Before editing a chunk of code, gather its rationale and "
             "historical context so the planned edit can respect the "
-            "constraints and avoid known risks."
+            "constraints and avoid known risks, each with the source it "
+            "rests on."
         ),
     )(_pre_edit_brief)
     mcp.prompt(

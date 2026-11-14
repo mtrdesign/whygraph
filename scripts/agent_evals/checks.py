@@ -453,6 +453,16 @@ def file_contains(rel_path: str, text: str) -> Check:
     return Check(f"{rel_path} has {text}", fn)
 
 
+def either(first: Check, second: Check, name: str) -> Check:
+    """Pass when either check holds; the detail shows both."""
+
+    def fn(ctx: Context) -> Outcome:
+        (ok_a, detail_a), (ok_b, detail_b) = first.run(ctx), second.run(ctx)
+        return ok_a or ok_b, f"{first.name}: {detail_a}; {second.name}: {detail_b}"
+
+    return Check(name, fn)
+
+
 def file_lacks(rel_path: str, text: str) -> Check:
     """Pass when a work-directory file does not hold ``text``."""
 
@@ -956,6 +966,289 @@ def record_rationale_before_edit() -> Check:
         return True, f"{hits} of {len(ctx.runs)} prompts called it before an edit"
 
     return Check("pre-edit rationale", fn, record=True)
+
+
+HIDDEN_TESTS = Path(__file__).resolve().parent / "fixtures" / "why" / "hidden"
+_HISTORY_READ_RE = re.compile(r"\bgit\b[^|;&\n]*\b(log|show|blame)\b")
+
+
+def hidden_test(name: str) -> Check:
+    """Record whether a hidden benchmark test passes on the case's end state.
+
+    The test lives under ``fixtures/why/hidden/`` and never in the fixture
+    repository, so the agent cannot see it. It is copied to the work directory
+    root after the last prompt, run with ``python3 -m unittest`` and removed.
+
+    Parameters
+    ----------
+    name : str
+        The test module's name without ``.py``, for example ``test_hidden_s1``.
+
+    Returns
+    -------
+    Check
+        A recording check whose ``ok`` is whether the hidden test passed.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        source = HIDDEN_TESTS / f"{name}.py"
+        target = ctx.workdir / f"{name}.py"
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        target.write_bytes(source.read_bytes())
+        try:
+            out = subprocess.run(
+                ["python3", "-m", "unittest", name],
+                cwd=ctx.workdir,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={**env, "PYTHONDONTWRITEBYTECODE": "1"},
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "hidden test timed out after 120 s"
+        finally:
+            target.unlink(missing_ok=True)
+        tail = (out.stderr.strip().splitlines() or ["no output"])[-1]
+        return (
+            out.returncode == 0,
+            f"{'pass' if out.returncode == 0 else 'fail'}: {tail}",
+        )
+
+    return Check(f"hidden test {name}", fn, record=True)
+
+
+def record_card_read() -> Check:
+    """Record whether any transcript of the case called ``whygraph_rationale_brief``."""
+
+    def fn(ctx: Context) -> Outcome:
+        calls = [
+            t.agent_type
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if "whygraph_rationale_brief" in u.name
+        ]
+        return bool(calls), f"{len(calls)} rationale call(s) in {sorted(set(calls))}"
+
+    return Check("card read", fn, record=True)
+
+
+def record_history_reads() -> Check:
+    """Record whether a ``Bash`` call ran ``git log``, ``git show`` or ``git blame``."""
+
+    def fn(ctx: Context) -> Outcome:
+        hits = [
+            c
+            for c in _bash_commands(ctx.all_transcripts())
+            if _HISTORY_READ_RE.search(c)
+        ]
+        return bool(hits), f"{len(hits)} history read(s)" + (
+            f", first: {hits[0][:80]!r}" if hits else ""
+        )
+
+    return Check("history read", fn, record=True)
+
+
+def record_plan_keeps(stem: str, patterns: tuple[str, ...]) -> Check:
+    """Record whether a plan names a constraint under its constraints or its blockers.
+
+    Parameters
+    ----------
+    stem : str
+        The plan's stem under ``.whygraph/plans/``.
+    patterns : tuple of str
+        Case-insensitive regexes; any one on a **Constraints to preserve** line
+        or in ``## Blockers`` counts.
+
+    Returns
+    -------
+    Check
+        A recording check whose ``ok`` is whether either place names it.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(_plan_path(ctx, stem))
+        if not text:
+            return False, "no plan written"
+        preserve = "\n".join(
+            line for line in text.splitlines() if "Constraints to preserve" in line
+        )
+        blockers = _section(text, "Blockers")
+
+        def named(body: str) -> bool:
+            return any(re.search(p, body, re.IGNORECASE) for p in patterns)
+
+        kept, blocked = named(preserve), named(blockers)
+        return kept or blocked, f"constraints to preserve: {kept}; blocker: {blocked}"
+
+    return Check("plan keeps the constraint", fn, record=True)
+
+
+# The tags of plan 54 section 5.7: a card item's basis after its quote.
+_SOURCE_TAG = re.compile(
+    r"\s*\((?:quoted: [^()\n]+|cited: [^()\n]+|inferred|note #\d+)\)"
+)
+_STEP_LABEL = re.compile(r"^\s*(?:-\s+)?\*\*([A-Z][A-Za-z -]*):\*\*")
+
+
+def _step_fields(steps: str, names: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Return ``(name, text)`` for each step field in ``names``, continuation lines joined."""
+    fields: list[tuple[str, str]] = []
+    current: str | None = None
+    for line in steps.splitlines():
+        label = _STEP_LABEL.match(line)
+        if re.match(r"^\d+\. ", line):
+            current = None
+        elif label:
+            current = label.group(1) if label.group(1) in names else None
+            if current:
+                fields.append((current, line[label.end() :]))
+        elif current and line.strip():
+            fields[-1] = (current, f"{fields[-1][1]} {line.strip()}")
+    return fields
+
+
+_NEXT_QUOTE = re.compile(r"\s*;\s*\"|\s*$")
+
+
+def split_quotes(body: str) -> list[tuple[str, bool]]:
+    """Split a field into its quotes, each with whether a source tag follows it.
+
+    A quote may hold a ``"`` of its own, as in ``row["id"]``, so a quote ends
+    only at a ``"`` that a tag follows, or one that ``; "`` (the next quote)
+    or the end of the field follows.
+
+    Parameters
+    ----------
+    body : str
+        The field's text after its label.
+
+    Returns
+    -------
+    list of (str, bool)
+        Each quote's text and whether it is tagged, in order.
+    """
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    while (start := body.find('"', pos)) >= 0:
+        end = start + 1
+        while (end := body.find('"', end)) >= 0:
+            tag = _SOURCE_TAG.match(body, end + 1)
+            if tag:
+                out.append((body[start + 1 : end], True))
+                pos = tag.end()
+                break
+            if _NEXT_QUOTE.match(body, end + 1):
+                out.append((body[start + 1 : end], False))
+                pos = end + 1
+                break
+            end += 1
+        else:
+            out.append((body[start + 1 :], False))
+            break
+    return out
+
+
+def constraint_quotes_tagged(stem: str) -> Check:
+    """Pass when each constraint quote in a plan's steps ends with a source tag.
+
+    Parameters
+    ----------
+    stem : str
+        The plan's stem under ``.whygraph/plans/``.
+
+    Returns
+    -------
+    Check
+        Fails when the plan is missing, quotes nothing under **Constraints to
+        preserve** or **Changes on purpose**, or has a quote with no tag. On a
+        **Changes on purpose** line only the first quote is the constraint.
+
+    Notes
+    -----
+    A tag is ``(quoted: <ref>)``, ``(cited: <ref>)``, ``(inferred)`` or
+    ``(note #<id>)``. An item of basis ``unknown`` has none, so a card cached
+    before sources existed fails this check: refresh the cards first.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(_plan_path(ctx, stem))
+        if not text:
+            return False, "no plan written"
+        fields = _step_fields(
+            _section(text, "Steps"), ("Constraints to preserve", "Changes on purpose")
+        )
+        quotes: list[str] = []
+        untagged: list[str] = []
+        for name, body in fields:
+            found = split_quotes(body)
+            if name == "Changes on purpose":
+                found = found[:1]
+            for quote, tagged in found:
+                quotes.append(quote)
+                if not tagged:
+                    untagged.append(quote[:60])
+        if not quotes:
+            return False, "no quote under Constraints to preserve or Changes on purpose"
+        if untagged:
+            return (
+                False,
+                f"{len(untagged)} of {len(quotes)} quotes untagged: {untagged}",
+            )
+        return True, f"{len(quotes)} quotes, each tagged"
+
+    return Check("constraint quotes carry a source tag", fn)
+
+
+def note_revision_proposed(note_env: str) -> Check:
+    """Pass when the run proposes exactly one note revision, after Acceptance.
+
+    Parameters
+    ----------
+    note_env : str
+        The environment variable that holds the id of the note the plan
+        changes on purpose. When it is set, the call's ``supersedes_id`` must
+        equal it.
+
+    Returns
+    -------
+    Check
+        Fails when the transcripts hold no ``whygraph_propose_note`` call with
+        a ``supersedes_id``, or more than one, or when the main session made it
+        before its first ``plan-tool.sh accept``.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        calls = [
+            u
+            for t in ctx.all_transcripts()
+            for u in t.tool_uses()
+            if _tool_matches(u.name, r"^whygraph_propose_note$")
+            and u.input.get("supersedes_id") not in (None, "")
+        ]
+        if len(calls) != 1:
+            return False, f"{len(calls)} propose call(s) with supersedes_id"
+        call = calls[0]
+        accepted = False
+        after = False
+        for t in ctx.of_type("main"):
+            for u in t.tool_uses():
+                command = str(u.input.get("command", ""))
+                if _tool_matches(u.name, r"^Bash$") and re.search(
+                    r"plan-tool\.sh\s+accept\s", command
+                ):
+                    accepted = True
+                elif u == call:
+                    after = accepted
+        if not after:
+            return False, "the propose call is not in the main session after accept"
+        found = str(call.input["supersedes_id"]).strip()
+        expected = os.environ.get(note_env, "").strip()
+        if expected and found != expected:
+            return False, f"supersedes_id {found}, expected {expected}"
+        return True, f"one revision of note #{found}, kind {call.input.get('kind')}"
+
+    return Check("one note revision proposed after Acceptance", fn)
 
 
 def record_comparison(defect_step: int | None) -> Check:

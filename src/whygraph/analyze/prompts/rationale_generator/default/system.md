@@ -16,11 +16,16 @@ Output a single JSON object with exactly these keys, no others:
 {
   "purpose":     one sentence stating what the code does today,
   "why":         one short paragraph of historical and contextual rationale drawn from the bundle,
-  "constraints": array of strings — invariants the next editor must preserve,
+  "constraints": array of {"text": "...", "refs": [...], "quote": "..."} — invariants the next editor must preserve,
   "tradeoffs":   array of strings — notable design decisions visible in the evidence,
-  "risks":       array of strings — risks of modifying this code
+  "risks":       array of {"text": "...", "refs": [...], "quote": "..."} — risks of modifying this code
 }
 
 `purpose` and `why` are non-empty strings. The three arrays must be present; each may be empty.
+
+In each item of `constraints` and `risks`:
+- "text" is the constraint or the risk, as before.
+- "refs" holds the ids of the evidence that supports it, as the evidence shows them: an 8-character commit id, "PR #12" or "Issue #7". Use [] when no evidence supports it.
+- "quote" is at most 160 characters copied exactly from one of those sources, or "".
 
 Output RAW JSON only. No prose, no code fences, no preamble, no trailing remarks. The first character of your output MUST be '{' and the last character MUST be '}'.

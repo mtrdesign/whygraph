@@ -108,3 +108,49 @@ describe("RationaleTab partial card", () => {
     );
   });
 });
+
+describe("RationaleTab item sources", () => {
+  const item = (over: Partial<NonNullable<RationaleCard["constraints"]>[number]>) => ({
+    text: "t",
+    basis: "unknown" as const,
+    refs: [],
+    ...over,
+  });
+
+  it("tags each basis, and nothing for unknown", async () => {
+    read = card({
+      constraints: [
+        item({ text: "one", basis: "quoted", quote: "the words" }),
+        item({ text: "two", basis: "cited" }),
+        item({ text: "three", basis: "inferred" }),
+        item({ text: "four", basis: "unknown" }),
+      ],
+    });
+    await mount();
+    const tags = screen.getAllByTestId("rationale-basis").map((e) => e.textContent);
+    expect(tags).toEqual(["quoted", "cited", "inferred"]);
+    expect(screen.getByText("quoted")).toHaveAttribute("title", "the words");
+    expect(screen.getByText("four")).toBeInTheDocument();
+  });
+
+  it("renders refs: PR link from its url, commit as 8 characters", async () => {
+    read = card({
+      risks: [
+        item({
+          text: "risky",
+          basis: "cited",
+          refs: [
+            { kind: "pr", id: "12", url: "https://github.com/o/r/pull/12" },
+            { kind: "commit", id: "0123456789abcdef0123456789abcdef01234567" },
+            { kind: "issue", id: "7" },
+          ],
+        }),
+      ],
+    });
+    await mount();
+    expect(screen.getByRole("link", { name: "PR #12" })).toHaveAttribute("href", "https://github.com/o/r/pull/12");
+    expect(screen.getByText("01234567")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "01234567" })).toBeNull();
+    expect(screen.getByText("issue #7")).toBeInTheDocument();
+  });
+});

@@ -48,7 +48,15 @@ import httpx
 import pytest
 
 from conftest import build_fake_codegraph_db
-from platform_fake import ORG, PLATFORM_ORIGIN, SLUG, TOKEN, FakePlatform, error_body
+from platform_fake import (
+    ORG,
+    PLATFORM_ORIGIN,
+    RATIONALE_ITEMS,
+    SLUG,
+    TOKEN,
+    FakePlatform,
+    error_body,
+)
 from whygraph.api_v1 import PLATFORM_BUDGET_MESSAGE
 from whygraph.core.config import Config
 from whygraph.core.context import ProjectContext, ProjectContextError, use_project
@@ -469,6 +477,10 @@ def test_mcp_linked_rationale_sends_the_same_reduced_target(
     assert "limit" not in body
     assert card["purpose"] == "p"
     assert card["platform"] == {"status": "ok", "url": API_ORIGIN}
+    # The platform's items pass through as they came: no empty `url` or
+    # `quote` is added, and nothing is flattened to a string (plan 54 D5).
+    assert card["constraints"] == list(RATIONALE_ITEMS)
+    assert card["risks"] == [RATIONALE_ITEMS[1]]
 
 
 def test_mcp_linked_rationale_shows_the_platforms_budget_refusal(

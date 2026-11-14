@@ -1,0 +1,17 @@
+diff --git a/price.py b/price.py
+index d9eda69..6aeeb40 100644
+--- a/price.py
++++ b/price.py
+@@ -1,10 +1,10 @@
+ """Amount rounding."""
+ 
+-from decimal import ROUND_HALF_EVEN, Decimal
++from decimal import ROUND_HALF_UP, Decimal
+ 
+ STEP = Decimal("0.01")
+ 
+ 
+ def round_amount(value):
+     """Round an amount (a ``Decimal`` or a string) to two decimals."""
+-    return Decimal(value).quantize(STEP, rounding=ROUND_HALF_EVEN)
++    return Decimal(value).quantize(STEP, rounding=ROUND_HALF_UP)

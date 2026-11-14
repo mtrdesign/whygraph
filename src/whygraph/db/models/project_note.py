@@ -57,6 +57,13 @@ class ProjectNote(WhygraphTable, table=True):
         Retirement actor and time.
     retire_reason : str | None
         One of ``RETIRE_REASONS``.
+    check_kind : str | None
+        ``absent`` or ``present``: a constraint note's check (plan 54).
+    check_text : str | None
+        The fixed text the check searches for.
+    check_glob : str | None
+        The git glob of the files it searches. The three check columns are
+        set together or not at all, and only on a ``constraint`` note.
     """
 
     id: int | None = Field(default=None, primary_key=True)
@@ -84,3 +91,6 @@ class ProjectNote(WhygraphTable, table=True):
     retired_by: str | None = Field(default=None, sa_type=Text)
     retired_at: str | None = Field(default=None, sa_type=Text)
     retire_reason: str | None = Field(default=None, sa_type=Text)
+    check_kind: str | None = Field(default=None, sa_type=Text)
+    check_text: str | None = Field(default=None, sa_type=Text)
+    check_glob: str | None = Field(default=None, sa_type=Text)

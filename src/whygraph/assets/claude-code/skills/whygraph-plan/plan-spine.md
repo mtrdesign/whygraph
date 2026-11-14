@@ -151,6 +151,10 @@ Check each box before you hand the plan over.
 - **Resolution needed:** <what the user has to confirm before proceeding>
 - **Review finding F<n> (<lens>):** <defect> - **Resolution needed:** <fix>
 
+## Constraint checks
+*(only when a confirmed note carries a check - otherwise omit this section entirely; the implement command searches for each text after every step)*
+- note #<id> - <absent | present>: "<text>" in <glob>
+
 ## Steps
 
 1. **<short step name>**

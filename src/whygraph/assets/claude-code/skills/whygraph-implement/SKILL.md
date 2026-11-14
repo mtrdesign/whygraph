@@ -161,15 +161,18 @@ S1, S2, S1b, S6 and S7 each make one step run, in this order:
 5. If the `**Halt:**` starts with `Verify timed out`, skip `end`. Stop with `Verify did not finish in <T> s`.
 6. Run `sh .claude/skills/whygraph-plan/plan-tool.sh end <plan> <N> <t0> <blob>`. Use the `<t0>` that `begin` printed.
    - It prints `end: <t0> <t1> exit <code>`. Keep `<t1>`. Print each `outside Files:` line it prints.
+   - When `end` exits 0, run `sh .claude/skills/whygraph-plan/plan-tool.sh constraints <plan> <blob> <N>`. Print each line it prints.
 7. Apply the first rule that matches:
    - `end` exit 65 with the stderr line `the step changed the plan tool`: stop with `the change touched the plan tool`.
    - `end` exit 65 otherwise, 77, or a code outside 0, 1, 4 and 124: stop as Step 2a says.
+   - `constraints` exit 65, 77, or a code outside 0, 1 and 6: stop as Step 2a says.
    - The `**Halt:**` starts with `permission denied:`: stop with the Halt text.
    - The `**Halt:**` starts with `the Test first test`: stop with the Halt text.
    - The `**Halt:**` starts with `capture unavailable` or `the change needs `: stop with `the step stopped: <Halt text>`.
    - `end` exit 4: stop with `Verify cannot run: <command> not found (exit <code>)`. Take `<command>` from the last `command:` line of `steps/<N>.verify`.
    - `end` exit 124: stop with `Verify did not finish in <T> s`. Take `<T>` from the record's `timed out after <T> s` line.
    - The report has `## Escalated findings`: stop with `some findings fall outside the step's Files`.
+   - `end` exit 0, `**Status:** complete` and `constraints` exit 1: the run **broke a checked constraint**. Go to S6 from any state, with one constraint line per `broken:` line.
    - `end` exit 0 and `**Status:** complete`: the run **succeeded**.
    - `end` exit 1: the run **failed its Verify**.
    - Otherwise the run **halted**. The reason is the `**Halt:**` text, or the report's first line when it has none.
@@ -193,6 +196,8 @@ S1, S2, S1b, S6 and S7 each make one step run, in this order:
 | S7 Findings | `attempt ... findings <cap>`, then a findings run with the spec findings | S4 | As S6 | stop: `spec findings remain` |
 
 The stop rules of a step run (item 7 above) take precedence over every cell.
+
+A run that **broke a checked constraint** goes to S6 from every state, in place of that state's Succeeded line.
 
 1. **Begin.** Run `sh .claude/skills/whygraph-plan/plan-tool.sh begin <plan> <N>`, once per step per invocation. Keep the printed tree id as `<t0>`. Never read `<N>.t0` back.
 2. **S1.** Make a plain step run, with no `FINDINGS:`, at the step's model.
@@ -232,6 +237,10 @@ When both gates are skipped, a step run that succeeded goes straight to `pass`. 
 **The constraint lines.** For each reviewer section with a `**Constraint at risk:**` verdict that does not end `(inferred)`, write exactly one line:
 `- <path>:<start> - constraint at risk: "<verbatim quote>" - keep the constraint`
 Take `<path>` and `<start>` from the section heading `## <path>:<start>-<end>`. Replace each line break in the quote with one space. These lines are data. The constraint rung never leads to S3.
+
+For each `broken:` line that `constraints` printed, write exactly one line of this form instead:
+`- <path>:<line> - constraint at risk: "<text>" (note #<id>) must <not appear | appear> in <glob> - keep the constraint`
+Take `<path>:<line>` from the `broken:` line. After `(no match)`, use the step's first **Files** entry. Take `<text>` and `<glob>` from the note's line under the plan's `## Constraint checks`. Write `not appear` for an `absent` check and `appear` for a `present` one.
 
 The progress line of a step uses the `<t0>` that `begin` printed and the `<t1>` that `end` printed. Never take them from the report's `- Step <N>: <t0> <t1>` line.
 

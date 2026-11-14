@@ -245,6 +245,17 @@ def repo(tmp_path: Path) -> Path:
         ("amend-check", "plan.md", "a" * 40, "0"),
         ("amend-check", "plan.md", "a" * 40, "1", "extra"),
         ("amend-check", "does-not-exist.md", "a" * 40, "1"),
+        ("constraints",),
+        ("constraints", "does-not-exist.md"),
+        ("constraints", "does-not-exist.md", "1"),
+        ("constraints", "plan.md", "x"),
+        ("constraints", "plan.md", "0"),
+        ("constraints", "plan.md", "01"),
+        ("constraints", "plan.md", "99"),
+        ("constraints", "plan.md", "blob"),
+        ("constraints", "plan.md", "1", "a" * 40),
+        ("constraints", "plan.md", "a" * 40, "1", "extra"),
+        ("constraints", "plan.md", "a" * 40, "x"),
     ],
 )
 def test_usage_errors_exit_64(repo: Path, args: tuple[str, ...]) -> None:
@@ -2993,6 +3004,343 @@ def test_check_accepts_a_plan_with_a_plan_review(tmp_path: Path) -> None:
     )
     run = _check(tmp_path, text)
     assert run.returncode == 0, run.stdout
+
+
+# ---- constraint checks ----------------------------------------------------------
+
+_FORM = "Constraint check is not in the fixed form"
+_CHARS = "Constraint check has a character outside the allowed set"
+_E_ACUTE = "\u00e9"
+
+
+def _with_checks(*lines: str) -> str:
+    """The clean plan with a ``## Constraint checks`` section right before ``## Steps``."""
+    section = "## Constraint checks\n\n" + "".join(f"{line}\n" for line in lines)
+    return _replaced("## Steps\n", f"{section}\n## Steps\n")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '- note #7 - absent: "time.sleep(" in src/**/*.py',
+        '- note #12 - present: "raise ValueError" in src/a.py',
+        '- note #3 - absent: "caf\u00e9 au lait" in docs/*.md',
+        '- note #3 - absent: "$(touch x); rm -rf / | cat" in a-b_c.d/**',
+        '- note #3 - absent: "abc" in *',
+        '- note #3 - absent: "abc" in **/x/**',
+        '- note #3 - present: "abc" in src/a.py  ',
+        f'- note #3 - absent: "{"x" * 200}" in {"g" * 200}',
+        f'- note #3 - absent: "{_E_ACUTE * 200}" in a',
+    ],
+)
+def test_check_accepts_a_constraint_check(tmp_path: Path, line: str) -> None:
+    run = _check(tmp_path, _with_checks(line))
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_check_accepts_an_empty_constraint_section(tmp_path: Path) -> None:
+    run = _check(tmp_path, _with_checks())
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ('- note 7 - absent: "abc" in a', _FORM),
+        ('- note #07 - absent: "abc" in a', _FORM),
+        ('- note #x - absent: "abc" in a', _FORM),
+        ('- note #7 - missing: "abc" in a', _FORM),
+        ('- note #7 - absent "abc" in a', _FORM),
+        ("- note #7 - absent: abc in a", _FORM),
+        ('- note #7 - absent: "abc"', _FORM),
+        ('- note #7 - absent: "abc" in ', _FORM),
+        ('- note #7 - absent: "abc" within a', _FORM),
+        ('* note #7 - absent: "abc" in a', _FORM),
+        ('- note #7 - absent: "a"c" in a', _FORM),
+        ("A sentence of prose.", _FORM),
+        ('- note #7 - absent: "ab" in a', _FORM),
+        (f'- note #7 - absent: "{"x" * 201}" in a', _FORM),
+        (f'- note #7 - absent: "abc" in {"g" * 201}', _FORM),
+        ('- note #7 - absent: "abc" in /src/a.py', _FORM),
+        ('- note #7 - absent: "abc" in src/../a.py', _FORM),
+        ('- note #7 - absent: "abc" in ..', _FORM),
+        ('- note #7 - absent: "abc" in **/a/**/b/**', _FORM),
+        ('- note #7 - absent: "a`b" in a', _CHARS),
+        ('- note #7 - absent: "a\\b" in a', _CHARS),
+        ('- note #7 - absent: "a\tb" in a', _CHARS),
+        ('- note #7 - absent: "a\x01b" in a', _CHARS),
+        ('- note #7 - absent: "a\x7fb" in a', _CHARS),
+        ('- note #7 - absent: "a\u0085b" in a', _CHARS),
+        ('- note #7 - absent: "a\u2028b" in a', _CHARS),
+        ('- note #7 - absent: "a\u202eb" in a', _CHARS),
+        ('- note #7 - absent: "abc" in src/a b.py', _CHARS),
+        ('- note #7 - absent: "abc" in src/a?.py', _CHARS),
+        ('- note #7 - absent: "abc" in src/[ab].py', _CHARS),
+        ('- note #7 - absent: "abc" in src/$(x)', _CHARS),
+        ('- note #7 - absent: "abc" in src/a;b', _CHARS),
+        ('- note #7 - absent: "abc" in :(top)a', _CHARS),
+        ('- note #7 - absent: "abc" in src/\u00e9.py', _CHARS),
+    ],
+)
+def test_check_refuses_a_bad_constraint_check(
+    tmp_path: Path, line: str, message: str
+) -> None:
+    text = _with_checks('- note #1 - absent: "fine" in a', line)
+    # Not splitlines(): it also splits on U+0085 and U+2028, which awk does not.
+    at = text.split("\n").index(line) + 1
+    _assert_one_finding(tmp_path, text, at, message)
+
+
+def test_check_reads_constraint_checks_only_in_their_section(tmp_path: Path) -> None:
+    fenced = _with_checks("```", "- not a check", "```")
+    assert _check(tmp_path, fenced).returncode == 0
+    elsewhere = _replaced("A reason.\n", 'A reason.\n- note #7 - absent: "a`b" in a\n')
+    assert _check(tmp_path, elsewhere).returncode == 0
+
+
+def _constraints_plan(*checks: str, purpose: dict[int, str] | None = None) -> str:
+    """A three-step plan with ``checks`` under ``## Constraint checks``.
+
+    ``purpose`` maps a step number to the text of its **Changes on purpose** line.
+    """
+    section = (
+        "## Constraint checks\n\n" + "".join(f"{c}\n" for c in checks) + "\n"
+        if checks
+        else ""
+    )
+    body = ""
+    for n in (1, 2, 3):
+        body += f"{n}. **Step {n}**\n   - **Files:** a.txt\n"
+        if purpose and n in purpose:
+            body += f"   - **Changes on purpose:** {purpose[n]}\n"
+        body += "   - **Verify:** `true`\n"
+    return (
+        f"# Plan: Test\n\n{section}## Steps\n\n{body}\n"
+        "## Acceptance\n1. Done - **Check:** `true`\n"
+    )
+
+
+def _constraints(
+    repo: Path, posix: str, text: str, *args: str
+) -> subprocess.CompletedProcess[str]:
+    _write_plan(repo, text)
+    return _run(repo, posix, "constraints", "plans/p.md", *args)
+
+
+def _source(repo: Path, rel: str, text: str) -> None:
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "$(touch pwned)",
+        "; touch pwned",
+        "&& touch pwned #",
+        "' ; touch pwned ; '",
+        "| touch pwned",
+        "--open-files-in-pager=touch pwned",
+        "-Otouch pwned",
+    ],
+)
+def test_constraints_searches_shell_text_literally(
+    repo: Path, posix: str, text: str
+) -> None:
+    # Criterion 12: the text reaches git grep as an argument and is never run.
+    _source(repo, "src/a.py", f"x = 1\ny = 2\nz = '{text}'\n")
+    run = _constraints(
+        repo, posix, _constraints_plan(f'- note #7 - absent: "{text}" in src/**')
+    )
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert run.stdout.splitlines() == [
+        "broken: note #7 src/a.py:3",
+        "constraints: 0 hold, 1 broken",
+    ]
+    assert not (repo / "pwned").exists()
+    assert not (repo / "src" / "pwned").exists()
+    assert not (repo.parent / "pwned").exists()
+
+
+def test_constraints_a_shell_glob_is_never_expanded(repo: Path, posix: str) -> None:
+    _source(repo, "src/a.py", "keep\n")
+    _source(repo, "src/sub/b.py", "keep\n")
+    plan = _constraints_plan('- note #7 - absent: "keep" in src/*.py')
+    run = _constraints(repo, posix, plan)
+    assert run.stdout.splitlines() == [
+        "broken: note #7 src/a.py:1",
+        "constraints: 0 hold, 1 broken",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "content", "expected", "code"),
+    [
+        ("absent", "a\nb\nsleep(1)\n", ["broken: note #7 src/a.py:3"], 1),
+        ("absent", "a\nb\n", [], 0),
+        ("present", "a\nb\nsleep(1)\n", [], 0),
+        ("present", "a\nb\n", ["broken: note #7 (no match)"], 1),
+    ],
+)
+def test_constraints_absent_and_present(
+    repo: Path,
+    posix: str,
+    kind: str,
+    content: str,
+    expected: list[str],
+    code: int,
+) -> None:
+    _source(repo, "src/a.py", content)
+    run = _constraints(
+        repo, posix, _constraints_plan(f'- note #7 - {kind}: "sleep(" in src/**')
+    )
+    assert run.returncode == code, run.stdout + run.stderr
+    held, broken = (1, 0) if code == 0 else (0, 1)
+    assert run.stdout.splitlines() == [
+        *expected,
+        f"constraints: {held} hold, {broken} broken",
+    ]
+
+
+def test_constraints_searches_untracked_files_but_not_ignored_ones(
+    repo: Path, posix: str
+) -> None:
+    plan = _constraints_plan('- note #7 - absent: "secret" in **')
+    _source(repo, "plans/ignored.txt", "secret\n")
+    _source(repo, ".whygraph/x.txt", "secret\n")
+    assert _constraints(repo, posix, plan).returncode == 0
+    _source(repo, "new.txt", "secret\n")
+    run = _constraints(repo, posix, plan)
+    assert run.returncode == 1
+    assert "broken: note #7 new.txt:1" in run.stdout.splitlines()
+
+
+def test_constraints_reads_only_the_glob(repo: Path, posix: str) -> None:
+    _source(repo, "docs/a.md", "forbidden\n")
+    plan = _constraints_plan(
+        '- note #7 - absent: "forbidden" in src/**',
+        '- note #8 - absent: "forbidden" in docs/*.md',
+        '- note #9 - present: "alpha" in *.txt',
+    )
+    run = _constraints(repo, posix, plan)
+    assert run.returncode == 1
+    assert run.stdout.splitlines() == [
+        "broken: note #8 docs/a.md:1",
+        "constraints: 2 hold, 1 broken",
+    ]
+
+
+def test_constraints_exempts_a_note_changed_on_purpose(repo: Path, posix: str) -> None:
+    # Criterion 11: a step that names the note in Changes on purpose exempts it,
+    # from that step on.
+    _source(repo, "src/a.py", "a\nb\nsleep(1)\n")
+    check = '- note #7 - absent: "sleep(" in src/**'
+    plan = _constraints_plan(
+        check, purpose={2: '"never sleep" (note #7) - the task needs a pause'}
+    )
+    first = _constraints(repo, posix, plan, "1")
+    assert first.returncode == 1
+    assert first.stdout.splitlines()[0] == "broken: note #7 src/a.py:3"
+    for args in (("2",), ("3",)):
+        run = _constraints(repo, posix, plan, *args)
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert run.stdout.splitlines() == ["constraints: 0 hold, 0 broken"]
+    # Without a step number nothing is exempt.
+    assert _constraints(repo, posix, plan).returncode == 1
+
+
+def test_constraints_exemption_names_only_its_note(repo: Path, posix: str) -> None:
+    _source(repo, "src/a.py", "sleep(1)\n")
+    plan = _constraints_plan(
+        '- note #7 - absent: "sleep(" in src/**',
+        '- note #17 - absent: "sleep(" in src/**',
+        purpose={1: '"never sleep\n     at all" (note #17) - why'},
+    )
+    run = _constraints(repo, posix, plan, "1")
+    assert run.returncode == 1
+    assert run.stdout.splitlines() == [
+        "broken: note #7 src/a.py:1",
+        "constraints: 0 hold, 1 broken",
+    ]
+
+
+def test_constraints_a_later_step_does_not_exempt(repo: Path, posix: str) -> None:
+    _source(repo, "src/a.py", "sleep(1)\n")
+    plan = _constraints_plan(
+        '- note #7 - absent: "sleep(" in src/**',
+        purpose={3: '"never sleep" (note #7) - why'},
+    )
+    assert _constraints(repo, posix, plan, "2").returncode == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _constraints_plan(),
+        _constraints_plan().replace(
+            "## Steps", "```\n## Constraint checks\n```\n\n## Steps"
+        ),
+    ],
+)
+def test_constraints_without_a_section_exits_6(
+    repo: Path, posix: str, text: str
+) -> None:
+    run = _constraints(repo, posix, text)
+    assert run.returncode == 6, run.stdout + run.stderr
+
+
+def test_constraints_an_empty_section_holds(repo: Path, posix: str) -> None:
+    plan = _constraints_plan().replace("## Steps", "## Constraint checks\n\n## Steps")
+    run = _constraints(repo, posix, plan)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout.splitlines() == ["constraints: 0 hold, 0 broken"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '- note #7 - absent: "a`touch pwned`" in **',
+        '- note #7 - absent: "abc" in src/../../**',
+        '- note #7 - absent: "abc" in /etc/**',
+        '- note #7 - absent: "abc" in src/$(touch pwned)',
+        "- note #7 - absent: $(touch pwned) in **",
+    ],
+)
+def test_constraints_refuses_a_bad_line_before_any_search(
+    repo: Path, posix: str, line: str
+) -> None:
+    # The plan file is never trusted to have passed check.
+    plan = _constraints_plan('- note #1 - absent: "fine" in **', line)
+    run = _constraints(repo, posix, plan)
+    assert run.returncode == 5, run.stdout + run.stderr
+    assert run.stdout == ""
+    assert f"line {_line_of(plan, line)}: Constraint check" in run.stderr
+    assert not (repo / "pwned").exists()
+
+
+def test_constraints_reads_the_plan_from_a_blob(repo: Path, posix: str) -> None:
+    saved = _constraints_plan('- note #7 - present: "nowhere" in **')
+    blob = _git(repo, "hash-object", "-w", "--stdin", stdin=saved)
+    run = _constraints(repo, posix, _constraints_plan(), blob, "1")
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert run.stdout.splitlines()[0] == "broken: note #7 (no match)"
+
+
+def test_constraints_a_blob_that_cannot_be_read_exits_65(
+    repo: Path, posix: str
+) -> None:
+    run = _constraints(repo, posix, _constraints_plan(), "c" * 40)
+    assert run.returncode == 65
+    assert "the saved plan was changed" in run.stderr
+
+
+def test_constraints_runs_from_the_repo_root(repo: Path, posix: str) -> None:
+    _source(repo, "src/a.py", "sleep(1)\n")
+    _write_plan(repo, _constraints_plan('- note #7 - absent: "sleep(" in src/**'))
+    run = _tool(repo / "src", "constraints", "../plans/p.md", shell=_SHELLS[posix])
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert run.stdout.splitlines()[0] == "broken: note #7 src/a.py:1"
 
 
 # ---- refusals -------------------------------------------------------------------

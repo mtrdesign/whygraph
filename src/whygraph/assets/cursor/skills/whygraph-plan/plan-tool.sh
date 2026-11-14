@@ -31,6 +31,9 @@
 #                               check the amendment of step N; on a pass,
 #                               write its "## Amendments" entry and print
 #                               the new blob id
+#   constraints <plan> [<blob>] [<N>]
+#                               search for each line of "## Constraint
+#                               checks"; 1 when one is broken
 #
 # Usage errors exit 64 (EX_USAGE). The plan's files live in
 # .whygraph/plans/<stem>/steps/. A subcommand that takes a plan exits 77 when
@@ -69,6 +72,21 @@
 # hold no shell syntax and no git push, keep the number of commands, and
 # re-point at most one reviewed command at another tracked file or test id;
 # a new Files path must be named in the Change and in no Boundaries.
+#
+# constraints reads the plan, or the saved plan <blob> as end does, and
+# runs no command of the plan. For each check line it runs
+#   git grep -nIF --untracked -e <text> -- ':(glob)<glob>'
+# from the repository root, with the text and the glob as arguments; no
+# shell reads them. Tracked and untracked files count, ignored and binary
+# ones do not. An absent text with a hit prints "broken: note #<id>
+# <path>:<line>" for the first hit; a present text with none prints
+# "broken: note #<id> (no match)". With <N>, a note that the Changes on
+# purpose field of step N or an earlier step names as "(note #<id>)" is
+# skipped. The last line is "constraints: <k> hold, <b> broken". It exits 0
+# when none is broken, 1 when one is, 6 when the plan has no "## Constraint
+# checks" section, 5 when a line under it breaks the fixed form or the
+# character set (check prints the same findings, see AWK_CONSTRAINT), and
+# 70 when git grep fails. It writes no file.
 #
 # The plan parser reads step lines only under "## Steps", Acceptance items
 # only under "## Acceptance", and skips fenced lines.
@@ -112,6 +130,7 @@ usage: plan-tool.sh snapshot
        plan-tool.sh log-check <plan> <blob>
        plan-tool.sh state <plan> [<hash>]
        plan-tool.sh amend-check <plan> <blob> <N>
+       plan-tool.sh constraints <plan> [<blob>] [<N>]
 EOF
     exit 64
 }
@@ -388,6 +407,91 @@ function first_word(part,    n, words, i, word) {
 }
 '
 
+# The constraint check line, shared by check and constraints. A line under
+# "## Constraint checks" reads
+#   - note #<id> - <absent | present>: "<text>" in <glob>
+# The text is 3 to 200 characters with no control character, no line or
+# paragraph separator, no bidi control, no double quote, no backtick and no
+# backslash. The glob is 1 to 200 of A-Z, a-z, 0-9, ".", "_", "-", "/" and
+# "*", with no leading "/", no ".." part and at most two "**". These are the
+# rules the portal applies to a note check. Bytes from 0x80 up count as one
+# character per UTF-8 lead byte.
+AWK_CONSTRAINT='
+# Read line s as a check. Returns "" and sets C_ID, C_KIND, C_TEXT and C_GLOB,
+# or returns "form" or "chars" for the first rule the line breaks.
+function constraint_of(s,    rest, at, n, i, c, next_byte, chars, parts, stars) {
+    if (!SEPARATORS) {
+        # LRM, RLM, LS, PS, LRE to RLO, and LRI to PDI, in UTF-8.
+        SEPARATORS = split("\342\200\216 \342\200\217 \342\200\250 \342\200\251 \342\200\252 \342\200\253 \342\200\254 \342\200\255 \342\200\256 \342\201\246 \342\201\247 \342\201\250 \342\201\251", SEPARATOR, " ")
+        GLOB_SET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-/*"
+    }
+    sub(/[ \t]+$/, "", s)
+    if (s !~ /^- note #[1-9][0-9]* - (absent|present): "/)
+        return "form"
+    rest = substr(s, 9)
+    at = index(rest, " ")
+    C_ID = substr(rest, 1, at - 1)
+    rest = substr(rest, at + 3)
+    at = index(rest, ":")
+    C_KIND = substr(rest, 1, at - 1)
+    rest = substr(rest, at + 3)
+    at = index(rest, "\"")
+    if (at == 0)
+        return "form"
+    C_TEXT = substr(rest, 1, at - 1)
+    rest = substr(rest, at + 1)
+    if (substr(rest, 1, 4) != " in " || length(rest) == 4)
+        return "form"
+    C_GLOB = substr(rest, 5)
+
+    n = length(C_TEXT)
+    chars = 0
+    for (i = 1; i <= n; i++) {
+        c = substr(C_TEXT, i, 1)
+        if (c < " " || c == "\177" || c == "`" || c == "\\")
+            return "chars"
+        next_byte = substr(C_TEXT, i + 1, 1)
+        # A C1 control: U+0080 to U+009F.
+        if (c == "\302" && next_byte >= "\200" && next_byte < "\240")
+            return "chars"
+        if (c < "\200" || c >= "\300")
+            chars++
+    }
+    for (i = 1; i <= SEPARATORS; i++)
+        if (index(C_TEXT, SEPARATOR[i]) > 0)
+            return "chars"
+    if (chars < 3 || chars > 200)
+        return "form"
+
+    n = length(C_GLOB)
+    for (i = 1; i <= n; i++)
+        if (index(GLOB_SET, substr(C_GLOB, i, 1)) == 0)
+            return "chars"
+    if (n > 200 || substr(C_GLOB, 1, 1) == "/")
+        return "form"
+    n = split(C_GLOB, parts, "/")
+    for (i = 1; i <= n; i++)
+        if (parts[i] == "..")
+            return "form"
+    stars = 0
+    rest = C_GLOB
+    while ((at = index(rest, "**")) > 0) {
+        stars++
+        rest = substr(rest, at + 2)
+    }
+    return (stars > 2) ? "form" : ""
+}
+
+# The finding for what constraint_of returned, or "".
+function constraint_finding(broken) {
+    if (broken == "form")
+        return "Constraint check is not in the fixed form"
+    if (broken == "chars")
+        return "Constraint check has a character outside the allowed set"
+    return ""
+}
+'
+
 AWK_CHECK='
 BEGIN {
     # UTF-8 bytes of U+2014 and U+2013; awk runs in the C locale.
@@ -631,7 +735,12 @@ function on_question_line(s,    at) {
             section = "risks"
         } else if (line ~ /^## Confidence:/) {
             have["## Confidence:"] = 1
+        } else if (line ~ /^## Constraint checks[ \t]*$/) {
+            section = "constraints"
         }
+    } else if (section == "constraints") {
+        if (line ~ /[^ \t]/ && constraint_finding(constraint_of(line)) != "")
+            finding(NR, constraint_finding(constraint_of(line)))
     } else if (section == "steps") {
         on_step_line(line)
     } else if (section == "acceptance") {
@@ -662,6 +771,60 @@ END {
         if (!(STRUCTURE[i] in have))
             finding(1, "missing " STRUCTURE[i])
     exit any_finding ? 1 : 0
+}
+'
+
+# The checks of the plan read from stdin, as tab-separated lines: "section"
+# for each "## Constraint checks" heading, "check <id> <kind> <glob> <text>"
+# for a good line under it, "bad <line number> <finding>" for any other
+# non-blank line, and "exempt <id>" for each "(note #<id>)" on the Changes on
+# purpose field of step N or an earlier step. With N empty, no line is
+# exempt. Fenced lines are skipped.
+AWK_CONSTRAINTS='
+$0 ~ /^[ \t]*(```|~~~)/ {
+    in_fence = !in_fence
+    next
+}
+in_fence {
+    next
+}
+/^## / {
+    in_steps = ($0 ~ /^## Steps[ \t]*$/)
+    in_checks = ($0 ~ /^## Constraint checks[ \t]*$/)
+    if (in_checks)
+        print "section"
+    step = 0
+    purpose = 0
+    next
+}
+in_checks && /[^ \t]/ {
+    broken = constraint_finding(constraint_of($0))
+    if (broken != "")
+        printf "bad\t%d\t%s\n", NR, broken
+    else
+        printf "check\t%s\t%s\t%s\t%s\n", C_ID, C_KIND, C_GLOB, C_TEXT
+    next
+}
+!in_steps || N == "" {
+    next
+}
+/^[0-9]+\. \*\*/ {
+    step = substr($0, 1, index($0, ".") - 1) + 0
+    purpose = 0
+    next
+}
+/^[ \t]*(-[ \t]+)?\*\*[A-Z][A-Za-z -]*:\*\*/ {
+    name = $0
+    sub(/^[ \t]*(-[ \t]+)?\*\*/, "", name)
+    sub(/:\*\*.*$/, "", name)
+    purpose = (name == "Changes on purpose")
+}
+purpose && step >= 1 && step <= N + 0 {
+    rest = $0
+    while (match(rest, /\(note #[0-9]+\)/)) {
+        printf "exempt\t%s\n", substr(rest, RSTART + 7, RLENGTH - 8)
+        rest = substr(rest, RSTART + RLENGTH)
+    }
 }
 '
 
@@ -1299,7 +1462,7 @@ cmd_fingerprint() {
 cmd_check() {
     [ $# -eq 1 ] || usage
     [ -f "$1" ] || usage "no such plan: $1"
-    LC_ALL=C awk "$AWK_SPANS$AWK_CHECK" <"$1"
+    LC_ALL=C awk "$AWK_SPANS$AWK_CONSTRAINT$AWK_CHECK" <"$1"
 }
 
 # Take the end tree and write the record of the run in $work to $record.
@@ -2371,6 +2534,93 @@ cmd_amend_check() {
     printf '%s\n' "$id"
 }
 
+# Search for each check of "## Constraint checks". The text and the glob are
+# validated by AWK_CONSTRAINT and again here, and reach git grep as
+# arguments after -e and --: no shell reads them.
+cmd_constraints() {
+    [ $# -ge 1 ] && [ $# -le 3 ] || usage
+    plan=$1
+    shift
+    blob=
+    step=
+    if [ $# -gt 0 ] && is_object_id "$1"; then
+        blob=$1
+        shift
+    fi
+    if [ $# -gt 0 ]; then
+        step=$1
+        shift
+        check_step "$step"
+    fi
+    [ $# -eq 0 ] || usage
+    [ -n "$blob" ] || [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+
+    # The plan path is relative to the caller, so read it before the cd.
+    if [ -z "$blob" ]; then
+        cat <"$plan" >"$work/plan" || usage "cannot read $plan"
+    fi
+    cd "$root" || exit 1
+    [ -z "$blob" ] || read_blob "$blob" "$work/plan"
+    if [ -n "$step" ]; then
+        plan_field "$work/plan" "" "" | grep -qx "step $step" || usage "no step $step in $plan"
+    fi
+    LC_ALL=C awk -v N="$step" "$AWK_CONSTRAINT$AWK_CONSTRAINTS" <"$work/plan" >"$work/checks" ||
+        fail "cannot read the plan"
+    if ! grep -qx section "$work/checks"; then
+        printf 'constraints: the plan has no "## Constraint checks" section\n'
+        exit 6
+    fi
+    LC_ALL=C awk -F '\t' '$1 == "bad" { printf "plan-tool.sh: line %s: %s\n", $2, $3 }' \
+        <"$work/checks" >"$work/bad"
+    if [ -s "$work/bad" ]; then
+        cat "$work/bad" >&2
+        exit 5
+    fi
+    exempt=" $(LC_ALL=C awk -F '\t' '$1 == "exempt" { printf "%s ", $2 }' <"$work/checks")"
+
+    tab=$(printf '\t')
+    held=0
+    broken=0
+    while IFS=$tab read -r kind id check_kind glob text; do
+        [ "$kind" = check ] || continue
+        case $exempt in
+            *" $id "*) continue ;;
+        esac
+        # The second check: never trust the awk alone with a process call.
+        case $glob in
+            '' | /* | *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/*-]*)
+                printf 'plan-tool.sh: note #%s: %s\n' "$id" "Constraint check has a character outside the allowed set" >&2
+                exit 5
+                ;;
+        esac
+        case $text in
+            *[\"\`\\]*)
+                printf 'plan-tool.sh: note #%s: %s\n' "$id" "Constraint check has a character outside the allowed set" >&2
+                exit 5
+                ;;
+        esac
+        run_git -c core.quotePath=true grep -nIF --untracked --no-color -e "$text" -- ":(glob)$glob" \
+            </dev/null >"$work/hits" 2>"$work/error"
+        found=$?
+        [ "$found" -le 1 ] || fail "git grep failed for note #$id: $(head -n 1 "$work/error")"
+        if [ "$check_kind" = absent ] && [ "$found" -eq 0 ]; then
+            where=$(LC_ALL=C awk '{ if (match($0, /:[0-9]+:/)) print substr($0, 1, RSTART + RLENGTH - 2); exit }' <"$work/hits")
+            printf 'broken: note #%s %s\n' "$id" "$where"
+            broken=$((broken + 1))
+        elif [ "$check_kind" = present ] && [ "$found" -eq 1 ]; then
+            printf 'broken: note #%s (no match)\n' "$id"
+            broken=$((broken + 1))
+        else
+            held=$((held + 1))
+        fi
+    done <"$work/checks"
+    printf 'constraints: %s hold, %s broken\n' "$held" "$broken"
+    [ "$broken" -eq 0 ] || exit 1
+}
+
 [ $# -ge 1 ] || usage
 subcommand=$1
 shift
@@ -2401,5 +2651,6 @@ case $subcommand in
     log-check) cmd_log_check "$@" ;;
     state) cmd_state "$@" ;;
     amend-check) cmd_amend_check "$@" ;;
+    constraints) cmd_constraints "$@" ;;
     *) usage "unknown subcommand: $subcommand" ;;
 esac

@@ -141,6 +141,8 @@ Then run these sub-steps in this order:
 
    Verify **passes** iff the exit code is `0` (and the prose intent is clearly satisfied - e.g. a `grep` for a string returns the string).
 
+   With `ACCEPTANCE: inline`, a passing Verify has one more check. Run `<PLAN_TOOL> constraints <PLAN_PATH> <N>`. Exit 0 or 6 keeps the pass. Exit 1 is a failed Verify, with the first `broken:` line as its cause. Any other exit halts with `plan-tool.sh constraints exited <code>: <first stderr line>`. With `ACCEPTANCE: separate`, the command runs this check itself after `end`.
+
    On a failure, if fewer than `FIX_ATTEMPTS` fix attempts were used on this step, record a fix line and go back to 4 for one bounded fix, confined to the step's files. The fix line is `  - fix <i>/<FIX_ATTEMPTS>: <cause> - <files>`. In a `FINDINGS:` run, record `  - fix (findings) <i>: <cause> - <files>` instead, where `<i>` is the number of the finding the fix serves; record one such line for each finding applied in 4, too. With no attempts left, halt. When the step failed at baseline, mark the failure `pre-existing at baseline`.
 7. **Capture after.** Once Verify passes, run the command of 2 with `--tag after` in place of `--tag before`. Exit `2` counts as a failed Verify: go back to 4 while attempts remain, with the cause `capture after: exit 2 - <first stderr line>`; with none left, halt. Exits `0`, `3` and any other code are handled as in 2.
 8. **End tree and diff.** Run the snapshot command to get `<t1>` and write it to `.whygraph/plans/<stem>/steps/<N>.t1`, overwriting any earlier one. Write the output of `git diff -U3 --no-color --no-ext-diff <t0> <t1>` to `.whygraph/plans/<stem>/steps/<N>.diff`.

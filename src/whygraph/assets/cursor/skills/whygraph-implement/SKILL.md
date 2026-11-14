@@ -161,15 +161,18 @@ S1, S2, S1b and S7 each make one step run, in this order:
 5. If the `**Halt:**` starts with `Verify timed out`, skip `end`. Stop with `Verify did not finish in <T> s`.
 6. Run `sh .cursor/skills/whygraph-plan/plan-tool.sh end <plan> <N> <t0> <blob>`. Use the `<t0>` that `begin` printed.
    - It prints `end: <t0> <t1> exit <code>`. Keep `<t1>`. Print each `outside Files:` line it prints.
+   - When `end` exits 0, run `sh .cursor/skills/whygraph-plan/plan-tool.sh constraints <plan> <blob> <N>`. Print each line it prints.
 7. Apply the first rule that matches:
    - `end` exit 65 with the stderr line `the step changed the plan tool`: stop with `the change touched the plan tool`.
    - `end` exit 65 otherwise, 77, or a code outside 0, 1, 4 and 124: stop as Step 2a says.
+   - `constraints` exit 65, 77, or a code outside 0, 1 and 6: stop as Step 2a says.
    - The `**Halt:**` starts with `permission denied:`: stop with the Halt text.
    - The `**Halt:**` starts with `the Test first test`: stop with the Halt text.
    - The `**Halt:**` starts with `capture unavailable` or `the change needs `: stop with `the step stopped: <Halt text>`.
    - `end` exit 4: stop with `Verify cannot run: <command> not found (exit <code>)`. Take `<command>` from the last `command:` line of `steps/<N>.verify`.
    - `end` exit 124: stop with `Verify did not finish in <T> s`. Take `<T>` from the record's `timed out after <T> s` line.
    - The report has `## Escalated findings`: stop with `some findings fall outside the step's Files`.
+   - `end` exit 0, `**Status:** complete` and `constraints` exit 1: the run **failed its Verify**. Its `<excerpt>` is the first `broken:` line.
    - `end` exit 0 and `**Status:** complete`: the run **succeeded**.
    - `end` exit 1: the run **failed its Verify**.
    - Otherwise the run **halted**. The reason is the `**Halt:**` text, or the report's first line when it has none.

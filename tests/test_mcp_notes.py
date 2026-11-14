@@ -1950,3 +1950,495 @@ def test_other_notes_render_exactly_as_before() -> None:
     ]
     for view, expected in samples:
         assert notes.render_note_line(view) == expected
+
+
+# ---------------------------------------------------------------------------
+# Checks on constraint notes (plan 54 section 5.8)
+# ---------------------------------------------------------------------------
+
+CHECK = {"kind": "absent", "text": "return 9", "glob": "src/**/*.py"}
+CHECK_ARGS = {f"check_{k}": v for k, v in CHECK.items()}
+
+M_SHAPE = "check must be an object with kind, text and glob"
+M_TOGETHER = "a check needs kind, text and glob together"
+M_CONSTRAINT = "only a constraint note can carry a check"
+M_KIND = "check kind must be absent or present"
+M_TYPE = "check text and glob must be text"
+M_TEXT_LEN = "check text must be 3 to 200 characters"
+M_TEXT_LINE = "check text must be one line of printable characters"
+M_TEXT_CHARS = "check text must not contain a double quote, a backtick or a backslash"
+M_GLOB_LEN = "check glob must be 1 to 200 characters"
+M_GLOB_CHARS = "check glob may hold only letters, digits, '.', '_', '-', '/' and '*'"
+M_GLOB_LEAD = "check glob must not start with '/'"
+M_GLOB_DOTDOT = "check glob must not hold a '..' segment"
+M_GLOB_STARS = "check glob may hold '**' at most twice"
+
+
+def _bad(message: str, **check: Any) -> tuple:
+    """A constraint note's check: :data:`CHECK` with ``check`` changed."""
+    return ({**CHECK, **check}, "constraint", message)
+
+
+BAD_CHECKS: list[tuple[Any, str, str]] = [
+    ("absent", "constraint", M_SHAPE),
+    (["absent", "x", "y"], "constraint", M_SHAPE),
+    ({**CHECK, "command": "rm -rf /"}, "constraint", M_SHAPE),
+    ({"kind": "absent", "text": "return 9"}, "constraint", M_TOGETHER),
+    ({"kind": "absent", "glob": "*.py"}, "constraint", M_TOGETHER),
+    ({"text": "return 9", "glob": "*.py"}, "constraint", M_TOGETHER),
+    ({**CHECK, "glob": None}, "constraint", M_TOGETHER),
+    (CHECK, "decision", M_CONSTRAINT),
+    (CHECK, "gotcha", M_CONSTRAINT),
+    (CHECK, "convention", M_CONSTRAINT),
+    _bad(M_KIND, kind="never"),
+    _bad(M_KIND, kind="ABSENT"),
+    _bad(M_KIND, kind=1),
+    _bad(M_TYPE, text=123),
+    _bad(M_TYPE, glob=["*.py"]),
+    _bad(M_TEXT_LEN, text="ab"),
+    _bad(M_TEXT_LEN, text=""),
+    _bad(M_TEXT_LEN, text="x" * 201),
+    _bad(M_TEXT_LINE, text="one\ntwo"),
+    _bad(M_TEXT_LINE, text="one\rtwo"),
+    _bad(M_TEXT_LINE, text="tab\there"),
+    _bad(M_TEXT_LINE, text="nul\x00here"),
+    _bad(M_TEXT_LINE, text="del\x7fhere"),
+    _bad(M_TEXT_LINE, text="c1\x85here"),
+    _bad(M_TEXT_LINE, text="line sep"),
+    _bad(M_TEXT_LINE, text="bidi‮flip"),
+    _bad(M_TEXT_LINE, text="lone\ud800half"),
+    _bad(M_TEXT_CHARS, text='say "hi"'),
+    _bad(M_TEXT_CHARS, text="run `ls`"),
+    _bad(M_TEXT_CHARS, text="back\\slash"),
+    _bad(M_GLOB_LEN, glob=""),
+    _bad(M_GLOB_LEN, glob="a" * 201),
+    _bad(M_GLOB_CHARS, glob="src/ a.py"),
+    _bad(M_GLOB_CHARS, glob="src/?.py"),
+    _bad(M_GLOB_CHARS, glob="src/[ab].py"),
+    _bad(M_GLOB_CHARS, glob="src/*.py;rm"),
+    _bad(M_GLOB_CHARS, glob="$(id)"),
+    _bad(M_GLOB_CHARS, glob=":(top)*.py"),
+    _bad(M_GLOB_CHARS, glob="src\\*.py"),
+    _bad(M_GLOB_CHARS, glob="src/café.py"),
+    _bad(M_GLOB_LEAD, glob="/etc/passwd"),
+    _bad(M_GLOB_DOTDOT, glob=".."),
+    _bad(M_GLOB_DOTDOT, glob="../x.py"),
+    _bad(M_GLOB_DOTDOT, glob="src/../x.py"),
+    _bad(M_GLOB_DOTDOT, glob="src/.."),
+    _bad(M_GLOB_STARS, glob="**/a/**/b/**"),
+]
+"""Every refusal of section 5.8, with its message: ``(check, note kind, message)``."""
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=T",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+    )
+
+
+def _track(root: Path) -> None:
+    """Make the fixture repo a git repository with every file committed."""
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+
+
+def _checked(check: dict, anchor: dict | None = None, body: str = "A rule.") -> int:
+    note_id = _propose(body, anchor, kind="constraint", check=check)["id"]
+    _confirm(note_id, admin=True)
+    return note_id
+
+
+def _note_count() -> int:
+    with get_session() as session:
+        return len(session.exec(select(ProjectNote)).all())
+
+
+@pytest.mark.parametrize(("check", "kind", "message"), BAD_CHECKS)
+def test_propose_refuses_a_bad_check(
+    project: SimpleNamespace, check: Any, kind: str, message: str
+) -> None:
+    with pytest.raises(WhyGraphError) as info:
+        _propose("A checked rule.", kind=kind, check=check)
+    assert info.value.code == "note_check_invalid"
+    assert str(info.value) == message
+    assert _note_count() == 0
+
+
+@pytest.mark.parametrize(("check", "kind", "message"), BAD_CHECKS)
+def test_confirm_refuses_a_bad_check(
+    project: SimpleNamespace, check: Any, kind: str, message: str
+) -> None:
+    note_id = _propose("A rule to confirm.", kind="constraint")["id"]
+    with pytest.raises(WhyGraphError) as info:
+        _confirm(note_id, admin=True, check=check, kind=kind)
+    assert info.value.code == "note_check_invalid"
+    assert str(info.value) == message
+    assert _row(note_id).status == "proposed"
+
+
+def test_a_check_refusal_never_quotes_the_value(project: SimpleNamespace) -> None:
+    secret = "zz-secret-zz"
+    for check in (
+        {**CHECK, "text": secret + "\n"},
+        {**CHECK, "text": secret + '"'},
+        {**CHECK, "glob": secret + " "},
+        {**CHECK, "glob": "../" + secret},
+        {**CHECK, "kind": secret},
+    ):
+        with pytest.raises(WhyGraphError) as info:
+            _propose("A rule.", kind="constraint", check=check)
+        assert secret not in str(info.value)
+
+
+def test_a_kind_edit_away_from_constraint_needs_the_check_dropped(
+    project: SimpleNamespace,
+) -> None:
+    note_id = _propose("A rule.", kind="constraint", check=CHECK)["id"]
+    with pytest.raises(WhyGraphError) as info:
+        _confirm(note_id, admin=True, kind="decision")
+    assert (info.value.code, str(info.value)) == ("note_check_invalid", M_CONSTRAINT)
+    view = _confirm(note_id, admin=True, kind="decision", check=None)
+    assert view["kind"] == "decision" and view["check"] is None
+    row = _row(note_id)
+    assert (row.check_kind, row.check_text, row.check_glob) == (None, None, None)
+
+
+def test_propose_stores_a_check_and_accepts_the_bounds(
+    project: SimpleNamespace,
+) -> None:
+    view = _propose("A checked rule.", kind="constraint", check=CHECK)
+    assert view["check"] == CHECK
+    assert view["check_state"] is None  # proposed: not live
+    row = _row(view["id"])
+    assert (row.check_kind, row.check_text, row.check_glob) == (
+        "absent",
+        "return 9",
+        "src/**/*.py",
+    )
+    accepted = [
+        {"kind": "present", "text": "abc", "glob": "a"},
+        {"kind": "absent", "text": "x" * 200, "glob": "a" * 200},
+        {"kind": "absent", "text": "café 'single' <b> $x %d", "glob": "**/*"},
+        {"kind": "absent", "text": "  spaced  ", "glob": "**/a/**/b.py"},
+        {"kind": "absent", "text": "dots", "glob": "a..b/.x/_y-z/*.py"},
+    ]
+    for n, check in enumerate(accepted):
+        made = _propose(f"Rule {n}.", kind="constraint", check=check)
+        assert made["check"] == check
+    plain = _propose("No check.", kind="constraint")
+    assert plain["check"] is None and plain["check_state"] is None
+    empty = _propose(
+        "All three null.",
+        kind="decision",
+        check={"kind": None, "text": None, "glob": None},
+    )
+    assert empty["check"] is None
+
+
+def test_confirm_keeps_sets_and_clears_a_check(project: SimpleNamespace) -> None:
+    kept = _propose("Kept.", kind="constraint", check=CHECK)["id"]
+    assert _confirm(kept, admin=True)["check"] == CHECK
+    added = _propose("Added.", kind="constraint")["id"]
+    other = {"kind": "present", "text": "return 2", "glob": "src/pkg/*.py"}
+    assert _confirm(added, admin=True, check=other)["check"] == other
+    cleared = _propose("Cleared.", kind="constraint", check=CHECK)["id"]
+    assert _confirm(cleared, admin=True, check=None)["check"] is None
+
+
+def test_a_check_edit_on_a_wide_note_needs_a_second_confirmer(
+    project: SimpleNamespace,
+) -> None:
+    note_id = _propose("Wide rule.", kind="constraint", actor="u1")["id"]
+    assert (
+        _code(lambda: _confirm(note_id, actor="u2", check=CHECK))
+        == "note_needs_second_confirmer"
+    )
+    # Naming the check it already has is not an edit.
+    same = _propose("Wide checked.", kind="constraint", check=CHECK, actor="u1")["id"]
+    assert _confirm(same, actor="u2", check=dict(CHECK))["status"] == "confirmed"
+
+
+def test_a_revision_carries_its_own_check(project: SimpleNamespace) -> None:
+    old = _confirmed(body="Keep it.", kind="constraint")
+    revision = _propose("Keep it.", kind="constraint", check=CHECK, supersedes_id=old)
+    # Same body and anchor, but a check: a new proposal, not a duplicate.
+    assert revision["duplicate"] is False and revision["id"] != old
+    assert revision["check"] == CHECK
+    done = _confirm(revision["id"], admin=True)
+    assert done["check"] == CHECK
+    assert _row(old).status == "retired" and _row(old).check_kind is None
+    again = _propose("Keep it.", kind="constraint", check=CHECK)
+    assert again["duplicate"] is True and again["id"] == revision["id"]
+
+
+def _state_of(note_id: int) -> str | None:
+    return notes.get_note(note_id)["check_state"]
+
+
+def test_check_state_holds_and_broken(project: SimpleNamespace) -> None:
+    _track(project.root)
+    absent_ok = _checked({"kind": "absent", "text": "return 9", "glob": "src/**"})
+    absent_bad = _checked({"kind": "absent", "text": "return 2", "glob": "src/**"})
+    present_ok = _checked({"kind": "present", "text": "return 2", "glob": "src/**"})
+    present_bad = _checked(
+        {"kind": "present", "text": "return 9", "glob": "src/**"}, body="Other."
+    )
+    no_files = _checked(
+        {"kind": "present", "text": "return 2", "glob": "lib/**"}, body="Lib."
+    )
+    assert _state_of(absent_ok) == "holds"
+    assert _state_of(absent_bad) == "broken"
+    assert _state_of(present_ok) == "holds"
+    assert _state_of(present_bad) == "broken"
+    assert _state_of(no_files) == "broken"
+    # The glob is git's: '*' stays inside one directory.
+    one_level = _checked(
+        {"kind": "absent", "text": "return 2", "glob": "src/*.py"}, body="One."
+    )
+    assert _state_of(one_level) == "holds"
+
+
+def test_check_state_reads_tracked_files_in_the_working_tree(
+    project: SimpleNamespace,
+) -> None:
+    _track(project.root)
+    note_id = _checked({"kind": "absent", "text": "return 9", "glob": "src/**"})
+    (project.root / "src" / "pkg" / "new.py").write_text("return 9\n")
+    assert _state_of(note_id) == "holds"  # untracked: not a file git tracks
+    (project.root / "src" / "pkg" / "b.py").write_text("return 9\n")
+    assert _state_of(note_id) == "broken"  # tracked, edited in the working tree
+    (project.root / "src" / "pkg" / "b.py").unlink()
+    assert _state_of(note_id) == "holds"  # deleted in the working tree
+
+
+def test_check_state_is_unknown_over_the_file_limit(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(project.root)
+    note_id = _checked({"kind": "absent", "text": "return 9", "glob": "src/**"})
+    assert notes.CHECK_MAX_FILES == 500
+    monkeypatch.setattr(notes, "CHECK_MAX_FILES", 3)  # src/** tracks four files
+    assert _state_of(note_id) == "unknown"
+    monkeypatch.setattr(notes, "CHECK_MAX_FILES", 4)
+    assert _state_of(note_id) == "holds"
+
+
+def test_check_state_is_unknown_for_a_file_over_the_size_limit(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(project.root)
+    absent = _checked({"kind": "absent", "text": "return 9", "glob": "src/**"})
+    present = _checked({"kind": "present", "text": "one", "glob": "src/**"}, body="B.")
+    monkeypatch.setattr(notes, "ANCHOR_FILE_MAX_BYTES", 20)  # x.py is 71 bytes
+    assert _state_of(absent) == "unknown"
+    # A hit in a readable file still decides.
+    assert _state_of(present) == "holds"
+
+
+def test_the_file_limit_is_shared_by_one_call(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(project.root)
+    for n in range(2):
+        _checked(
+            {"kind": "absent", "text": "return 9", "glob": "src/pkg/*.py"},
+            {"kind": "path", "path": "src/pkg"},
+            body=f"Rule {n}.",
+        )
+    monkeypatch.setattr(notes, "CHECK_MAX_FILES", 3)  # two files per check
+    found = notes.notes_for_target(_target("src/pkg/a.py", 1, 2))
+    assert sorted(v["check_state"] for v in found) == ["holds", "unknown"]
+
+
+def test_check_state_outside_a_git_repository_is_unknown(
+    project: SimpleNamespace,
+) -> None:
+    note_id = _checked(CHECK)
+    assert _state_of(note_id) == "unknown"
+
+
+def test_check_state_only_while_confirmed(project: SimpleNamespace) -> None:
+    _track(project.root)
+    proposed = _propose("Waiting.", kind="constraint", check=CHECK)["id"]
+    assert notes.get_note(proposed)["check"] == CHECK
+    assert _state_of(proposed) is None
+    retired = _checked(CHECK, body="Gone.")
+    assert _state_of(retired) == "holds"
+    view = notes.retire(retired, actor_uid="u1", reason="outdated")
+    assert view["check"] == CHECK and view["check_state"] is None
+    assert _state_of(retired) is None
+    plain = _confirmed(body="No check.", kind="constraint")
+    assert _state_of(plain) is None and notes.get_note(plain)["check"] is None
+
+
+def test_lists_never_compute_a_check_state(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(project.root)
+    note_id = _checked(CHECK)
+
+    def refuse(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("a list ran a check")
+
+    monkeypatch.setattr(notes, "_tracked_files", refuse)
+    listed = notes.list_notes()
+    assert [v["id"] for v in listed] == [note_id]
+    assert listed[0]["check"] == CHECK and "check_state" not in listed[0]
+    assert all("check_state" not in v for v in notes.project_notes())
+    assert all("check_state" not in v for v in notes.list_notes(attention=True))
+
+
+def test_notes_for_target_computes_the_check_state(project: SimpleNamespace) -> None:
+    _track(project.root)
+    broken = _checked(
+        {"kind": "absent", "text": "return 2", "glob": "src/**"},
+        {"kind": "path", "path": "src/pkg"},
+    )
+    found = notes.notes_for_target(_target("src/pkg/a.py", 1, 2))
+    assert [(v["id"], v["check_state"]) for v in found] == [(broken, "broken")]
+    line = notes.render_note_line(found[0])
+    assert line.endswith('"A rule." [check: broken]')
+
+
+def test_deny_listed_files_are_never_read(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(project.root)
+    read: list[str] = []
+    real = notes._read_lines
+    monkeypatch.setattr(
+        notes, "_read_lines", lambda root, rel: read.append(rel) or real(root, rel)
+    )
+    env_note = _checked({"kind": "present", "text": "TOKEN=x", "glob": ".env*"})
+    toml = _checked(
+        {"kind": "present", "text": "anything", "glob": "*.toml"}, body="Toml."
+    )
+    internal = _checked(
+        {"kind": "present", "text": "slug=demo", "glob": ".whygraph/**"}, body="W."
+    )
+    assert _state_of(env_note) == "broken"  # the file holds it, but is never read
+    assert _state_of(toml) == "broken"
+    assert _state_of(internal) == "broken"
+    assert read == []
+
+
+def test_a_tracked_symlink_is_never_followed(
+    project: SimpleNamespace, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("return 9\n")
+    os.symlink(outside, project.root / "src" / "pkg" / "link.py")
+    _track(project.root)
+    note_id = _checked({"kind": "absent", "text": "return 9", "glob": "src/**"})
+    assert _state_of(note_id) == "holds"
+
+
+def test_a_stored_check_that_breaks_the_rules_is_unknown(
+    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _track(project.root)
+    note_id = _checked(CHECK)
+    calls: list[object] = []
+    monkeypatch.setattr(notes, "_tracked_files", lambda *a: calls.append(a) or [])
+    for values in (
+        {"check_glob": "../*"},
+        {"check_text": 'x"y'},
+        {"check_kind": "maybe"},
+        {"check_text": None},
+        {"kind": "decision"},
+    ):
+        _set(note_id, **{**{f"check_{k}": v for k, v in CHECK.items()}, **values})
+        assert _state_of(note_id) == "unknown"
+        _set(note_id, kind="constraint")
+    assert calls == []
+
+
+def test_render_note_line_marks_only_a_broken_check() -> None:
+    base: notes.NoteView = {
+        "id": 7,
+        "kind": "constraint",
+        "body": "b",
+        "anchor": {"kind": "path", "path": "src"},
+        "anchor_state": "current",
+    }
+    plain = '- note #7 [constraint] ("src", current): "b"'
+    assert notes.render_note_line(base) == plain
+    for state in (None, "holds", "unknown"):
+        view: Any = {**base, "check": CHECK, "check_state": state}
+        assert notes.render_note_line(view) == plain
+    broken: Any = {**base, "check": CHECK, "check_state": "broken"}
+    assert notes.render_note_line(broken) == plain + " [check: broken]"
+
+
+def test_propose_tool_stores_supersedes_id(project: SimpleNamespace) -> None:
+    old = _confirmed(PROJECT, "Old fact.")
+    result = _as("u-mcp", body="New fact.", project_wide=True, supersedes_id=old)
+    assert result["note"]["supersedes_id"] == old
+    assert _row(result["note_id"]).supersedes_id == old
+    assert _row(old).status == "confirmed"
+
+
+def test_propose_tool_refuses_a_bad_supersedes_id(project: SimpleNamespace) -> None:
+    proposed = _propose("Not yet.", PROJECT)["id"]
+    purpose, _ = _purpose()
+    _confirm(purpose["id"], admin=True)
+    for target, code in [
+        (9999, "note_not_found"),
+        (proposed, "note_state"),
+        (purpose["id"], "note_invalid"),
+    ]:
+        with pytest.raises(WhyGraphError) as info:
+            _as("u-mcp", body="Rev.", project_wide=True, supersedes_id=target)
+        assert info.value.code == code
+
+
+def test_propose_tool_takes_a_check(project: SimpleNamespace) -> None:
+    result = _as(
+        "u-mcp",
+        kind="constraint",
+        project_wide=True,
+        check_kind="absent",
+        check_text="return 9",
+        check_glob="src/**/*.py",
+    )
+    assert result["note"]["check"] == CHECK
+    assert _row(result["note_id"]).check_glob == "src/**/*.py"
+    plain = _as("u-mcp", body="No check.", kind="constraint", project_wide=True)
+    assert plain["note"]["check"] is None
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        ({"check_kind": "absent"}, M_TOGETHER),
+        ({"check_text": "return 9", "check_glob": "*.py"}, M_TOGETHER),
+        ({"check_kind": "absent", "check_text": "x", "check_glob": "*.py"}, M_TEXT_LEN),
+        (
+            {"check_kind": "absent", "check_text": "abc", "check_glob": "/x"},
+            M_GLOB_LEAD,
+        ),
+    ],
+)
+def test_propose_tool_refuses_a_bad_check(
+    project: SimpleNamespace, args: dict, message: str
+) -> None:
+    with pytest.raises(WhyGraphError) as info:
+        _as("u-mcp", kind="constraint", project_wide=True, **args)
+    assert (info.value.code, str(info.value)) == ("note_check_invalid", message)
+    with pytest.raises(WhyGraphError) as info:
+        _as("u-mcp", kind="decision", project_wide=True, **{**args, **CHECK_ARGS})
+    assert (info.value.code, str(info.value)) == ("note_check_invalid", M_CONSTRAINT)

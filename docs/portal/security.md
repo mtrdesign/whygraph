@@ -430,6 +430,12 @@ front of every later session. The controls:
   `.whygraph`, `.codegraph`, `whygraph.toml`, `.env*`) cannot be anchors.
 - **Chat cannot load images from a model.** A Markdown image in a reply is shown as its alt text and a
   link, never fetched, because a loaded image URL could carry what the model had read out of the portal.
+- **A check on a constraint is a text search, never a command.** The text and the glob are checked
+  against a short character set (no quote, backtick, backslash or `..`) and reach `git grep` as
+  arguments, so no shell reads them. A wrong check, from a bad or injected note that a person
+  confirmed, can stop a run or fail a step's Verify, but it cannot change a file. It also needs a
+  confirmed note: a proposal's check does nothing. See
+  [A check on a constraint](../guide/notes.md#a-check-on-a-constraint).
 - **No text in logs.** Audit and log fields carry ids and enums, never a note's text, an origin or a
   ref.
 - **Statistics cannot read notes.** The Chat statistics tool refuses the notes table.

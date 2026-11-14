@@ -7,6 +7,7 @@ import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { ErrorState } from "../state/ErrorState";
 import { nativeSelect } from "../portal/Field";
+import { CheckFields, NO_CHECK, checkOf, draftProblem } from "./CheckFields";
 
 /** Proposes a note on `anchor`. A human proposal still waits for a confirm (its own or another member's). */
 export function AddNoteForm({ anchor }: { anchor: NoteAnchor }) {
@@ -15,13 +16,23 @@ export function AddNoteForm({ anchor }: { anchor: NoteAnchor }) {
   const [body, setBody] = useState("");
   const [kind, setKind] = useState<NoteKind>("decision");
   const [open, setOpen] = useState(false);
+  const [check, setCheck] = useState(NO_CHECK);
   const [existing, setExisting] = useState<number | null>(null);
 
+  const withCheck = kind === "constraint" && check.kind !== "";
+  const problem = withCheck ? draftProblem(check) : null;
   const add = useMutation({
-    mutationFn: () => api.proposeNote({ body: body.trim(), kind, anchor }),
+    mutationFn: () =>
+      api.proposeNote({
+        body: body.trim(),
+        kind,
+        anchor,
+        ...(kind === "constraint" && check.kind !== "" ? { check: checkOf(check) ?? undefined } : {}),
+      }),
     onSuccess: (note) => {
       setExisting(note.duplicate ? note.id : null);
       setBody("");
+      setCheck(NO_CHECK);
       setOpen(false);
       void invalidate();
     },
@@ -64,9 +75,10 @@ export function AddNoteForm({ anchor }: { anchor: NoteAnchor }) {
           </option>
         ))}
       </select>
+      {kind === "constraint" && <CheckFields value={check} onChange={setCheck} />}
       <p className="text-xs text-muted-foreground">Everyone who can open this project can see it.</p>
       <div className="flex gap-2">
-        <Button size="sm" type="submit" disabled={add.isPending || body.trim().length === 0}>
+        <Button size="sm" type="submit" disabled={add.isPending || body.trim().length === 0 || (withCheck && problem !== null)}>
           Propose note
         </Button>
         <Button size="sm" type="button" variant="ghost" onClick={() => setOpen(false)}>

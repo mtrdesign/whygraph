@@ -10,6 +10,7 @@ import {
   SOURCE_LABEL,
   STATUS_LABEL,
   anchorText,
+  checkText,
   chatSessionOf,
   isAgentNote,
   isProjectWide,
@@ -17,7 +18,7 @@ import {
   useInvalidateNotes,
   useViewerUid,
 } from "../../lib/notes";
-import { useProjectApi, useSlug } from "../../lib/project";
+import { useProjectApi, useProjectQuery, useSlug } from "../../lib/project";
 import { plural } from "../../lib/plural";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -27,6 +28,7 @@ import { Textarea } from "../ui/textarea";
 import { ErrorState } from "../state/ErrorState";
 import { ConfirmDialog } from "../portal/ConfirmDialog";
 import { nativeSelect } from "../portal/Field";
+import { CheckFields, checkOf, draftOf, draftProblem } from "./CheckFields";
 
 const STATE_BADGE: Record<NoteAnchorState, { label: string; variant: "success" | "warning" | "destructive" | "outline" } | null> = {
   current: { label: "Anchor current", variant: "success" },
@@ -63,6 +65,20 @@ export function NoteBadges({ note }: { note: Note }) {
   );
 }
 
+/**
+ * The check state of a confirmed note. List views omit it, so it is fetched from
+ * the single-note view, only when there is a check to report on. Errors show nothing.
+ */
+function useCheckState(note: Note) {
+  const need = !!note.check && note.status === "confirmed" && note.check_state === undefined;
+  const one = useProjectQuery(["notes", "one", note.id], (api) => api.note(note.id), {
+    enabled: need,
+    staleTime: 60_000,
+    retry: false,
+  });
+  return note.check_state ?? (need ? one.data?.check_state : undefined);
+}
+
 type Mode = null | "confirm" | "still-true" | "revise" | "retire";
 
 /**
@@ -93,6 +109,7 @@ export function NoteCard({
   const [body, setBody] = useState(note.body);
   const [kind, setKind] = useState<NoteKind>(note.kind);
   const [lines, setLines] = useState({ start: String(note.anchor.line_start ?? ""), end: String(note.anchor.line_end ?? "") });
+  const [check, setCheck] = useState(draftOf(note.check));
   const [reason, setReason] = useState<NoteRetireReason>("outdated");
   const [rejectOpen, setRejectOpen] = useState(false);
   // A wide note the server told us needs a second confirmer (the UI only knows project notes up front).
@@ -115,9 +132,23 @@ export function NoteCard({
   // A project note's text is edited at confirm only by a project admin (the server refuses others).
   const canEditText = !isProjectWide(note) || canConfigure;
 
+  const checkState = useCheckState(note);
+  // Only a changed check is sent: undefined keeps the proposal's, null removes it.
+  const nextCheck = kind === "constraint" ? checkOf(check) : null;
+  const before = note.check ?? null;
+  const checkChanged =
+    canEditText &&
+    (nextCheck === null
+      ? before !== null
+      : before === null || before.kind !== nextCheck.kind || before.text !== nextCheck.text || before.glob !== nextCheck.glob);
+  const checkBad = canEditText && kind === "constraint" && draftProblem(check) !== null;
+
   const confirm = useMutation({
     mutationFn: () =>
-      api.confirmNote(note.id, edited && canEditText ? { body: body.trim(), kind } : {}),
+      api.confirmNote(note.id, {
+        ...(edited && canEditText ? { body: body.trim(), kind } : {}),
+        ...(checkChanged ? { check: nextCheck } : {}),
+      }),
     onSuccess: done,
     onError,
   });
@@ -170,6 +201,7 @@ export function NoteCard({
     retire.reset();
     setBody(note.body);
     setKind(note.kind);
+    setCheck(draftOf(note.check));
     setMode(m);
   };
 
@@ -179,7 +211,7 @@ export function NoteCard({
     </p>
   );
 
-  const editor = (submit: string, onSubmit: () => void, enabled: boolean, allowText: boolean) => (
+  const editor = (submit: string, onSubmit: () => void, enabled: boolean, allowText: boolean, withCheck = false) => (
     <div className="flex flex-col gap-2" data-testid="note-editor">
       {allowText ? (
         <>
@@ -201,6 +233,7 @@ export function NoteCard({
               </option>
             ))}
           </select>
+          {withCheck && kind === "constraint" && <CheckFields value={check} onChange={setCheck} />}
         </>
       ) : (
         <p className="text-xs text-muted-foreground">
@@ -256,7 +289,7 @@ export function NoteCard({
       );
     }
   } else if (canAct && mode === "confirm") {
-    actions = editor("Confirm", () => confirm.mutate(), body.trim().length > 0, canEditText);
+    actions = editor("Confirm", () => confirm.mutate(), body.trim().length > 0 && !checkBad, canEditText, true);
   } else if (canAct && mode === "still-true") {
     actions = (
       <div className="flex flex-col gap-2">
@@ -340,6 +373,19 @@ export function NoteCard({
       <div className="break-all font-mono text-xs text-muted-foreground" data-testid="note-anchor">
         {anchorText(note.anchor)}
       </div>
+      {note.check && (
+        <p className="flex flex-wrap items-center gap-1.5 break-all text-xs text-muted-foreground" data-testid="note-check">
+          <span>Check - {checkText(note.check)}</span>
+          {checkState && (
+            <Badge
+              variant={checkState === "holds" ? "success" : checkState === "broken" ? "destructive" : "outline"}
+              data-testid="check-state"
+            >
+              {checkState === "holds" ? "Check holds" : checkState === "broken" ? "Check broken" : "Check unknown"}
+            </Badge>
+          )}
+        </p>
+      )}
       {note.commits_since ? (
         <p className="text-xs text-muted-foreground">{plural(note.commits_since, "commit")} touched this since it was confirmed.</p>
       ) : null}

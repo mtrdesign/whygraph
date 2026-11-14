@@ -9,8 +9,9 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from whygraph.analyze import CommitEvidence, Rationale
+from whygraph.analyze import CommitEvidence, Item, ItemRef, Rationale
 from whygraph.api_v1 import (
+    API_VERSION,
     MAX_HUNKS,
     MAX_ORIGINS,
     ErrorOut,
@@ -19,6 +20,7 @@ from whygraph.api_v1 import (
     HunkIn,
     OriginIn,
     RationaleIn,
+    RationaleItemOut,
     RationaleOut,
     StatusOut,
     TargetIn,
@@ -243,13 +245,27 @@ def test_evidence_out_mirrors_evidence_dict_exactly() -> None:
         EvidenceOut.model_validate({**payload, "push_status": "lost"})
 
 
+ITEMS = (
+    Item(
+        "keep it small",
+        "quoted",
+        (ItemRef("commit", SHA), ItemRef("pr", "7", "https://github.com/o/r/pull/7")),
+        quote="keep it small",
+    ),
+    Item("callers pass bytes", "cited", (ItemRef("issue", "3"),)),
+    Item("no network here", "inferred"),
+    Item("an old string", "unknown"),
+)
+"""One item of each basis, with and without a ``url`` and a ``quote``."""
+
+
 def test_rationale_out_mirrors_the_tool_response() -> None:
     rationale = Rationale(
         purpose="p",
         why="w",
-        constraints=("c",),
-        tradeoffs=(),
-        risks=("r1", "r2"),
+        constraints=ITEMS,
+        tradeoffs=("t",),
+        risks=ITEMS[1:3],
         model="m",
         provider="stub",
     )
@@ -257,10 +273,42 @@ def test_rationale_out_mirrors_the_tool_response() -> None:
         payload = _format_response(
             target, rationale, [_evidence()], "2026-01-01T00:00:00+00:00"
         )
-        assert RationaleOut.model_validate(payload).model_dump() == payload
+        model = RationaleOut.model_validate(payload)
+        assert model.model_dump() == payload
+        assert model.model_dump(mode="json") == payload
+        assert isinstance(model.constraints[0], RationaleItemOut)
         assert TargetOut.model_validate(
             target_dict(target)
         ).model_dump() == target_dict(target)
+    # `url` and `quote` are left out when unset, as `Item.as_dict` leaves them.
+    first, second = payload["constraints"][:2]
+    assert first["refs"][1]["url"] and "url" not in first["refs"][0]
+    assert "quote" in first and "quote" not in second
+
+
+def test_rationale_item_out_refuses_an_unknown_basis_or_ref_kind() -> None:
+    item = {"text": "x", "basis": "quoted", "refs": [{"kind": "pr", "id": "1"}]}
+    assert RationaleItemOut.model_validate(item).model_dump() == item
+    with pytest.raises(ValidationError):
+        RationaleItemOut.model_validate({**item, "basis": "guessed"})
+    with pytest.raises(ValidationError):
+        RationaleItemOut.model_validate({**item, "refs": [{"kind": "tag", "id": "1"}]})
+    # A version-1 card (plain strings) does not parse: `/meta` stops that
+    # client first (`API_VERSION`), so it never gets this far.
+    card = _format_response(
+        Target("a.py", 1, 2, None),
+        Rationale("p", "w", (), (), (), "m", "stub"),
+        [_evidence()],
+        "2026-01-01T00:00:00+00:00",
+    )
+    RationaleOut.model_validate(card)
+    with pytest.raises(ValidationError):
+        RationaleOut.model_validate({**card, "constraints": ["a plain string"]})
+
+
+def test_api_version_is_2() -> None:
+    """Plan 54 D5: card items became objects, so the contract version moved."""
+    assert API_VERSION == 2
 
 
 def test_status_and_error_out() -> None:

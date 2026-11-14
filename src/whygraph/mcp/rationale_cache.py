@@ -48,7 +48,8 @@ from sqlalchemy import delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, col, select
 
-from whygraph.analyze import CommitEvidence, Rationale
+from whygraph.analyze import CommitEvidence, Item, ItemRef, Rationale
+from whygraph.analyze.rationale import ITEM_BASES, REF_KINDS
 from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.db import get_session
 from whygraph.db.models import RationaleCache
@@ -88,14 +89,81 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _decode_ref(value: object) -> ItemRef | None:
+    """One stored ref, or ``None`` when it is not a ``{"kind", "id"}`` object."""
+    if not isinstance(value, dict):
+        return None
+    kind, ref_id, url = value.get("kind"), value.get("id"), value.get("url")
+    if kind not in REF_KINDS or not isinstance(ref_id, str) or not ref_id:
+        return None
+    return ItemRef(kind, ref_id, url if isinstance(url, str) and url else None)
+
+
+def decode_item(value: object) -> Item | None:
+    """One stored constraint or risk as an :class:`~whygraph.analyze.Item`.
+
+    Parameters
+    ----------
+    value : object
+        A decoded JSON list element: an object ``{"text", "basis", "refs",
+        "quote"}`` (:meth:`Item.as_dict`), or a plain string from a row or
+        bundle written before items carried sources.
+
+    Returns
+    -------
+    Item or None
+        A plain string becomes ``Item(text, "unknown", (), "")``. An object
+        keeps its basis when it is a known one (else ``"unknown"``) and the
+        refs that are well formed. ``None`` for anything else (an object
+        without a string ``text``, a number), which the caller skips.
+    """
+    if isinstance(value, str):
+        return Item(value, "unknown")
+    if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+        return None
+    basis = value.get("basis")
+    if basis not in ITEM_BASES:
+        basis = "unknown"
+    raw_refs = value.get("refs")
+    refs = tuple(
+        ref
+        for ref in map(_decode_ref, raw_refs if isinstance(raw_refs, list) else [])
+        if ref is not None
+    )
+    quote = value.get("quote")
+    return Item(value["text"], basis, refs, quote if isinstance(quote, str) else "")
+
+
+def decode_items(raw: str | None) -> tuple[Item, ...]:
+    """A stored JSON list of constraints or risks as items (see :func:`decode_item`).
+
+    Parameters
+    ----------
+    raw : str or None
+        The JSON text of a ``constraints`` / ``risks`` column.
+
+    Returns
+    -------
+    tuple[Item, ...]
+        The items; empty for a missing or malformed column.
+    """
+    try:
+        values = json.loads(raw) if raw else []
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(values, list):
+        return ()
+    return tuple(item for item in map(decode_item, values) if item is not None)
+
+
 def _rationale_from_row(row: RationaleCache) -> Rationale:
     """Rebuild the :class:`~whygraph.analyze.Rationale` a cache row holds."""
     return Rationale(
         purpose=row.purpose,
         why=row.why,
-        constraints=tuple(json.loads(row.constraints)),
+        constraints=decode_items(row.constraints),
         tradeoffs=tuple(json.loads(row.tradeoffs)),
-        risks=tuple(json.loads(row.risks)),
+        risks=decode_items(row.risks),
         model=row.actual_model or row.model,
         provider=row.actual_provider or row.provider,
         input_tokens=row.input_tokens,
@@ -364,9 +432,9 @@ def store_cached(
         "cached_at": cached_at,
         "purpose": rationale.purpose,
         "why": rationale.why,
-        "constraints": json.dumps(list(rationale.constraints)),
+        "constraints": json.dumps([item.as_dict() for item in rationale.constraints]),
         "tradeoffs": json.dumps(list(rationale.tradeoffs)),
-        "risks": json.dumps(list(rationale.risks)),
+        "risks": json.dumps([item.as_dict() for item in rationale.risks]),
         "input_tokens": rationale.input_tokens,
         "output_tokens": rationale.output_tokens,
         "actual_provider": rationale.provider,
@@ -490,6 +558,7 @@ _IMPORT_SPAN_MAX = 5_000
 _IMPORT_TEXT_MAX = 32_000
 _IMPORT_LIST_ITEMS = 50
 _IMPORT_ITEM_MAX = 4_000
+_IMPORT_REF_MAX = 500
 _IMPORT_IDENT_MAX = 200
 _IMPORT_FUTURE_SLACK = timedelta(minutes=5)
 _IMPORT_INT_MAX = 2**31
@@ -784,6 +853,35 @@ def _import_deferred(value: Any) -> str:
     return " ".join(tokens)
 
 
+def _import_list_element(name: str, element: Any) -> Any:
+    """One imported list element as the value to store; ``None`` when too long.
+
+    ``tradeoffs`` stay strings. A constraint or risk is read by the one
+    decoder (:func:`decode_item`): a plain string becomes basis ``unknown``,
+    an object keeps its basis and well-formed refs, anything else is a format
+    error. The stored value is :meth:`Item.as_dict`.
+    """
+    if name == "tradeoffs":
+        return clean_text(
+            element, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
+        )
+    item = decode_item(element)
+    if item is None:
+        raise ImportFormatError(name, "must be a list of text or item objects")
+    text = clean_text(item.text, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name)
+    quote = clean_text(
+        item.quote, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
+    )
+    if text is None or quote is None:
+        return None
+    refs = tuple(
+        ref
+        for ref in item.refs
+        if len(ref.id) <= _IMPORT_REF_MAX and len(ref.url or "") <= _IMPORT_REF_MAX
+    )
+    return Item(text, item.basis, refs, quote).as_dict()
+
+
 def _check_rationale(
     record: Mapping[str, Any], latest: datetime, paths: dict[str, str | None]
 ) -> dict[str, Any] | str | None:
@@ -827,23 +925,21 @@ def _check_rationale(
         texts[name] = clean_text(
             record.get(name), multiline=True, max_chars=_IMPORT_TEXT_MAX, field=name
         )
-    lists: dict[str, list[str] | None] = {}
+    lists: dict[str, list[Any] | None] = {}
     for name in ("constraints", "tradeoffs", "risks"):
         value = record.get(name)
         if not isinstance(value, list | tuple):
             raise ImportFormatError(name, "must be a list of text")
-        items: list[str] | None = []
+        items: list[Any] | None = []
         if len(value) > _IMPORT_LIST_ITEMS:
             items = None
         else:
-            for item in value:
-                text = clean_text(
-                    item, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
-                )
-                if text is None:
+            for element in value:
+                cleaned = _import_list_element(name, element)
+                if cleaned is None:
                     items = None
                     break
-                items.append(text)
+                items.append(cleaned)
         lists[name] = items
     deferred_shas = _import_deferred(record.get("deferred_shas"))
     # Format errors above win over skips; the skips follow.

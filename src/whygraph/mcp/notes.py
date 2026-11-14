@@ -41,6 +41,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,7 @@ from whygraph.services.codegraph import (
     CodeGraphError,
     Symbol,
 )
+from whygraph.services.git import git_env
 
 from . import targets
 from .descriptions import PROPOSE_NOTE_ANNOTATIONS, PROPOSE_NOTE_DESCRIPTION
@@ -153,6 +155,44 @@ LIST_LIMIT_MAX = 200
 AGENT_SOURCES = ("chat", "mcp")
 """The sources the caps apply to."""
 
+CHECK_NOTE_KIND = "constraint"
+"""The only note kind that may carry a check (plan 54 section 5.8)."""
+
+CHECK_KINDS = ("absent", "present")
+"""What a check asserts: its text is absent from, or present in, its files."""
+
+CHECK_STATES = ("holds", "broken", "unknown")
+"""The ``check_state`` of a live check (a confirmed note's)."""
+
+CHECK_TEXT_MIN_CHARS = 3
+CHECK_TEXT_MAX_CHARS = 200
+"""Bounds of a check's text, in characters."""
+
+CHECK_GLOB_MAX_CHARS = 200
+"""Longest check glob, in characters."""
+
+CHECK_MAX_GLOB_STARS = 2
+"""Most ``**`` a check glob may hold."""
+
+CHECK_MAX_FILES = 500
+"""Files one call may read for its checks (R10); beyond it a check is ``unknown``.
+
+Each file is read through :func:`_read_lines`, so it is also capped at
+:data:`ANCHOR_FILE_MAX_BYTES`."""
+
+_CHECK_FIELDS = ("kind", "text", "glob")
+_CHECK_COLUMNS = ("check_kind", "check_text", "check_glob")
+_CHECK_TEXT_FORBIDDEN = frozenset('"`\\')
+_CHECK_GLOB_RE = re.compile(r"[A-Za-z0-9._/*-]+")
+_CHECK_GIT_TIMEOUT = 10
+_REGULAR_FILE_MODES = (b"100644", b"100755")
+
+_KEEP: Any = object()
+"""``confirm(check=...)`` left out: keep the proposal's check."""
+
+_OMIT: Any = object()
+"""``_view(check_state=...)`` left out: a list view, no state computed."""
+
 _ANCHOR_KEYS: dict[str, frozenset[str]] = {
     "project": frozenset(),
     "area": frozenset({"area"}),
@@ -221,6 +261,14 @@ class NoteView(TypedDict, total=False):
         Full commit SHAs and ``#N`` references.
     supersedes_id : int
         The note this one revises.
+    check : dict or None
+        ``{"kind", "text", "glob"}``: a constraint note's check (``kind`` is
+        ``absent`` or ``present``), or ``None``. Member-written data.
+    check_state : str or None
+        ``holds``, ``broken`` or ``unknown`` for a confirmed note with a
+        check, ``None`` for any other note. Computed only for a view of one
+        note or one target (:func:`get_note`, the write paths,
+        :func:`notes_for_target`); absent from list views.
     resource : str
         ``whygraph://note/<id>``; confirmed notes only.
     duplicate : bool
@@ -248,6 +296,8 @@ class NoteView(TypedDict, total=False):
     edited_on_confirm: bool
     refs: list[str]
     supersedes_id: int
+    check: dict | None
+    check_state: str | None
     resource: str
     duplicate: bool
 
@@ -335,6 +385,92 @@ def _is_control(ch: str) -> bool:
     """A C0 / C1 control character or DEL."""
     code = ord(ch)
     return code < 0x20 or 0x7F <= code <= 0x9F
+
+
+def _check_invalid(message: str) -> WhyGraphError:
+    """A check refusal; ``message`` names a rule, never a value."""
+    return WhyGraphError(message, code="note_check_invalid")
+
+
+def _clean_check(kind: object, check: object) -> dict[str, str | None]:
+    """Validate a note's check; return its three ``project_note`` columns.
+
+    A check is a fixed text that must be absent from, or present in, the
+    files git tracks that match one glob (plan 54 D8). Its text later
+    reaches ``git grep`` on a developer's machine (R8), so both fields are
+    held to a fixed character set here, and again wherever they are used.
+
+    Parameters
+    ----------
+    kind : object
+        The note's (final) kind; only ``constraint`` may carry a check.
+    check : object
+        ``None``, or a mapping with exactly the keys ``kind``
+        (``absent`` / ``present``), ``text`` and ``glob``. A mapping whose
+        three values are all ``None`` is no check.
+
+    Returns
+    -------
+    dict
+        ``check_kind``, ``check_text`` and ``check_glob``: all set, or all
+        ``None``.
+
+    Raises
+    ------
+    WhyGraphError
+        ``note_check_invalid``: not a mapping of those keys; some but not all
+        three fields; a check on a note that is not a constraint; an unknown
+        kind; a text that is not 3 to 200 printable characters on one line
+        or holds ``"``, a backtick or a backslash; a glob that is not 1 to
+        200 characters of letters, digits, ``.``, ``_``, ``-``, ``/`` and
+        ``*``, starts with ``/``, holds a ``..`` segment or more than two
+        ``**``. No message quotes a value.
+    """
+    if check is None:
+        return dict.fromkeys(_CHECK_COLUMNS)
+    if not isinstance(check, Mapping) or set(check) - set(_CHECK_FIELDS):
+        raise _check_invalid("check must be an object with kind, text and glob")
+    given = [check.get(name) for name in _CHECK_FIELDS]
+    if all(value is None for value in given):
+        return dict.fromkeys(_CHECK_COLUMNS)
+    if any(value is None for value in given):
+        raise _check_invalid("a check needs kind, text and glob together")
+    if kind != CHECK_NOTE_KIND:
+        raise _check_invalid("only a constraint note can carry a check")
+    check_kind, text, glob = given
+    if not isinstance(check_kind, str) or check_kind not in CHECK_KINDS:
+        raise _check_invalid("check kind must be absent or present")
+    if not isinstance(text, str) or not isinstance(glob, str):
+        raise _check_invalid("check text and glob must be text")
+    if not CHECK_TEXT_MIN_CHARS <= len(text) <= CHECK_TEXT_MAX_CHARS:
+        raise _check_invalid(
+            f"check text must be {CHECK_TEXT_MIN_CHARS} to {CHECK_TEXT_MAX_CHARS} "
+            "characters"
+        )
+    # isprintable() refuses every control, format (bidi), separator other
+    # than the ASCII space (U+2028 / U+2029 too), surrogate and private-use
+    # character, so the text is one line of visible characters.
+    if not text.isprintable():
+        raise _check_invalid("check text must be one line of printable characters")
+    if _CHECK_TEXT_FORBIDDEN & set(text):
+        raise _check_invalid(
+            "check text must not contain a double quote, a backtick or a backslash"
+        )
+    if not 1 <= len(glob) <= CHECK_GLOB_MAX_CHARS:
+        raise _check_invalid(
+            f"check glob must be 1 to {CHECK_GLOB_MAX_CHARS} characters"
+        )
+    if not _CHECK_GLOB_RE.fullmatch(glob):
+        raise _check_invalid(
+            "check glob may hold only letters, digits, '.', '_', '-', '/' and '*'"
+        )
+    if glob.startswith("/"):
+        raise _check_invalid("check glob must not start with '/'")
+    if ".." in glob.split("/"):
+        raise _check_invalid("check glob must not hold a '..' segment")
+    if glob.count("**") > CHECK_MAX_GLOB_STARS:
+        raise _check_invalid("check glob may hold '**' at most twice")
+    return {"check_kind": check_kind, "check_text": text, "check_glob": glob}
 
 
 def _check_kind(kind: object) -> str:
@@ -983,6 +1119,161 @@ def _commits_since(
     return min(len(shas), COMMITS_SINCE_CAP)
 
 
+# ---------------------------------------------------------------------------
+# Checks on read (plan 54 section 5.8)
+# ---------------------------------------------------------------------------
+
+
+def _check_view(row: ProjectNote) -> dict[str, str | None] | None:
+    """A row's stored check as ``{"kind", "text", "glob"}``, or ``None``."""
+    values = (row.check_kind, row.check_text, row.check_glob)
+    if all(value is None for value in values):
+        return None
+    return dict(zip(_CHECK_FIELDS, values))
+
+
+def _check_changes(row: ProjectNote, check: object) -> bool:
+    """Whether a confirm's ``check`` differs from the proposal's (an edit)."""
+    if check is _KEEP:
+        return False
+    stored = _check_view(row) or dict.fromkeys(_CHECK_FIELDS)
+    if check is None:
+        return any(value is not None for value in stored.values())
+    if not isinstance(check, Mapping) or set(check) - set(_CHECK_FIELDS):
+        return True
+    return {name: check.get(name) for name in _CHECK_FIELDS} != stored
+
+
+def _tracked_files(root: Path, glob: str, limit: int) -> list[str] | None:
+    """The regular files git tracks under ``root`` that match ``glob``.
+
+    One ``git ls-files`` with the glob as a single ``:(glob)`` pathspec
+    after ``--``, as an argument (never through a shell), under the
+    portal's git environment. Symbolic links and submodules are left out.
+
+    Returns
+    -------
+    list of str or None
+        Repo-relative paths, or ``None`` when git fails (not a repository,
+        a timeout) or more than ``limit`` files match.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "ls-files",
+                "--stage",
+                "-z",
+                "--",
+                f":(glob){glob}",
+            ],
+            cwd=root,
+            env=git_env(),
+            capture_output=True,
+            timeout=_CHECK_GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    files: list[str] = []
+    seen: set[str] = set()
+    for entry in result.stdout.split(b"\0"):
+        meta, tab, name = entry.partition(b"\t")
+        if not tab or meta.split(b" ", 1)[0] not in _REGULAR_FILE_MODES:
+            continue
+        rel = os.fsdecode(name)
+        if rel in seen:  # an unmerged path is listed once per stage
+            continue
+        seen.add(rel)
+        files.append(rel)
+        if len(files) > limit:
+            return None
+    return files
+
+
+class _CheckRunner:
+    """Check states for one call, under one shared file budget (R10).
+
+    Built only for a view of one note or one target, never for a list. Each
+    file is read through the guards notes already use: Chat's deny-list (a
+    deny-listed file is skipped, never read, so a check cannot probe a
+    secret), :func:`check_inside`, :func:`_validate_path` and
+    :func:`_read_lines` (no symlink, a regular file of at most
+    :data:`ANCHOR_FILE_MAX_BYTES`).
+    """
+
+    def __init__(self) -> None:
+        self.root = targets.repo_root()
+        self.budget = CHECK_MAX_FILES
+
+    def state(self, row: ProjectNote) -> str | None:
+        """``holds`` / ``broken`` / ``unknown``, or ``None`` without a live check.
+
+        A check is live only while its note is confirmed. A stored check
+        that breaks the rules of :func:`_clean_check` is ``unknown`` and
+        never reaches git. More matching files than the call's remaining
+        budget, a git failure or a file that cannot be read safely (when no
+        file decided the result) make the state ``unknown``.
+        """
+        stored = _check_view(row)
+        if row.status != "confirmed" or stored is None:
+            return None
+        try:
+            check = _clean_check(row.kind, stored)
+        except WhyGraphError:
+            return "unknown"
+        glob, text = check["check_glob"] or "", check["check_text"] or ""
+        files = _tracked_files(self.root, glob, self.budget)
+        if files is None:
+            return "unknown"
+        self.budget -= len(files)
+        needle = text.encode("utf-8")
+        found = uncertain = False
+        for rel in files:
+            hit = self._contains(rel, needle)
+            if hit is None:
+                uncertain = True
+            elif hit:
+                found = True
+                break
+        absent = check["check_kind"] == "absent"
+        if found:
+            return "broken" if absent else "holds"
+        if uncertain:
+            return "unknown"
+        return "holds" if absent else "broken"
+
+    def _contains(self, rel: str, needle: bytes) -> bool | None:
+        """Whether a tracked file holds ``needle``; ``None`` when it cannot be read.
+
+        A deny-listed file, and one deleted from the working tree, holds
+        nothing.
+        """
+        # Function-local: chat/__init__ -> chat.tools -> mcp.rationale -> mcp.notes.
+        from whygraph.chat.files import _is_denied
+
+        if (
+            _is_denied(Path(rel)) is not None
+            or _is_denied(Path(rel.casefold())) is not None
+        ):
+            return False
+        full = _inside(self.root, rel)
+        if full is None:
+            return None
+        if not os.path.lexists(full):
+            return False
+        try:
+            _validate_path(rel)
+            lines = _read_lines(self.root, rel)
+        except (WhyGraphError, _Unreadable):
+            return None
+        return any(needle in line for line in lines)
+
+
 def _refs_list(raw: str | None) -> list[str]:
     """The stored refs JSON as a list."""
     if not raw:
@@ -1001,8 +1292,9 @@ def _view(
     *,
     commits_since: int | None = None,
     duplicate: bool | None = None,
+    check_state: Any = _OMIT,
 ) -> NoteView:
-    """Shape a row into a :class:`NoteView`."""
+    """Shape a row into a :class:`NoteView` (``check_state`` only when given)."""
     anchor: dict[str, Any] = {"kind": row.anchor_kind}
     if row.anchor_kind == "area":
         anchor["area"] = row.area
@@ -1047,6 +1339,9 @@ def _view(
     view["refs"] = _refs_list(row.refs)
     if row.supersedes_id is not None:
         view["supersedes_id"] = row.supersedes_id
+    view["check"] = _check_view(row)
+    if check_state is not _OMIT:
+        view["check_state"] = check_state
     if row.status == "confirmed":
         view["resource"] = f"whygraph://note/{row.id}"
     if duplicate is not None:
@@ -1061,14 +1356,20 @@ def _build(
     *,
     state: tuple[str, _Location | None] | None = None,
     duplicate: bool | None = None,
+    checks: _CheckRunner | None = None,
 ) -> NoteView:
-    """Evaluate (unless given) and shape one row."""
+    """Evaluate (unless given) and shape one row; ``checks`` adds ``check_state``."""
     anchor_state, location = state if state is not None else evaluator.evaluate(row)
     commits = None
     if row.anchor_kind in ("path", "area"):
         commits = _commits_since(session, row, evaluator)
     return _view(
-        row, anchor_state, location, commits_since=commits, duplicate=duplicate
+        row,
+        anchor_state,
+        location,
+        commits_since=commits,
+        duplicate=duplicate,
+        check_state=checks.state(row) if checks is not None else _OMIT,
     )
 
 
@@ -1086,7 +1387,9 @@ def _view_by_id(note_id: int, *, duplicate: bool | None = None) -> NoteView:
     """Read one note back as a view (after its write transaction committed)."""
     with get_session() as session, _Evaluator(MAX_FILES_PER_CALL) as evaluator:
         row = _load(session, note_id)
-        return _build(session, evaluator, row, duplicate=duplicate)
+        return _build(
+            session, evaluator, row, duplicate=duplicate, checks=_CheckRunner()
+        )
 
 
 def _transition(session: Session, note_id: int, expected: str, values: dict) -> int:
@@ -1130,13 +1433,17 @@ def get_note(note_id: int) -> NoteView:
 def _find_duplicate(
     session: Session, body: str, fields: Mapping[str, Any]
 ) -> ProjectNote | None:
-    """A non-retired note with the same anchor and whitespace-normalised body."""
+    """A non-retired note with the same anchor, check and whitespace-normalised body.
+
+    The check is part of the match, so a revision that only adds or changes
+    a check is a new proposal, not a duplicate of the note it revises.
+    """
     kind = fields["anchor_kind"]
     conditions = [
         col(ProjectNote.status) != "retired",
         col(ProjectNote.anchor_kind) == kind,
     ]
-    for key in _DUPLICATE_KEYS[kind]:
+    for key in (*_DUPLICATE_KEYS[kind], *_CHECK_COLUMNS):
         value = fields.get(key)
         column = col(getattr(ProjectNote, key))
         conditions.append(column.is_(None) if value is None else column == value)
@@ -1193,6 +1500,7 @@ def propose(
     origin: str | None = None,
     refs: Iterable[str] | None = (),
     supersedes_id: int | None = None,
+    check: Mapping[str, Any] | None = None,
 ) -> NoteView:
     """Propose a note (or a revision of a confirmed one).
 
@@ -1223,12 +1531,17 @@ def propose(
     supersedes_id : int, optional
         Makes this proposal a revision of that note, which must be confirmed
         and not a ``purpose`` note.
+    check : Mapping, optional
+        ``{"kind", "text", "glob"}``, a ``constraint`` note's check; the
+        rules are :func:`_clean_check`'s. A revision carries its own check:
+        nothing is copied from the note it revises.
 
     Returns
     -------
     NoteView
         The new proposal, or with ``duplicate: True`` the existing non-retired
-        note that has the same anchor and the same whitespace-normalised body
+        note that has the same anchor, the same check and the same
+        whitespace-normalised body
         (a dedupe hit counts toward no cap). MCP and Chat callers must drop
         ``note`` from their result when the hit is another member's pending
         proposal (D1); this function returns the full view.
@@ -1236,9 +1549,10 @@ def propose(
     Raises
     ------
     WhyGraphError
-        ``note_invalid`` (validation), ``note_state`` (``supersedes_id`` is
-        not confirmed), ``note_not_found`` (no such ``supersedes_id``),
-        ``note_limit`` (a cap), ``note_no_actor``, ``note_linked``.
+        ``note_invalid`` (validation), ``note_check_invalid`` (the check),
+        ``note_state`` (``supersedes_id`` is not confirmed),
+        ``note_not_found`` (no such ``supersedes_id``), ``note_limit`` (a
+        cap), ``note_no_actor``, ``note_linked``.
     """
     _refuse_linked()
     actor = _require_actor(actor_uid)
@@ -1247,9 +1561,10 @@ def propose(
     origin = _check_origin(origin)
     clean = _clean_body(body)
     kind = _check_kind(kind)
+    check_fields = _clean_check(kind, check)
     if supersedes_id is not None and not _is_int(supersedes_id):
         raise _invalid("supersedes_id must be a note id")
-    fields = _anchor_fields(anchor)
+    fields = {**_anchor_fields(anchor), **check_fields}
     with get_session() as session:
         _begin_immediate(session)
         refs_json = _validate_refs(session, refs)
@@ -1414,12 +1729,16 @@ def purpose_notes() -> dict[str, NoteView | None]:
     return out
 
 
-def _edits(row: ProjectNote, body: object, kind: object) -> bool:
-    """Whether a confirm request changes the body or the kind."""
+def _edits(row: ProjectNote, body: object, kind: object, check: object = _KEEP) -> bool:
+    """Whether a confirm request changes the body, the kind or the check."""
     body_changed = body is not None and (
         not isinstance(body, str) or body.strip() != row.body
     )
-    return body_changed or (kind is not None and kind != row.kind)
+    return (
+        body_changed
+        or (kind is not None and kind != row.kind)
+        or _check_changes(row, check)
+    )
 
 
 def confirm(
@@ -1429,6 +1748,7 @@ def confirm(
     actor_can_configure: bool,
     body: str | None = None,
     kind: str | None = None,
+    check: Any = _KEEP,
 ) -> NoteView:
     """Confirm a proposed note, optionally editing it.
 
@@ -1445,6 +1765,11 @@ def confirm(
         ``proposed_body`` (shown as ``edited_on_confirm``). The kind never
         changes to or from ``purpose``; naming the note's own kind is not an
         edit.
+    check : Mapping or None, optional
+        Left out, the proposal's check is kept (and checked again against
+        the final kind, so a kind edit away from ``constraint`` must drop
+        it). ``None`` removes it; a mapping replaces it, under the rules of
+        :func:`_clean_check`. A different check is an edit.
 
     Returns
     -------
@@ -1460,8 +1785,8 @@ def confirm(
         proposed, or the note it revises is no longer confirmed),
         ``note_invalid`` (an edit, including a kind edit to or from
         ``purpose``, or the anchor no longer resolves; a stale code index
-        refuses a symbol note), ``note_not_found``,
-        ``note_no_actor``, ``note_linked``.
+        refuses a symbol note), ``note_check_invalid`` (the check),
+        ``note_not_found``, ``note_no_actor``, ``note_linked``.
 
     Notes
     -----
@@ -1474,7 +1799,7 @@ def confirm(
     with get_session() as session:
         row = _load(session, note_id)
         _check_second_confirmer(
-            row, actor, actor_can_configure, edits=_edits(row, body, kind)
+            row, actor, actor_can_configure, edits=_edits(row, body, kind, check)
         )
         if row.status != "proposed":
             raise _state("only a proposed note can be confirmed")
@@ -1485,6 +1810,9 @@ def confirm(
             raise _invalid("a note's kind cannot change to or from purpose")
         else:
             new_kind = _check_kind(kind)
+        check_fields = _clean_check(
+            new_kind, _check_view(row) if check is _KEEP else check
+        )
         values = _rehash_for_write(row)
         now = _iso(_utcnow())
         values.update(
@@ -1493,6 +1821,7 @@ def confirm(
             confirmed_at=now,
             body=new_body,
             kind=new_kind,
+            **check_fields,
         )
         if new_body != row.body:
             values["proposed_body"] = row.body
@@ -1907,8 +2236,10 @@ def notes_for_target(
     Returns
     -------
     list of NoteView
-        At most :data:`NOTES_PER_TARGET`. Every agent surface uses the
-        defaults: confirmed notes only, ``missing`` excluded.
+        At most :data:`NOTES_PER_TARGET`, each with its ``check_state``
+        (the returned notes share one :data:`CHECK_MAX_FILES` budget).
+        Every agent surface uses the defaults: confirmed notes only,
+        ``missing`` excluded.
     """
     _refuse_linked()
     # Function-local: chat/__init__ -> chat.tools -> mcp.rationale -> mcp.notes.
@@ -1964,8 +2295,9 @@ def notes_for_target(
             group.sort(key=lambda item: _recency(item[1]), reverse=True)
             group.sort(key=lambda item: item[0])
             chosen += [(row, state) for _, row, state in group]
+        checks = _CheckRunner()
         return [
-            _build(session, evaluator, row, state=state)
+            _build(session, evaluator, row, state=state, checks=checks)
             for row, state in chosen[:NOTES_PER_TARGET]
         ]
 
@@ -2043,6 +2375,9 @@ def render_note_line(note: NoteView) -> str:
     :func:`project_notes`. Every other note keeps the ASCII rendering
     unchanged.
 
+    A note whose ``check_state`` is ``broken`` gets `` [check: broken]``
+    after its body; no other state adds anything.
+
     Parameters
     ----------
     note : NoteView
@@ -2070,7 +2405,10 @@ def render_note_line(note: NoteView) -> str:
     else:
         body = json.dumps(flat)
     state = note.get("anchor_state", "unknown")
-    return f"- note #{note.get('id')} [{note.get('kind')}] ({where}, {state}): {body}"
+    line = f"- note #{note.get('id')} [{note.get('kind')}] ({where}, {state}): {body}"
+    if note.get("check_state") == "broken":
+        line += " [check: broken]"
+    return line
 
 
 # ---------------------------------------------------------------------------
@@ -2421,6 +2759,15 @@ def _import_anchor(
     return values, skip
 
 
+def _import_check(record: Mapping[str, Any], kind: str) -> dict[str, str | None]:
+    """A record's three check columns under :func:`_clean_check`'s rules."""
+    given = {name: record.get(f"check_{name}") for name in _CHECK_FIELDS}
+    try:
+        return _clean_check(kind, given)
+    except WhyGraphError as exc:
+        raise ImportFormatError("check", str(exc)) from None
+
+
 def _choice(record: Mapping[str, Any], name: str, allowed: tuple[str, ...]) -> str:
     """A field whose value must be one of ``allowed``."""
     value = record.get(name)
@@ -2499,6 +2846,7 @@ def _check_import_record(
         raise ImportFormatError("supersedes_id", "must be a note id")
     refs = _import_refs(record.get("refs"))
     origin = _import_origin(record.get("origin"), chat_ids)
+    check = _import_check(record, kind)
     anchor, skip = _import_anchor(record, anchor_kind)
     downgraded = status == "confirmed" and not keep_status
     stored_status = "proposed" if downgraded else status
@@ -2524,6 +2872,7 @@ def _check_import_record(
         "origin": origin,
         "refs": json.dumps(refs) if refs else None,
         **lifecycle,
+        **check,
     }
     return _ImportedNote(
         index=index,
@@ -2592,7 +2941,7 @@ def _duplicate_key(values: Mapping[str, Any]) -> tuple:
     kind = values["anchor_kind"]
     return (
         kind,
-        tuple(values[name] for name in _DUPLICATE_KEYS[kind]),
+        tuple(values[name] for name in (*_DUPLICATE_KEYS[kind], *_CHECK_COLUMNS)),
         _normalise(values["body"]),
     )
 
@@ -2759,6 +3108,7 @@ def import_notes(
         ProjectNote.status,
         ProjectNote.anchor_kind,
         *(getattr(ProjectNote, name) for name in _ANCHOR_COLUMNS),
+        *(getattr(ProjectNote, name) for name in _CHECK_COLUMNS),
         ProjectNote.body,
         ProjectNote.proposed_at,
         ProjectNote.proposed_by,
@@ -2955,6 +3305,10 @@ def whygraph_propose_note(
     area: str | None = None,
     project_wide: bool | None = None,
     refs: list[str] | None = None,
+    check_kind: str | None = None,
+    check_text: str | None = None,
+    check_glob: str | None = None,
+    supersedes_id: int | None = None,
 ) -> ProposeNoteResult:
     """MCP tool - propose a note for a person to confirm.
 
@@ -2962,16 +3316,24 @@ def whygraph_propose_note(
     agent-facing summary. The proposer is the principal the request was
     authenticated as (:func:`~whygraph.core.context.current_actor`); the
     note is created with ``source="mcp"`` and never reaches a model before a
-    person confirms it.
+    person confirms it. ``check_kind`` / ``check_text`` / ``check_glob`` are
+    a ``constraint`` note's check, all three or none (:func:`_clean_check`);
+    it is live only once a person confirms the note. ``supersedes_id`` names
+    the confirmed note a revision replaces (:func:`propose` validates it);
+    confirming the revision retires the old note.
 
     Raises
     ------
     WhyGraphError
         ``note_linked`` on a linked project (before any DB access),
-        ``note_invalid``, ``note_limit``, ``note_no_actor``.
+        ``note_invalid``, ``note_check_invalid``, ``note_limit``,
+        ``note_no_actor``, ``note_not_found`` / ``note_state`` for a bad
+        ``supersedes_id``.
     """
     _refuse_linked()
     anchor = _mcp_anchor(qualified_name, path, line_start, line_end, area, project_wide)
+    given = {"kind": check_kind, "text": check_text, "glob": check_glob}
+    check = given if any(value is not None for value in given.values()) else None
     actor = current_actor()
     view = propose(
         body,
@@ -2981,6 +3343,8 @@ def whygraph_propose_note(
         actor_uid=actor,
         origin="mcp",
         refs=refs or (),
+        check=check,
+        supersedes_id=supersedes_id,
     )
     return proposal_result(view, actor)
 
@@ -3025,6 +3389,10 @@ __all__ = [
     "ANCHOR_FILE_MAX_BYTES",
     "ANCHOR_KINDS",
     "BODY_MAX_CHARS",
+    "CHECK_KINDS",
+    "CHECK_MAX_FILES",
+    "CHECK_NOTE_KIND",
+    "CHECK_STATES",
     "COMMITS_SINCE_CAP",
     "IMPORTED_UID_PREFIX",
     "IMPORT_MAX_LINE",

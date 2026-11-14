@@ -766,8 +766,18 @@ def test_rationale_zero_budget_never_generates(
 def test_rationale_cache_hit_never_generates(
     chat_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from whygraph.analyze import Rationale
+    from whygraph.analyze import Item, ItemRef, Rationale
 
+    constraints = (
+        Item(
+            "keep it small",
+            "quoted",
+            (ItemRef("pr", "7", "https://github.com/o/r/pull/7"),),
+            quote="keep it small",
+        ),
+        Item("an old string", "unknown"),
+    )
+    risks = (Item("no network here", "inferred"),)
     monkeypatch.setattr(
         chat_tools, "collect_evidence", lambda target, limit=20: [_fake_evidence_item()]
     )
@@ -778,9 +788,9 @@ def test_rationale_cache_hit_never_generates(
             rationale=Rationale(
                 purpose="cached purpose",
                 why="w",
-                constraints=(),
+                constraints=constraints,
                 tradeoffs=(),
-                risks=(),
+                risks=risks,
                 model="m",
                 provider="anthropic",
             ),
@@ -800,6 +810,11 @@ def test_rationale_cache_hit_never_generates(
     assert result["generated"] is False
     assert result["purpose"] == "cached purpose"
     assert registry.generations_used == 0
+    # The model reads each item whole, with its basis and refs (plan 54 D5).
+    assert result["constraints"] == [item.as_dict() for item in constraints]
+    assert result["risks"] == [
+        {"text": "no network here", "basis": "inferred", "refs": []}
+    ]
 
 
 def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:

@@ -17,6 +17,8 @@ import pytest
 from whygraph.analyze import (
     AnalyzeError,
     CommitEvidence,
+    Item,
+    ItemRef,
     Prompt,
     Rationale,
     RationaleError,
@@ -229,9 +231,14 @@ def test_generate_returns_rationale_with_parsed_fields() -> None:
     assert isinstance(rationale, Rationale)
     assert rationale.purpose == "Caches resolved prompts."
     assert rationale.why.startswith("Added in #12")
-    assert rationale.constraints == ("cache key must stay content-addressable",)
+    # Plain-string items (the old reply shape) parse, with no source.
+    assert rationale.constraints == (
+        Item("cache key must stay content-addressable", "inferred", (), ""),
+    )
     assert rationale.tradeoffs == ("in-memory only, not shared across processes",)
-    assert rationale.risks == ("a stale cache survives a prompt edit",)
+    assert rationale.risks == (
+        Item("a stale cache survives a prompt edit", "inferred", (), ""),
+    )
     assert isinstance(rationale.constraints, tuple)
     assert rationale.model == "stub-1"
     assert rationale.provider == "stub"
@@ -443,6 +450,212 @@ def test_commit_evidence_is_frozen() -> None:
     evidence = CommitEvidence(_commit())
     with pytest.raises(Exception):  # FrozenInstanceError
         evidence.commit = _commit()  # type: ignore[misc]
+
+
+# ---- sources: basis assigned by code (plan 54 section 5.4) ----------------
+
+_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+_BODY = "The total number of attempts stays at 3:\nthe upstream locks a client out."
+
+
+def _sourced_evidence() -> list[CommitEvidence]:
+    """One commit with a PR and an issue that share the number 5."""
+    return [
+        CommitEvidence(
+            _commit(
+                sha=_SHA,
+                subject="cap fetch retries",
+                body=_BODY,
+                llm_description="Lowers the retry count in fetch.",
+            ),
+            pull_requests=(_pr(number=5, title="Retry cap", body="alpha reason"),),
+            issues=(_issue(number=5, title="Lockouts", body="beta report"),),
+        )
+    ]
+
+
+def _with_items(constraints: list, risks: list | None = None) -> Rationale:
+    """Generate a card whose reply carries ``constraints`` / ``risks`` items."""
+    blob = json.dumps(
+        {
+            "purpose": "p",
+            "why": "w",
+            "constraints": constraints,
+            "tradeoffs": ["a plain tradeoff"],
+            "risks": risks or [],
+        }
+    )
+    return RationaleGenerator(_StubClient(text=blob)).generate(_sourced_evidence())
+
+
+_COMMIT_REF = ItemRef("commit", _SHA, None)
+_PR_REF = ItemRef("pr", "5", "https://example.com/pr/12")
+_ISSUE_REF = ItemRef("issue", "5", "https://example.com/issue/7")
+
+
+def test_item_quoted_when_the_quote_is_in_a_cited_source() -> None:
+    card = _with_items(
+        [{"text": "at most 3 attempts", "refs": ["a1b2c3d4"], "quote": "stays at 3"}]
+    )
+
+    assert card.constraints == (
+        Item("at most 3 attempts", "quoted", (_COMMIT_REF,), "stays at 3"),
+    )
+
+
+@pytest.mark.parametrize("quote", ["not in the commit", ""])
+def test_item_cited_when_the_quote_is_absent_or_not_found(quote: str) -> None:
+    card = _with_items(
+        [{"text": "at most 3 attempts", "refs": ["a1b2c3d4"], "quote": quote}]
+    )
+
+    assert card.constraints == (
+        Item("at most 3 attempts", "cited", (_COMMIT_REF,), ""),
+    )
+
+
+def test_item_inferred_when_no_ref_is_in_the_bundle() -> None:
+    card = _with_items(
+        [
+            {
+                "text": "at most 3 attempts",
+                "refs": ["deadbeef", "PR #99", "Issue #6"],
+                "quote": "stays at 3",
+            }
+        ]
+    )
+
+    assert card.constraints == (Item("at most 3 attempts", "inferred", (), ""),)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        "at most 3 attempts",
+        {"text": "at most 3 attempts", "quote": "stays at 3"},
+        {"text": "at most 3 attempts", "refs": ["a1b2c3d4"]},
+        {"text": "at most 3 attempts", "refs": "a1b2c3d4", "quote": "stays at 3"},
+        {"text": "at most 3 attempts", "refs": ["a1b2c3d4"], "quote": 3},
+        {"text": "at most 3 attempts", "refs": None, "quote": None},
+    ],
+    ids=[
+        "plain-string",
+        "refs-missing",
+        "quote-missing",
+        "refs-not-a-list",
+        "quote-not-a-string",
+        "both-null",
+    ],
+)
+def test_item_inferred_when_plain_or_refs_and_quote_are_malformed(item) -> None:
+    card = _with_items([item], risks=[item])
+
+    expected = (Item("at most 3 attempts", "inferred", (), ""),)
+    assert card.constraints == expected
+    assert card.risks == expected
+
+
+def test_item_quote_matches_across_other_whitespace() -> None:
+    card = _with_items(
+        [
+            {
+                "text": "at most 3 attempts",
+                "refs": ["a1b2c3d4"],
+                "quote": "  attempts\tstays at 3: the   upstream locks ",
+            }
+        ]
+    )
+
+    (item,) = card.constraints
+    assert item.basis == "quoted"
+    assert item.quote == "attempts stays at 3: the upstream locks"
+
+
+def test_item_quote_from_the_model_summary_is_not_a_source() -> None:
+    """The diff summary is model output, so a quote from it is only cited."""
+    card = _with_items(
+        [
+            {
+                "text": "fewer retries",
+                "refs": ["a1b2c3d4"],
+                "quote": "Lowers the retry count",
+            }
+        ]
+    )
+
+    assert card.constraints[0].basis == "cited"
+
+
+def test_item_pr_and_issue_of_the_same_number_are_different_sources() -> None:
+    card = _with_items(
+        [
+            {"text": "pr", "refs": ["PR #5"], "quote": "alpha reason"},
+            {"text": "issue", "refs": ["Issue #5"], "quote": "alpha reason"},
+            {"text": "issue2", "refs": ["issue #5"], "quote": "beta report"},
+        ]
+    )
+
+    assert card.constraints == (
+        Item("pr", "quoted", (_PR_REF,), "alpha reason"),
+        Item("issue", "cited", (_ISSUE_REF,), ""),
+        Item("issue2", "quoted", (_ISSUE_REF,), "beta report"),
+    )
+
+
+def test_item_drops_refs_not_in_the_bundle_and_keeps_the_rest() -> None:
+    card = _with_items(
+        [
+            {
+                "text": "t",
+                "refs": ["PR #99", 7, "a1b2c3d4", "Issue #5", "a1b2c3d4"],
+                "quote": "beta report",
+            }
+        ]
+    )
+
+    assert card.constraints == (
+        Item("t", "quoted", (_COMMIT_REF, _ISSUE_REF), "beta report"),
+    )
+
+
+def test_item_accepts_a_longer_sha_prefix() -> None:
+    card = _with_items([{"text": "t", "refs": [_SHA], "quote": ""}])
+
+    assert card.constraints[0].refs == (_COMMIT_REF,)
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"refs": ["a1b2c3d4"], "quote": "stays at 3"},
+        {"text": 5, "refs": [], "quote": ""},
+    ],
+    ids=["no-text", "text-not-a-string"],
+)
+def test_item_without_string_text_raises(item: dict) -> None:
+    with pytest.raises(RationaleError, match="risks"):
+        _with_items([], risks=[item])
+
+
+def test_tradeoffs_stay_plain_strings() -> None:
+    card = _with_items([])
+
+    assert card.tradeoffs == ("a plain tradeoff",)
+
+
+def test_item_is_frozen() -> None:
+    item = Item("t", "inferred", (), "")
+    with pytest.raises(Exception):  # FrozenInstanceError
+        item.text = "changed"  # type: ignore[misc]
+
+
+def test_rationale_prompt_asks_for_refs_and_quote() -> None:
+    client = _StubClient()
+    RationaleGenerator(client).generate([CommitEvidence(_commit())])
+
+    system = client.requests[0].messages[0].content
+    assert '"refs"' in system
+    assert '"quote"' in system
 
 
 # ---- _format_evidence ----------------------------------------------------

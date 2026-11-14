@@ -89,7 +89,8 @@ ladder, no review gate and no evaluator (see [Differences between editors](#diff
    only then changes code. A step that fails climbs the [recovery ladder](#running-unattended).
 7. **Review gate.** After each verified step, a reviewer checks the step's own diff against the
    rationale cards already cached. A **Constraint at risk** verdict stops the loop so that you can fix
-   it. The gate reads cached cards only and never generates one.
+   it, unless the constraint is tagged `(inferred)`. The gate reads cached cards only and never
+   generates one.
 8. **Acceptance.** A last, separate run walks the plan's `## Acceptance` list: first the project's full
    test command, then each check. The plan tool runs each check, so a hung one is killed on a deadline.
    It reports what failed and undoes nothing. A list with only `manual:`
@@ -97,6 +98,44 @@ ladder, no review gate and no evaluator (see [Differences between editors](#diff
 
 The implementor flags files it changed outside the step's **Files**, logs every fix attempt with its
 cause, and never edits a file that the step's **Boundaries** names.
+
+### Where a constraint comes from
+
+Each constraint and risk a plan quotes from a rationale card ends with a tag that names its
+[source](mcp-usage.md#the-tools). The quote itself is the card item's text, unchanged.
+
+| Tag | Meaning |
+|---|---|
+| `(quoted: <ref>)` | A commit, PR or issue states it: the card holds a passage of that source. |
+| `(cited: <ref>)` | The card names a source, but no passage of it was found. |
+| `(inferred)` | No source backs it: the model read it from the diffs. Treat it as a guess. |
+| `(note #<id>)` | A [project note](notes.md) that a person confirmed. |
+| none | The card was cached before cards recorded sources. |
+
+`<ref>` is the first 8 characters of a commit id, `PR #<n>` or `Issue #<n>`. A guess informs you but never stops a run. A
+constraint tagged `(inferred)` alone never becomes a Blocker: the plan lists it under Risks. In
+Claude Code, a review-gate **Constraint at risk** verdict that ends `(inferred)` is printed and does
+not hold the step.
+
+**Changes on purpose.** Sometimes the task itself asks to change a recorded constraint, such as "sort
+the export by name" when a card says the export stays in id order. The step that does it then has a
+**Changes on purpose** line: the constraint quoted verbatim, its tag, and why the plan changes it.
+Such a constraint is not a Blocker, and the step does not repeat it under **Constraints to
+preserve**. The implementor does not treat it as a guard. In Claude Code, the review gate reports a
+hunk that breaks it as **Changed on purpose**, prints one line, and goes on.
+
+When the quote is a [project note](notes.md), it keeps its `(note #<id>)` tag on that line. After a
+run whose Acceptance passed, the implement command in Claude Code and Cursor proposes a note for each
+such step, at most three per run, so the next plan does not quote the old rule:
+
+- A quote tagged `(note #<id>)` becomes a proposed **revision** of that note, anchored to the step's
+  first file, with the plan and step in its body. When you confirm it, the old note is retired.
+- Any other quote becomes a proposed `decision` note that says the quoted constraint no longer holds.
+
+Nothing counts until you confirm it in the portal, and a failed proposal is printed and never stops the
+run. In VS Code and Codex, the run prints one line per such step instead, and you record the note with
+`/whygraph-note` (in Codex, ask the agent to record it). See
+[Limits on agent proposals](notes.md#limits-on-agent-proposals).
 
 ### Plan review
 
@@ -214,6 +253,16 @@ it stops only when no rung of its ladder can help.
   once, before any edit, on a command that does not exist (a shell function such as `nvm use` does not
   exist under `sh -c`), that hangs, or that changes the working tree. A `Verify` that already fails
   at baseline is a recorded result, not a stop. The pre-flight runs on every invocation.
+- **A pass that ran no test is marked.** When a `Verify` exits 0 but its output says that no test ran
+  (`no tests ran`, `collected 0 items`, `0 passing`, `running 0 tests`, `no tests to run`,
+  `no tests found` or `0 tests`, in any case), its baseline result reads `pass (no test ran)`. It is
+  still a pass and never a stop, but it tells you that the step's `Verify` checks nothing yet.
+- **A one-page brief comes first.** In Claude Code and Cursor, the pre-flight starts by printing the
+  plan's objective, its Blockers, open questions and constraint checks, one line per step (its name,
+  the number of files, its model, and whether it changes a constraint on purpose) and the Acceptance
+  items. The plan tool builds it from the plan's own lines, with no model. You can print it for any
+  plan yourself with `sh .claude/skills/whygraph-plan/plan-tool.sh brief <plan>` (the tool sits
+  beside the plan skill in each editor's folder).
 - **Do not edit the working tree during a run.** The script compares tree ids before and after each
   step, and an edit of yours looks like the step's own.
 - **A Verify must only check.** A `Verify` that migrates a database, writes a file, or waits for input
@@ -664,6 +713,8 @@ after a clone, as you would the `sources/` folder.
 | Plan review (logic and UX/UI reviewers, then a fixer) | Yes: the logic reviewer on a strong model, the UX/UI reviewer on a fast one | Yes: both on the model the editor picks | Yes: both on the model the editor picks | Yes: both on the model the editor picks, read-only by written rule only |
 | Recovery ladder and plan amendment | Yes | Yes, on one model (the retry repeats it) | No | No |
 | Pre-flight probe and baseline of every Verify | Yes | Yes | No | No |
+| One-page brief of the plan before the pre-flight | Yes | Yes | No | No |
+| A note proposed for a change on purpose, after a passing Acceptance | Yes | Yes | No, one printed line per step | No, one printed line per step |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
 | Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |
 | UI evidence capture | Yes | Yes | Yes | Yes |

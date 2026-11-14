@@ -81,8 +81,11 @@ You do **not** hand off further. Researchers don't fan out further.
 
 ## Constraints / risks cited verbatim
 *(example: only for the source whose section is Constraints / risks cited verbatim)*
-- "<verbatim quote from a card's constraints[]>" - from `qualified.name`
-- "<verbatim quote from a card's risks[]>" - from `qualified.name`
+- "<the `text` of a card's constraints[] item, verbatim>" <tag> - from `qualified.name`
+- "<the `text` of a card's risks[] item, verbatim>" <tag> - from `qualified.name`
+- "<a note body, verbatim>" (note #<id>) - from `qualified.name`
+
+*(`<tag>` comes from the item's `basis` and `refs`: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`.)*
 
 ## Prior art
 *(example: only for the source whose section is Prior art)*

@@ -531,6 +531,9 @@ class NoteRecord(BaseModel):
     retired_by: str | None = None
     retired_at: str | None = None
     retire_reason: str | None = None
+    check_kind: str | None = None
+    check_text: str | None = None
+    check_glob: str | None = None
 
 
 class PurposeRunRecord(BaseModel):
@@ -561,6 +564,9 @@ class RationaleRecord(BaseModel):
     """``rationale.jsonl``: one ``rationale_cache`` row (plan 42 section 5.5).
 
     The three list columns are decoded lists; ``import_id`` never travels.
+    A constraint or risk is an item object (``text``, ``basis``, ``refs``,
+    ``quote``) or, in a bundle written before items carried sources, a plain
+    string (read as basis ``unknown``). Both stay format version 1.
     """
 
     model_config = _WIRE
@@ -574,9 +580,9 @@ class RationaleRecord(BaseModel):
     cached_at: str
     purpose: str
     why: str
-    constraints: list[str]
+    constraints: list[str | dict[str, Any]]
     tradeoffs: list[str]
-    risks: list[str]
+    risks: list[str | dict[str, Any]]
     input_tokens: Int | None = None
     output_tokens: Int | None = None
     actual_provider: str | None = None

@@ -1521,6 +1521,7 @@ def test_review_output_contract_on_a_fixture_diff() -> None:
         if (found := re.match(r"\*\*(.+?):\*\*", line))
     }
     assert verdicts == {
+        "Changed on purpose",
         "Constraint at risk",
         "Risk triggered",
         "No rationale",
@@ -1607,6 +1608,334 @@ def test_reviewer_wiring() -> None:
             if not p.name.startswith("plan-reviewer")
         ]
         assert not found, tree
+
+
+# ---- plan 54 section 5.7 and plan 53 section 5.9: sourced constraints --------
+
+_SOURCE_TAGS = (
+    "`(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`"
+)
+_REF_NAMES = "`<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`."
+_CHANGES_ON_PURPOSE_LINE = (
+    "   - **Changes on purpose:** <verbatim quote of a recorded constraint this step "
+    "changes> - <why>, or omit this line\n"
+)
+
+
+@pytest.mark.parametrize("tree", list(_AGENT_PATHS))
+def test_sourced_rationale_contract(tree: str) -> None:
+    """Each tree quotes a card item's text and ends the quote with its basis tag."""
+    source = (
+        _ASSET_ROOT / _SOURCE_DIRS[tree] / "sources" / "whygraph-rationale.md"
+    ).read_text()
+    assert "Each item of a card's `constraints` and `risks` is an object" in source
+    assert "its `text` is what you quote" in source
+    assert "End each quote with the tag of its item" in source
+    assert _SOURCE_TAGS in source and _REF_NAMES in source
+    assert "A quote from a card's `notes` ends with `(note #<id>)`." in source
+
+    researcher = "\n".join(_agent_body(tree, "researcher"))
+    assert (
+        '"<the `text` of a card\'s constraints[] item, verbatim>" <tag>' in researcher
+    )
+    assert '"<a note body, verbatim>" (note #<id>)' in researcher
+    assert _SOURCE_TAGS in researcher and _REF_NAMES in researcher
+
+    synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+    assert "Copy the tag after each quote with it" in synthesizer
+    assert (
+        "A constraint tagged `(inferred)` alone never makes a Blocker." in synthesizer
+    )
+    assert (
+        "It goes to **Risks called out across the change** with its tag." in synthesizer
+    )
+
+    planner = "\n".join(_agent_body(tree, "planner"))
+    # The working-set block stays pinned; it carries each item's text only.
+    assert "constraints: [<verbatim>, ...]" in planner
+    assert "each item of `constraints` and `risks` as its `text`" in planner
+    assert "End each quote with the tag of its item's `basis`" in planner
+    assert "A constraint tagged `(inferred)` alone never makes a Blocker." in planner
+
+
+def test_sourced_rationale_gate_is_claude_code_only() -> None:
+    """The reviewer tags its verdicts from the card; an inferred one never holds a step."""
+    body = "\n".join(_agent_body("claude-code", _REVIEWER))
+    assert "read from the `basis` and `refs` of the card you fetched" in body
+    assert "never from the plan" in body
+    assert _SOURCE_TAGS in body and _REF_NAMES in body
+    assert '**Constraint at risk:** "<constraint, verbatim>" - <how' in body
+    assert "violate it> <tag>" in body
+    skill = _text(_IMPLEMENT_ENTRY["claude-code"])
+    assert (
+        "A **Constraint at risk:** verdict that ends `(inferred)` does not go to S6. "
+        "Print it."
+    ) in skill
+    for tree in ("cursor", "vscode", "codex"):
+        assert "ends `(inferred)`" not in _text(_IMPLEMENT_ENTRY[tree]), tree
+
+
+def test_changes_on_purpose_contract() -> None:
+    """The Changes on purpose field: spine, plan tool, synthesizer, planner, implementor.
+
+    The reviewer verdict and the implement skill's one-line print are Claude
+    Code only, because only Claude Code runs a review gate.
+    """
+    for tree, folder in _SOURCE_DIRS.items():
+        spine = (_ASSET_ROOT / folder / "plan-spine.md").read_text()
+        assert _CHANGES_ON_PURPOSE_LINE in spine, tree
+        preserve = spine.index("   - **Constraints to preserve:**")
+        assert preserve < spine.index(_CHANGES_ON_PURPOSE_LINE), tree
+        tool = (_ASSET_ROOT / folder / "plan-tool.sh").read_text()
+        assert 'KNOWN_FIELD["Changes on purpose"] = 1' in tool, tree
+        assert 'QUOTED_FIELD["Changes on purpose"] = 1' in tool, tree
+    for tree in _AGENT_PATHS:
+        synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+        assert (
+            "- **Changes on purpose** - a quoted constraint that this step's Change "
+            "removes or changes, verbatim,"
+        ) in synthesizer, tree
+        assert "Never repeat it under **Constraints to preserve**." in synthesizer, tree
+        rule = (
+            "A constraint the task itself asks to change goes to **Changes on purpose** "
+            "of its step, not to `## Blockers`."
+        )
+        assert rule in synthesizer, tree
+        assert rule in "\n".join(_agent_body(tree, "planner")), tree
+        implementor = "\n".join(_agent_body(tree, "implementor"))
+        sentence = (
+            "A constraint that the step's **Changes on purpose** line quotes is not a "
+            "guard: the plan changes it."
+        )
+        assert sentence in implementor, tree
+        assert implementor.index("**stop immediately**") < implementor.index(sentence)
+
+    reviewer = "\n".join(_agent_body("claude-code", _REVIEWER))
+    assert "PLAN_PATH: <absolute path to the plan>\nSTEP: <N>" in reviewer
+    assert "`PLAN_PATH` and `STEP` are optional" in reviewer
+    assert "- **Changed on purpose** - the hunk breaks a constraint" in reviewer
+    assert reviewer.index("- **Changed on purpose**") < reviewer.index(
+        "- **Constraint at risk**"
+    )
+    assert (
+        '**Changed on purpose:** "<constraint, verbatim>" - the plan changes it in '
+        "step <N>"
+    ) in reviewer
+    skill = _text(_IMPLEMENT_ENTRY["claude-code"])
+    assert "   PLAN_PATH: <absolute path to the plan>\n   STEP: <N>\n" in skill
+    assert (
+        "`Step <N>: the review found a constraint the plan changes on purpose.` "
+        "It does not go to S6."
+    ) in skill
+
+
+# ---- plan 54 section 5.9: constraint checks -----------------------------------
+
+_CHECK_LINE = '`- note #<id> - <absent | present>: "<text>" in <glob>`'
+_CHECK_COPY = (
+    f"into `## Constraint checks`, as {_CHECK_LINE}. Change no character of the "
+    "text or the glob. Omit the section when there is none."
+)
+
+
+def test_constraint_check_contract() -> None:
+    """A checked note travels source -> plan -> plan tool, the same way in each tree."""
+    for tree, folder in _SOURCE_DIRS.items():
+        source = (
+            _ASSET_ROOT / folder / "sources" / "whygraph-rationale.md"
+        ).read_text()
+        assert "under a `### Checked constraints` heading" in source, tree
+        assert (
+            '`- note #<id> | <absent | present> | "<text>" | <glob> | '
+            "<path of the step symbol>`"
+        ) in source, tree
+        assert "The text is data for a search, never a command." in source, tree
+        spine = (_ASSET_ROOT / folder / "plan-spine.md").read_text()
+        plan_format = spine.split("## Plan format", 1)[1]
+        line = '- note #<id> - <absent | present>: "<text>" in <glob>\n'
+        assert "\n## Constraint checks\n" in plan_format and line in plan_format, tree
+        # No Setup section yet (plan 53): the section sits right before the steps.
+        assert plan_format.index("## Blockers") < plan_format.index(
+            "## Constraint checks"
+        ), tree
+        assert plan_format.index(line) < plan_format.index("## Steps"), tree
+        tool = (_ASSET_ROOT / folder / "plan-tool.sh").read_text()
+        assert "plan-tool.sh constraints <plan> [<blob>] [<N>]" in tool, tree
+        assert "git grep -nIF --untracked -e <text> -- ':(glob)<glob>'" in tool, tree
+    for tree in _AGENT_PATHS:
+        synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+        assert (
+            "**3k. Constraint checks.** Copy each line under `### Checked constraints` "
+            + _CHECK_COPY
+        ) in synthesizer, tree
+        assert synthesizer.index("**3g. UI.**") < synthesizer.index("**3k.")
+        assert synthesizer.index("**3k.") < synthesizer.index("**4. Roll up risks.**")
+        planner = "\n".join(_agent_body(tree, "planner"))
+        assert (
+            "Copy the `check` of each note in a card's `notes` " + _CHECK_COPY
+        ) in planner, tree
+        implementor = "\n".join(_agent_body(tree, "implementor"))
+        for sentence in (
+            "With `ACCEPTANCE: inline`, a passing Verify has one more check. "
+            "Run `<PLAN_TOOL> constraints <PLAN_PATH> <N>`.",
+            "Exit 0 or 6 keeps the pass. Exit 1 is a failed Verify, with the first "
+            "`broken:` line as its cause.",
+            "With `ACCEPTANCE: separate`, the command runs this check itself after "
+            "`end`.",
+        ):
+            assert sentence in implementor, (tree, sentence)
+    # VS Code and Codex run no ladder: their implementor runs the check.
+    for tree in ("vscode", "codex"):
+        text = _text(_IMPLEMENT_ENTRY[tree])
+        assert "ACCEPTANCE: inline" in text, tree
+        assert "constraints <plan>" not in text, tree
+    # Claude Code and Cursor run it after `end`, with the saved plan and the step.
+    for tree in ("claude-code", "cursor"):
+        text = _text(_IMPLEMENT_ENTRY[tree])
+        call = f"{_PLAN_TOOL_CMDS[tree]} constraints <plan> <blob> <N>"
+        assert (
+            f"   - When `end` exits 0, run `{call}`. Print each line it prints.\n"
+            in (text)
+        ), tree
+        assert (
+            "   - `constraints` exit 65, 77, or a code outside 0, 1 and 6: stop as "
+            "Step 2a says.\n"
+        ) in text, tree
+        outcome = "   - `end` exit 0, `**Status:** complete` and `constraints` exit 1:"
+        assert text.index(outcome) < text.index(
+            "   - `end` exit 0 and `**Status:** complete`: the run **succeeded**."
+        ), tree
+    cc = _text(_IMPLEMENT_ENTRY["claude-code"])
+    for phrase in (
+        "the run **broke a checked constraint**. Go to S6 from any state, with one "
+        "constraint line per `broken:` line.",
+        "A run that **broke a checked constraint** goes to S6 from every state, "
+        "in place of that state's Succeeded line.",
+        '`- <path>:<line> - constraint at risk: "<text>" (note #<id>) must '
+        "<not appear | appear> in <glob> - keep the constraint`",
+        "After `(no match)`, use the step's first **Files** entry.",
+        # A second break stops at the S6 cap, as a second reviewer verdict does.
+        "   - Exit 1: stop with `a recorded constraint is at risk`.",
+    ):
+        assert phrase in cc, phrase
+    cursor = _text(_IMPLEMENT_ENTRY["cursor"])
+    assert (
+        "the run **failed its Verify**. Its `<excerpt>` is the first `broken:` line."
+    ) in cursor
+
+
+# ---- plan 54 section 5.12: a run proposes what it changed on purpose ---------
+
+_WRITE_BACK = (
+    "When the run summary says `Acceptance: passed`, also propose for each step "
+    "that has a **Changes on purpose** line, at most 3 times in one run."
+)
+_WRITE_BACK_SENTENCES = (
+    _WRITE_BACK,
+    "The quote is the text inside the quotation marks, without the tag.",
+    "- The tag is `(note #<id>)`: call `whygraph_propose_note` with `supersedes_id` "
+    "<id>, kind `constraint`, the anchor `path` of the step's first **Files** "
+    "entry, and the body `Changed on purpose by <plan stem>, step <N>: <the reason "
+    "on the line>`.",
+    "- Otherwise: call it with kind `decision`, the same anchor, and the body "
+    '`"<quote>" no longer holds. Changed on purpose by <plan stem>, step <N>: '
+    "<the reason on the line>`.",
+    "Print each note id and its review link. A tool error: print it and go on.",
+    "The anchor `path` is the first **Files** entry without its `:<lines>` suffix.",
+)
+_WRITE_BACK_PRINT = (
+    "also print one line for each step of the plan that has a **Changes on "
+    "purpose** line, at most 3: `Step <N> changed a recorded constraint on purpose: "
+)
+
+
+def _write_back_paragraph(text: str) -> str:
+    """The write-back paragraph of an implement skill's Step 5."""
+    return text.split(_WRITE_BACK, 1)[1].split("\n\n", 1)[0]
+
+
+@pytest.mark.parametrize("tree", list(_AGENT_PATHS))
+def test_write_back_contract(tree: str) -> None:
+    """The plan keeps a note's id; a passing run proposes, or tells the person."""
+    synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+    assert (
+        "When the quote is a note body, keep `(note #<id>)` right after it: after a "
+        "passing run, the implement command names that note."
+    ) in synthesizer
+    planner = "\n".join(_agent_body(tree, "planner"))
+    assert (
+        "A quote of a note body ends with `(note #<id>)`, on a **Changes on "
+        "purpose** line too."
+    ) in planner
+
+    text = _text(_IMPLEMENT_ENTRY[tree])
+    if tree in ("claude-code", "cursor"):
+        step5 = text.split("## Step 5 - ", 1)[1].split("\n## Step 6 - ", 1)[0]
+        for sentence in _WRITE_BACK_SENTENCES:
+            assert sentence in step5, sentence
+        # Only after a passing Acceptance, and never as a stop.
+        acceptance = text.split("### Step 3d - Acceptance", 1)[1].split("\n### ", 1)[0]
+        assert (
+            "If any item failed, stop with `acceptance failed: <item numbers>`. "
+            "Otherwise run the second paragraph of Step 5, then Step 3e."
+        ) in acceptance
+        assert step5.index("## Decisions worth a note") < step5.index(_WRITE_BACK)
+        paragraph = _write_back_paragraph(text)
+        assert "stop" not in paragraph.lower()
+        if tree == "claude-code":
+            allowed = _frontmatter(_ASSET_ROOT / _IMPLEMENT_ENTRY[tree])
+            assert "mcp__whygraph__whygraph_propose_note" in allowed["allowed-tools"]
+    else:
+        # No WhyGraph tool call for it: one printed line per step.
+        assert _WRITE_BACK_PRINT in text
+        assert "supersedes_id" not in text
+        assert "no longer holds, then confirm it in the portal.`" in text
+        assert "When the tag is `(note #<id>)`, add `It replaces note #<id>.`" in text
+        assert "`**Status:**` is `acceptance passed`" in text
+    if tree == "vscode":
+        assert "run /whygraph-note to record that" in text
+        assert "Call no tool for it." in text
+    if tree == "codex":
+        assert "Propose nothing for it yourself; the user decides." in text
+
+
+# ---- plan 54 sections 5.13 and 5.15: a Verify that ran no test, the brief -----
+
+
+def test_no_test_ran_and_brief_contract() -> None:
+    """The plan tool marks a pass that ran no test; the entry points show it."""
+    for folder in _SOURCE_DIRS.values():
+        tool = (_ASSET_ROOT / folder / "plan-tool.sh").read_text()
+        assert "#   brief <plan>" in tool
+        assert "       plan-tool.sh brief <plan>\n" in tool
+        assert "result='pass (no test ran)'" in tool
+        phrases = (
+            "no tests ran|collected 0 items|0 passing|running 0 tests|no tests to "
+            "run|no tests found|0 tests"
+        )
+        assert phrases in tool
+    for tree in _AGENT_PATHS:
+        implementor = "\n".join(_agent_body(tree, "implementor"))
+        assert (
+            "and one per `pass (no test ran)` line, `  - Step <N>: passes, but its "
+            "Verify ran no test`."
+        ) in implementor, tree
+    for tree in ("claude-code", "cursor"):
+        text = _text(_IMPLEMENT_ENTRY[tree])
+        cmd = _PLAN_TOOL_CMDS[tree]
+        prepare = text.split("### Step 2c - Before the first step", 1)[1]
+        prepare = prepare.split("\n## Step 3 - ", 1)[0]
+        assert prepare.index(f"`{cmd} brief <plan>`") < prepare.index(
+            f"`{cmd} probe <plan>`"
+        ), tree
+        assert (
+            "A line that ends `pass (no test ran)` is a pass: its Verify exited 0, but "
+            "its output says that no test ran."
+        ) in prepare, tree
+        assert (
+            "Print it as it is and go on, so the user sees that this step's Verify "
+            "checks nothing yet."
+        ) in prepare, tree
 
 
 # ---- planning harness v2: entry points, reply shapes, researcher limits -----
@@ -1709,7 +2038,7 @@ def test_implement_entry_points() -> None:
 
 _PLAN_TOOL_SUBCOMMANDS = (
     "snapshot|begin|end|pass|next|changed|probe|baseline|accept|attempt|amends"
-    "|save|restore|log-check|state|amend-check"
+    "|save|restore|log-check|state|amend-check|constraints|brief"
 )
 
 
@@ -1846,7 +2175,11 @@ def test_implement_constraint_line_only_where_the_gate_runs() -> None:
     assert form in _text(_IMPLEMENT_ENTRY["claude-code"])
     cursor = _text(_IMPLEMENT_ENTRY["cursor"])
     assert "constraint at risk:" not in cursor
-    assert "constraint" not in cursor.lower()
+    # The plan tool's constraints subcommand is one exception (plan 54 5.9), and
+    # the write-back paragraph of Step 5 is the other (plan 54 5.12).
+    rest = cursor.replace(_WRITE_BACK + _write_back_paragraph(cursor), "")
+    rest = rest.replace("plan-tool.sh constraints", "").replace("`constraints`", "")
+    assert "constraint" not in rest.lower()
 
 
 def test_no_implement_entry_point_says_a_problem_in_the_plan() -> None:

@@ -59,6 +59,7 @@ from test_portal_v1 import (  # noqa: F401 -- `v1` and `generator` are fixtures
     v1,
 )
 from whygraph.api_v1 import (
+    API_VERSION,
     EvidenceIn,
     EvidenceReplyOut,
     MetaOut,
@@ -382,7 +383,7 @@ def test_platform_client_parses_every_recorded_reply() -> None:
     )
     try:
         meta = client.meta()
-        assert isinstance(meta, MetaOut) and meta.api_version >= 1
+        assert isinstance(meta, MetaOut) and meta.api_version == API_VERSION == 2
         reply = client.exchange("code", "verifier", "http://127.0.0.1:8765/cb")
         assert isinstance(reply, TokenReply)
 
@@ -393,9 +394,12 @@ def test_platform_client_parses_every_recorded_reply() -> None:
         assert isinstance(
             client.evidence(FAKE_SLUG, EvidenceIn(target=target)), EvidenceReplyOut
         )
-        assert isinstance(
-            client.rationale(FAKE_SLUG, RationaleIn(target=target)), RationaleOut
-        )
+        card = client.rationale(FAKE_SLUG, RationaleIn(target=target))
+        assert isinstance(card, RationaleOut)
+        # The recorded card holds items of the new shape (plan 54 D5).
+        assert [item.basis for item in card.constraints] == ["quoted", "inferred"]
+        assert [ref.kind for ref in card.constraints[0].refs] == ["commit", "pr"]
+        assert card.constraints[0].quote and card.risks[0].basis == "cited"
         for call in (
             lambda: client.history(FAKE_SLUG, "sample.py"),
             lambda: client.commit(FAKE_SLUG, "a" * 40),

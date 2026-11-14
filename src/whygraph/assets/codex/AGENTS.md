@@ -88,6 +88,8 @@ Given a `tasks.json`, validate it as in planning, then delegate one implementor 
 
 After the implementor reports, propose each entry of its `## Decisions worth a note` with `whygraph_propose_note` (`kind` and `body` from the entry; the anchor as `qualified_name`, or `path` with `line_start` / `line_end`) and print the note ids and review links.
 
+If the implementor's `**Status:**` is `acceptance passed`, also print one line for each step of the plan that has a **Changes on purpose** line, at most 3: `Step <N> changed a recorded constraint on purpose: ask me to record that "<quote>" no longer holds, then confirm it in the portal.` The quote is the text inside the quotation marks on that line, without its tag. When the tag is `(note #<id>)`, add `It replaces note #<id>.` Propose nothing for it yourself; the user decides.
+
 **Skip when**: no plan exists, the "plan" is an informal chat-message bullet list (not a `# Plan:` markdown file with the standard schema), the change is trivial, the user is asking you to *review* the plan rather than execute it, or the plan has unresolved blockers.
 
 ## Recording a decision

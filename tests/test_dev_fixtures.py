@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "dev_fixtures.sh"
+BENCH_BUILDER = Path("scripts") / "agent_evals" / "fixtures" / "why" / "build.sh"
 
 
 def _git(*args: str, cwd: Path) -> str:
@@ -28,10 +29,12 @@ def _git(*args: str, cwd: Path) -> str:
 
 
 def _checkout(tmp_path: Path) -> Path:
-    """A one-commit repo holding a copy of the script under ``scripts/``."""
+    """A one-commit repo holding the script and the benchmark builder it calls."""
     root = tmp_path / "checkout"
     (root / "scripts").mkdir(parents=True)
     shutil.copy(SCRIPT, root / "scripts" / SCRIPT.name)
+    (root / BENCH_BUILDER).parent.mkdir(parents=True)
+    shutil.copy(SCRIPT.parent.parent / BENCH_BUILDER, root / BENCH_BUILDER)
     _git("init", "-q", "-b", "main", cwd=root)
     _git("add", "-A", cwd=root)
     _git(
@@ -86,6 +89,15 @@ def test_creates_both_repos(tmp_path: Path) -> None:
 
     assert _head(repos / "whygraph") == _head(checkout)
     assert _git("rev-list", "--count", "HEAD", cwd=repos / "demo").strip() == "3"
+    assert _git("rev-list", "--count", "HEAD", cwd=repos / "why-bench").strip() == "12"
+    assert (
+        _git("rev-list", "--count", "HEAD", cwd=repos / "why-bench-blank").strip()
+        == "1"
+    )
+    tree = "HEAD^{tree}"
+    assert _git("rev-parse", tree, cwd=repos / "why-bench") == _git(
+        "rev-parse", tree, cwd=repos / "why-bench-blank"
+    )
 
 
 def test_healthy_repos_are_left_alone(tmp_path: Path) -> None:

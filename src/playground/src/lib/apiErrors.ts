@@ -365,6 +365,7 @@ export const MESSAGES: Record<string, Resolver> = {
   note_not_found: "That note no longer exists.",
   note_state: { tone: "warn", message: "This note changed in the meantime. Reload to see its current state." },
   note_invalid: "WhyGraph couldn't save that note. Check its text and what it is attached to; the details are below.",
+  note_check_invalid: "WhyGraph couldn't save that check. Only a constraint can have one, and the text and the file pattern follow fixed rules; the details are below.",
   note_limit: { tone: "warn", message: "Too many notes are waiting for review, or the daily limit for agent proposals was reached. Review some first." },
   note_needs_second_confirmer: "This note applies to most of the project, so another member or a project admin must confirm it.",
   note_no_actor: "WhyGraph couldn't tell who made this request. Reload the page and try again.",

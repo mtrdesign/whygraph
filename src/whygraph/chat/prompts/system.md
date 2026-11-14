@@ -39,6 +39,9 @@ and `read_file` for those without hesitating.
   constraints, tradeoffs, risks) for a symbol. Cheap when cached; when not
   cached it *generates* one, which is slow and **budgeted to a couple of
   calls per question**. Spend it on the symbol that actually matters.
+  When you cite a constraint or risk, name its `basis` and its `refs`: an
+  `inferred` one is the card model's reading of the diffs, not something a
+  commit, PR or issue states.
 - `get_pr` / `get_issue` — PR discussion is usually where a design decision
   was actually argued out, and an issue carries the original problem
   statement.

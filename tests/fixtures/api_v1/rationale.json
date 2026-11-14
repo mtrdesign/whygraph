@@ -2,9 +2,7 @@
   "body": {
     "cached_at": "<time>",
     "completing": true,
-    "constraints": [
-      "keep it small"
-    ],
+    "constraints": [],
     "describing": 2,
     "evidence_count": {
       "commits": 2,

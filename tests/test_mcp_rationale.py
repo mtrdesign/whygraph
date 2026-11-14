@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from whygraph.analyze import AnalyzeError, CommitEvidence, Rationale
+from whygraph.analyze import AnalyzeError, CommitEvidence, Item, ItemRef, Rationale
 from whygraph.db import get_session
 from whygraph.db.models import Commit
 from whygraph.mcp.errors import WhyGraphError
@@ -63,9 +63,16 @@ class _FakeGenerator:
         return Rationale(
             purpose="Holds two sample lines.",
             why="Built up across two commits.",
-            constraints=("keep it small",),
+            constraints=(
+                Item(
+                    "keep it small",
+                    "quoted",
+                    (ItemRef("pr", "4", "https://x/pull/4"),),
+                    "small",
+                ),
+            ),
             tradeoffs=(),
-            risks=("none worth noting",),
+            risks=(Item("none worth noting", "inferred"),),
             model="fake-1",
             provider="fake",
         )
@@ -91,9 +98,18 @@ def test_rationale_brief_returns_card(
     result = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
 
     assert result["purpose"] == "Holds two sample lines."
-    assert result["constraints"] == ["keep it small"]
+    assert result["constraints"] == [
+        {
+            "text": "keep it small",
+            "basis": "quoted",
+            "refs": [{"kind": "pr", "id": "4", "url": "https://x/pull/4"}],
+            "quote": "small",
+        }
+    ]
     assert result["tradeoffs"] == []
-    assert result["risks"] == ["none worth noting"]
+    assert result["risks"] == [
+        {"text": "none worth noting", "basis": "inferred", "refs": []}
+    ]
     assert result["model"] == "fake-1"
     assert result["provider"] == "fake"
     assert result["evidence_count"]["commits"] == 2
@@ -307,6 +323,9 @@ def test_rationale_brief_skips_backfill_on_cache_hit(
     result = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
 
     assert result["purpose"] == "cached purpose"
+    # A row of plain strings (before items had sources) serves basis unknown.
+    assert result["constraints"] == [{"text": "c1", "basis": "unknown", "refs": []}]
+    assert result["risks"] == [{"text": "r1", "basis": "unknown", "refs": []}]
     assert sentinel["generator_called"] is False
     # Crucially, the descriptor was NOT invoked — backfill stayed behind the
     # cache lookup and the rows remain NULL.

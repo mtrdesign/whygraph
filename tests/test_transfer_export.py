@@ -251,6 +251,27 @@ def test_descriptions_skip_stubs_and_rationale_drops_import_id(
     assert "import_id" not in tb.RationaleRecord.model_fields
 
 
+def test_rationale_items_export_their_text(env: SimpleNamespace) -> None:
+    """A row of item objects (plan 54) and one of old plain strings both export."""
+    item = {
+        "text": "keep it",
+        "basis": "quoted",
+        "refs": [{"kind": "pr", "id": "4"}],
+        "quote": "q",
+    }
+    with get_session() as s:
+        _seed(s)
+        row = s.get(RationaleCache, ("a.py", 1, 5, "anthropic", "default"))
+        assert row is not None
+        row.constraints = json.dumps([item, "old words"])
+        row.risks = json.dumps([{**item, "text": "a risk"}])
+        s.add(row)
+        s.commit()
+    (card,) = recs(_read(_export(env)), tb.RATIONALE)
+    assert card.constraints == ["keep it", "old words"]
+    assert card.risks == ["a risk"]
+
+
 def test_note_filter_and_edited_flag(env: SimpleNamespace) -> None:
     with get_session() as s:
         _seed(s)

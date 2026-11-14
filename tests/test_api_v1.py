@@ -247,9 +247,10 @@ def test_rationale_out_mirrors_the_tool_response() -> None:
     rationale = Rationale(
         purpose="p",
         why="w",
-        constraints=("c",),
-        tradeoffs=(),
-        risks=("r1", "r2"),
+        # Empty until RationaleOut types the items (plan 54 Step B3).
+        constraints=(),
+        tradeoffs=("t",),
+        risks=(),
         model="m",
         provider="stub",
     )

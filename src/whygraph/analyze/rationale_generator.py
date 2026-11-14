@@ -20,6 +20,7 @@ trivially testable: feed a stub :class:`LlmClient` and a list of
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -37,7 +38,7 @@ from whygraph.services.llm import (
 
 from .exceptions import AnalyzeError, RationaleError
 from .prompt import RATIONALE_PLACEHOLDER, Prompt, render, resolve
-from .rationale import CommitEvidence, Rationale
+from .rationale import CommitEvidence, Item, ItemRef, Rationale
 
 # Prompt component tag — the subtree under ``analyze/prompts/`` that holds
 # this class's ``system`` / ``task`` markdown files.
@@ -46,6 +47,14 @@ _PROMPT_COMPONENT = "rationale_generator"
 # The rationale JSON schema, split by the validation each key needs.
 _REQUIRED_STR_FIELDS = ("purpose", "why")
 _REQUIRED_LIST_FIELDS = ("constraints", "tradeoffs", "risks")
+# The list keys whose items are ``{"text", "refs", "quote"}`` objects (or a
+# plain string); ``tradeoffs`` stays a list of strings.
+_SOURCED_LIST_FIELDS = ("constraints", "risks")
+
+# A ref the model names: "PR #12" / "Issue #7", or a commit SHA prefix.
+_NUMBERED_REF_RE = re.compile(r"(PR|Issue)\s*#\s*(\d+)", re.IGNORECASE)
+_SHA_REF_RE = re.compile(r"[0-9a-fA-F]{7,40}")
+_WHITESPACE_RE = re.compile(r"\s+")
 
 
 def _short_sha(sha: str) -> str:
@@ -236,6 +245,149 @@ def _format_evidence(
     return "\n\n".join(blocks)
 
 
+def _collapse_whitespace(text: str) -> str:
+    """Make each run of whitespace one space and strip the ends."""
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+@dataclass(frozen=True, slots=True)
+class _Source:
+    """One piece of evidence a card item may cite, with the texts a quote may come from.
+
+    ``texts`` are whitespace-collapsed, one per field (title, body, a
+    comment), so a quote must sit inside one of them.
+    """
+
+    ref: ItemRef
+    texts: tuple[str, ...]
+
+
+def _pr_texts(pr: PullRequest, caps: _PrRenderCaps) -> list[str]:
+    """The human-written texts of a PR, clipped as :func:`_format_pr` renders them."""
+    texts = [pr.title, pr.body or ""]
+    for c in _json_list(pr.commit_titles)[: caps.pr_roster_max_commits]:
+        if isinstance(c, dict):
+            texts.append(str(c.get("headline", "")))
+    for cm in _json_list(pr.comments)[: caps.pr_discussion_max_comments]:
+        if isinstance(cm, dict):
+            texts.append((cm.get("body") or "").strip()[: caps.pr_comment_max_chars])
+    return texts
+
+
+def _source(ref: ItemRef, texts: Sequence[str]) -> _Source:
+    """A :class:`_Source` over the non-empty, whitespace-collapsed ``texts``."""
+    collapsed = (_collapse_whitespace(t) for t in texts)
+    return _Source(ref, tuple(t for t in collapsed if t))
+
+
+def _evidence_sources(
+    evidence: Sequence[CommitEvidence], caps: _PrRenderCaps = _PrRenderCaps()
+) -> dict[tuple[str, str], _Source]:
+    """Index the evidence a card item may cite, by ``(kind, id)``.
+
+    Built beside :func:`_format_evidence` and kept in memory only. A commit's
+    texts are its subject and body, not its ``llm_description``: the diff
+    summary is model output, so a quote from it proves nothing. A PR's texts
+    are its title, body, squashed-commit headlines and discussion; an issue's
+    its title and body.
+    """
+    sources: dict[tuple[str, str], _Source] = {}
+    for item in evidence:
+        commit = item.commit
+        key = ("commit", commit.sha)
+        if key not in sources:
+            sources[key] = _source(
+                ItemRef("commit", commit.sha), (commit.subject, commit.body)
+            )
+        for pr in item.pull_requests:
+            key = ("pr", str(pr.number))
+            if key not in sources:
+                ref = ItemRef("pr", str(pr.number), pr.html_url or None)
+                sources[key] = _source(ref, _pr_texts(pr, caps))
+        for issue in item.issues:
+            key = ("issue", str(issue.number))
+            if key not in sources:
+                ref = ItemRef("issue", str(issue.number), issue.html_url or None)
+                sources[key] = _source(ref, (issue.title, issue.body or ""))
+    return sources
+
+
+def _resolve_ref(
+    raw: object, sources: dict[tuple[str, str], _Source]
+) -> _Source | None:
+    """The source a model-written ref names, or ``None`` when it is not in the bundle.
+
+    ``"PR #12"`` and ``"Issue #12"`` are different sources. A commit ref is
+    a SHA prefix of at least 7 hex characters that matches exactly one
+    commit of the bundle (the bundle shows 8).
+    """
+    if not isinstance(raw, str):
+        return None
+    ref = raw.strip()
+    numbered = _NUMBERED_REF_RE.fullmatch(ref)
+    if numbered:
+        kind = "pr" if numbered.group(1).lower() == "pr" else "issue"
+        return sources.get((kind, str(int(numbered.group(2)))))
+    if _SHA_REF_RE.fullmatch(ref):
+        prefix = ref.lower()
+        hits = [
+            source
+            for (kind, sha), source in sources.items()
+            if kind == "commit" and sha.lower().startswith(prefix)
+        ]
+        return hits[0] if len(hits) == 1 else None
+    return None
+
+
+def _item(raw: str | dict, sources: dict[tuple[str, str], _Source]) -> Item:
+    """Turn one validated constraint or risk of the reply into an :class:`Item`.
+
+    The basis is decided here, never taken from the model (plan 54 D6):
+
+    * ``"quoted"`` - a ref is in the bundle and the quote, whitespace runs
+      collapsed, is inside one text of one of those refs;
+    * ``"cited"`` - a ref is in the bundle, but the quote is empty or not
+      found;
+    * ``"inferred"`` - no ref is in the bundle, the item is a plain string,
+      or ``refs`` / ``quote`` is missing or of the wrong type.
+
+    A ref that is not in the bundle is dropped. Bad refs or a bad quote never
+    raise.
+
+    Parameters
+    ----------
+    raw : str or dict
+        A plain string, or an object whose ``text`` is a string (checked by
+        :func:`_parse_rationale_json`).
+    sources : dict
+        The bundle's sources (:func:`_evidence_sources`).
+
+    Returns
+    -------
+    Item
+        The item; its ``refs`` are empty and ``quote`` is ``""`` unless the
+        basis says otherwise.
+    """
+    if isinstance(raw, str):
+        return Item(raw, "inferred")
+    text = raw["text"]
+    refs, quote = raw.get("refs"), raw.get("quote")
+    if not isinstance(refs, list) or not isinstance(quote, str):
+        return Item(text, "inferred")
+    found: list[_Source] = []
+    for ref in refs:
+        source = _resolve_ref(ref, sources)
+        if source is not None and source not in found:
+            found.append(source)
+    if not found:
+        return Item(text, "inferred")
+    item_refs = tuple(source.ref for source in found)
+    needle = _collapse_whitespace(quote)
+    if needle and any(needle in t for source in found for t in source.texts):
+        return Item(text, "quoted", item_refs, needle)
+    return Item(text, "cited", item_refs)
+
+
 # Cap on the target docstring excerpt — keeps the structural section from
 # crowding out the change-history evidence.
 _DOCSTRING_EXCERPT_CHARS = 240
@@ -336,9 +488,11 @@ def _parse_rationale_json(text: str) -> dict:
     """Parse and validate the model's rationale output.
 
     Strips an optional Markdown code fence, decodes the JSON, and checks the
-    five-key schema: ``purpose`` and ``why`` are strings; ``constraints``,
-    ``tradeoffs`` and ``risks`` are lists of strings. Unknown keys are
-    ignored.
+    five-key schema: ``purpose`` and ``why`` are strings; ``tradeoffs`` is a
+    list of strings; ``constraints`` and ``risks`` are lists whose items are
+    a string or an object with a string ``text`` (their ``refs`` and
+    ``quote`` are judged later by :func:`_item` and never raise). Unknown
+    keys are ignored.
 
     Parameters
     ----------
@@ -379,7 +533,17 @@ def _parse_rationale_json(text: str) -> dict:
         if key not in parsed:
             raise RationaleError(f"rationale output missing required key {key!r}")
         value = parsed[key]
-        if not isinstance(value, list) or not all(
+        if key in _SOURCED_LIST_FIELDS:
+            if not isinstance(value, list) or not all(
+                isinstance(item, str)
+                or (isinstance(item, dict) and isinstance(item.get("text"), str))
+                for item in value
+            ):
+                raise RationaleError(
+                    f"rationale key {key!r} must be a list of strings or of "
+                    "objects with a string 'text'"
+                )
+        elif not isinstance(value, list) or not all(
             isinstance(item, str) for item in value
         ):
             raise RationaleError(f"rationale key {key!r} must be a list of strings")
@@ -537,6 +701,8 @@ class RationaleGenerator:
         # TODO: capping bundle size belongs to the future evidence-bundle
         # builder — the generator neither truncates nor chunks its input.
         bundle = _format_evidence(evidence, self._caps)
+        # The text of each piece of evidence, by id, to judge the items' quotes.
+        sources = _evidence_sources(evidence, self._caps)
         if symbol_context is not None:
             bundle = f"{_format_symbol_context(symbol_context)}\n\n{bundle}"
         task = render(
@@ -567,9 +733,9 @@ class RationaleGenerator:
         return Rationale(
             purpose=fields["purpose"],
             why=fields["why"],
-            constraints=tuple(fields["constraints"]),
+            constraints=tuple(_item(raw, sources) for raw in fields["constraints"]),
             tradeoffs=tuple(fields["tradeoffs"]),
-            risks=tuple(fields["risks"]),
+            risks=tuple(_item(raw, sources) for raw in fields["risks"]),
             model=response.model,
             provider=response.provider,
             input_tokens=response.input_tokens,

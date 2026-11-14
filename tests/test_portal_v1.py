@@ -264,7 +264,8 @@ class _Generator:
         return Rationale(
             purpose="Holds the sample lines.",
             why="Two commits built it up.",
-            constraints=("keep it small",),
+            # Empty until RationaleOut types the items (plan 54 Step B3).
+            constraints=(),
             tradeoffs=(),
             risks=(),
             model="fake-1",

@@ -48,7 +48,8 @@ from sqlalchemy import delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, col, select
 
-from whygraph.analyze import CommitEvidence, Rationale
+from whygraph.analyze import CommitEvidence, Item, ItemRef, Rationale
+from whygraph.analyze.rationale import ITEM_BASES, REF_KINDS
 from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.db import get_session
 from whygraph.db.models import RationaleCache
@@ -88,14 +89,81 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _decode_ref(value: object) -> ItemRef | None:
+    """One stored ref, or ``None`` when it is not a ``{"kind", "id"}`` object."""
+    if not isinstance(value, dict):
+        return None
+    kind, ref_id, url = value.get("kind"), value.get("id"), value.get("url")
+    if kind not in REF_KINDS or not isinstance(ref_id, str) or not ref_id:
+        return None
+    return ItemRef(kind, ref_id, url if isinstance(url, str) and url else None)
+
+
+def decode_item(value: object) -> Item | None:
+    """One stored constraint or risk as an :class:`~whygraph.analyze.Item`.
+
+    Parameters
+    ----------
+    value : object
+        A decoded JSON list element: an object ``{"text", "basis", "refs",
+        "quote"}`` (:meth:`Item.as_dict`), or a plain string from a row or
+        bundle written before items carried sources.
+
+    Returns
+    -------
+    Item or None
+        A plain string becomes ``Item(text, "unknown", (), "")``. An object
+        keeps its basis when it is a known one (else ``"unknown"``) and the
+        refs that are well formed. ``None`` for anything else (an object
+        without a string ``text``, a number), which the caller skips.
+    """
+    if isinstance(value, str):
+        return Item(value, "unknown")
+    if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+        return None
+    basis = value.get("basis")
+    if basis not in ITEM_BASES:
+        basis = "unknown"
+    raw_refs = value.get("refs")
+    refs = tuple(
+        ref
+        for ref in map(_decode_ref, raw_refs if isinstance(raw_refs, list) else [])
+        if ref is not None
+    )
+    quote = value.get("quote")
+    return Item(value["text"], basis, refs, quote if isinstance(quote, str) else "")
+
+
+def decode_items(raw: str | None) -> tuple[Item, ...]:
+    """A stored JSON list of constraints or risks as items (see :func:`decode_item`).
+
+    Parameters
+    ----------
+    raw : str or None
+        The JSON text of a ``constraints`` / ``risks`` column.
+
+    Returns
+    -------
+    tuple[Item, ...]
+        The items; empty for a missing or malformed column.
+    """
+    try:
+        values = json.loads(raw) if raw else []
+    except (TypeError, json.JSONDecodeError):
+        return ()
+    if not isinstance(values, list):
+        return ()
+    return tuple(item for item in map(decode_item, values) if item is not None)
+
+
 def _rationale_from_row(row: RationaleCache) -> Rationale:
     """Rebuild the :class:`~whygraph.analyze.Rationale` a cache row holds."""
     return Rationale(
         purpose=row.purpose,
         why=row.why,
-        constraints=tuple(json.loads(row.constraints)),
+        constraints=decode_items(row.constraints),
         tradeoffs=tuple(json.loads(row.tradeoffs)),
-        risks=tuple(json.loads(row.risks)),
+        risks=decode_items(row.risks),
         model=row.actual_model or row.model,
         provider=row.actual_provider or row.provider,
         input_tokens=row.input_tokens,
@@ -364,9 +432,9 @@ def store_cached(
         "cached_at": cached_at,
         "purpose": rationale.purpose,
         "why": rationale.why,
-        "constraints": json.dumps(list(rationale.constraints)),
+        "constraints": json.dumps([item.as_dict() for item in rationale.constraints]),
         "tradeoffs": json.dumps(list(rationale.tradeoffs)),
-        "risks": json.dumps(list(rationale.risks)),
+        "risks": json.dumps([item.as_dict() for item in rationale.risks]),
         "input_tokens": rationale.input_tokens,
         "output_tokens": rationale.output_tokens,
         "actual_provider": rationale.provider,

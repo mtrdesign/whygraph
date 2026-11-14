@@ -132,9 +132,9 @@ class RationaleCard(_RationaleCardRequired, total=False):
     status: str
     purpose: str
     why: str
-    constraints: list[str]
+    constraints: list[dict[str, Any]]
     tradeoffs: list[str]
-    risks: list[str]
+    risks: list[dict[str, Any]]
     model: str
     provider: str
     cached_at: str
@@ -202,15 +202,17 @@ def _format_response(
     ``generated`` ``None`` (Explorer, Chat's cached read, the ``/api/v1``
     wire shape) leaves out ``evidence`` and ``generated``; the MCP tool
     passes a bool and gets both. ``partial``, ``describing`` and
-    ``completing`` are always emitted (plan 49 section 4.3).
+    ``completing`` are always emitted (plan 49 section 4.3). Each
+    constraint and risk is an object ``{"text", "basis", "refs"}`` plus
+    ``"quote"`` when it has one (:meth:`whygraph.analyze.Item.as_dict`).
     """
     card = {
         "target": target_dict(target),
         "purpose": rationale.purpose,
         "why": rationale.why,
-        "constraints": list(rationale.constraints),
+        "constraints": [item.as_dict() for item in rationale.constraints],
         "tradeoffs": list(rationale.tradeoffs),
-        "risks": list(rationale.risks),
+        "risks": [item.as_dict() for item in rationale.risks],
         "model": rationale.model,
         "provider": rationale.provider,
         "cached_at": cached_at,

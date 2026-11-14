@@ -159,15 +159,15 @@ src/**/*.py`. The rules:
 | Glob | 1 to 200 characters of letters, digits, `.`, `_`, `-`, `/` and `*`. It is relative: no leading `/`, no `..` part, and at most two `**`. |
 
 The portal refuses a check that breaks a rule with `note_check_invalid`. When you confirm a note,
-leaving the check out keeps it, and sending `null` removes it. A check counts only on a **confirmed**
-note: a proposal's check does nothing until a person confirms it.
+the confirm form shows the proposal's check: keep it, change it, or choose **No check** to remove it
+(through the API, leaving `check` out keeps it and `null` removes it). A check counts only on a
+**confirmed** note: a proposal's check does nothing until a person confirms it.
 
 ### Where a check runs
 
-- **In the portal, for one note.** A single note (and the notes of one symbol or path) shows a tag:
-  `holds`, `broken`, or `unknown` when the check could not be run. The portal searches git-tracked
-  files only, up to 500 of them. The Notes list shows the check but no tag, because it would search on
-  every row.
+- **In the portal.** A confirmed note with a check shows a tag: `holds`, `broken`, or `unknown` when
+  the check could not be run. The portal searches git-tracked files only, up to 500 of them. The Notes
+  list fetches the tag for each checked note on screen, so notes without a check cost nothing.
 - **In the plan tool, at plan time and after each step.** `/whygraph-plan` copies each check into the
   plan under **Constraint checks**, and `/whygraph-implement` searches for each text with `git grep`
   after every step (`plan-tool.sh constraints`). It searches tracked **and untracked** files, so a

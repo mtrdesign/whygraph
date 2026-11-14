@@ -1615,9 +1615,7 @@ def test_reviewer_wiring() -> None:
 _SOURCE_TAGS = (
     "`(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`"
 )
-_REF_NAMES = (
-    "`<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`."
-)
+_REF_NAMES = "`<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`."
 _CHANGES_ON_PURPOSE_LINE = (
     "   - **Changes on purpose:** <verbatim quote of a recorded constraint this step "
     "changes> - <why>, or omit this line\n"

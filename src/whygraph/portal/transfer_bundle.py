@@ -531,6 +531,9 @@ class NoteRecord(BaseModel):
     retired_by: str | None = None
     retired_at: str | None = None
     retire_reason: str | None = None
+    check_kind: str | None = None
+    check_text: str | None = None
+    check_glob: str | None = None
 
 
 class PurposeRunRecord(BaseModel):

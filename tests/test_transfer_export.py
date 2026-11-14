@@ -302,6 +302,23 @@ def test_note_filter_and_edited_flag(env: SimpleNamespace) -> None:
     assert notes[10].supersedes_id is None
 
 
+def test_a_constraint_note_exports_its_check(env: SimpleNamespace) -> None:
+    check = {"check_kind": "present", "check_text": "with lock:", "check_glob": "**"}
+    with get_session() as s:
+        _seed(s)
+        s.add(_note(1, kind="constraint", **check))
+        s.add(_note(2))
+        s.commit()
+    bundle = _read(_export(env))
+    notes = {n.id: n for n in recs(bundle, tb.NOTES)}
+    assert {k: getattr(notes[1], k) for k in check} == check
+    assert (notes[2].check_kind, notes[2].check_text, notes[2].check_glob) == (
+        None,
+        None,
+        None,
+    )
+
+
 def test_uids_are_unprefixed_and_named_by_the_right_table(
     env: SimpleNamespace,
 ) -> None:

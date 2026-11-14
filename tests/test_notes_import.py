@@ -1078,3 +1078,94 @@ def test_no_actor_and_linked_project(project: SimpleNamespace) -> None:
                 purpose_allowed=True,
             )
     assert info.value.code == "note_linked"
+
+
+# --- plan 54 section 5.8: a constraint note's check ------------------------------
+
+CHECK = {
+    "check_kind": "absent",
+    "check_text": "billing.charge(",
+    "check_glob": "src/**",
+}
+
+
+@pytest.mark.parametrize(
+    ("record", "rule"),
+    [
+        (_rec(1, **CHECK), "only a constraint note can carry a check"),
+        (
+            _rec(1, kind="constraint", check_kind="absent", check_text="abc"),
+            "a check needs kind, text and glob together",
+        ),
+        (
+            _rec(1, kind="constraint", **{**CHECK, "check_kind": "run"}),
+            "check kind must be absent or present",
+        ),
+        (
+            _rec(1, kind="constraint", **{**CHECK, "check_text": "a\nb c"}),
+            "check text must be one line of printable characters",
+        ),
+        (
+            _rec(1, kind="constraint", **{**CHECK, "check_text": "$(rm `x`)"}),
+            "check text must not contain a double quote, a backtick or a backslash",
+        ),
+        (
+            _rec(1, kind="constraint", **{**CHECK, "check_glob": "../*"}),
+            "check glob must not hold a '..' segment",
+        ),
+        (
+            _rec(1, kind="constraint", **{**CHECK, "check_glob": "/etc/*"}),
+            "check glob must not start with '/'",
+        ),
+        (
+            _rec(1, kind="constraint", **{**CHECK, "check_glob": "a;b"}),
+            "check glob may hold only letters, digits, '.', '_', '-', '/' and '*'",
+        ),
+    ],
+)
+def test_a_bad_check_refuses_the_bundle(
+    project: SimpleNamespace, record: dict[str, Any], rule: str
+) -> None:
+    error = _format_error([record])
+    assert (error.field, error.reason) == ("check", rule)
+    assert _rows() == []
+
+
+def test_a_check_is_imported_with_its_status(project: SimpleNamespace) -> None:
+    result = _import(
+        [
+            _rec(1, kind="constraint", **CHECK),
+            _proposed(2, kind="constraint", body="Pending.", **CHECK),
+            _rec(3, kind="constraint", body="No check."),
+        ]
+    )
+    assert result.inserted == {"proposed": 1, "confirmed": 2, "retired": 0}
+    rows = _rows()
+    assert [r.status for r in rows] == ["confirmed", "proposed", "confirmed"]
+    for row in rows[:2]:
+        assert (row.check_kind, row.check_text, row.check_glob) == tuple(CHECK.values())
+    assert (rows[2].check_kind, rows[2].check_text, rows[2].check_glob) == (
+        None,
+        None,
+        None,
+    )
+    # The imported confirmed note's check is live.
+    assert notes.get_note(rows[0].id)["check"] == {
+        "kind": "absent",
+        "text": "billing.charge(",
+        "glob": "src/**",
+    }
+    downgraded = _import([_rec(9, kind="constraint", body="Later.", **CHECK)],
+                         keep_status=False)  # fmt: skip
+    assert downgraded.downgraded == 1
+    assert _rows()[-1].check_glob == "src/**"
+
+
+def test_the_check_is_part_of_the_duplicate_match(project: SimpleNamespace) -> None:
+    first = _import([_rec(1, kind="constraint", body="Same.")])
+    assert first.inserted["confirmed"] == 1
+    other = _rec(2, kind="constraint", body="Same.", proposed_at=T1, **CHECK)
+    second = _import([other])
+    assert second.inserted["confirmed"] == 1 and second.skipped_duplicate == 0
+    again = _import([{**other, "id": 3, "proposed_by": "src-u9"}])
+    assert again.skipped_duplicate == 1

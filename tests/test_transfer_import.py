@@ -903,6 +903,26 @@ def test_bundle_level_note_error_names_the_member(target, tmp_path):
     assert "notes.jsonl line 1: supersedes_id" in exc.value.args[0]
 
 
+def test_a_confirmed_check_imports_live_and_a_bad_one_refuses(target, tmp_path):
+    from whygraph.db.models import ProjectNote
+    from whygraph.portal.transfer_bundle import BundleError
+
+    check = {"check_kind": "absent", "check_text": "x = 2", "check_glob": "src/*"}
+    notes = [_note(1, kind="constraint", **check), _note(2)]
+    _import(target, _bundle(tmp_path / "b.zip", _members(**{"notes.jsonl": notes})))
+    with use_project(target.ctx), get_session() as session:
+        row = session.exec(
+            select(ProjectNote).where(ProjectNote.check_kind.is_not(None))  # type: ignore[union-attr]
+        ).one()
+        assert row.status == "confirmed"
+        assert (row.check_kind, row.check_text, row.check_glob) == tuple(check.values())
+    bad = [_note(1, kind="constraint", **{**check, "check_glob": "../*"})]
+    path = _bundle(tmp_path / "bad.zip", _members(**{"notes.jsonl": bad}))
+    with pytest.raises(BundleError) as exc:
+        _import(target, path)
+    assert "notes.jsonl line 1: check" in exc.value.args[0]
+
+
 def test_purpose_skipped_when_the_target_has_one(target, tmp_path):
     from whygraph.db.models import ProjectNote, ProjectPurposeRun
 

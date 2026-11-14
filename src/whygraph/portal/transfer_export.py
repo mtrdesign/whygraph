@@ -302,6 +302,9 @@ def _note_record(
         retired_by=_strip(row.retired_by),
         retired_at=row.retired_at,
         retire_reason=row.retire_reason,
+        check_kind=row.check_kind,
+        check_text=row.check_text,
+        check_glob=row.check_glob,
     )
 
 

@@ -106,14 +106,18 @@ AREA_HISTORY_ANNOTATIONS = ToolAnnotations(
 )
 
 PROPOSE_NOTE_DESCRIPTION = (
-    "What: propose a short team note (decision, constraint, gotcha or "
-    "convention) anchored to a symbol, line range, path, area or the whole "
-    "project. It waits for a person to confirm it. "
-    "When: a decision or constraint the code does not show and a future "
-    "reader needs. Never use it to restate code or commit text. "
-    "Give exactly one of `qualified_name`, `path` (+ `line_start` / "
-    "`line_end`), `area` or `project_wide`. "
-    "Cost: a database write, capped per day."
+    "What: propose a short note (decision, constraint, gotcha or "
+    "convention) anchored to a symbol, line range, path, area or the "
+    "project; a person confirms it. "
+    "When: a decision or constraint the code does not show and readers "
+    "need; never restate code or commit text. "
+    "Give exactly one of `qualified_name`, `path` (+ `line_start` / `line_end`), "
+    "`area` or `project_wide`. "
+    "A `constraint` may carry a check: `check_kind` (`absent` or `present`), "
+    "a fixed `check_text` and `check_glob`, all or none. "
+    "A revision names the note it replaces in `supersedes_id`; confirming "
+    "retires the old note. "
+    "Cost: a capped write."
 )
 
 PROPOSE_NOTE_ANNOTATIONS = ToolAnnotations(

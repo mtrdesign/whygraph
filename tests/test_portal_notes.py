@@ -14,6 +14,7 @@ the other route tables (``test_portal_app.py``, ``test_portal_tenancy.py``,
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -430,6 +431,7 @@ def test_the_statuses_of_the_error_codes(api: SimpleNamespace) -> None:
         ("note_not_found", 404),
         ("note_state", 409),
         ("note_invalid", 400),
+        ("note_check_invalid", 400),
         ("note_limit", 429),
         ("note_needs_second_confirmer", 403),
         ("note_no_actor", 500),
@@ -561,3 +563,156 @@ def test_bound_project_is_set_on_every_notes_request(
     # confirm and reconfirm read it twice (can_configure, audit), retire and
     # reject once (audit); a missing binding would raise RuntimeError instead.
     assert seen == ["api"] * 6
+
+
+# ---------------------------------------------------------------------------
+# Checks on constraint notes (plan 54 section 5.8)
+# ---------------------------------------------------------------------------
+
+# sample.py holds "line one", "line two" and "line three".
+HOLDS_ABSENT = {"kind": "absent", "text": "line four", "glob": "*.py"}
+BROKEN_ABSENT = {"kind": "absent", "text": "line two", "glob": "*.py"}
+HOLDS_PRESENT = {"kind": "present", "text": "line one", "glob": "**/*.py"}
+BROKEN_PRESENT = {"kind": "present", "text": "line one", "glob": "lib/*.py"}
+
+
+def propose_checked(t: SimpleNamespace, who: str, check: Any, body: str) -> dict:
+    response = call(
+        t,
+        who,
+        "POST",
+        N,
+        json={"body": body, "kind": "constraint", "anchor": NARROW, "check": check},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_every_check_rule_is_refused_over_rest(api: SimpleNamespace) -> None:
+    from test_mcp_notes import BAD_CHECKS
+
+    def post(path: str, payload: dict) -> Any:
+        # ASCII-escaped JSON: a lone surrogate cannot be sent as UTF-8.
+        return call(
+            t,
+            "dee",
+            "POST",
+            path,
+            content=json.dumps(payload).encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    t = api
+    pending = propose(t, "dee", NARROW, body="a rule to confirm")["id"]
+    for check, kind, message in BAD_CHECKS:
+        made = post(N, {"body": BODY, "kind": kind, "anchor": NARROW, "check": check})
+        assert (made.status_code, made.json()) == (
+            400,
+            {"error": message, "code": "note_check_invalid"},
+        ), check
+        confirmed = post(f"{N}/{pending}/confirm", {"kind": kind, "check": check})
+        assert (confirmed.status_code, confirmed.json()["code"]) == (
+            400,
+            "note_check_invalid",
+        )
+    listed = call(t, "dee", "GET", N).json()
+    assert [n["id"] for n in listed] == [pending]
+    assert listed[0]["status"] == "proposed"
+
+
+def test_a_check_through_propose_confirm_and_reads(api: SimpleNamespace) -> None:
+    t = api
+    states = {}
+    for n, check in enumerate(
+        (HOLDS_ABSENT, BROKEN_ABSENT, HOLDS_PRESENT, BROKEN_PRESENT)
+    ):
+        made = propose_checked(t, "dee", check, f"rule {n}")
+        assert made["check"] == check and made["check_state"] is None
+        done = call(t, "dee", "POST", f"{N}/{made['id']}/confirm", json={})
+        assert done.status_code == 200, done.text
+        assert done.json()["check"] == check
+        states[made["id"]] = done.json()["check_state"]
+        one = call(t, "dee", "GET", f"{N}/{made['id']}").json()
+        assert one["check_state"] == states[made["id"]]
+    assert list(states.values()) == ["holds", "broken", "holds", "broken"]
+    target = call(
+        t, "eve", "GET", f"{N}/for-target?path=sample.py&line_start=1&line_end=2"
+    ).json()
+    assert {n["id"]: n["check_state"] for n in target} == states
+    # A list never runs a check.
+    listed = call(t, "eve", "GET", N).json()
+    assert all("check_state" not in n and n["check"] for n in listed)
+    # Retired: the check stays on the record, but is no longer live.
+    first = next(iter(states))
+    gone = call(t, "dee", "POST", f"{N}/{first}/retire", json={"reason": "outdated"})
+    assert gone.json()["check"] == HOLDS_ABSENT
+    assert gone.json()["check_state"] is None
+    assert call(t, "dee", "GET", f"{N}/{first}").json()["check_state"] is None
+
+
+def test_confirm_sets_keeps_and_clears_a_check(api: SimpleNamespace) -> None:
+    t = api
+    plain = propose(t, "dee", NARROW, body="add a check at confirm")
+    added = call(
+        t, "dee", "POST", f"{N}/{plain['id']}/confirm", json={"check": BROKEN_ABSENT}
+    ).json()
+    assert added["check"] == BROKEN_ABSENT and added["check_state"] == "broken"
+    checked = propose_checked(t, "dee", HOLDS_ABSENT, "drop the check at confirm")
+    cleared = call(
+        t, "dee", "POST", f"{N}/{checked['id']}/confirm", json={"check": None}
+    ).json()
+    assert cleared["check"] is None and cleared["check_state"] is None
+    kept = propose_checked(t, "dee", HOLDS_ABSENT, "keep the check at confirm")
+    done = call(t, "dee", "POST", f"{N}/{kept['id']}/confirm", json={"body": "kept"})
+    assert done.json()["check"] == HOLDS_ABSENT
+
+
+def test_a_check_edit_makes_a_wide_note_need_a_second_confirmer(
+    api: SimpleNamespace,
+) -> None:
+    t = api
+    wide = propose(t, "dee", WIDE)
+    edited = call(
+        t, "finn", "POST", f"{N}/{wide['id']}/confirm", json={"check": HOLDS_ABSENT}
+    )
+    assert edited.status_code == 403
+    assert edited.json()["code"] == "note_needs_second_confirmer"
+    by_admin = call(
+        t, "cy", "POST", f"{N}/{wide['id']}/confirm", json={"check": HOLDS_ABSENT}
+    )
+    assert by_admin.status_code == 200 and by_admin.json()["check_state"] == "holds"
+
+
+def test_a_check_over_the_file_limit_is_unknown(
+    api: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    t = api
+    made = propose_checked(t, "dee", HOLDS_ABSENT, "a rule over many files")
+    call(t, "dee", "POST", f"{N}/{made['id']}/confirm", json={})
+    monkeypatch.setattr(notes, "CHECK_MAX_FILES", 0)  # *.py tracks one file
+    got = call(t, "dee", "GET", f"{N}/{made['id']}").json()
+    assert got["check_state"] == "unknown"
+
+
+def test_a_revision_over_rest_carries_its_own_check(api: SimpleNamespace) -> None:
+    t = api
+    old = propose(t, "dee", NARROW)
+    call(t, "dee", "POST", f"{N}/{old['id']}/confirm", json={})
+    revision = call(
+        t,
+        "dee",
+        "POST",
+        N,
+        json={
+            "body": BODY,
+            "kind": "constraint",
+            "anchor": NARROW,
+            "supersedes_id": old["id"],
+            "check": HOLDS_ABSENT,
+        },
+    )
+    assert revision.status_code == 201, revision.text
+    assert revision.json()["supersedes_id"] == old["id"]
+    done = call(t, "dee", "POST", f"{N}/{revision.json()['id']}/confirm", json={})
+    assert done.json()["check_state"] == "holds"
+    assert call(t, "dee", "GET", f"{N}/{old['id']}").json()["status"] == "retired"

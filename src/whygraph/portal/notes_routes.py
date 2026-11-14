@@ -57,6 +57,7 @@ _STATUS = {
     "note_not_found": 404,
     "note_state": 409,
     "note_invalid": 400,
+    "note_check_invalid": 400,
     "note_limit": 429,
     "note_needs_second_confirmer": 403,
     "note_no_actor": 500,
@@ -177,7 +178,10 @@ def _audit(
 
 
 class ProposeBody(BaseModel):
-    """``POST /notes``; the domain validates every field (``note_invalid``)."""
+    """``POST /notes``; the domain validates every field (``note_invalid``).
+
+    ``check`` is ``{"kind", "text", "glob"}`` or null (``note_check_invalid``).
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -186,15 +190,21 @@ class ProposeBody(BaseModel):
     anchor: Any = None
     refs: Any = None
     supersedes_id: Any = None
+    check: Any = None
 
 
 class ConfirmBody(BaseModel):
-    """``POST /notes/{id}/confirm``: an optional edit."""
+    """``POST /notes/{id}/confirm``: an optional edit.
+
+    ``check`` left out keeps the proposal's check; null removes it; an
+    object replaces it.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
     body: Any = None
     kind: Any = None
+    check: Any = None
 
 
 class ReconfirmBody(BaseModel):
@@ -365,6 +375,7 @@ def propose_note(payload: ProposeBody, request: Request, response: Response) -> 
             origin="ui",
             refs=payload.refs if payload.refs is not None else (),
             supersedes_id=payload.supersedes_id,
+            check=payload.check,
         )
     response.status_code = 200 if view.get("duplicate") else 201
     return _one(view)
@@ -411,8 +422,11 @@ def confirm_note(
     payload: ConfirmBody | None = None,
     access: OrgAccess = Depends(current_org),
 ) -> dict:
-    """Confirm a proposed note, optionally editing its body or kind."""
+    """Confirm a proposed note, optionally editing its body, kind or check."""
     payload = payload or ConfirmBody()
+    edits: dict[str, Any] = {}
+    if "check" in payload.model_fields_set:
+        edits["check"] = payload.check
     with _mapped():
         view = notes.confirm(
             note_id,
@@ -420,6 +434,7 @@ def confirm_note(
             actor_can_configure=_can_configure(request),
             body=payload.body,
             kind=payload.kind,
+            **edits,
         )
     _audit("note_confirmed", request, access, view)
     return _one(view)

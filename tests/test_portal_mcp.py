@@ -494,6 +494,13 @@ def test_tools_declare_an_output_schema() -> None:
     assert {"status", "evidence", "generated", "platform", "notes"} <= set(props)
     assert "note" in tools["whygraph_propose_note"].outputSchema["properties"]
     assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
+    supersedes = tools["whygraph_propose_note"].inputSchema["properties"][
+        "supersedes_id"
+    ]
+    assert "integer" in json.dumps(supersedes)
+    assert "supersedes_id" not in tools["whygraph_propose_note"].inputSchema.get(
+        "required", []
+    )
 
 
 def test_tools_carry_titles_annotations_and_server_instructions() -> None:

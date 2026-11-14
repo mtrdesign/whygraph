@@ -36,3 +36,6 @@
   step's Verify (the other editors), unless the step's **Changes on purpose** names the note. A check
   is a text search and never runs a command. See
   [A check on a constraint](../guide/notes.md#a-check-on-a-constraint).
+- **The platform API is version 2.** A rationale card's `constraints` and `risks` are lists of
+  items with their sources, so a linked portal and its platform must both run this release. An older
+  linked portal shows **Update required** until it is updated.

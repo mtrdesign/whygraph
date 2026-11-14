@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 import anyio.from_thread
 from mcp.server.fastmcp import Context, FastMCP
@@ -101,6 +101,41 @@ CARD_EVIDENCE_REFS = 5
 """Commits a card cites under ``evidence`` (newest first)."""
 
 
+class _RationaleItemRefRequired(TypedDict):
+    kind: Literal["commit", "pr", "issue"]
+    id: str
+
+
+class RationaleItemRef(_RationaleItemRefRequired, total=False):
+    """A source one card item names (:meth:`whygraph.analyze.ItemRef.as_dict`).
+
+    ``kind`` is ``"commit"``, ``"pr"`` or ``"issue"``; ``id`` the commit's
+    full SHA or the PR's or issue's number as a string; ``url`` the PR's or
+    issue's ``html_url``, present only when known.
+    """
+
+    url: str
+
+
+class _RationaleItemRequired(TypedDict):
+    text: str
+    basis: Literal["quoted", "cited", "inferred", "unknown"]
+    refs: list[RationaleItemRef]
+
+
+class RationaleItem(_RationaleItemRequired, total=False):
+    """One ``constraints`` / ``risks`` item (:meth:`whygraph.analyze.Item.as_dict`).
+
+    ``basis`` ``"quoted"``: a named source holds ``quote``; ``"cited"``: a
+    named source is in the evidence but holds no quote; ``"inferred"``: no
+    source is named, so the item is the model's reading of the diffs;
+    ``"unknown"``: the card predates sources. ``quote`` is present only for
+    ``"quoted"``.
+    """
+
+    quote: str
+
+
 class _RationaleCardRequired(TypedDict):
     target: dict[str, Any]
 
@@ -132,9 +167,9 @@ class RationaleCard(_RationaleCardRequired, total=False):
     status: str
     purpose: str
     why: str
-    constraints: list[dict[str, Any]]
+    constraints: list[RationaleItem]
     tradeoffs: list[str]
-    risks: list[dict[str, Any]]
+    risks: list[RationaleItem]
     model: str
     provider: str
     cached_at: str

@@ -174,7 +174,7 @@ when you open the project list. There is no background polling.
 | `revoked`, reason `project_access_removed` | You lost access to this project on the platform (it became Restricted, your role was removed or the organization default dropped) | Ask a project admin on the platform for access, or remove it; reconnecting cannot help |
 | `removed` | The project, or its organization, was deleted | Remove it from this machine |
 | `access_lost` | The platform can no longer read the repository, so its history may be out of date | An admin fixes it on the platform; nothing to do locally |
-| `update_required` | The platform needs a newer WhyGraph than this portal | Update with `whygraph up` |
+| `update_required` | The platform needs a newer WhyGraph than this portal, or the two speak different API versions (the next release moves to API version 2, because a card's constraints and risks now carry their sources) | Update with `whygraph up` |
 
 ### Project roles
 

@@ -699,8 +699,9 @@ MAPPING: list[tuple[dict, tuple[str, str | None]]] = [
     # A connection error, a timeout or a 5xx.
     ({"failure": "unreachable"}, ("unreachable", None)),
     ({"failure": "timeout"}, ("unreachable", None)),
-    # An incompatible `meta`: this WhyGraph cannot speak to that platform.
-    ({"api_version": 2}, ("update_required", None)),
+    # An incompatible `meta`: this WhyGraph cannot speak to that platform
+    # (version 1 sends card items as plain strings, plan 54 D5).
+    ({"api_version": 1}, ("update_required", None)),
 ]
 """Every row of plan section 4.11's platform-answer -> local-status table."""
 

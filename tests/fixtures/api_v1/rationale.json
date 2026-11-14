@@ -2,7 +2,29 @@
   "body": {
     "cached_at": "<time>",
     "completing": true,
-    "constraints": [],
+    "constraints": [
+      {
+        "basis": "quoted",
+        "quote": "keep it small",
+        "refs": [
+          {
+            "id": "<sha1>",
+            "kind": "commit"
+          },
+          {
+            "id": "7",
+            "kind": "pr",
+            "url": "https://github.com/acme/api/pull/7"
+          }
+        ],
+        "text": "keep it small"
+      },
+      {
+        "basis": "inferred",
+        "refs": [],
+        "text": "no network in the hot path"
+      }
+    ],
     "describing": 2,
     "evidence_count": {
       "commits": 2,
@@ -25,7 +47,18 @@
     },
     "provider": "fake",
     "purpose": "Holds the sample lines.",
-    "risks": [],
+    "risks": [
+      {
+        "basis": "cited",
+        "refs": [
+          {
+            "id": "3",
+            "kind": "issue"
+          }
+        ],
+        "text": "callers pass bytes"
+      }
+    ],
     "target": {
       "line_end": 3,
       "line_start": 1,

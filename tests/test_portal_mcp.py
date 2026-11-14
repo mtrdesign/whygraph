@@ -492,6 +492,22 @@ def test_tools_declare_an_output_schema() -> None:
         assert schema is not None and set(schema["required"]) == required
     props = tools["whygraph_rationale_brief"].outputSchema["properties"]
     assert {"status", "evidence", "generated", "platform", "notes"} <= set(props)
+    # Each constraint and risk is an object with its source (plan 54 D5).
+    defs = tools["whygraph_rationale_brief"].outputSchema["$defs"]
+    for key in ("constraints", "risks"):
+        assert props[key]["items"] == {"$ref": "#/$defs/RationaleItem"}
+    item = defs["RationaleItem"]
+    assert set(item["required"]) == {"text", "basis", "refs"}
+    assert set(item["properties"]) == {"text", "basis", "refs", "quote"}
+    assert item["properties"]["basis"]["enum"] == [
+        "quoted",
+        "cited",
+        "inferred",
+        "unknown",
+    ]
+    ref = defs["RationaleItemRef"]
+    assert set(ref["required"]) == {"kind", "id"}
+    assert ref["properties"]["kind"]["enum"] == ["commit", "pr", "issue"]
     assert "note" in tools["whygraph_propose_note"].outputSchema["properties"]
     assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
     supersedes = tools["whygraph_propose_note"].inputSchema["properties"][
@@ -521,6 +537,9 @@ def test_tools_carry_titles_annotations_and_server_instructions() -> None:
         assert ann.openWorldHint is open_world
         assert len(tools[name].description) <= 600
         assert "whygraph scan" not in tools[name].description
+    brief = tools["whygraph_rationale_brief"].description
+    assert all(f"`{basis}`" in brief for basis in ("quoted", "cited", "inferred"))
+    assert "reading of the diffs, not a recorded statement" in brief
     assert mcp_server.mcp.instructions == WHYGRAPH_INSTRUCTIONS
     assert WHYGRAPH_INSTRUCTIONS.startswith("WhyGraph")
     assert "`partial: true`" in WHYGRAPH_INSTRUCTIONS

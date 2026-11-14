@@ -38,6 +38,7 @@ from typing import Any
 
 import httpx
 
+from whygraph.api_v1 import API_VERSION
 from whygraph.portal.platform_client import MAX_RESPONSE_BYTES
 
 PLATFORM_ORIGIN = "https://wg.example.com"
@@ -108,7 +109,7 @@ class FakePlatform:
         self,
         platform_origin: str = PLATFORM_ORIGIN,
         *,
-        api_version: int = 1,
+        api_version: int = API_VERSION,
         min_client: str = "0.0.0",
     ) -> None:
         self.platform_origin = platform_origin
@@ -300,14 +301,29 @@ class FakePlatform:
         return httpx.Response(404, json=error_body("not_found"))
 
 
+RATIONALE_ITEMS = (
+    {
+        "text": "keep it small",
+        "basis": "quoted",
+        "refs": [
+            {"kind": "commit", "id": SHA},
+            {"kind": "pr", "id": "7", "url": "https://github.com/acme/demo/pull/7"},
+        ],
+        "quote": "keep it small",
+    },
+    {"text": "no network here", "basis": "inferred", "refs": []},
+)
+"""The ``constraints`` of the fake's card (``risks`` holds the second)."""
+
+
 def _rationale_body(project: dict) -> dict:
     return {
         "target": {"path": "a.py", "line_start": 1, "line_end": 2},
         "purpose": "p",
         "why": "w",
-        "constraints": [],
+        "constraints": list(RATIONALE_ITEMS),
         "tradeoffs": [],
-        "risks": [],
+        "risks": [RATIONALE_ITEMS[1]],
         "model": "m",
         "provider": "x",
         "cached_at": "2026-10-05T10:00:00Z",

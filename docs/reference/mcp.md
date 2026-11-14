@@ -195,9 +195,16 @@ Returns the card:
   "target": { "...": "..." },
   "purpose": "...",
   "why": "...",
-  "constraints": ["..."],
+  "constraints": [
+    { "text": "...", "basis": "quoted",
+      "refs": [{ "kind": "commit", "id": "<full sha>" }], "quote": "..." },
+    { "text": "...", "basis": "inferred", "refs": [] }
+  ],
   "tradeoffs": ["..."],
-  "risks": ["..."],
+  "risks": [
+    { "text": "...", "basis": "cited",
+      "refs": [{ "kind": "pr", "id": "847", "url": "..." }] }
+  ],
   "model": "claude-opus-4-7",
   "provider": "anthropic",
   "cached_at": "2026-06-11T12:00:00Z",
@@ -230,6 +237,13 @@ plus provenance (`model`, `provider`, `cached_at`) and an `evidence_count` summa
 the top five commits (newest first) with their PR and issue links, so you can name "PR #847" without
 an evidence call; it is derived on each call, not stored with the card. `generated` is `true` when
 this call paid for the card and `false` when it was read from the cache.
+
+Each item of `constraints` and `risks` names its source. `basis` is decided by WhyGraph's code, not
+by the model: `quoted` when a commit, PR or issue in `refs` holds `quote` word for word (whitespace
+aside), `cited` when a ref is in the evidence but the quote is not found, `inferred` when no source
+supports it (the model's reading of the diffs, not a recorded statement), and `unknown` for a card
+cached before sources existed. A ref is `{kind, id, url?}`: `kind` is `commit`, `pr` or `issue`, and
+`id` is the full commit SHA or the PR or issue number. `tradeoffs` stays a list of strings.
 
 #### Cached-only lookups { #cached-only-lookups }
 

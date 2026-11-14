@@ -35,8 +35,14 @@ from pydantic import (
 
 from whygraph.services.git import BlameHunk, BlameOrigin
 
-API_VERSION = 1
-"""The ``/api/v1`` contract version."""
+API_VERSION = 2
+"""The ``/api/v1`` contract version.
+
+2 (plan 54): each card ``constraints`` / ``risks`` item is an object
+(:class:`RationaleItemOut`), not a string. Both sides compare it at
+``/meta``, so a client of another version reports ``update_required``
+rather than failing to parse a card.
+"""
 
 MAX_HUNKS = 200
 """Most hunks one request may carry."""
@@ -78,6 +84,12 @@ Role = Literal["owner", "admin", "member"]
 
 ProjectRoleName = Literal["admin", "contributor", "viewer"]
 """The token user's effective role on the project (M2f-1)."""
+
+Basis = Literal["quoted", "cited", "inferred", "unknown"]
+"""How a card's constraint or risk is sourced (``analyze.ITEM_BASES``)."""
+
+RefKind = Literal["commit", "pr", "issue"]
+"""What a constraint's or risk's ref points at (``analyze.REF_KINDS``)."""
 
 
 def _check_sha(value: str) -> str:
@@ -359,15 +371,70 @@ class EvidenceCountOut(_Out):
     issues: int
 
 
+class RationaleItemRefOut(_Out):
+    """A source one constraint or risk names (``analyze.ItemRef.as_dict``).
+
+    Attributes
+    ----------
+    kind : str
+        ``"commit"``, ``"pr"`` or ``"issue"`` (:data:`RefKind`).
+    id : str
+        The commit's full SHA, or the pull request's or issue's number.
+    url : str or None
+        The pull request's or issue's ``html_url``; omitted when ``None``.
+    """
+
+    kind: RefKind
+    id: str
+    url: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_url(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if not data.get("url"):
+            data.pop("url", None)
+        return data
+
+
+class RationaleItemOut(_Out):
+    """One constraint or risk of a card, with its source (``analyze.Item.as_dict``).
+
+    Attributes
+    ----------
+    text : str
+        The constraint or the risk.
+    basis : str
+        How its source was checked (:data:`Basis`).
+    refs : list[RationaleItemRefOut]
+        The named sources found in the evidence.
+    quote : str
+        The checked quote; omitted when empty.
+    """
+
+    text: str
+    basis: Basis
+    refs: list[RationaleItemRefOut] = Field(default_factory=list)
+    quote: str = ""
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_quote(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        data = handler(self)
+        if not data.get("quote"):
+            data.pop("quote", None)
+        return data
+
+
 class RationaleOut(_Out):
     """A rationale card (``mcp.rationale._format_response``)."""
 
     target: TargetOut
     purpose: str
     why: str
-    constraints: list[str] = Field(default_factory=list)
+    constraints: list[RationaleItemOut] = Field(default_factory=list)
     tradeoffs: list[str] = Field(default_factory=list)
-    risks: list[str] = Field(default_factory=list)
+    risks: list[RationaleItemOut] = Field(default_factory=list)
     model: str
     provider: str
     cached_at: str
@@ -579,6 +646,7 @@ __all__ = [
     "MAX_PATH",
     "MAX_QUALIFIED_NAME",
     "PLATFORM_BUDGET_MESSAGE",
+    "Basis",
     "CommitOut",
     "ErrorOut",
     "EvidenceCountOut",
@@ -593,7 +661,10 @@ __all__ = [
     "PullRequestOut",
     "PushStatus",
     "RationaleIn",
+    "RationaleItemOut",
+    "RationaleItemRefOut",
     "RationaleOut",
+    "RefKind",
     "RepoPath",
     "Role",
     "Sha",

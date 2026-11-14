@@ -1074,6 +1074,81 @@ def record_plan_keeps(stem: str, patterns: tuple[str, ...]) -> Check:
     return Check("plan keeps the constraint", fn, record=True)
 
 
+# The tags of plan 54 section 5.7: a card item's basis after its quote.
+_SOURCE_TAG = re.compile(
+    r"\s*\((?:quoted: [^()\n]+|cited: [^()\n]+|inferred|note #\d+)\)"
+)
+_STEP_LABEL = re.compile(r"^\s*(?:-\s+)?\*\*([A-Z][A-Za-z -]*):\*\*")
+
+
+def _step_fields(steps: str, names: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Return ``(name, text)`` for each step field in ``names``, continuation lines joined."""
+    fields: list[tuple[str, str]] = []
+    current: str | None = None
+    for line in steps.splitlines():
+        label = _STEP_LABEL.match(line)
+        if re.match(r"^\d+\. ", line):
+            current = None
+        elif label:
+            current = label.group(1) if label.group(1) in names else None
+            if current:
+                fields.append((current, line[label.end() :]))
+        elif current and line.strip():
+            fields[-1] = (current, f"{fields[-1][1]} {line.strip()}")
+    return fields
+
+
+def constraint_quotes_tagged(stem: str) -> Check:
+    """Pass when each constraint quote in a plan's steps ends with a source tag.
+
+    Parameters
+    ----------
+    stem : str
+        The plan's stem under ``.whygraph/plans/``.
+
+    Returns
+    -------
+    Check
+        Fails when the plan is missing, quotes nothing under **Constraints to
+        preserve** or **Changes on purpose**, or has a quote with no tag. On a
+        **Changes on purpose** line only the first quote is the constraint.
+
+    Notes
+    -----
+    A tag is ``(quoted: <ref>)``, ``(cited: <ref>)``, ``(inferred)`` or
+    ``(note #<id>)``. An item of basis ``unknown`` has none, so a card cached
+    before sources existed fails this check: refresh the cards first.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(_plan_path(ctx, stem))
+        if not text:
+            return False, "no plan written"
+        fields = _step_fields(
+            _section(text, "Steps"), ("Constraints to preserve", "Changes on purpose")
+        )
+        quotes: list[str] = []
+        untagged: list[str] = []
+        for name, body in fields:
+            found = list(re.finditer(r'"([^"]+)"', body))
+            if name == "Changes on purpose":
+                found = found[:1]
+            for match in found:
+                quotes.append(match.group(1))
+                if not _SOURCE_TAG.match(body, match.end()):
+                    untagged.append(match.group(1)[:60])
+        if not quotes:
+            return False, "no quote under Constraints to preserve or Changes on purpose"
+        if untagged:
+            return (
+                False,
+                f"{len(untagged)} of {len(quotes)} quotes untagged: {untagged}",
+            )
+        return True, f"{len(quotes)} quotes, each tagged"
+
+    return Check("constraint quotes carry a source tag", fn)
+
+
 def record_comparison(defect_step: int | None) -> Check:
     """Record, for the section 6.4 comparison, what the evaluators caught."""
 

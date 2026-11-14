@@ -89,7 +89,8 @@ ladder, no review gate and no evaluator (see [Differences between editors](#diff
    only then changes code. A step that fails climbs the [recovery ladder](#running-unattended).
 7. **Review gate.** After each verified step, a reviewer checks the step's own diff against the
    rationale cards already cached. A **Constraint at risk** verdict stops the loop so that you can fix
-   it. The gate reads cached cards only and never generates one.
+   it, unless the constraint is tagged `(inferred)`. The gate reads cached cards only and never
+   generates one.
 8. **Acceptance.** A last, separate run walks the plan's `## Acceptance` list: first the project's full
    test command, then each check. The plan tool runs each check, so a hung one is killed on a deadline.
    It reports what failed and undoes nothing. A list with only `manual:`
@@ -97,6 +98,32 @@ ladder, no review gate and no evaluator (see [Differences between editors](#diff
 
 The implementor flags files it changed outside the step's **Files**, logs every fix attempt with its
 cause, and never edits a file that the step's **Boundaries** names.
+
+### Where a constraint comes from
+
+Each constraint and risk a plan quotes from a rationale card ends with a tag that names its
+[source](mcp-usage.md#the-tools). The quote itself is the card item's text, unchanged.
+
+| Tag | Meaning |
+|---|---|
+| `(quoted: <ref>)` | A commit, PR or issue states it: the card holds a passage of that source. |
+| `(cited: <ref>)` | The card names a source, but no passage of it was found. |
+| `(inferred)` | No source backs it: the model read it from the diffs. Treat it as a guess. |
+| `(note #<id>)` | A [project note](notes.md) that a person confirmed. |
+| none | The card was cached before cards recorded sources. |
+
+`<ref>` is a commit id, `PR #<n>` or `Issue #<n>`. A guess informs you but never stops a run. A
+constraint tagged `(inferred)` alone never becomes a Blocker: the plan lists it under Risks. In
+Claude Code, a review-gate **Constraint at risk** verdict that ends `(inferred)` is printed and does
+not hold the step.
+
+**Changes on purpose.** Sometimes the task itself asks to change a recorded constraint, such as "sort
+the export by name" when a card says the export stays in id order. The step that does it then has a
+**Changes on purpose** line: the constraint quoted verbatim, its tag, and why the plan changes it.
+Such a constraint is not a Blocker, and the step does not repeat it under **Constraints to
+preserve**. The implementor does not treat it as a guard. In Claude Code, the review gate reports a
+hunk that breaks it as **Changed on purpose**, prints one line, and goes on. Once the change is in,
+record the new rule with `/whygraph-note` so the next plan does not quote the old one.
 
 ### Plan review
 

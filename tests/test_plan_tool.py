@@ -676,6 +676,28 @@ def test_check_dash_inside_quotes_is_exempt(tmp_path: Path, line: str) -> None:
     assert _check(tmp_path, text).returncode == 0
 
 
+_VERIFY_LINE = "   - **Verify:** `true` and `true`\n"
+
+
+def test_check_changes_on_purpose_after_the_last_field(tmp_path: Path) -> None:
+    line = '   - **Changes on purpose:** "stay fast" (cited: 1a2b3c4d) - the task asks for it\n'
+    text = _replaced(_VERIFY_LINE, _VERIFY_LINE + line)
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_check_changes_on_purpose_quote_may_hold_a_dash(tmp_path: Path) -> None:
+    # The quote runs onto a second line, so only the field exemption covers its dash:
+    # read as more Verify text, the dash would be a finding.
+    lines = (
+        '   - **Changes on purpose:** "stay fast\n'
+        f'     {_EM} always" (inferred) - the task asks for it\n'
+    )
+    text = _replaced(_VERIFY_LINE, _VERIFY_LINE + lines)
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
 def test_check_ignores_fenced_code(tmp_path: Path) -> None:
     text = _change_is(f"Read this.\n     ```\n     ## Steps {_EM}\n     ```")
     assert _check(tmp_path, text).returncode == 0, _check(tmp_path, text).stdout

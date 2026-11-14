@@ -51,14 +51,15 @@ File tools (read, grep, glob) for spot-checking only. The shell, where one exist
 | `qualified.name` | path/to/file.py:LN-LN | 12 commits, 3 PRs |
 ```
 
-**2. Identify Blockers.** Scan the `## Constraints / risks cited verbatim` section for any verbatim constraint that the task description appears to violate. If you find one, hoist it into the **Blockers** section. Otherwise omit the section entirely - never include an empty placeholder.
+**2. Identify Blockers.** Scan the `## Constraints / risks cited verbatim` section for any verbatim constraint that the task description appears to violate. If you find one, hoist it into the **Blockers** section. Otherwise omit the section entirely - never include an empty placeholder. A constraint the task itself asks to change goes to **Changes on purpose** of its step, not to `## Blockers`. A constraint tagged `(inferred)` alone never makes a Blocker. It goes to **Risks called out across the change** with its tag.
 
 **3. Sequence steps.** Order steps as the sidecar's `WORKING SET` block lists the symbols: the planner lists it in dependency order (callees before callers, leaves before roots). Each step gets:
 - **Files** - concrete paths and line ranges from the working set.
 - **Change** - one paragraph synthesising what changes at that location.
 - **Boundaries** - the files or behaviours the `## Boundaries` section marks `external contract` or `owned by t<N>` that this step could reach. When `PARENT` is not `none`, read it and add the `files_hint` paths of the other children. Write "none" when nothing applies.
-- **Constraints to preserve** - verbatim quotes from the `## Constraints / risks cited verbatim` section; "none recorded" if absent.
-- **Risks** - verbatim quotes from the `## Constraints / risks cited verbatim` section; "none recorded" if absent.
+- **Constraints to preserve** - verbatim quotes from the `## Constraints / risks cited verbatim` section; "none recorded" if absent. Copy the tag after each quote with it: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)` or `(note #<id>)`. A quote without a tag stays without one.
+- **Changes on purpose** - a quoted constraint that this step's Change removes or changes, verbatim, with its tag and a one-line why. Omit the line otherwise. Such a constraint is not a Blocker. Never repeat it under **Constraints to preserve**.
+- **Risks** - verbatim quotes from the `## Constraints / risks cited verbatim` section; "none recorded" if absent. Copy the tag after each quote with it.
 - **Test first** - for a step symbol that the `## Verify candidates` section flags **uncovered**, the `<test file>::<test name>` that entry names; "none" otherwise. Never take Test first from a covered entry.
 - **Model** - `haiku`, `sonnet` or `opus` by the spine's `## Model per step` ladder, lowercase, with a one-line why.
 - **Routes** and **Expected UI** - only on the steps that step 3g names; omit both lines otherwise.
@@ -80,7 +81,7 @@ File tools (read, grep, glob) for spot-checking only. The shell, where one exist
 - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3 in step 3d.
 - Add the Acceptance item that `CAPTURE_STATUS` selects. For `available` or `unknown`, add `manual: open .whygraph/plans/<stem>/ui/index.html and compare before and after for each UI step`. For `unavailable: <reason>`, add one `manual:` item per Expected UI state instead, and name the reason in the confidence reason. For `none`, add no UI item. These items do not count toward the six-item cap of step 3c.
 
-**4. Roll up risks.** The bottom-of-plan **Risks called out across the change** section is the deduplicated union of the risks in the `## Constraints / risks cited verbatim` section and the symbols the `## Verify candidates` section flags as **uncovered** (a change no existing test exercises). If two reports raised the same concern, fold them into one bullet, preserving verbatim quotes.
+**4. Roll up risks.** The bottom-of-plan **Risks called out across the change** section is the deduplicated union of the risks in the `## Constraints / risks cited verbatim` section and the symbols the `## Verify candidates` section flags as **uncovered** (a change no existing test exercises). If two reports raised the same concern, fold them into one bullet, preserving verbatim quotes and their tags.
 
 **5. Confidence.** Take the **lowest** confidence reported by any researcher as the floor for the plan's confidence. Reasoning: the plan is only as trustworthy as its weakest source. If the constraints report says high but the prior art report says low (no precedent for this change), the plan is low-confidence overall - say so honestly.
 

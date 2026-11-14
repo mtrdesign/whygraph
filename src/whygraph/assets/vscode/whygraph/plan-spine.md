@@ -158,6 +158,7 @@ Check each box before you hand the plan over.
    - **Change:** <one-paragraph description>
    - **Boundaries:** <files or behaviours this step must not touch, or "none">
    - **Constraints to preserve:** <verbatim quotes, or "none recorded">
+   - **Changes on purpose:** <verbatim quote of a recorded constraint this step changes> - <why>, or omit this line
    - **Risks:** <verbatim quotes, or "none recorded">
    - **Test first:** <`<test file>::<test name>` to add before the change, run by this step's Verify, or "none">
    - **Model:** <haiku | sonnet | opus> - <one-line why>

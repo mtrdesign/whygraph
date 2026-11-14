@@ -33,6 +33,7 @@ from checks import (
     attempt_count,
     begin_end_around_implementors,
     children_in_order,
+    constraint_quotes_tagged,
     file_contains,
     file_exists,
     file_lacks,
@@ -511,6 +512,7 @@ REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
 # commit. The hidden tests under ``fixtures/why/hidden`` judge each run.
 BENCH_HISTORY = "why-bench"
 BENCH_BLANK = "why-bench-blank"
+P18_STEM = "eval-p18"
 # Round 2 showed that S1 and S3 as first written ("Make `fetch` more robust
 # against timeouts.", "Simplify `price.py`.") tempt no change even without the
 # history, so both now read as the bug reports they would be without it.
@@ -1019,6 +1021,23 @@ CASES: tuple[Case, ...] = (
             plan_note(REVIEW_P2, r"(?m)^=== ui ===[ \t]*$", "review sidecar ui block"),
             record_review_cost(),
         ),
+    ),
+    # Plan 54 section 8: a deep plan on the S2 task, whose constraint (the
+    # export stays in id order) the task asks to change. Each quote under
+    # Constraints to preserve or Changes on purpose must carry its source tag.
+    Case(
+        id="P18",
+        name="sourced constraint quotes in a deep plan",
+        prompts=(
+            f"/whygraph-plan {BENCH_TASKS[1][1]} --deep --no-questions "
+            f"--out .whygraph/plans/{P18_STEM}.md",
+        ),
+        budget=4.0,
+        estimate=0.0,
+        setup=_clear_bench_plans(P18_STEM),
+        checks=(constraint_quotes_tagged(P18_STEM),),
+        repo=BENCH_HISTORY,
+        tools=("Skill",),
     ),
     Case(
         id="C1",

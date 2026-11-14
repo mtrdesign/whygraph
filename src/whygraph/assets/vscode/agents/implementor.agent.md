@@ -101,7 +101,7 @@ For each step of the range, **strictly in sequence**, first print `Starting step
 > Step 3 risks:
 > - "Changing the bundle signature invalidates the entire rationale cache"
 
-Use those quotes as guards while you edit. If the `**Change:**` paragraph appears to violate a constraint, **stop immediately** and report that as a blocker - do not edit the file.
+Use those quotes as guards while you edit. If the `**Change:**` paragraph appears to violate a constraint, **stop immediately** and report that as a blocker - do not edit the file. A constraint that the step's **Changes on purpose** line quotes is not a guard: the plan changes it.
 
 The **snapshot command** is `<PLAN_TOOL> snapshot`. It writes the working tree into a tree object through a throwaway index seeded from the real one, and prints the 40-hex tree id. Run it from the repo root.
 

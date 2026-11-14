@@ -1521,6 +1521,7 @@ def test_review_output_contract_on_a_fixture_diff() -> None:
         if (found := re.match(r"\*\*(.+?):\*\*", line))
     }
     assert verdicts == {
+        "Changed on purpose",
         "Constraint at risk",
         "Risk triggered",
         "No rationale",
@@ -1607,6 +1608,127 @@ def test_reviewer_wiring() -> None:
             if not p.name.startswith("plan-reviewer")
         ]
         assert not found, tree
+
+
+# ---- plan 54 section 5.7 and plan 53 section 5.9: sourced constraints --------
+
+_SOURCE_TAGS = (
+    "`(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`"
+)
+_REF_NAMES = (
+    "`<ref>` names the item's first ref: the commit id, `PR #<n>` or `Issue #<n>`."
+)
+_CHANGES_ON_PURPOSE_LINE = (
+    "   - **Changes on purpose:** <verbatim quote of a recorded constraint this step "
+    "changes> - <why>, or omit this line\n"
+)
+
+
+@pytest.mark.parametrize("tree", list(_AGENT_PATHS))
+def test_sourced_rationale_contract(tree: str) -> None:
+    """Each tree quotes a card item's text and ends the quote with its basis tag."""
+    source = (
+        _ASSET_ROOT / _SOURCE_DIRS[tree] / "sources" / "whygraph-rationale.md"
+    ).read_text()
+    assert "Each item of a card's `constraints` and `risks` is an object" in source
+    assert "its `text` is what you quote" in source
+    assert "End each quote with the tag of its item" in source
+    assert _SOURCE_TAGS in source and _REF_NAMES in source
+    assert "A quote from a card's `notes` ends with `(note #<id>)`." in source
+
+    researcher = "\n".join(_agent_body(tree, "researcher"))
+    assert (
+        '"<the `text` of a card\'s constraints[] item, verbatim>" <tag>' in researcher
+    )
+    assert '"<a note body, verbatim>" (note #<id>)' in researcher
+    assert _SOURCE_TAGS in researcher and _REF_NAMES in researcher
+
+    synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+    assert "Copy the tag after each quote with it" in synthesizer
+    assert (
+        "A constraint tagged `(inferred)` alone never makes a Blocker." in synthesizer
+    )
+    assert (
+        "It goes to **Risks called out across the change** with its tag." in synthesizer
+    )
+
+    planner = "\n".join(_agent_body(tree, "planner"))
+    # The working-set block stays pinned; it carries each item's text only.
+    assert "constraints: [<verbatim>, ...]" in planner
+    assert "each item of `constraints` and `risks` as its `text`" in planner
+    assert "End each quote with the tag of its item's `basis`" in planner
+    assert "A constraint tagged `(inferred)` alone never makes a Blocker." in planner
+
+
+def test_sourced_rationale_gate_is_claude_code_only() -> None:
+    """The reviewer tags its verdicts from the card; an inferred one never holds a step."""
+    body = "\n".join(_agent_body("claude-code", _REVIEWER))
+    assert "read from the `basis` and `refs` of the card you fetched" in body
+    assert "never from the plan" in body
+    assert _SOURCE_TAGS in body and _REF_NAMES in body
+    assert '**Constraint at risk:** "<constraint, verbatim>" - <how' in body
+    assert "violate it> <tag>" in body
+    skill = _text(_IMPLEMENT_ENTRY["claude-code"])
+    assert (
+        "A **Constraint at risk:** verdict that ends `(inferred)` does not go to S6. "
+        "Print it."
+    ) in skill
+    for tree in ("cursor", "vscode", "codex"):
+        assert "ends `(inferred)`" not in _text(_IMPLEMENT_ENTRY[tree]), tree
+
+
+def test_changes_on_purpose_contract() -> None:
+    """The Changes on purpose field: spine, plan tool, synthesizer, planner, implementor.
+
+    The reviewer verdict and the implement skill's one-line print are Claude
+    Code only, because only Claude Code runs a review gate.
+    """
+    for tree, folder in _SOURCE_DIRS.items():
+        spine = (_ASSET_ROOT / folder / "plan-spine.md").read_text()
+        assert _CHANGES_ON_PURPOSE_LINE in spine, tree
+        preserve = spine.index("   - **Constraints to preserve:**")
+        assert preserve < spine.index(_CHANGES_ON_PURPOSE_LINE), tree
+        tool = (_ASSET_ROOT / folder / "plan-tool.sh").read_text()
+        assert 'KNOWN_FIELD["Changes on purpose"] = 1' in tool, tree
+        assert 'QUOTED_FIELD["Changes on purpose"] = 1' in tool, tree
+    for tree in _AGENT_PATHS:
+        synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
+        assert (
+            "- **Changes on purpose** - a quoted constraint that this step's Change "
+            "removes or changes, verbatim,"
+        ) in synthesizer, tree
+        assert "Never repeat it under **Constraints to preserve**." in synthesizer, tree
+        rule = (
+            "A constraint the task itself asks to change goes to **Changes on purpose** "
+            "of its step, not to `## Blockers`."
+        )
+        assert rule in synthesizer, tree
+        assert rule in "\n".join(_agent_body(tree, "planner")), tree
+        implementor = "\n".join(_agent_body(tree, "implementor"))
+        sentence = (
+            "A constraint that the step's **Changes on purpose** line quotes is not a "
+            "guard: the plan changes it."
+        )
+        assert sentence in implementor, tree
+        assert implementor.index("**stop immediately**") < implementor.index(sentence)
+
+    reviewer = "\n".join(_agent_body("claude-code", _REVIEWER))
+    assert "PLAN_PATH: <absolute path to the plan>\nSTEP: <N>" in reviewer
+    assert "`PLAN_PATH` and `STEP` are optional" in reviewer
+    assert "- **Changed on purpose** - the hunk breaks a constraint" in reviewer
+    assert reviewer.index("- **Changed on purpose**") < reviewer.index(
+        "- **Constraint at risk**"
+    )
+    assert (
+        '**Changed on purpose:** "<constraint, verbatim>" - the plan changes it in '
+        "step <N>"
+    ) in reviewer
+    skill = _text(_IMPLEMENT_ENTRY["claude-code"])
+    assert "   PLAN_PATH: <absolute path to the plan>\n   STEP: <N>\n" in skill
+    assert (
+        "`Step <N>: the review found a constraint the plan changes on purpose.` "
+        "It does not go to S6."
+    ) in skill
 
 
 # ---- planning harness v2: entry points, reply shapes, researcher limits -----

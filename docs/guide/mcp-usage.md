@@ -29,6 +29,21 @@ number; see [Evidence items](../reference/mcp.md#evidence-items).
   none, it returns `{"status": "not_cached"}`. See
   [Cached-only lookups](../reference/mcp.md#cached-only-lookups).
 
+Each item of a card's `constraints` and `risks` is an object that names its source:
+`{"text", "basis", "refs", "quote"}`. `text` is the constraint or the risk; quote it as it stands.
+`refs` lists the evidence behind it, each `{"kind": "commit" | "pr" | "issue", "id", "url"}` (`url`
+when there is one), and `quote` is a passage copied from that evidence, when there is one. `basis` is
+one of four values:
+
+- `quoted` - a commit, PR or issue in `refs` holds `quote`. WhyGraph checks that, not the model.
+- `cited` - `refs` names the evidence, but the passage was not found in it.
+- `inferred` - no evidence backs it: the model read it from the diffs. Treat it as a guess.
+- `unknown` - the card was cached before cards recorded sources. It gains them when it is generated
+  again; `force_refresh` does that at once, at LLM cost.
+
+`tradeoffs` stays a list of strings. The planning agents end each quote with a tag from `basis`, such
+as `(quoted: 1a2b3c4d)` or `(inferred)` - see [Planning a change](planning.md#where-a-constraint-comes-from).
+
 A typical flow: before editing a function, your assistant calls `whygraph_rationale_brief` to ground
 itself in intent. If the card comes back thin, it falls back to `whygraph_evidence_for` for the raw
 history.

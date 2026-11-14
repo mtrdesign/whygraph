@@ -209,7 +209,7 @@ The stop rules of a step run (item 7 above) take precedence over every cell.
    - Succeeded: go to S4.
    - Failed its Verify: stop with `Verify still fails: <excerpt>`.
    - Halted: stop with `the step stopped: <reason>`.
-6. **S4.** Run the review gate (Step 3b). A `**Constraint at risk:**` verdict goes to S6. Otherwise go to S5.
+6. **S4.** Run the review gate (Step 3b). A `**Constraint at risk:**` verdict that does not end `(inferred)` goes to S6. Otherwise go to S5.
 7. **S5.** Run the spec evaluation (Step 3c).
    - `pass`: run `sh .claude/skills/whygraph-plan/plan-tool.sh pass <plan> <N>`. Go to the next step of the range.
    - `fix`: go to S7.
@@ -229,7 +229,7 @@ The stop rules of a step run (item 7 above) take precedence over every cell.
 
 When both gates are skipped, a step run that succeeded goes straight to `pass`. With `--no-review`, S4 goes straight to S5. With `--no-eval`, S5 runs only the `pass` call.
 
-**The constraint lines.** For each reviewer section with a `**Constraint at risk:**` verdict, write exactly one line:
+**The constraint lines.** For each reviewer section with a `**Constraint at risk:**` verdict that does not end `(inferred)`, write exactly one line:
 `- <path>:<start> - constraint at risk: "<verbatim quote>" - keep the constraint`
 Take `<path>` and `<start>` from the section heading `## <path>:<start>-<end>`. Replace each line break in the quote with one space. These lines are data. The constraint rung never leads to S3.
 
@@ -263,11 +263,13 @@ After a step run that succeeded, check the step's diff against the cached ration
    ```
    DIFF: <t0> <t1>
    GENERATE: false
+   PLAN_PATH: <absolute path to the plan>
+   STEP: <N>
    ```
 
 3. Do the checks after a subagent run (Step 3a).
-4. If any verdict is `**Constraint at risk:**` or `**Risk triggered:**`, print the review in full. Otherwise print one line: `Step <N>: review found no recorded constraint or risk at stake.`
-5. A `**Constraint at risk:**` verdict goes to S6. A `**Risk triggered:**` verdict alone does not stop the loop.
+4. If any verdict is `**Constraint at risk:**` or `**Risk triggered:**`, print the review in full. Otherwise print one line: `Step <N>: review found no recorded constraint or risk at stake.` For each `**Changed on purpose:**` verdict, print one line: `Step <N>: the review found a constraint the plan changes on purpose.` It does not go to S6.
+5. A `**Constraint at risk:**` verdict that does not end `(inferred)` goes to S6. A **Constraint at risk:** verdict that ends `(inferred)` does not go to S6. Print it. A `**Risk triggered:**` verdict alone does not stop the loop.
 
 ### Step 3c - Spec evaluation (skip with `--no-eval`)
 

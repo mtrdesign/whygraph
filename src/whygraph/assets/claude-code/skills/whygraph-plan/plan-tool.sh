@@ -406,12 +406,14 @@ BEGIN {
         KNOWN_FIELD[REQUIRED[i]] = 1
     KNOWN_FIELD["Routes"] = 1
     KNOWN_FIELD["Expected UI"] = 1
+    KNOWN_FIELD["Changes on purpose"] = 1
     n = split("haiku,sonnet,opus,fable", words, ",")
     for (i = 1; i <= n; i++)
         MODEL[words[i]] = 1
     PHRASE_COUNT = split(" and then ; and also ;, then ", PHRASE, ";")
     QUOTED_FIELD["Constraints to preserve"] = 1
     QUOTED_FIELD["Risks"] = 1
+    QUOTED_FIELD["Changes on purpose"] = 1
 
     section = ""
     field = ""

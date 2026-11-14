@@ -453,6 +453,16 @@ def file_contains(rel_path: str, text: str) -> Check:
     return Check(f"{rel_path} has {text}", fn)
 
 
+def either(first: Check, second: Check, name: str) -> Check:
+    """Pass when either check holds; the detail shows both."""
+
+    def fn(ctx: Context) -> Outcome:
+        (ok_a, detail_a), (ok_b, detail_b) = first.run(ctx), second.run(ctx)
+        return ok_a or ok_b, f"{first.name}: {detail_a}; {second.name}: {detail_b}"
+
+    return Check(name, fn)
+
+
 def file_lacks(rel_path: str, text: str) -> Check:
     """Pass when a work-directory file does not hold ``text``."""
 
@@ -1098,6 +1108,47 @@ def _step_fields(steps: str, names: tuple[str, ...]) -> list[tuple[str, str]]:
     return fields
 
 
+_NEXT_QUOTE = re.compile(r"\s*;\s*\"|\s*$")
+
+
+def split_quotes(body: str) -> list[tuple[str, bool]]:
+    """Split a field into its quotes, each with whether a source tag follows it.
+
+    A quote may hold a ``"`` of its own, as in ``row["id"]``, so a quote ends
+    only at a ``"`` that a tag follows, or one that ``; "`` (the next quote)
+    or the end of the field follows.
+
+    Parameters
+    ----------
+    body : str
+        The field's text after its label.
+
+    Returns
+    -------
+    list of (str, bool)
+        Each quote's text and whether it is tagged, in order.
+    """
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    while (start := body.find('"', pos)) >= 0:
+        end = start + 1
+        while (end := body.find('"', end)) >= 0:
+            tag = _SOURCE_TAG.match(body, end + 1)
+            if tag:
+                out.append((body[start + 1 : end], True))
+                pos = tag.end()
+                break
+            if _NEXT_QUOTE.match(body, end + 1):
+                out.append((body[start + 1 : end], False))
+                pos = end + 1
+                break
+            end += 1
+        else:
+            out.append((body[start + 1 :], False))
+            break
+    return out
+
+
 def constraint_quotes_tagged(stem: str) -> Check:
     """Pass when each constraint quote in a plan's steps ends with a source tag.
 
@@ -1130,13 +1181,13 @@ def constraint_quotes_tagged(stem: str) -> Check:
         quotes: list[str] = []
         untagged: list[str] = []
         for name, body in fields:
-            found = list(re.finditer(r'"([^"]+)"', body))
+            found = split_quotes(body)
             if name == "Changes on purpose":
                 found = found[:1]
-            for match in found:
-                quotes.append(match.group(1))
-                if not _SOURCE_TAG.match(body, match.end()):
-                    untagged.append(match.group(1)[:60])
+            for quote, tagged in found:
+                quotes.append(quote)
+                if not tagged:
+                    untagged.append(quote[:60])
         if not quotes:
             return False, "no quote under Constraints to preserve or Changes on purpose"
         if untagged:

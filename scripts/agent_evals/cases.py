@@ -37,6 +37,7 @@ from checks import (
     constraint_quotes_tagged,
     file_contains,
     file_exists,
+    either,
     file_lacks,
     implementor_model,
     listener_got_no_bytes,
@@ -873,9 +874,15 @@ CASES: tuple[Case, ...] = (
         plans=("u16.md",),
         checks=(
             # The check is on plan line "## Constraint checks": the step makes
-            # DEBUG_TRACE appear, so the run goes to the constraint rung once
-            # and then stops on the second break.
-            stop_block(1, (r"a recorded constraint is at risk",), once=True),
+            # DEBUG_TRACE appear, so the run goes to the constraint rung once.
+            # After it the run either breaks the check again and stops, or
+            # keeps the constraint and finishes without the text: both are
+            # right. The Verify does not need the text, so neither is forced.
+            either(
+                stop_block(1, (r"a recorded constraint is at risk",), once=True),
+                file_lacks("mini/pricing.py", "DEBUG_TRACE"),
+                "stops on a second break, or keeps the constraint",
+            ),
             attempt_count("u16", 1, "constraint", minimum=1, maximum=1),
             record_ladder("u16", "the constraint rung, then a stop at step 1"),
         ),

@@ -31,6 +31,15 @@
   constraint, the step gets a **Changes on purpose** line with the quote and the reason, in place of
   a Blocker. The implementor does not guard it, and in Claude Code the review gate reports it as
   **Changed on purpose** and goes on. Run **Settings > Update agent files** to pick it up.
+- **A plan runs before you read it, so it can be trusted to run.** The planner now runs each `Verify`
+  once and hands over the result (the dry run), and a plan can carry a `## Setup` section of install and
+  generate commands. A run that finds a `Verify` failing before any change runs the Setup, tries again,
+  and stops with `Verify fails before any change` or `setup failed` instead of failing late. A `manual:`
+  span in backticks is no longer run as a command. The dry run executes commands from your repository
+  before you read the plan, with a smaller set of secrets and no package download. Pass `--no-dry-run`
+  to skip it. Run **Settings > Update agent files** to pick it up, and see
+  [The dry run](../guide/planning.md#the-dry-run) and
+  [Running unattended](../guide/planning.md#running-unattended).
 - **A run proposes the note it made stale.** After a `/whygraph-implement` run whose Acceptance
   passed, Claude Code and Cursor propose a note for each step with a **Changes on purpose** line, at
   most three per run: a revision of the note the step changed (its `(note #<id>)` tag stays on the

@@ -54,6 +54,7 @@ CAPTURE_PATH: .codex/whygraph/capture.mjs
 PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>   # yes when the user asks for `--refresh-profile`: derive the UI profile (`.whygraph/profiles/ui.md`) again
 REVIEW: <yes | no | auto>     # from the user's words: yes when they ask for a plan review, no when they ask for none; default auto
+DRY_RUN: <yes | no>           # no only when they ask to skip the dry run; default yes, also when they ask for no questions
 ```
 
 4. **Clarify.** A reply `CLARIFY: <question> | options: <a>; <b>` means no plan was written. Ask the question in chat, then delegate again with the same prompt plus `CLARIFICATION: <answer>`. Ask once per plan.

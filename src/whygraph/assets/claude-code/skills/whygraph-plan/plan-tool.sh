@@ -36,6 +36,10 @@
 #                               checks"; 1 when one is broken
 #   brief <plan>                print a page about the plan for a person
 #   proof <plan>                print which steps proved their change
+#   setup <plan> [<blob>]       run the "## Setup" commands once
+#   ready <plan> [<blob>]       say whether a failing baseline is a fault
+#   dryrun <plan>               run every Verify and Acceptance item 1 at
+#                               plan time; print the findings as a review
 #
 # Usage errors exit 64 (EX_USAGE). The plan's files live in
 # .whygraph/plans/<stem>/steps/. A subcommand that takes a plan exits 77 when
@@ -111,6 +115,28 @@
 # --from-step prints "unknown". An "unproven" step is not a defect: a step
 # that only moves code has no red test.
 #
+# setup runs the "## Setup" commands in order as one job under one budget,
+# stops at the first that fails, and writes steps/setup. It exits 0 when
+# all passed and no tracked or unignored file changed, 1 when a command
+# failed, 3 at the deadline, 5 when the tree changed (the paths follow) and
+# 6 when the plan has no "## Setup" section. ready reads steps/baseline and
+# runs nothing: a resumed run prints "ready: resumed"; a "fail" whose
+# Verify names a path, or a directory, of an earlier step's Files waits for
+# that step; any other "fail" prints "not ready" and exits 1.
+#
+# dryrun runs no agent, changes no tracked file and never writes
+# steps/baseline: its record is steps/dryrun, and steps/setup when it runs
+# Setup. One call ends within the Verify budget. A call with work left
+# prints "dryrun: more, <k> of <n> commands done" and exits 2; the next call
+# for the same plan goes on, and the sixth call always ends it. The finished
+# call prints the findings in the plan reviewer's reply form, with a "- ran:"
+# line, and exits 0. A changed plan or a finished record starts again.
+#
+# Every bounded job gets npm_config_yes=false, and its process group is
+# killed after it exits. A setup or dryrun job also loses *_API_KEY,
+# AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, CLAUDE_CODE_OAUTH_TOKEN and
+# WHYGRAPH_*, unless the caller set WHYGRAPH_KEEP_SECRETS=1.
+#
 # The plan parser reads step lines only under "## Steps", Acceptance items
 # only under "## Acceptance", and skips fenced lines.
 #
@@ -156,6 +182,9 @@ usage: plan-tool.sh snapshot
        plan-tool.sh constraints <plan> [<blob>] [<N>]
        plan-tool.sh brief <plan>
        plan-tool.sh proof <plan>
+       plan-tool.sh setup <plan> [<blob>]
+       plan-tool.sh ready <plan> [<blob>]
+       plan-tool.sh dryrun <plan>
 EOF
     exit 64
 }
@@ -213,7 +242,10 @@ function literal_spans(text,    count, i, n, words) {
 # "item <i>" for each Acceptance item, "logged <n>" for each
 # "- [x] Step <n>:" line of the "## Implementation log" section, and
 # "amended <n>" for each "- Step <n>:" line of the "## Amendments" section
-# ("amended ?" for any other "- " line there).
+# ("amended ?" for any other "- " line there). A Verify or Check whose first
+# span starts with "manual:" prints no span: it is not literal. With N empty
+# and F "Setup", it prints the command of each "## Setup" bullet, and
+# returns 3 when the plan has no such section.
 AWK_VERIFY='
 # Whether line s starts with the field name; then VALUE is the text after it.
 function field_value(s, name) {
@@ -237,6 +269,15 @@ in_fence {
     in_items = ($0 ~ /^## Acceptance[ \t]*$/)
     in_log = ($0 ~ /^## Implementation log[ \t]*$/)
     in_amend = ($0 ~ /^## Amendments[ \t]*$/)
+    in_setup = ($0 ~ /^## Setup[ \t]*$/)
+    if (F == "Setup" && in_setup)
+        found = 1
+    next
+}
+# F "Setup" prints the one span of each bullet under "## Setup".
+F == "Setup" {
+    if (in_setup && $0 ~ /^[ \t]*- / && spans_of($0) == 1 && SPAN[1] ~ /[^ \t]/)
+        print SPAN[1]
     next
 }
 N == "" && in_log && index($0, "- [x] Step ") == 1 {
@@ -271,6 +312,9 @@ in_items && in_block {
     at = index($0, "**Check:**")
     if (at > 0) {
         count = literal_spans(substr($0, at + 10))
+        # A span that starts with "manual:" is never a command.
+        if (count > 0 && index(SPAN[1], "manual:") == 1)
+            count = 0
         for (i = 1; i <= count; i++)
             print SPAN[i]
         exit
@@ -304,6 +348,8 @@ in_block && field_value($0, F) {
         print NR
     } else if (F == "Verify" && RAW == "") {
         count = literal_spans(VALUE)
+        if (count > 0 && index(SPAN[1], "manual:") == 1)
+            count = 0
         for (i = 1; i <= count; i++)
             print SPAN[i]
     } else {
@@ -547,6 +593,8 @@ BEGIN {
     for (i = 1; i <= JOURNEY_LABEL_COUNT; i++)
         KNOWN_JOURNEY_LABEL[JOURNEY_LABEL[i]] = 1
     LEAVES_COUNT = split("Refresh,Back,Cancel,Direct link", LEAVES, ",")
+    # The characters of has_shell_syntax.
+    SHELL_CHARS = ";&|<>$`\047*?[{}"
 
     section = ""
     field = ""
@@ -555,6 +603,56 @@ BEGIN {
 function finding(at, message) {
     printf "line %d: %s\n", at, message
     any_finding = 1
+}
+
+# An HTML comment, a zero-width character or a bidi control: the person reads
+# the plan rendered, an agent reads it raw.
+function hidden_text(s,    i) {
+    if (!ZERO_WIDTHS) {
+        ZERO_WIDTHS = split("\342\200\213 \342\200\214 \342\200\215 \342\201\240 \357\273\277", ZERO_WIDTH, " ")
+        constraint_of("")
+    }
+    if (index(s, "<!--") > 0)
+        finding(NR, "plan has hidden text: HTML comment")
+    for (i = 1; i <= ZERO_WIDTHS; i++)
+        if (index(s, ZERO_WIDTH[i]) > 0) {
+            finding(NR, "plan has hidden text: zero-width character")
+            break
+        }
+    for (i = 1; i <= SEPARATORS; i++)
+        if (index(s, SEPARATOR[i]) > 0) {
+            finding(NR, "plan has hidden text: bidi control")
+            break
+        }
+}
+
+# A bullet under "## Setup": one literal command, no shell syntax, no git push.
+function on_setup_line(s,    span, i, words, n, part) {
+    if (s !~ /^[ \t]*- /)
+        return
+    setup_count++
+    if (spans_of(s) != 1 || SPAN[1] !~ /[^ \t]/) {
+        finding(NR, "Setup line has no literal command")
+        return
+    }
+    span = SPAN[1]
+    for (i = 1; i <= length(SHELL_CHARS); i++)
+        if (index(span, substr(SHELL_CHARS, i, 1)) > 0) {
+            finding(NR, "Setup command has shell syntax: " span)
+            break
+        }
+    gsub(/\t/, " ", span)
+    gsub(/[;&|]/, "\n", span)
+    n = split(span, words, "\n")
+    for (i = 1; i <= n; i++) {
+        part = words[i]
+        gsub(/  +/, " ", part)
+        sub(/^ +/, "", part)
+        if (part ~ /^git( -[^ ]+( [^- ][^ ]*)?)* push( |$)/) {
+            finding(NR, "Setup command names git push")
+            break
+        }
+    }
 }
 
 function ste_flush() {
@@ -923,6 +1021,7 @@ function journey_end(    i, k, from, number, exempt) {
 
 {
     line = $0
+    hidden_text(line)
     if (line ~ /^[ \t]*(```|~~~)/) {
         in_fence = !in_fence
         next
@@ -964,11 +1063,17 @@ function journey_end(    i, k, from, number, exempt) {
             section = "journey"
             if (!journey_at)
                 journey_at = NR
+        } else if (line ~ /^## Setup[ \t]*$/) {
+            section = "setup"
+            if (!setup_at)
+                setup_at = NR
         } else if (line ~ /^## Resolved decisions[ \t]*$/) {
             section = "resolved"
         }
     } else if (section == "journey") {
         on_journey_line(line)
+    } else if (section == "setup") {
+        on_setup_line(line)
     } else if (section == "resolved") {
         if (line ~ /^\|[ \t]*Q[0-9]+[ \t]*\|/) {
             number = line
@@ -1013,6 +1118,8 @@ END {
     close_item()
     close_question()
     journey_end()
+    if (setup_count > 5)
+        finding(setup_at, "Setup has more than 5 commands")
     for (i = 1; i <= STRUCTURE_COUNT; i++)
         if (!(STRUCTURE[i] in have))
             finding(1, "missing " STRUCTURE[i])
@@ -1602,6 +1709,17 @@ read_budget() {
 # first failure, and appends to $1/ran and $1/output. stdin is closed so that
 # a command cannot eat the list of spans.
 BOUNDED_JOB='
+npm_config_yes=false
+export npm_config_yes
+# A setup or dry-run job loses the strip list (see the header comment).
+if [ -f "$1/strip" ]; then
+    for name in $(env | sed -n "s/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p"); do
+        case $name in
+            *_API_KEY | AWS_SECRET_ACCESS_KEY | AWS_SESSION_TOKEN | CLAUDE_CODE_OAUTH_TOKEN | WHYGRAPH_*)
+                unset "$name" ;;
+        esac
+    done
+fi
 code=0
 while IFS= read -r span; do
     printf "command: %s\n" "$span" >>"$1/ran"
@@ -1771,6 +1889,11 @@ run_bounded() {
         watchdog=$!
         wait "$job"
         bounded=$?
+        # A background process that a command started must not outlive it.
+        if [ "$job_form" -ne 4 ] && kill -TERM -"$job" 2>/dev/null; then
+            sleep 1
+            kill -KILL -"$job" 2>/dev/null
+        fi
         job=
         kill "$watchdog" 2>/dev/null
         wait "$watchdog"
@@ -2150,6 +2273,28 @@ names_test_first() {
     [ -n "$word" ] && [ "$word" != none ]
 }
 
+# Run the spans of $work/spans as one job and set result to its baseline
+# form: pass, "pass (no test ran)", "timeout <s>: <command>", "cannot run
+# <code>: <command>" or "fail <code>: <excerpt>". $work/plan is the plan.
+run_verify_result() {
+    run_job
+    last=$(sed -n 's/^command: //p' "$work/ran" | tail -n 1)
+    if [ "$code" -eq 0 ]; then
+        result=pass
+        # A pass that ran no test says so.
+        if LC_ALL=C awk "$AWK_NO_TEST" <"$work/output"; then
+            result='pass (no test ran)'
+        fi
+    elif [ "$code" -eq 124 ] && [ -f "$work/timed-out" ]; then
+        result="timeout $budget: $last"
+    elif { [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; } &&
+        cannot_run "$last" "$(all_files "$work/plan")"; then
+        result="cannot run $code: $last"
+    else
+        result="fail $code: $(excerpt_of "$work/output")"
+    fi
+}
+
 cmd_baseline() {
     [ $# -ge 2 ] && [ $# -le 4 ] || usage
     plan=$1
@@ -2214,22 +2359,7 @@ cmd_baseline() {
     elif [ ! -s "$work/spans" ]; then
         result='not literal'
     elif [ -z "$result" ]; then
-        run_job
-        last=$(sed -n 's/^command: //p' "$work/ran" | tail -n 1)
-        if [ "$code" -eq 0 ]; then
-            result=pass
-            # A pass that ran no test says so.
-            if LC_ALL=C awk "$AWK_NO_TEST" <"$work/output"; then
-                result='pass (no test ran)'
-            fi
-        elif [ "$code" -eq 124 ] && [ -f "$work/timed-out" ]; then
-            result="timeout $budget: $last"
-        elif { [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; } &&
-            cannot_run "$last" "$(all_files "$work/plan")"; then
-            result="cannot run $code: $last"
-        else
-            result="fail $code: $(excerpt_of "$work/output")"
-        fi
+        run_verify_result
     fi
 
     line="step $step $hash: $result"
@@ -3007,6 +3137,148 @@ cmd_brief() {
     LC_ALL=C awk "$AWK_BRIEF" <"$1" || fail "cannot read $1"
 }
 
+# Read plan $1, or blob $2 when set, into $work/plan; set stem, cd to the
+# repository root and check the work directory.
+load_plan() {
+    if [ -z "${2:-}" ]; then
+        cat <"$1" >"$work/plan" || usage "cannot read $1"
+    fi
+    stem=$(stem_of "$1")
+    cd "$root" || exit 1
+    [ -z "${2:-}" ] || read_blob "$2" "$work/plan"
+    check_work_dir
+    mkdir -p "$steps_dir" || fail "cannot create $steps_dir"
+}
+
+# Start a job that loses the strip list, unless the person kept it.
+strip_secrets() {
+    rm -f "$work/strip"
+    [ "${WHYGRAPH_KEEP_SECRETS:-}" = 1 ] || : >"$work/strip"
+}
+
+# Run the "## Setup" commands of $work/plan as one job and write
+# steps/setup. Prints "setup: <k> of <n> commands ran, exit <code>" and
+# returns 0, 1 (a command failed), 3 (the deadline), 5 (a tracked or
+# unignored file changed; the paths follow) or 6 (no section).
+run_setup() {
+    plan_field "$work/plan" "" Setup >"$work/spans"
+    [ $? -ne 3 ] || {
+        printf 'setup: no Setup section\n'
+        return 6
+    }
+    setup_record=$steps_dir/setup
+    check_leaf "$setup_record"
+    total=$(LC_ALL=C awk 'END { print NR }' <"$work/spans")
+    before=$(take_snapshot) || fail "snapshot failed"
+    strip_secrets
+    run_job
+    after=$(take_snapshot) || fail "snapshot failed"
+    rm -f "$work/strip"
+    setup_code=$code
+    ran=$(LC_ALL=C awk 'END { print NR }' <"$work/ran")
+    start_write "$setup_record"
+    {
+        cat "$work/ran"
+        printf 'exit: %s\n' "$setup_code"
+    } >"$tmp"
+    finish_write "$setup_record"
+    printf 'setup: %s of %s commands ran, exit %s\n' "$ran" "$total" "$setup_code"
+    setup_last=$(sed -n 's/^command: //p' "$work/ran" | tail -n 1)
+    if [ "$setup_code" -eq 124 ] && [ -f "$work/timed-out" ]; then
+        return 3
+    fi
+    [ "$setup_code" -eq 0 ] || return 1
+    setup_paths=
+    if [ "$before" != "$after" ]; then
+        setup_paths=$(run_git -c core.quotePath=false diff --name-only --no-renames "$before" "$after") ||
+            fail "git diff failed"
+        printf '%s\n' "$setup_paths"
+        return 5
+    fi
+    return 0
+}
+
+cmd_setup() {
+    [ $# -eq 1 ] || [ $# -eq 2 ] || usage
+    plan=$1
+    blob=${2:-}
+    [ -z "$blob" ] || is_object_id "$blob" || usage "not a blob id: $blob"
+    [ -n "$blob" ] || [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    read_budget
+    choose_kill_form
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    load_plan "$plan" "$blob"
+    run_setup
+    exit $?
+}
+
+# The ready test on record $1 (a baseline or a dry-run record) for plan
+# file $2. With $3 "resume", a run that a .done marker or a logged pass
+# shows is not fresh prints "ready: resumed". For the last result line of
+# each step: a "fail" whose Verify waits for an earlier step prints "ready:
+# step <N> waits for an earlier step"; any other prints "not ready: step
+# <N>: <excerpt>". Returns 1 when it printed a "not ready" line.
+ready_check() {
+    scan=$(plan_field "$2" "" "")
+    if [ "${3:-}" = resume ]; then
+        while read -r kind number; do
+            [ "$kind" = step ] || continue
+            if [ -f "$steps_dir/$number.done" ] || logged_pass "$number" ||
+                { printf '%s\n' "$scan" | grep -qx "logged $number" &&
+                    [ "$(record_exit "$steps_dir/$number.verify")" = 0 ]; }; then
+                printf 'ready: resumed\n'
+                return 0
+            fi
+        done <<EOF
+$scan
+EOF
+    fi
+    [ -f "$1" ] || {
+        printf 'ready: no baseline\n'
+        return 0
+    }
+    LC_ALL=C awk '
+        $1 == "step" && $2 ~ /^[0-9]+$/ && index($0, ": ") > 0 {
+            if (!($2 in last))
+                order[++n] = $2
+            last[$2] = substr($0, index($0, ": ") + 2)
+        }
+        END { for (i = 1; i <= n; i++) print order[i] "\t" last[order[i]] }
+    ' <"$1" >"$work/last"
+    not_ready=0
+    while IFS='	' read -r number result; do
+        case $result in
+            'fail '*) ;;
+            *) continue ;;
+        esac
+        if waits_for_earlier "$2" "$number"; then
+            printf 'ready: step %s waits for an earlier step\n' "$number"
+        else
+            printf 'not ready: step %s: %s\n' "$number" "${result#fail *: }"
+            not_ready=1
+        fi
+    done <"$work/last"
+    [ "$not_ready" -eq 0 ] || return 1
+    printf 'ready: ok\n'
+    return 0
+}
+
+cmd_ready() {
+    [ $# -eq 1 ] || [ $# -eq 2 ] || usage
+    plan=$1
+    blob=${2:-}
+    [ -z "$blob" ] || is_object_id "$blob" || usage "not a blob id: $blob"
+    [ -n "$blob" ] || [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    load_plan "$plan" "$blob"
+    ready_check "$steps_dir/baseline" "$work/plan" resume
+    exit $?
+}
+
 # 0 when a word of step $2's Verify spans in plan file $1 is a path that the
 # Files of an earlier step name, or a directory that holds such a path: the
 # Verify waits for an earlier step (R17). A "::<test id>" suffix and a
@@ -3057,6 +3329,349 @@ record_exit() {
 # 0 when the output part of record $1 holds a phrase of AWK_NO_TEST.
 ran_no_test() {
     LC_ALL=C awk 'out { print } /^--- / { out = 1 }' <"$1" | LC_ALL=C awk "$AWK_NO_TEST"
+}
+
+# ---- dryrun: the dry run of a plan at plan time (see the header comment).
+
+# 0 when unit $1 is marked done in the dry-run record.
+dry_done() {
+    grep -qxF "done: $1" "$record"
+}
+
+dry_mark() {
+    printf 'done: %s\n' "$1" >>"$record" || fail "cannot append to $record"
+}
+
+# Run $work/spans within the time left in this call, without the strip
+# list's variables, and set result as baseline does. Returns 2 when the
+# call must end first: too little time left, or the end of the call cut the
+# command short. A command cut by its own deadline is a result.
+dry_run_unit() {
+    left=$((deadline - ($(date +%s) - started)))
+    # The first command of a call gets the whole deadline: the 20 s between
+    # the 580 s cap and the 600 s shell limit cover the call's own work. A
+    # later command needs 5 s and gets the time left.
+    if [ "$ran_here" -eq 0 ]; then
+        left=$deadline
+    elif [ "$left" -lt 5 ]; then
+        return 2
+    fi
+    budget=$left
+    strip_secrets
+    run_verify_result
+    rm -f "$work/strip"
+    budget=$deadline
+    ran_here=$((ran_here + 1))
+    case $result in
+        'timeout '*) [ "$left" -ge "$deadline" ] || return 2 ;;
+    esac
+    cat "$work/ran" >>"$record" || fail "cannot append to $record"
+    return 0
+}
+
+# The baseline of step $1 into the record, as unit $2. $3 "again" runs a
+# failing Verify once more: a pass makes it "unstable: <first excerpt>".
+dry_step() {
+    plan_field "$work/plan" "$1" Verify >"$work/spans"
+    key=$(plan_field "$work/plan" "$1" Verify raw | run_git hash-object --stdin) ||
+        fail "git hash-object failed"
+    if names_test_first "$(plan_field "$work/plan" "$1" "Test first")"; then
+        result='test first'
+    elif [ ! -s "$work/spans" ]; then
+        result='not literal'
+    else
+        dry_run_unit || return 2
+        if [ "${3:-}" = again ] && [ "$result" = pass ]; then
+            result="unstable: $first"
+        fi
+    fi
+    printf 'step %s %s: %s\n' "$1" "$key" "$result" >>"$record" || fail "cannot append to $record"
+    dry_mark "$2"
+}
+
+# The last result line of each step in the record, as "<N> TAB <line
+# number> TAB <result>", in step order.
+dry_last() {
+    LC_ALL=C awk '
+        $1 == "step" && $2 ~ /^[0-9]+$/ && index($0, ": ") > 0 {
+            if (!($2 in last))
+                order[++n] = $2
+            last[$2] = substr($0, index($0, ": ") + 2)
+            at[$2] = NR
+        }
+        END { for (i = 1; i <= n; i++) print order[i] "\t" at[order[i]] "\t" last[order[i]] }
+    ' <"$record"
+}
+
+# An excerpt fit for one finding line: no "|", at most 80 bytes.
+dry_excerpt() {
+    printf '%s\n' "$1" | LC_ALL=C tr '|' '/' |
+        LC_ALL=C awk '{ s = substr($0, 1, 80) } END { print (s ~ /[^ \t]/) ? s : "no output" }'
+}
+
+dry_finding() {
+    findings=$((findings + 1))
+    printf '%s\n' "- F$findings | blocker | $1 | $2 | evidence: $record:$3 | fix: $4" >>"$work/findings"
+}
+
+# The paths that differ between trees $1 and $2, joined by ", ".
+dry_paths() {
+    [ "$1" != "$2" ] || return 0
+    run_git -c core.quotePath=false diff --name-only --no-renames "$1" "$2" || fail "git diff failed"
+}
+
+# End the call: print the block, mark the record done, exit 0.
+dry_finish() {
+    if [ -z "$not_checked" ] && ! dry_done finish; then
+        tree1=$(take_snapshot) || fail "snapshot failed"
+        tree0=$(sed -n 's/^tree: //p' "$record" | head -n 1)
+        pre=$(sed -n 's/^setup trees: \([^ ]*\) .*/\1/p' "$record" | tail -n 1)
+        post=$(sed -n 's/^setup trees: [^ ]* //p' "$record" | tail -n 1)
+        if [ -n "$pre" ]; then
+            paths=$({ dry_paths "$tree0" "$pre"; dry_paths "$post" "$tree1"; } | sort -u)
+        else
+            paths=$(dry_paths "$tree0" "$tree1")
+        fi
+        [ -z "$paths" ] || printf 'changed: %s\n' "$(printf '%s\n' "$paths" | LC_ALL=C awk 'NR > 1 { printf ", " } { printf "%s", $0 }')" >>"$record"
+        dry_mark finish
+    fi
+    findings=0
+    : >"$work/findings"
+    grep -n '^probe: ' "$record" | while IFS= read -r line; do
+        at=${line%%:*}
+        rest=${line#*:probe: }
+        where=${rest%%: missing *}
+        word=${rest#*: missing }
+        case $where in
+            step*) printf '%s\t%s\tVerify cannot run: %s is missing\tInstall %s, or use a Verify whose command this machine has.\n' "$where" "$at" "$word" "$word" ;;
+            *) printf 'acceptance\t%s\tCheck cannot run: %s is missing\tInstall %s, or use a Check whose command this machine has.\n' "$at" "$word" "$word" ;;
+        esac
+    done >"$work/lines"
+    dry_last >"$work/last"
+    while IFS='	' read -r number at result; do
+        case $result in
+            'fail '*)
+                waits_for_earlier "$work/plan" "$number" && continue
+                printf 'step %s\t%s\tVerify fails before the change: %s\tUse a Verify that passes before the change, or fix the environment.\n' \
+                    "$number" "$at" "$(dry_excerpt "${result#fail *: }")"
+                ;;
+            'pass (no test ran)')
+                waits_for_earlier "$work/plan" "$number" && continue
+                printf 'step %s\t%s\tVerify ran no test: %s\tPoint the Verify at a test that exists before the change.\n' \
+                    "$number" "$at" "$(dry_excerpt "$(plan_field "$work/plan" "$number" Verify | head -n 1)")"
+                ;;
+            'unstable: '*)
+                printf 'step %s\t%s\tVerify is unstable: failed, then passed: %s\tMake the test stable, or point the Verify at a stable test.\n' \
+                    "$number" "$at" "$(dry_excerpt "${result#unstable: }")"
+                ;;
+            'timeout '*)
+                seconds=${result#timeout }
+                printf 'step %s\t%s\tVerify did not finish in %s s\tUse a faster Verify, or raise WHYGRAPH_VERIFY_TIMEOUT, at most 580.\n' \
+                    "$number" "$at" "${seconds%%:*}"
+                ;;
+        esac
+    done <"$work/last" >>"$work/lines"
+    at=$(grep -n '^setup: exit ' "$record" | tail -n 1)
+    if [ -n "$at" ]; then
+        setup_code=${at##*setup: exit }
+        if [ "$setup_code" -ne 0 ]; then
+            last_setup=$(sed -n 's/^setup command: //p' "$record" | tail -n 1)
+            printf 'plan\t%s\tSetup failed: %s (exit %s)\tFix the Setup command, or remove it from ## Setup.\n' \
+                "${at%%:*}" "$(dry_excerpt "$last_setup")" "$setup_code" >>"$work/lines"
+        fi
+    fi
+    at=$(grep -n '^setup changed: ' "$record" | tail -n 1)
+    [ -z "$at" ] || printf 'plan\t%s\tSetup changed tracked files: %s\tMake each Setup command write only files that git ignores.\n' \
+        "${at%%:*}" "$(dry_excerpt "${at#*setup changed: }")" >>"$work/lines"
+    at=$(grep -n '^acceptance 1: ' "$record" | tail -n 1)
+    case ${at#*acceptance 1: } in
+        'fail '*)
+            printf 'acceptance\t%s\tThe full test command fails before the change: %s\tFix the environment, or name the failing tests under Risks.\n' \
+                "${at%%:*}" "$(dry_excerpt "${at#*acceptance 1: fail *: }")" >>"$work/lines"
+            ;;
+        'timeout '*)
+            seconds=${at#*acceptance 1: timeout }
+            printf 'acceptance\t%s\tVerify did not finish in %s s\tUse a faster full test command, or raise WHYGRAPH_VERIFY_TIMEOUT.\n' \
+                "${at%%:*}" "${seconds%%:*}" >>"$work/lines"
+            ;;
+    esac
+    at=$(grep -n '^changed: ' "$record" | tail -n 1)
+    [ -z "$at" ] || printf 'plan\t%s\tA Verify changed the working tree: %s\tMake each Verify write only files that git ignores.\n' \
+        "${at%%:*}" "$(dry_excerpt "${at#*changed: }")" >>"$work/lines"
+    while IFS='	' read -r where at defect fix; do
+        dry_finding "$where" "$defect" "$at" "$fix"
+    done <"$work/lines"
+    if [ -s "$work/findings" ]; then
+        printf 'REVIEW: dry-run\n'
+        cat "$work/findings"
+    else
+        printf 'REVIEW: dry-run none\n'
+    fi
+    commands=$(grep -cE '^(command|setup command): ' "$record")
+    seconds=$(($(sed -n 's/^call [0-9]*: [a-z]* \([0-9]*\)$/\1/p' "$record" | LC_ALL=C awk '{ s += $1 } END { print s + 0 }') + $(date +%s) - started))
+    if ! plan_field "$work/plan" "" Setup >/dev/null; then
+        setup_state='none in plan'
+    elif [ -z "$(grep '^setup: exit ' "$record")" ]; then
+        setup_state='not needed'
+    elif grep -qx 'setup: exit 0' "$record" && ! grep -q '^setup changed: ' "$record"; then
+        setup_state=ran
+    else
+        setup_state="failed $(sed -n 's/^setup: exit //p' "$record" | tail -n 1)"
+        ! grep -q '^setup changed: ' "$record" || setup_state='failed 5'
+    fi
+    printf '%s\n' "- ran: $commands commands in $seconds s; setup: $setup_state; record: $record"
+    [ -z "$not_checked" ] || printf '%s\n' "- not checked: $not_checked (dry-run budget)"
+    printf 'call %s: done %s\n' "$calls" "$(($(date +%s) - started))" >>"$record"
+    exit 0
+}
+
+# The call ends with work left: on the sixth call, finish with the rest
+# under "- not checked:", else record it and exit 2.
+dry_more() {
+    if [ "$calls" -ge 6 ]; then
+        not_checked=$(
+            for n in $steps; do dry_done "step $n" || printf 'step %s\n' "$n"; done
+            [ -z "$accept_spans" ] || dry_done acceptance || printf 'acceptance\n'
+        )
+        not_checked=$(printf '%s\n' "$not_checked" | LC_ALL=C awk '
+            /^step / { s = s (s == "" ? "steps " : ", ") $2; next }
+            /./ { a = "acceptance" }
+            END { if (s != "" && a != "") print s ", " a; else print s a }
+        ')
+        [ -n "$not_checked" ] || not_checked='later commands'
+        dry_finish
+    fi
+    done_units=$(grep -cE '^done: (step|again|after|setup|acceptance)' "$record")
+    total_units=$((step_count + $([ -n "$accept_spans" ] && printf 1 || printf 0) + $(grep -cE '^done: (again|after|setup)' "$record")))
+    printf 'call %s: more %s\n' "$calls" "$(($(date +%s) - started))" >>"$record"
+    printf 'dryrun: more, %s of %s commands done\n' "$done_units" "$total_units"
+    exit 2
+}
+
+cmd_dryrun() {
+    [ $# -eq 1 ] || usage
+    plan=$1
+    [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    read_budget
+    choose_kill_form
+    deadline=$budget
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    load_plan "$plan" ""
+    record=$steps_dir/dryrun
+    check_leaf "$record"
+    id=$(run_git hash-object --no-filters -- "$work/plan") || fail "git hash-object failed"
+    started=$(date +%s)
+    ran_here=0
+    not_checked=
+    # Go on only after a call that exited 2 for the same plan.
+    calls=0
+    if [ -f "$record" ] && [ "$(sed -n 1p "$record")" = "plan: $id" ]; then
+        case $(grep '^call [0-9]*: ' "$record" | tail -n 1) in
+            call*': more '*)
+                calls=$(grep '^call [0-9]*: ' "$record" | tail -n 1 | sed 's/^call \([0-9]*\):.*/\1/')
+                ;;
+        esac
+    fi
+    if [ "$calls" -eq 0 ]; then
+        start_write "$record"
+        printf 'plan: %s\n' "$id" >"$tmp"
+        finish_write "$record"
+        tree0=$(take_snapshot) || fail "snapshot failed"
+        printf 'tree: %s\n' "$tree0" >>"$record"
+    fi
+    calls=$((calls + 1))
+    printf 'call %s\n' "$calls" >>"$record"
+    scan=$(plan_field "$work/plan" "" "")
+    steps=$(printf '%s\n' "$scan" | sed -n 's/^step //p')
+    step_count=$(printf '%s\n' "$steps" | LC_ALL=C awk 'NF { n++ } END { print n + 0 }')
+    files=$(all_files "$work/plan")
+    accept_spans=
+    if printf '%s\n' "$scan" | grep -qx 'item 1'; then
+        accept_spans=$(plan_field "$work/plan" 1 Check)
+    fi
+
+    # 1. The checks of probe.
+    if ! dry_done probe; then
+        while read -r kind number; do
+            case $kind in
+                step) where="step $number" field=Verify ;;
+                item) where="acceptance $number" field=Check ;;
+                *) continue ;;
+            esac
+            plan_field "$work/plan" "$number" "$field" | while IFS= read -r span; do
+                probe_misses "$span" "$files" scripts | while read -r k word; do
+                    printf 'probe: %s: missing %s\n' "$where" "$word"
+                done
+            done
+        done <<EOF >>"$record"
+$scan
+EOF
+        dry_mark probe
+    fi
+
+    # 3. The baseline of every step.
+    for n in $steps; do
+        dry_done "step $n" && continue
+        dry_step "$n" "step $n" || dry_more
+    done
+
+    # 4. A failing Verify runs once more.
+    dry_last | while IFS='	' read -r number at result; do
+        case $result in 'fail '*) printf '%s\t%s\n' "$number" "${result#fail *: }" ;; esac
+    done >"$work/failing"
+    while IFS='	' read -r number first; do
+        dry_done "again $number" && continue
+        dry_step "$number" "again $number" again || dry_more
+    done <"$work/failing"
+
+    # 5. The ready test, then Setup once and the steps again.
+    ready_check "$record" "$work/plan" >"$work/ready"
+    sed -n 's/^not ready: step \([0-9]*\): .*/\1/p' "$work/ready" >"$work/not-ready"
+    if [ -s "$work/not-ready" ] && plan_field "$work/plan" "" Setup >/dev/null && ! dry_done setup; then
+        left=$((deadline - ($(date +%s) - started)))
+        if [ "$ran_here" -eq 0 ]; then
+            left=$deadline
+        elif [ "$left" -lt 5 ]; then
+            dry_more
+        fi
+        budget=$left
+        run_setup >"$work/setup-out"
+        setup_code=$?
+        budget=$deadline
+        ran_here=$((ran_here + 1))
+        if [ "$setup_code" -eq 3 ] && [ "$left" -lt "$deadline" ]; then
+            dry_more
+        fi
+        sed 's/^command: /setup command: /' "$work/ran" >>"$record"
+        if [ "$setup_code" -eq 5 ]; then
+            printf 'setup: exit 0\n' >>"$record"
+            printf 'setup changed: %s\n' "$(printf '%s\n' "$setup_paths" | LC_ALL=C awk 'NR > 1 { printf ", " } { printf "%s", $0 }')" >>"$record"
+        else
+            printf 'setup: exit %s\n' "$setup_code" >>"$record"
+        fi
+        printf 'setup trees: %s %s\n' "${before:-none}" "${after:-none}" >>"$record"
+        dry_mark setup
+    fi
+    if dry_done setup; then
+        while read -r number; do
+            dry_done "after $number" && continue
+            dry_step "$number" "after $number" || dry_more
+        done <"$work/not-ready"
+    fi
+
+    # 6. Acceptance item 1, in a call of its own.
+    if [ -n "$accept_spans" ] && ! dry_done acceptance; then
+        [ "$ran_here" -eq 0 ] || dry_more
+        printf '%s\n' "$accept_spans" >"$work/spans"
+        dry_run_unit || dry_more
+        printf 'acceptance 1: %s\n' "$result" >>"$record"
+        dry_mark acceptance
+    fi
+
+    # 7. The tree test, then the block.
+    dry_finish
 }
 
 cmd_proof() {
@@ -3182,5 +3797,8 @@ case $subcommand in
     constraints) cmd_constraints "$@" ;;
     brief) cmd_brief "$@" ;;
     proof) cmd_proof "$@" ;;
+    setup) cmd_setup "$@" ;;
+    ready) cmd_ready "$@" ;;
+    dryrun) cmd_dryrun "$@" ;;
     *) usage "unknown subcommand: $subcommand" ;;
 esac

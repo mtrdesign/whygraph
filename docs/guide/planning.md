@@ -208,12 +208,36 @@ question, never a bare `unknown`.
 
 After it writes a plan, the planner runs `plan-tool.sh check <plan>`, a small shell script that ships
 with the agent files. It lints the plan for what a script can judge: every step has its required lines,
-each Verify is a literal command or starts with `manual:`, each Model is a known one, a step that shows a
+each Verify is a literal command or starts with `manual:`, each Model is a known one, a `## Setup` section
+holds at most five literal commands with no shell syntax and no `git push`, a step that shows a
 screen has a valid Routes path, a `## User journey` has its lines, a chain of hops that joins up, real
 step numbers and a walk item in Acceptance, at most three questions are plan-shaping, and no sentence is too long or
-joins two actions. It exits 0 for a clean plan. Otherwise it prints one `line <n>: <message>` for each
-finding. The planner fixes the named lines and checks again, at most twice, and any finding left is
+joins two actions, and no text is hidden from a reader (an HTML comment, a zero-width character or a
+bidi control). A backticked span that starts with `manual:` is never a command. It exits 0 for a clean
+plan. Otherwise it prints one `line <n>: <message>` for each finding. The planner fixes the named lines and checks again, at most twice, and any finding left is
 named in the plan's Confidence reason. When the synthesizer writes the plan, it runs the check itself.
+
+### The dry run
+
+A plan whose first `Verify` cannot pass on your machine fails an hour into a run. So the planner runs
+`plan-tool.sh dryrun <plan>` before it hands the plan over. The script runs the same commands that the
+pre-flight of `/whygraph-implement` runs later: each `Verify` once, and Acceptance item 1 when it is a
+literal command. It starts no agent, changes no tracked file and writes `steps/dryrun`, never the
+record of a run.
+
+- A `Verify` that fails before its step is done is a finding, unless an earlier step has not added its
+  file yet. When the plan has a `## Setup` section, the script runs it once and tries again.
+- A call ends within the `Verify` deadline, and a plan with many steps takes more than one call. The
+  planner repeats the call. The sixth call ends the work, and what it did not reach is named under
+  `- not checked:`.
+- The result has the shape of a review. Each finding is a `blocker`, and goes to `## Blockers` as
+  `- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`. The planner never edits the plan to
+  fit your machine. The reply names the record, in the `- ran:` line of its Confidence reason.
+- `--no-dry-run` skips the dry run. `--no-questions` does not.
+
+Fix the cause the Blocker names, then run `/whygraph-implement`. It runs the dry run again. When the
+Blocker no longer holds, it prints `The dry-run Blockers no longer hold.` and goes on. The bullet stays
+in the plan as a record.
 
 ### Verify evidence
 
@@ -252,12 +276,19 @@ many Acceptance checks are literal, passed or ran no test. `unproven` is not a d
 moves or renames code has no failing test. The run summary of `/whygraph-implement` prints the two total
 lines as `- Proof:`. `proof` speaks for the last run only, because each run starts with an empty baseline.
 
-!!! warning "The implement command pre-approves the plan tool, which runs every Verify and Check"
+!!! warning "The plan tool runs every Verify and Check, and the planner runs it before you read the plan"
     `/whygraph-implement` is allowed to call `plan-tool.sh` without a prompt, and the tool runs whatever
     command a plan names in a `Verify` line or an Acceptance Check, as written. In a permission mode
     that prompts, no prompt appears for those commands. The command prints every command before the
-    first edit, but it does not ask. Run only a plan you reviewed, and read its `Verify` and Check
-    lines first. WhyGraph ships no allow rule for `plan-tool.sh` in any other command.
+    first edit, but it does not ask. Read a plan's `Verify` and Check lines before you run it.
+
+    Since the [dry run](#the-dry-run), the planner also runs those commands, and the plan's `## Setup`
+    commands, **before you have read the plan**. They come from your repository's files through a
+    model. The dry run runs them as the pre-flight does, with a deadline, and it fails when a command
+    changes a tracked file. The reply names the record that lists every command. It is `steps/dryrun`
+    in the plan's folder. In a permission mode that prompts, the editor asks once before the first
+    call, and the prompt names the script and the plan, not the commands. Pass `--no-dry-run` to skip
+    it. WhyGraph ships no allow rule for `plan-tool.sh` in the plan command.
 
 !!! warning "Update all agent files together"
     The implementor writes the record and the evaluator reads it. If you keep an edited implementor and
@@ -275,6 +306,7 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--sources <a,b>` | Run only these sources. A source with `enabled: false` is turned on for this run. |
 | `--no-questions` | Take every default. Every consent question is answered No. |
 | `--review` / `--no-review` | Force the [plan review](#plan-review), also for a single-pass plan, or skip it. Not both. Without either, a deep plan is reviewed and a single-pass plan is not. These are not the implement command's `--no-review`, which skips the review gate after each step. |
+| `--no-dry-run` | Skip the [dry run](#the-dry-run), which runs each `Verify` once before the plan is handed over. `--no-questions` does not skip it. |
 | `--out <path>` | Save the plan at `<path>` instead of `.whygraph/plans/<name>.md`. |
 | `--refresh-profile` | Derive the [UI profile](#ui-evidence) again instead of reusing the cached one. |
 
@@ -292,7 +324,9 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
 | `--eval-fix-attempts N` | How many times a failed spec evaluation sends the step back to the implementor, 0 to 2. Default 1. |
 
-The command refuses a plan that has open Blockers or an unanswered plan-shaping question.
+The command refuses a plan that has open Blockers or an unanswered plan-shaping question. A plan whose
+only Blockers are dry-run ones is not refused at once: the command runs the dry run again and goes on when
+the Blockers no longer hold.
 
 ## Running unattended
 
@@ -304,8 +338,38 @@ it stops only when no rung of its ladder can help.
 - **Every Verify runs on your environment before the first edit.** A script probes every `Verify` and
   Acceptance Check, prints each command, and then runs each `Verify` once as a baseline. It stops at
   once, before any edit, on a command that does not exist (a shell function such as `nvm use` does not
-  exist under `sh -c`), that hangs, or that changes the working tree. A `Verify` that already fails
-  at baseline is a recorded result, not a stop. The pre-flight runs on every invocation.
+  exist under `sh -c`), that hangs, or that changes the working tree. The pre-flight runs on every
+  invocation.
+- **A fresh run stops when a Verify fails before any change.** A `Verify` must pass when its own step is
+  done, so it passes before the change too, unless the step waits for a file that an earlier step adds.
+  That failure is expected. Any other failure at baseline is a fault of the machine or the plan. The
+  script `ready` tells them apart. On a fault, the run executes the plan's `## Setup` once, runs the
+  baselines again, and stops with `Verify fails before any change` when one still fails. A run that
+  resumes a half-done plan is never stopped by this, because an earlier step of the slice is applied.
+- **Setup makes a fresh checkout ready.** A plan can hold a `## Setup` section of at most five literal
+  commands, such as an install and a generate step. The planner writes them only when the repo's CI or
+  README runs them before the tests. A command may change files that git ignores and nothing else: a
+  tracked file or an unignored one that changed stops the run with `setup failed`. A command has no
+  shell syntax and never adds or upgrades a package. `plan-tool.sh setup <plan>` runs the commands and
+  writes `steps/setup`.
+- **Setup and the dry run run commands you have not read.** The plan command runs them before you see
+  the plan (see the warning above), and `--no-questions` does not turn that off. Only `--no-dry-run`
+  does. A Setup command runs the install scripts of every package it installs, and it may write
+  outside the repository, such as a global cache or your home folder. The check of tracked files cannot
+  see that. Read the `## Setup` section of a plan, and the `Read first` line above it, as you read a
+  script you download.
+- **A command of the dry run or Setup runs with fewer secrets.** It loses `*_API_KEY`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and every `WHYGRAPH_*`
+  variable. The registry tokens `GITHUB_TOKEN`, `GH_TOKEN` and `NPM_TOKEN` stay, so an install from a
+  private registry works. A `Verify` that the pre-flight runs keeps its full environment. Export
+  `WHYGRAPH_KEEP_SECRETS=1` before you start your editor to keep every variable. No plan line, profile
+  key or repo file can do that for you.
+- **No tool is fetched during a run.** Every command the plan tool runs gets `npm_config_yes=false`, so
+  `npx` fails on a package that is not installed instead of downloading it. After a command exits, the
+  tool also kills the processes it left behind.
+- **Two findings of the dry run name a weak Verify.** `Verify ran no test` means a `Verify` exited 0
+  but ran no test, and names no file an earlier step adds, so it cannot fail. `Verify is unstable`
+  means a `Verify` failed once and passed on the second run. The script runs a failing `Verify` twice.
 - **A pass that ran no test is marked.** When a `Verify` exits 0 but its output says that no test ran
   (`no tests ran`, `collected 0 items`, `0 passing`, `running 0 tests`, `no tests to run`,
   `no tests found` or `0 tests`, in any case), its baseline result reads `pass (no test ran)`. It is
@@ -359,6 +423,8 @@ Every stop prints one block that names the cause, and the next action:
 
 | Cause | What to do |
 |---|---|
+| `Verify fails before any change: <lines>` | The named `Verify` fails on your machine before any edit. Fix the environment, or change the `Verify`. Then run the command again. |
+| `setup failed: <line>` | A `## Setup` command of the plan failed, hit its deadline or changed a tracked file. Run it by hand to see why. Then run the command again. |
 | `Verify did not finish in <T> s` (also `at baseline`) | Narrow the step's `Verify`, or export a larger `WHYGRAPH_VERIFY_TIMEOUT` (at most 580). |
 | `Verify cannot run: <misses>`, `Check cannot run: <misses>` | Make the command plain. A shell function such as `nvm` does not exist under `sh -c`. |
 | `a Verify changed the working tree at baseline: <paths>` | Add a cache or build output to `.gitignore`, or give the step a `Verify` that only checks. |
@@ -766,6 +832,8 @@ after a clone, as you would the `sources/` folder.
 | Plan review (logic, UX/UI and journey reviewers, then a fixer) | Yes: the logic and journey reviewers on a strong model, the UX/UI reviewer on a fast one | Yes: both on the model the editor picks | Yes: both on the model the editor picks | Yes: both on the model the editor picks, read-only by written rule only |
 | Recovery ladder and plan amendment | Yes | Yes, on one model (the retry repeats it) | No | No |
 | Pre-flight probe and baseline of every Verify | Yes | Yes | No | No |
+| Dry run at plan time | Yes | Yes | No: the planner has no terminal and skips it | Yes |
+| Setup pass when a Verify fails before any change | Yes, by the skill | Yes, by the skill | Yes, by the implementor | Yes, by the implementor |
 | One-page brief of the plan before the pre-flight | Yes | Yes | No | No |
 | A note proposed for a change on purpose, after a passing Acceptance | Yes | Yes | No, one printed line per step | No, one printed line per step |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
@@ -777,7 +845,7 @@ after a clone, as you would the `sources/` folder.
 | Splitting | Child plans started for you | Child plans started for you | Run the prompt once per child | The main agent runs one implementor per child |
 
 In VS Code the prompt runs as the planner itself, so it asks its questions in the same conversation
-and has no terminal. In Cursor the plan is run from a skill, and the review gate is skipped; run
+and has no terminal. It skips the dry run and the plan check. In Cursor the plan is run from a skill, and the review gate is skipped; run
 `/whygraph-review` from Claude Code if you want it. VS Code and Codex run one implementor for the
 whole plan, so the recovery ladder, the plan amender and the pre-flight are not there. They get the
 bounded Verify deadline, the plan tool and the new `--fix-attempts` default of 2. In VS Code the

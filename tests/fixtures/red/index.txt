@@ -1,0 +1,22 @@
+# Recorded output of each runner for the classes of plan-tool.sh red.
+# <file> <exit> <test name> <expected result>
+# Recorded 2026-11-15 on macOS: pytest 9 (Python 3.12), go 1.23, node 22
+# (node --test), vitest 5. Paths are replaced with /work. jest, mocha,
+# cargo, Playwright and Cypress were not available on the recording machine,
+# so they have no fixture: their output is not guessed.
+pytest-failing.txt 1 test_limit red
+pytest-missing-id.txt 4 test_nope red (did not run)
+pytest-import-error.txt 4 test_parse red (did not run)
+pytest-no-tests.txt 5 test_empty red (did not run)
+go-failing.txt 1 TestLimit red
+go-missing-id.txt 0 TestNope red (did not run)
+go-import-error.txt 1 TestParse red (did not run)
+go-no-tests.txt 0 TestEmpty red (did not run)
+node-failing.txt 1 limit red
+node-missing-id.txt 0 nope red (did not run)
+node-import-error.txt 1 parse red (did not run)
+node-no-tests.txt 0 empty passed
+vitest-failing.txt 1 limit red
+vitest-missing-id.txt 0 nope passed
+vitest-import-error.txt 1 parse red (did not run)
+vitest-no-tests.txt 1 empty red (did not run)

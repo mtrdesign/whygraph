@@ -62,6 +62,7 @@ An older plan may lack the status block, `## Resolved decisions`, `## Prior art`
    - First H1 must match `^# Plan: (.+)$`. If not, refuse and stop.
    - If a `## Blockers` section is present with at least one non-empty bullet, refuse:
      `Plan has unresolved blockers. Resolve them in the plan file first.` Print the blockers verbatim and stop.
+     A bullet that starts `- **Dry run` is no reason to refuse with `BASELINE: done`: the caller checked it. Without `BASELINE: done`, run `<PLAN_TOOL> dryrun <PLAN_PATH>` until it exits 0. When its first line is not `REVIEW: dry-run none`, refuse with `Plan has unresolved blockers from the dry run. Fix what the lines below name, then re-run.`, print its output and stop. When it is clean, your first log write adds `- Dry-run Blockers checked again: clean (<timestamp>)`.
    - If `## Open questions` holds an entry with `**Plan-shaping:** yes`, refuse:
      `Plan has an unanswered plan-shaping question. Answer it (run the plan command again) or edit the plan.` Print the question verbatim and stop.
    - When `TASKS_PATH` is not `none`, run `git ls-files --error-unmatch -- '<TASKS_PATH>'`. Exit 0 means git tracks it: refuse with `<TASKS_PATH> is tracked by git; refusing it.` and stop.
@@ -88,6 +89,7 @@ An older plan may lack the status block, `## Resolved decisions`, `## Prior art`
 6. **Baseline** (skipped with `FINDINGS:` or `STEP_RANGE: acceptance`). Before any edit, get `.whygraph/plans/<stem>/steps/baseline`. Never run `CAPTURE` here.
    - With `BASELINE: done`, run no command. Read the `baseline` file.
    - Without it, run `<PLAN_TOOL> probe <PLAN_PATH>`. Then run `<PLAN_TOOL> baseline <PLAN_PATH> <N> first` for the first step of the range, and `<PLAN_TOOL> baseline <PLAN_PATH> <N>` for each later one. Halt on exit 3 or 4 with `baseline stopped: <first output line>`.
+   Then run `<PLAN_TOOL> ready <PLAN_PATH>`. On exit 1, run `<PLAN_TOOL> setup <PLAN_PATH>`. On its exit 0, run the baseline calls again, once, and `ready` again. Halt with `Verify fails before any change: <the not ready lines>` when `ready` still exits 1, or when `setup` exits 6. Halt with `setup failed: <the printed line>` when `setup` exits 1, 3 or 5.
 
    On the first run of the range, log `- Baseline: <k> of <n> Verify commands pass (<timestamp>)`. Here `<k>` counts the `pass` lines, `pass (no test ran)` included, and `<n>` the steps in the range. Under it, log one line per `fail` line, `  - Step <N>: fails at baseline: <excerpt>`, one per `test first` line, `  - Step <N>: expected (Test first)`, and one per `pass (no test ran)` line, `  - Step <N>: passes, but its Verify ran no test`. A step whose Verify fails at baseline is still attempted. If it still fails after the change, report the failure as `pre-existing at baseline`.
 

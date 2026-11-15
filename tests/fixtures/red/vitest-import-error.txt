@@ -1,0 +1,23 @@
+
+ RUN  v5.0.2 /work
+
+ ❯ import.test.mjs (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  import.test.mjs [ import.test.mjs ]
+Error: Cannot find module './limits.mjs' imported from /work/import.test.mjs
+ ❯ import.test.mjs:1:1
+      1| import { parseLimit } from "./limits.mjs";
+       | ^
+      2| import { test } from "vitest";
+      3| test("parse", () => {});
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  21:26:25
+   Duration  135ms (worker 97%, environment 3%)
+

@@ -15,7 +15,9 @@ consent: false
 2. For each working-set file, find the tests that exercise it: call `codegraph_search(query=<short name>)` for each of its symbols and keep the hits under the test directories (`tests/`, `test/`, `__tests__/`, `*_test.*`, `*.spec.*`), then grep those directories for the module's import path or file name. Name the test file and, where you can, the test function.
 3. For each working-set symbol, write one or more `Verify:` candidates as literal commands in backticks, the narrowest that proves the symbol still works - e.g. `uv run pytest tests/test_cache.py::test_key_is_content_addressable -q` or `npm test -- src/lib/cache.test.ts`. Build them from the commands in 1 and the tests in 2. Never write prose such as "run the tests" or "check it still works".
 4. Flag every symbol that no test exercises as **uncovered**: name the test to add (file and test name) and the literal command that would run it.
+5. Find the commands that prepare a fresh checkout for the tests: the install command of the lockfile, then each generate step the CI workflow or the README runs before the tests. Record each as the repo runs it. Leave out a command that changes a file git tracks. Never report a command that adds or upgrades a package.
 
 A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
 
 Report the project's full test command first, as `- Test commands: ...`; the synthesizer makes it Acceptance item 1.
+Then report `- Setup commands: <command>; <command>`, or `- Setup commands: none`.

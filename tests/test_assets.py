@@ -2039,6 +2039,7 @@ def test_implement_entry_points() -> None:
 _PLAN_TOOL_SUBCOMMANDS = (
     "snapshot|begin|end|pass|next|changed|probe|baseline|accept|attempt|amends"
     "|save|restore|log-check|state|amend-check|constraints|brief|proof"
+    "|setup|ready|dryrun"
 )
 
 
@@ -2114,6 +2115,9 @@ def test_implement_stop_block_and_causes(tree: str) -> None:
         "Check cannot run: <misses>",
         "a Verify changed the working tree at baseline: <paths>",
         "acceptance failed: <items>",
+        # Plan 56 section 5.8: the fresh-run stop.
+        "Verify fails before any change: <lines>",
+        "setup failed: <line>",
     ):
         assert any(c.fullmatch(wanted) for _, c in causes), wanted
     # The Next of a baseline change says how to keep the Verify a pure check.
@@ -2464,14 +2468,27 @@ def test_plan_reviewer_reply_shape() -> None:
         logic = body.split("## Lens logic", 1)[1].split("## Lens ui", 1)[0]
         ui = body.split("## Lens ui", 1)[1].split("## Lens journey", 1)[0]
         journey = body.split("## Lens journey", 1)[1].split("## Reply format", 1)[0]
-        assert re.findall(r"^(\d+)\. ", logic, re.M) == [str(i) for i in range(1, 10)]
+        assert re.findall(r"^(\d+)\. ", logic, re.M) == [str(i) for i in range(1, 12)]
         assert re.findall(r"^(\d+)\. ", ui, re.M) == [str(i) for i in range(1, 7)]
         assert re.findall(r"^(\d+)\. ", journey, re.M) == [
             str(i) for i in range(1, 9)
         ], tree
         assert (
-            "`logic` runs its nine checks, `ui` its six, `journey` its eight." in body
+            "`logic` runs its eleven checks, `ui` its six, `journey` its eight." in body
         )
+        assert (
+            "10. **Step-local Verify.** The Verify can pass when this step is done and no later step is."
+            in logic
+        ), tree
+        assert (
+            "11. **Named files.** Each file the Change adds or edits is in **Files**, by its exact path."
+            in logic
+        ), tree
+        assert (
+            "unless the step's **Changes on purpose** line quotes that constraint."
+            in logic
+        ), tree
+        assert "Run these eleven checks for each step" in logic, tree
 
 
 def test_plan_amender_tools() -> None:
@@ -2590,9 +2607,33 @@ def test_plan_review_fan_out() -> None:
             "`REVIEW_PATH: <absolute path of the review sidecar>`",
             "`review: failed - <reason>`",
             "`review: skipped - <reason>`",
-            "Revise mode never runs **2g**",
+            "Revise mode never runs the reviewers: one review round per plan.",
+            # Plan 56 section 5.6: the dry run is a third reviewer that is a script.
+            "Run it when `REVIEW` asks for a review or `DRY_RUN` is `yes`.",
+            "1a. **Dry run.** In the same message as the reviewers, run "
+            "`<PLAN_TOOL> dryrun <OUT_PATH>`.",
+            "The tool ends the loop itself at its sixth call.",
+            "the block is `(unavailable: dryrun exited <code>)`",
+            "`dry run: skipped - no plan tool`",
+            "=== dry-run ===\n<the dry-run block verbatim, or (unavailable: <reason>)>",
+            "when the dry-run block's first line is `REVIEW: dry-run` with nothing after it",
+            "`- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`",
+            "Copy the dry run's `- ran:` line into the Confidence reason",
+            "With `DRY_RUN: yes`, revise mode runs `<PLAN_TOOL> dryrun <PLAN_PATH>` "
+            "on the plan it wrote",
         ):
             assert phrase in review, (tree, phrase)
+        for phrase in (
+            "With `DRY_RUN: no`, also keep the dry-run bullets of `## Blockers`.",
+            "**2c**, **2g** and **Phase 3** name",
+            "DRY_RUN: <yes | no>",
+            "6. With `REVIEW: yes` or `DRY_RUN: yes`, run **2g**",
+        ):
+            assert phrase in planner, (tree, phrase)
+        assert (
+            "In VS Code no terminal is available to the planner: skip the dry run."
+            in planner
+        ) == (tree == "vscode"), tree
         # 2g sits between 2e and 2f, so 2f relays the fixer's reply.
         assert planner.index("**2e.") < planner.index("**2g.") < planner.index("**2f.")
         assert "the fixer's reply when **2g** ran" in planner, tree
@@ -2608,6 +2649,40 @@ def test_plan_review_fan_out() -> None:
         assert (_OPUS_OVERRIDE in planner.splitlines()) == (tree == "claude-code")
 
 
+def test_synthesizer_setup_and_dry_run_rules() -> None:
+    """Step 3i, the Step 3 additions and rule 3c are in all four synthesizers."""
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "synthesizer"))
+        assert body.index("**3h. User journey.**") < body.index("**3i. Setup.**"), tree
+        assert body.index("**3i. Setup.**") < body.index("**3k. Constraint checks."), (
+            tree
+        )
+        step3i = body.split("**3i. Setup.**", 1)[1].split("**3k.", 1)[0]
+        assert "`- Setup commands:` line of the `## Verify candidates`" in step3i, tree
+        assert "Omit the section when the line is `none` or missing." in step3i, tree
+        for sentence in (
+            "A Verify must pass when its own step is done.",
+            "Move a whole-repo check to the last step that completes the change, "
+            "or to Acceptance.",
+            "List each file the Change adds or edits, by its exact path.",
+            "Write **Read first** with at most three items",
+            "Never write a mitigation that tells the implementor to check or "
+            "confirm something.",
+            "Settle it now with at most 3 reads, or make it an Open question.",
+        ):
+            assert sentence in body, (tree, sentence)
+        fixer = body.split("**9. Fix from the review.**", 1)[1]
+        rule3c = fixer.split("\n3c. ", 1)[1].split("\n4. ", 1)[0]
+        for sentence in (
+            "Never apply a `dry-run` finding by an edit: it reports this machine, "
+            "not the text.",
+            "`- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`",
+            "It never becomes an Open question.",
+            "In `## Plan review` its line is `- F<n> (dry-run): blocked`.",
+        ):
+            assert sentence in rule3c, (tree, sentence)
+
+
 def test_plan_review_fan_in() -> None:
     """The four synthesizers carry step 9, the fixer, and its reply forms."""
     for tree in _AGENT_PATHS:
@@ -2621,6 +2696,7 @@ def test_plan_review_fan_in() -> None:
             "3",
             "3a",
             "3b",
+            "3c",
             "4",
             "5",
             "6",
@@ -2672,10 +2748,17 @@ def test_plan_entry_points() -> None:
             assert phrase in text, (tree, phrase)
         assert "or the word `web`" in text, tree
         assert "REVIEW: <yes | no | auto>" in text, tree
+        assert "DRY_RUN: <yes | no>" in text, tree
+        if tree != "codex":
+            assert "[--review|--no-review] [--no-dry-run]" in text, tree
+            assert (
+                "- `DRY_RUN` is `no` for `--no-dry-run`, otherwise `yes`. "
+                "`--no-questions` does not change it." in text
+            ), tree
     stay = {
-        "claude-code": "`MODE`, `REVIEW`, `SOURCES_DIR`",
-        "cursor": "`MODE`, `REVIEW`, `SOURCES_DIR`",
-        "vscode": "`MODE`, `REVIEW`, `SOURCES_DIR`",
+        "claude-code": "`MODE`, `REVIEW`, `DRY_RUN`, `SOURCES_DIR`",
+        "cursor": "`MODE`, `REVIEW`, `DRY_RUN`, `SOURCES_DIR`",
+        "vscode": "`MODE`, `REVIEW`, `DRY_RUN`, `SOURCES_DIR`",
         "codex": "`MODE`, `REVIEW` and the other lines stay the same.",
     }
     for tree, rel in _PLAN_ENTRY.items():
@@ -5264,3 +5347,193 @@ def test_ui_profile_auth() -> None:
         assert "`Browser tests` is `tests`, `Auth` is `auth`, else `none`," in fill, (
             tree
         )
+
+
+def test_runnable_plan_spine_and_source() -> None:
+    """The spine holds Setup, a Verify that can pass, named files and Read first."""
+    for tree, folder in _SOURCE_DIRS.items():
+        base = _ASSET_ROOT / folder
+        text = (base / "plan-spine.md").read_text()
+        assert "Verify is a literal command, Setup, Acceptance" in text, tree
+        verify = text.split("## Verify is a literal command", 1)[1].split("\n## ", 1)[0]
+        assert "A Verify must pass when its own step is done." in verify, tree
+        assert "Otherwise put it in Acceptance." in verify, tree
+        setup = text.split("\n## Setup\n", 1)[1].split("\n## ", 1)[0]
+        assert "Write this section only when a source reported setup commands." in setup
+        assert "A setup command may change only files that git ignores." in setup, tree
+        boundaries = text.split("## Boundaries per step", 1)[1].split("\n## ", 1)[0]
+        assert "- Name each file a Change adds or edits by its exact path" in boundaries
+        assert "- [ ] Each Verify can pass when its own step is done." in text, tree
+        assert "- [ ] Each file a Change names is in Files." in text, tree
+        fmt = text.split("## Plan format", 1)[1]
+        assert "\n**Read first:** <at most three places" in fmt, tree
+        block = "## Setup\n*(only when a source reported setup commands"
+        assert "- `<literal command>` - <what it prepares>" in fmt, tree
+        journey = fmt.index("\n## User journey\n")
+        setup_at = fmt.index("\n" + block)
+        blockers = fmt.index("\n## Blockers\n")
+        assert journey < setup_at < blockers, tree
+        review = fmt.index("- **Review finding F<n> (<lens>):**")
+        dry = fmt.index("- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>")
+        hop = fmt.index("- **Journey hop H<n>:**")
+        assert review < dry < hop, tree
+        source = (base / "sources" / "repo-tests.md").read_text()
+        assert "5. Find the commands that prepare a fresh checkout" in source, tree
+        assert "`- Setup commands: <command>; <command>`" in source, tree
+        assert "- Setup commands: none" in source, tree
+
+
+def test_runnable_plan_contract() -> None:
+    """Plan 56 Phase 1: the reviewer, synthesizer, planner, entry points, implementors."""
+    for tree in _SOURCE_DIRS:
+        reviewer = "\n".join(_agent_body(tree, "plan-reviewer"))
+        logic = reviewer.split("## Lens logic", 1)[1].split("## Lens ui", 1)[0]
+        assert (
+            "10. **Step-local Verify.** The Verify can pass when this step is done"
+            in (logic)
+        ), tree
+        assert "is a `blocker`. Its fix moves the check to that later step." in logic, (
+            tree
+        )
+        assert (
+            "11. **Named files.** Each file the Change adds or edits is in" in logic
+        ), tree
+        assert (
+            "A Change that asks for a new file without a path is a `should`." in logic
+        ), tree
+        assert (
+            "A Change that contradicts a card constraint is a finding, unless the "
+            "step's **Changes on purpose** line quotes that constraint."
+        ) in logic, tree
+        synth = "\n".join(_agent_body(tree, "synthesizer"))
+        assert synth.index("**3h. User journey.**") < synth.index("**3i. Setup.**"), (
+            tree
+        )
+        assert synth.index("**3i. Setup.**") < synth.index(
+            "**3k.", synth.index("**3i.")
+        ), tree
+        assert (
+            "**3i. Setup.** Fill `## Setup` from the `- Setup commands:` line of the "
+            "`## Verify candidates` section, one bullet per command, in its order. "
+            "Omit the section when the line is `none` or missing."
+        ) in synth, tree
+        assert "List each file the Change adds or edits, by its exact path." in synth, (
+            tree
+        )
+        assert "A Verify must pass when its own step is done." in synth, tree
+        assert (
+            "Never write a mitigation that tells the implementor to check or confirm "
+            "something."
+        ) in synth, tree
+        fixer = synth.split("**9. Fix from the review.**", 1)[1]
+        rule3c = fixer.split("\n3c. ", 1)[1].split("\n4. ", 1)[0]
+        assert fixer.index("\n3b. ") < fixer.index("\n3c. "), tree
+        assert (
+            "Never apply a `dry-run` finding by an edit: it reports this machine, "
+            "not the text."
+        ) in rule3c, tree
+        assert (
+            "`- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`. "
+            "It never becomes an Open question. In `## Plan review` its line is "
+            "`- F<n> (dry-run): blocked`."
+        ) in rule3c, tree
+        planner = "\n".join(_agent_body(tree, "planner"))
+        assert "- `DRY_RUN`: `yes` or `no`. Only `no` skips the dry run of **2g**." in (
+            planner
+        ), tree
+        assert (
+            "`DRY_RUN` decides on the dry run of item 1a. Only `DRY_RUN: no` skips it."
+            in (planner)
+        ), tree
+        assert (
+            "1a. **Dry run.** In the same message as the reviewers, run "
+            "`<PLAN_TOOL> dryrun <OUT_PATH>`."
+        ) in planner, tree
+        assert "- Exit 0: its output is the dry-run block." in planner, tree
+        assert "the block is `(unavailable: dryrun exited <code>)`." in planner, tree
+        assert "=== dry-run ===\n<the dry-run block verbatim" in planner, tree
+        assert (
+            "Copy the dry run's `- ran:` line into the Confidence reason of the plan "
+            "and of your reply."
+        ) in planner, tree
+        assert (
+            "With `DRY_RUN: yes`, revise mode runs `<PLAN_TOOL> dryrun <PLAN_PATH>` "
+            "on the plan it wrote, as item 1a runs it."
+        ) in planner, tree
+        assert (
+            "Replace the dry-run bullets of `## Blockers` with one bullet per "
+            "finding, in the form of item 3."
+        ) in planner, tree
+        no_terminal = (
+            "In VS Code no terminal is available to the planner: skip the dry run. "
+            'Add "dry run: skipped - no terminal" to the Confidence reason.'
+        )
+        assert (no_terminal in planner) == (tree == "vscode"), tree
+        implementor = "\n".join(_agent_body(tree, "implementor"))
+        assert (
+            "A bullet that starts `- **Dry run` is no reason to refuse with `BASELINE: done`"
+            in (implementor)
+        ), tree
+        assert (
+            "`Plan has unresolved blockers from the dry run. Fix what the lines below name, then re-run.`"
+            in (implementor)
+        ), tree
+        assert "- Dry-run Blockers checked again: clean (<timestamp>)" in implementor, (
+            tree
+        )
+        assert (
+            "Then run `<PLAN_TOOL> ready <PLAN_PATH>`. On exit 1, run "
+            "`<PLAN_TOOL> setup <PLAN_PATH>`. On its exit 0, run the baseline calls "
+            "again, once, and `ready` again."
+        ) in implementor, tree
+        assert (
+            "Halt with `Verify fails before any change: <the not ready lines>` when "
+            "`ready` still exits 1, or when `setup` exits 6. Halt with "
+            "`setup failed: <the printed line>` when `setup` exits 1, 3 or 5."
+        ) in implementor, tree
+        entry = (_ASSET_ROOT / _PLAN_ENTRY[tree]).read_text()
+        assert "DRY_RUN: <yes | no>" in entry, tree
+        if tree == "codex":
+            assert "no only when they ask to skip the dry run" in entry, tree
+        else:
+            assert "[--no-dry-run]" in entry, tree
+            assert "`--no-dry-run` -> skip the dry run." in entry, tree
+            assert "`DRY_RUN` is `no` for `--no-dry-run`, otherwise `yes`." in entry, (
+                tree
+            )
+            assert "`--no-questions` does not change it." in entry, tree
+    for tree in ("claude-code", "cursor"):
+        skill = (_ASSET_ROOT / _IMPLEMENT_ENTRY[tree]).read_text()
+        assert (
+            "When every bullet starts `- **Dry run`, do not refuse here. Step 2a decides."
+            in (skill)
+        ), tree
+        para = skill.split("**Dry-run Blockers.**", 1)[1].split("\n\n", 1)[0]
+        assert (
+            "plan-tool.sh dryrun <plan>`. On exit 2, run it again, until it exits 0."
+            in para
+        ), tree
+        assert (
+            "`REVIEW: dry-run none`: print `The dry-run Blockers no longer hold.`"
+            in para
+        ), tree
+        assert "Plan has unresolved blockers from the dry run." in para, tree
+        item = skill.split("4a. **Ready.**", 1)[1].split("**Reset", 1)[0]
+        assert "plan-tool.sh ready <plan> <blob>`. Print its output." in item, tree
+        assert "plan-tool.sh setup <plan> <blob>`. Print its output." in item, tree
+        assert "Exit 6: stop with `Verify fails before any change: <lines>`." in item, (
+            tree
+        )
+        assert (
+            "Exit 1, 3 or 5: stop with `setup failed: <the printed line>`." in item
+        ), tree
+        assert "run item 4 again, once. Then run `ready` again." in item, tree
+        assert "`<lines>` is the text after `not ready: ` of each such line" in item, (
+            tree
+        )
+        assert (
+            "`end` exit 0, and the report has no `**Status:**` line and no "
+            "`**Halt:**` line: the run **succeeded**."
+        ) in skill, tree
+        assert "| `Verify fails before any change: <lines>` |" in skill, tree
+        assert "| `setup failed: <line>` |" in skill, tree

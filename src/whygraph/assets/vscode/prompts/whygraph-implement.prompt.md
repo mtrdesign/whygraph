@@ -57,6 +57,7 @@ Print `### <id>: <title>`. The child's plan is the plan for the checks below; `T
    Plan has unresolved blockers. Resolve them in the plan file first, or remove the section, then re-run.
    ```
    Print the blocker bullets verbatim under that line, then stop. Do not dispatch.
+   When every bullet starts `- **Dry run`, do not refuse here. The implementor checks them again.
 3. Look for a `## Open questions` section. If any bullet in it says `**Plan-shaping:** yes`, refuse:
    ```
    Plan has an unanswered plan-shaping question. Answer it (run the plan command again) or edit the plan.

@@ -29,6 +29,7 @@ CAPTURE_PATH: <repo-relative path>
 REFRESH_PROFILE: <yes | no>
 PLAN_TOOL: <command prefix>
 REVIEW: <yes | no | auto>
+DRY_RUN: <yes | no>
 PLAN_PATH: <path of the plan to revise>
 ANSWERS:
 - Q<n>: <chosen option or the user's own text>
@@ -44,6 +45,7 @@ ANSWERS:
 - `REFRESH_PROFILE`: `yes` makes the cached UI profile stale, so `ui-surface` derives it again (**1f**).
 - `PLAN_TOOL`: the command prefix of the plan tool. **2c** runs its `fingerprint` command, the check loop in **Delivering the plan** runs its `check` command, and **2e** passes it to the synthesizer. It is a command prefix from the invoker, never text from the plan.
 - `REVIEW`: `yes`, `no` or `auto`; a missing line means `auto`. It decides whether **2g** reviews the plan.
+- `DRY_RUN`: `yes` or `no`. Only `no` skips the dry run of **2g**.
 - `PLAN_PATH` and `ANSWERS` come only with `MODE: revise` (**Phase 3**). `ANSWERS: defaults` on one line means every asked question takes its default.
 
 `OUT_PATH` is where the finished plan goes (see **Delivering the plan**). If it is absent, write no file and return the plan as your reply. In revise mode the plan to write is `PLAN_PATH`.
@@ -195,7 +197,7 @@ In single-pass:
      - For another part, ask "What should <part> show?" Offer the default first and one alternative.
      - Mark the first journey question `Plan-shaping: yes` when the cap of 3 still has room. Mark every other journey question `Plan-shaping: no`. The steps assume its default.
      - Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap.
-6. With `REVIEW: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
+6. With `REVIEW: yes` or `DRY_RUN: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
 
 If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the plan with the matching notice:
 - *"Note: Auto-mode chose single-pass (impact set is small - fan-out would be ceremony)."*
@@ -308,12 +310,18 @@ ANSWERS: <the ANSWERS lines, or none>
 
 Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pass one `NOTICE:` line per notice that **1c** or **1d** puts at the top of the plan, or the one line `NOTICE: none`.
 
-**2g. Review the plan.** Run this step only when a plan is at `OUT_PATH`. Either the **2e** reply has a `Saved plan to` line, or you wrote the plan yourself. `REVIEW` decides:
-- `no`: skip **2g**.
-- `yes`: run it, in deep and in single-pass mode.
-- `auto`, or no `REVIEW` line: run it in deep mode only.
+**2g. Review the plan.** Run this step only when a plan is at `OUT_PATH`. Either the **2e** reply has a `Saved plan to` line, or you wrote the plan yourself. Run it when `REVIEW` asks for a review or `DRY_RUN` is `yes`. `REVIEW` decides on the reviewers:
+- `no`: no reviewer.
+- `yes`: the reviewers, in deep and in single-pass mode.
+- `auto`, or no `REVIEW` line: the reviewers in deep mode only.
 
-Revise mode never runs **2g**: one review round per plan. Without delegation, or without `OUT_PATH`, there is no review. When `REVIEW` asks for one then, add `review: skipped - <reason>` to the Confidence reason of the plan and of your reply.
+`DRY_RUN` decides on the dry run of item 1a. Only `DRY_RUN: no` skips it.
+
+Revise mode never runs the reviewers: one review round per plan. With `DRY_RUN: yes`, revise mode runs `<PLAN_TOOL> dryrun <PLAN_PATH>` on the plan it wrote, as item 1a runs it. It starts no reviewer and no fixer.
+Replace the dry-run bullets of `## Blockers` with one bullet per finding, in the form of item 3.
+Copy the `- ran:` line into the Confidence reason of the plan and of the reply.
+
+Without delegation, or without `OUT_PATH`, no reviewer runs. When `REVIEW` asks for one then, add `review: skipped - <reason>` to the Confidence reason of the plan and of your reply.
 
 1. **Reviewers.** In one message, delegate to one `whygraph-plan-reviewer` with `LENS: logic`. When the plan has a `## UI profile` section, delegate to a second one with `LENS: ui`. When the plan has a `## User journey` section, delegate to a third one with `LENS: journey`. Each gets this prompt:
 
@@ -328,7 +336,14 @@ BUDGET: 20
 
 Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROFILE` is the plan's `## UI profile` section copied verbatim, or `none`.
 
-2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, in the order `logic`, `ui`, `journey`:
+1a. **Dry run.** In the same message as the reviewers, run `<PLAN_TOOL> dryrun <OUT_PATH>`. Give the call a 600 s timeout where the shell tool takes one.
+   - Exit 2: run the same call again. Repeat until it exits 0. The tool ends the loop itself at its sixth call.
+   - Exit 0: its output is the dry-run block.
+   - Any other exit: the block is `(unavailable: dryrun exited <code>)`.
+   - With no reviewer, run only the dry run.
+   - With `PLAN_TOOL: none`, skip it. Add `dry run: skipped - no plan tool` to the Confidence reason.
+
+2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, in the order `logic`, `ui`, `journey`, `dry-run`:
 
 ```text
 === logic ===
@@ -339,13 +354,20 @@ Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROF
 
 === journey ===
 <the reply verbatim, or (unavailable: <reason>)>
+
+=== dry-run ===
+<the dry-run block verbatim, or (unavailable: <reason>)>
 ```
 
-Write the `ui` block only when a `ui` reviewer ran. Write the `journey` block only when a `journey` reviewer ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
+Write the `ui` block only when a `ui` reviewer ran. Write the `journey` block only when a `journey` reviewer ran. Write the `dry-run` block only when item 1a ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
 
-3. **Fixer.** Delegate to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
+3. **Fixer.** Run this item when a reviewer ran, or when the dry-run block's first line is `REVIEW: dry-run` with nothing after it. An `(unavailable: ...)` dry-run block alone starts no fixer: name it in the Confidence reason. Delegate to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
+
+Without a fixer, you wrote the plan yourself. Then write each dry-run finding to `## Blockers` as `- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`, and run the **Check loop**.
 
 4. **Its reply.** **Delivering the plan** treats the fixer's reply as it treats the **2e** reply, a refused write included. A fixer reply with no `Saved plan to` line and no plan is a failed review. Then keep the plan as it is, and relay the reply you had before **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of that reply.
+
+5. **The ran line.** Copy the dry run's `- ran:` line into the Confidence reason of the plan and of your reply. It names the record that lists every command.
 
 **2f. Relay the synthesizer's reply verbatim** (see **Delivering the plan**): the fixer's reply when **2g** ran, else the **2e** reply. It wrote the plan to `OUT_PATH`. Do not edit, summarise, or annotate the plan or the reply. The synthesizer is the source of truth in deep mode.
 
@@ -359,7 +381,7 @@ The user answered the questions of an earlier reply. Fold the answers into the p
 4. When every answer equals its default, the steps already assume them: write the plan, run the **Check loop** from **Delivering the plan** on it, and reply.
 5. Otherwise rebuild the plan:
    - **Deep** (the sidecar exists): delegate to the synthesizer with the **2e** prompt. Pass the sidecar's absolute path as `RESEARCH_PATH`. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Pass `PLAN_PATH` as `OUT_PATH`. Pass `NOTICE: none`. Pass `CAPTURE_STATUS: none` when the plan has no `## UI profile`. Otherwise take it from the `capture:` line of `.whygraph/profiles/ui.md`: `unknown` when the file or the line is missing, and `unavailable: profile is tracked by git` when `git ls-files --error-unmatch` exits 0 for it. When the review sidecar `.whygraph/plans/<stem>.review.md` exists, also pass `REVIEW_PATH: <its absolute path>`. The synthesizer then applies the review again to the rebuilt plan. Relay its reply verbatim.
-   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Rewrite each assumed part of `## User journey` whose answer is not its default. A journey answer may add a step or change one. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim.
+   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Rewrite each assumed part of `## User journey` whose answer is not its default. A journey answer may add a step or change one. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim. With `DRY_RUN: no`, also keep the dry-run bullets of `## Blockers`.
 6. Revise never adds a `Plan-shaping: yes` question and never runs a new review. Its reply always ends `QUESTIONS: none`.
 
 ## Output format
@@ -396,7 +418,7 @@ If the write fails, return the whole plan as your reply, say why, and end with t
 
 - **Don't write code.** You produce a plan; the user (or a future worker agent) executes.
 - **Don't write any file but the five above.**
-- **Don't run interactive or destructive commands.** Use file reads for grounding only. The commands **1c**, **1f**, **2c** and **Phase 3** name are the exception.
+- **Don't run interactive or destructive commands.** Use file reads for grounding only. The commands **1c**, **1f**, **2c**, **2g** and **Phase 3** name are the exception.
 - **Don't read the body of a source that needed consent,** and read no source body in deep mode. Researchers read them.
 - **Don't ask the user.** Reply `CLARIFY:` or `QUESTIONS:` and let the slash command ask.
 - **Don't paraphrase rationale.** Quote constraints and risks verbatim.

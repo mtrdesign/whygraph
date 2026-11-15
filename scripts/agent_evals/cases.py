@@ -49,6 +49,7 @@ from checks import (
     no_edit,
     no_implementor,
     no_plan_tool_call,
+    no_stop_block,
     no_process,
     note_revision_proposed,
     plan_log_contains,
@@ -59,6 +60,7 @@ from checks import (
     hidden_test,
     plan_tool_check,
     plan_tool_check_or_confidence,
+    printed,
     reaches_acceptance,
     record_card_read,
     record_comparison,
@@ -68,6 +70,7 @@ from checks import (
     record_rationale_before_edit,
     record_review_cost,
     reply_contains,
+    reply_matches,
     reply_starts_with,
     researchers_reached_mcp,
     resolved_decisions_has,
@@ -81,6 +84,7 @@ from checks import (
     sidecar_blocks_match_researchers,
     step_diff_paths,
     stop_block,
+    stop_cause_lacks,
     tasks_done,
     tool_called,
     transcript_exists,
@@ -452,7 +456,46 @@ P9_SEEDS = (
         ),
     ),
 )
-REVIEW_FIXTURES = ("p9.md", "p10.md", "p12.md", "p13.md")
+REVIEW_FIXTURES = ("p9.md", "p10.md", "p12.md", "p13.md", "p15.md")
+
+# P15's seeded lines, as (step, field, text the line must hold). Each is the
+# defect of one rule that plan 56 adds or widens.
+P15_SEEDED = {
+    "whole-repo verify": (1, "Verify", "npx vite build"),
+    "no path": (3, "Change", "Add a test file for `featureFlags`"),
+    "contradicts card": (4, "Change", "at run time"),
+}
+P15_PLAN = "eval-p15.md"
+
+
+def _p15(*keys: str) -> tuple[int, ...]:
+    """Return the p15.md lines of ``P15_SEEDED`` entries."""
+    return tuple(
+        line for key in keys for line in step_field_line("p15.md", *P15_SEEDED[key][:2])
+    )
+
+
+P15_SEEDS = (
+    Seeded(
+        "step 1's Verify is a whole-repo build that step 2 repairs",
+        (1,),
+        # The reviewer cites code it read: the import that step 2 removes.
+        ((P15_PLAN, _p15("whole-repo verify")), ("src/main.jsx", (3, 6, 9, 10))),
+    ),
+    Seeded(
+        "step 3 adds a test file and names no path",
+        (3,),
+        (
+            (P15_PLAN, _p15("no path") + step_field_line("p15.md", 3, "Files")),
+            ("src/flags.js", (1,)),
+        ),
+    ),
+    Seeded(
+        "step 4 adds a runtime setter that the cached card of src/flags.js rules out",
+        (4,),
+        ((P15_PLAN, _p15("contradicts card")), ("src/flags.js", (1,))),
+    ),
+)
 
 # Plan 52's journey fixture: ``fixtures/journey`` overlays ui-demo, and p12.md
 # seeds three defects in the journey of p13.md's task.
@@ -566,6 +609,52 @@ def setup_dirty_tree(ws: Workspace) -> None:
         path.write_text(body, encoding="utf-8")
 
 
+def setup_ready_ignore(ws: Workspace) -> None:
+    """Commit a ``.gitignore`` line for ``.ready``, the file U9's Setup creates."""
+    with (ws.dir / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write(".ready\n")
+    _commit(ws, "eval: ignore .ready")
+
+
+P14_TASK = "add an empty state to the list page that shows the empty label from src/labels.generated.js"
+P14_GENERATOR = """import { writeFileSync } from 'node:fs'
+writeFileSync(
+  new URL('../src/labels.generated.js', import.meta.url),
+  "export const labels = { items: 'items', empty: 'No items yet' }\\n",
+)
+"""
+P14_TEST = """import test from 'node:test'
+import assert from 'node:assert/strict'
+import { labels } from './labels.generated.js'
+
+test('the empty label is set', () => {
+  assert.equal(labels.empty, 'No items yet')
+})
+"""
+P14_README = (
+    "# ui-demo\n\nRun `node scripts/gen-labels.mjs` before `node --test`. "
+    "It writes `src/labels.generated.js`, which git ignores.\n"
+)
+
+
+def setup_generated_file(ws: Workspace) -> None:
+    """Add a test that imports a gitignored generated file, and what writes it.
+
+    The hook writes the generator script, the test, a README line that names
+    the command and a ``.gitignore`` line, and removes the generated file, so a
+    plan that does not run the command has a failing test. The edits are
+    working-tree changes that the portal workspace restores afterwards.
+    """
+    root = ws.dir
+    (root / "scripts").mkdir(exist_ok=True)
+    (root / "scripts" / "gen-labels.mjs").write_text(P14_GENERATOR, encoding="utf-8")
+    (root / "src" / "labels.test.js").write_text(P14_TEST, encoding="utf-8")
+    (root / "README.md").write_text(P14_README, encoding="utf-8")
+    with (root / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write("src/labels.generated.js\n")
+    (root / "src" / "labels.generated.js").unlink(missing_ok=True)
+
+
 def strip_substeps(text: str) -> str:
     """Delete the ``STRIPPED_SUBSTEPS`` items from an implementor's Phase 2.
 
@@ -617,6 +706,8 @@ def strip_implementor(tree: Path) -> None:
 PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
 REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
+PLAN_P14 = ".whygraph/plans/eval-p14.md"
+REVIEW_P14 = ".whygraph/plans/eval-p14.review.md"
 
 # Plan 54's rationale benchmark (section 5.2). Two scratch repositories with
 # the same tree, built by ``fixtures/why/build.sh``: ``why-bench`` holds the
@@ -971,6 +1062,53 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="U9",
+        name="Setup repairs the baseline",
+        prompts=(implement("u9"),),
+        budget=0.9,
+        estimate=0.5,
+        plans=("u9.md",),
+        setup=setup_ready_ignore,
+        checks=(
+            no_stop_block(),
+            reaches_acceptance(),
+            file_exists(".whygraph/plans/u9/steps/setup"),
+        ),
+    ),
+    Case(
+        id="U10",
+        name="Verify fails before any change",
+        prompts=(implement("u10"),),
+        budget=0.9,
+        estimate=0.5,
+        plans=("u10.md",),
+        checks=(
+            stop_block(1, (r"Verify fails before any change: step 1",), once=True),
+            stop_cause_lacks("step 2"),
+            no_implementor(0),
+            no_edit(),
+        ),
+    ),
+    Case(
+        id="U15",
+        name="dry-run Blocker whose cause is gone",
+        prompts=(implement("u15"),),
+        budget=2.5,
+        estimate=1.4,
+        plans=("u15.md",),
+        setup=setup_greet_test,
+        checks=(
+            printed("The dry-run Blockers no longer hold."),
+            reaches_acceptance(),
+            file_contains("mini/greet.py", "def greet"),
+            plan_note(
+                ".whygraph/plans/u15.md",
+                r"(?m)^- \*\*Dry run F1:\*\*",
+                "dry-run Blocker bullet kept",
+            ),
+        ),
+    ),
+    Case(
         id="U16",
         name="a step breaks a recorded constraint",
         prompts=(implement("u16"),),
@@ -1211,6 +1349,34 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="P14",
+        name="dry run repairs the environment",
+        prompts=(f"/whygraph-plan {P14_TASK} --deep --no-questions --out {PLAN_P14}",),
+        budget=6.5,
+        estimate=3.5,
+        setup=setup_generated_file,
+        checks=(
+            plan_note(PLAN_P14, r"(?m)^## Setup[ \t]*$", "Setup section"),
+            plan_note(
+                REVIEW_P14, r"(?m)^=== dry-run ===[ \t]*$", "dry-run sidecar block"
+            ),
+            reply_matches(r"- ran: \d+ commands? in", "reply has the ran line"),
+            plan_tool_check("eval-p14"),
+        ),
+    ),
+    Case(
+        id="P15",
+        name="plan review: three new rules",
+        prompts=(plan_reviewer_prompt("eval-p15", "logic", "opus"),),
+        budget=2.0,
+        estimate=1.0,
+        setup=copy_plan("p15.md", "eval-p15"),
+        checks=(
+            review_findings(P15_SEEDS),
+            agent_model("whygraph-plan-reviewer", "opus"),
+        ),
+    ),
+    Case(
         id="P20",
         name="journey in a deep plan",
         prompts=(
@@ -1441,6 +1607,12 @@ def _review_fixture_problems() -> list[str]:
         found = _p9(key)
         if not found or text not in lines[found[0] - 1]:
             problems.append(f"P9: step {step} {field_name} does not hold {text!r}")
+    p15 = FIXTURES / "plans" / "p15.md"
+    lines = p15.read_text(encoding="utf-8").splitlines() if p15.is_file() else []
+    for key, (step, field_name, text) in P15_SEEDED.items():
+        found = _p15(key)
+        if not found or text not in lines[found[0] - 1]:
+            problems.append(f"P15: step {step} {field_name} does not hold {text!r}")
     problems.extend(_journey_fixture_problems())
     return problems
 

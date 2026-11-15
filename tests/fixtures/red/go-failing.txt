@@ -1,0 +1,5 @@
+--- FAIL: TestLimit (0.00s)
+    limits_test.go:7: limit is 2, want 3
+FAIL
+FAIL	example.com/limits/limits	0.437s
+FAIL

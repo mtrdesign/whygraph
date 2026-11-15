@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Dispatches to the planner subagent, which researches the change with one researcher per knowledge source and a synthesizer, splits a large task into child plans only when needed, and returns the few plan-shaping questions for you to ask after research.
 
-**Argument shape:** `<task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]`
+**Argument shape:** `<task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--refresh-profile] [--out <path>]`
 
 ## Step 1 - Parse arguments
 
@@ -22,11 +22,12 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--no-questions` -> ask nothing: every consent is `no`, and open questions take their defaults.
 - `--review` -> review the plan before it is handed over, in single-pass mode too.
 - `--no-review` -> skip the plan review.
+- `--no-dry-run` -> skip the dry run. Without it, the planner runs each Verify once before it hands the plan over.
 - `--refresh-profile` -> derive the UI profile (`.whygraph/profiles/ui.md`) again, even when the cached one is fresh.
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--refresh-profile] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--refresh-profile] [--out <path>]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
@@ -93,6 +94,7 @@ CAPTURE_PATH: .cursor/skills/whygraph-ui-check/capture.mjs
 PLAN_TOOL: sh .cursor/skills/whygraph-plan/plan-tool.sh
 REFRESH_PROFILE: <yes | no>
 REVIEW: <yes | no | auto>
+DRY_RUN: <yes | no>
 ```
 
 - `MODE` is `shallow` for `--shallow`, `deep` for `--deep`, otherwise `auto`.
@@ -100,6 +102,7 @@ REVIEW: <yes | no | auto>
 - `SOURCES` is the `--sources` list, otherwise `all`.
 - `REFRESH_PROFILE` is `yes` for `--refresh-profile`, otherwise `no`.
 - `REVIEW` is `yes` for `--review`, `no` for `--no-review`, otherwise `auto`.
+- `DRY_RUN` is `no` for `--no-dry-run`, otherwise `yes`. `--no-questions` does not change it.
 
 The planner has its own system prompt and the CodeGraph and WhyGraph MCP tools. Do not inline planning instructions here.
 
@@ -136,7 +139,7 @@ The planner wrote a `tasks.json` and no plan. The reply has the shape `SPLIT: <p
    - `OUT_PATH: <repo root>/<the child's plan>`
    - `CONSENT` and `TERMS` lines as in Step 4 for `t1` only. Every other child gets `CONSENT: none` and no `TERMS` line.
    - `REFRESH_PROFILE` as in Step 4 for `t1` only. Every other child gets `REFRESH_PROFILE: no`.
-   - `MODE`, `REVIEW`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay the same.
+   - `MODE`, `REVIEW`, `DRY_RUN`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay the same.
 3. Print each child's reply verbatim under a line `### <id>: <title>`, with the one exception in Step 8. A child reply that starts `CLARIFY: ` follows **Clarify** for that child only.
 4. After every wave is planned, run Step 7 for each child's reply, one child at a time, in `id` order.
 

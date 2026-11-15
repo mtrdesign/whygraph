@@ -1,0 +1,4 @@
+# example.com/limits/broken [example.com/limits/broken.test]
+broken/broken_test.go:6:5: undefined: ParseLimit
+FAIL	example.com/limits/broken [build failed]
+FAIL

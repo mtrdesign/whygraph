@@ -649,6 +649,40 @@ def stop_block(
     return Check(f"stop block at step {step}", fn)
 
 
+def no_stop_block() -> Check:
+    """Pass when the main session printed no ``Run stopped at step`` block."""
+
+    def fn(ctx: Context) -> Outcome:
+        blocks = stop_blocks(_main_texts(ctx))
+        return not blocks, f"{len(blocks)} stop block(s)"
+
+    return Check("no stop block", fn)
+
+
+def stop_cause_lacks(text: str) -> Check:
+    """Pass when the last stop block's Cause does not hold ``text``."""
+
+    def fn(ctx: Context) -> Outcome:
+        blocks = stop_blocks(_main_texts(ctx))
+        if not blocks:
+            return False, "no 'Run stopped at step' block"
+        cause = blocks[-1].fields.get("Cause", "")
+        found = text in cause
+        return not found, f"cause {'holds' if found else 'lacks'} {text!r}"
+
+    return Check(f"cause lacks {text}", fn)
+
+
+def printed(text: str) -> Check:
+    """Pass when any text block of the main session holds ``text``."""
+
+    def fn(ctx: Context) -> Outcome:
+        ok = any(text in t for t in _main_texts(ctx))
+        return ok, f"session {'printed' if ok else 'did not print'} {text!r}"
+
+    return Check(f"session prints {text}", fn)
+
+
 def verdicts_per_run(expected: list[str]) -> Check:
     """Pass when each run's reply holds one verdict, in the expected order."""
 

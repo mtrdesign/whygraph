@@ -49,6 +49,7 @@ The **repo root** is the directory that holds `.whygraph/` when the path is unde
    Plan has unresolved blockers. Resolve them in the plan file first, or remove the section, then re-run.
    ```
    Print the blocker bullets verbatim under that line, then stop. Do not dispatch.
+   When every bullet starts `- **Dry run`, do not refuse here. Step 2a decides.
 3. Look for a `## Open questions` section. If any bullet in it says `**Plan-shaping:** yes`, refuse:
    ```
    Plan has an unanswered plan-shaping question. Answer it (run the plan command again) or edit the plan.
@@ -88,6 +89,10 @@ Every plan-tool call follows these rules:
 - Exit 65 from any call: stop with `the saved plan was changed`, unless the subcommand says otherwise.
 - An exit code that this file does not name for that subcommand: stop with `plan-tool.sh <subcommand> exited <code>: <first stderr line>`.
 
+**Dry-run Blockers.** When Step 2 left this to you, run `sh .cursor/skills/whygraph-plan/plan-tool.sh dryrun <plan>`. On exit 2, run it again, until it exits 0. Print its output.
+- The first line is `REVIEW: dry-run none`: print `The dry-run Blockers no longer hold.` and go on.
+- Otherwise respond with `Plan has unresolved blockers from the dry run. Fix what the lines below name, then re-run.` and stop.
+
 ### Step 2b - Capture
 
 Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.cursor/skills/whygraph-ui-check/capture.mjs`.
@@ -116,12 +121,19 @@ Do this once per invocation, before any step runs. For a tasks.json, do it once 
 4. **Baseline.** Run `sh .cursor/skills/whygraph-plan/plan-tool.sh snapshot` and keep the printed tree id as `<before>`.
    - Run `sh .cursor/skills/whygraph-plan/plan-tool.sh baseline <plan> <N> first <blob>` for the first step of the range.
    - Run `sh .cursor/skills/whygraph-plan/plan-tool.sh baseline <plan> <N> <blob>` for each later step of the range, in order.
-   - Print each line that `baseline` prints. A `fail` line is a recorded result, not a stop.
+   - Print each line that `baseline` prints. A `fail` line is a recorded result. Item 4a decides whether it stops the run.
    - A line that ends `pass (no test ran)` is a pass: its Verify exited 0, but its output says that no test ran. Print it as it is and go on, so the user sees that this step's Verify checks nothing yet.
    - Exit 3: stop with `Verify did not finish in <T> s at baseline: <command>`, from the printed `timeout <T>: <command>`.
    - Exit 4: stop with `Verify cannot run: <command> not found (exit <code>)`, from the printed `cannot run <code>: <command>`.
    - Then run `sh .cursor/skills/whygraph-plan/plan-tool.sh snapshot` again and keep the id as `<after>`.
    - Run `sh .cursor/skills/whygraph-plan/plan-tool.sh changed <before> <after>`. Exit 1: stop with `a Verify changed the working tree at baseline: <paths>`, listing the paths it printed.
+4a. **Ready.** Run `sh .cursor/skills/whygraph-plan/plan-tool.sh ready <plan> <blob>`. Print its output.
+   - Exit 0: go on.
+   - Exit 1: run `sh .cursor/skills/whygraph-plan/plan-tool.sh setup <plan> <blob>`. Print its output.
+     - Exit 6: stop with `Verify fails before any change: <lines>`.
+     - Exit 1, 3 or 5: stop with `setup failed: <the printed line>`.
+     - Exit 0: run item 4 again, once. Then run `ready` again. Exit 1: stop with `Verify fails before any change: <lines>`.
+   - `<lines>` is the text after `not ready: ` of each such line, joined by `; `.
 5. **Reset.** Run `sh .cursor/skills/whygraph-plan/plan-tool.sh attempt <plan> <first step of the range> reset`. The user read the last stop, so each step's counts start again. Amendments are not reset.
 
 The baseline pass runs on every invocation. Each implementor prompt carries `BASELINE: done`.
@@ -176,6 +188,7 @@ S1, S2, S1b and S7 each make one step run, in this order:
    - `end` exit 0, `**Status:** complete` and `constraints` exit 1: the run **failed its Verify**. Its `<excerpt>` is the first `broken:` line.
    - `end` exit 0 and `**Status:** complete`: the run **succeeded**.
    - `end` exit 1: the run **failed its Verify**.
+   - `end` exit 0, and the report has no `**Status:**` line and no `**Halt:**` line: the run **succeeded**. Print `Step <N>: the report had no Status line; the Verify exit decides.`
    - Otherwise the run **halted**. The reason is the `**Halt:**` text, or the report's first line when it has none.
 8. Print the report as Step 4 says, then run Step 5 on it.
 
@@ -415,6 +428,8 @@ When a `restore` fails, stop with its own cause, as Step 2a says. The plan was n
 | Cause | Next |
 |---|---|
 | `Verify did not finish in <T> s at baseline: <command>` | Narrow the step's Verify, or export a larger `WHYGRAPH_VERIFY_TIMEOUT` (at most 580) before starting Cursor. |
+| `Verify fails before any change: <lines>` | The named Verify fails on your machine before any edit. Fix the environment, or change the Verify. Then run the command again. |
+| `setup failed: <line>` | A Setup command of the plan failed. Run it by hand to see why. Then run the command again. |
 | `Verify cannot run: <command> not found (exit <code>)`, or `Verify cannot run: <misses>` from `probe` | Make the Verify a plain command; a shell function such as `nvm` does not exist under `sh -c`. Fix each Check it lists the same way. |
 | `Check cannot run: <misses>` | Make each Acceptance Check a plain command, as for a Verify. |
 | `a Verify changed the working tree at baseline: <paths>` | If a path is a cache or build output, add it to `.gitignore`. Otherwise change the step's Verify to one that only checks. |

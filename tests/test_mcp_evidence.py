@@ -1976,3 +1976,35 @@ def test_walk_past_survives_an_argv_too_long_for_the_os(
         _Blamer(repo), Target("sample.py", 3, 3, None), hunk, {newest.sha}
     )
     assert out == []
+
+
+def test_drain_never_joins_a_describe_thread_before_it_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A drain between ``_spawn``'s tracking and its ``start`` must not raise."""
+    import threading
+
+    import whygraph.mcp.evidence as ev
+
+    errors: list[BaseException] = []
+    original_start = threading.Thread.start
+
+    def drain_first(self: threading.Thread) -> None:
+        if self.name == "whygraph-describe":
+            # Drain from another thread while this one is tracked but not started.
+            def drain() -> None:
+                try:
+                    ev.drain_describes(timeout=5)
+                except BaseException as exc:  # noqa: BLE001 - the race under test
+                    errors.append(exc)
+
+            helper = threading.Thread(target=drain)
+            original_start(helper)
+            helper.join(0.2)
+        original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", drain_first)
+    ev._spawn(lambda: None)
+    monkeypatch.setattr(threading.Thread, "start", original_start)
+    assert ev.drain_describes(timeout=5)
+    assert errors == []

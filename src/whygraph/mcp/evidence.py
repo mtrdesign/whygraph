@@ -936,9 +936,11 @@ def _spawn(fn: Callable[[], None]) -> threading.Thread:
                 _threads.discard(thread)
 
     thread = threading.Thread(target=run, name="whygraph-describe", daemon=True)
+    # Start under the lock: drain_describes snapshots _threads under it, and
+    # joining a tracked thread before its start() raises RuntimeError.
     with _threads_lock:
         _threads.add(thread)
-    thread.start()
+        thread.start()
     return thread
 
 

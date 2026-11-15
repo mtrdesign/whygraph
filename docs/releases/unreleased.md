@@ -5,6 +5,14 @@
 
 ## Changes
 
+- **A Test first test is seen red, and cannot be edited to pass.** `plan-tool.sh red` runs the
+  test before the change and writes `steps/<N>.red`. `verify` and `end` compare the test with a copy
+  and stop on an edit, with the first line `verify: test first edited`. `proof` takes the class of
+  a Test first step from that record (`proven`, `not proven` or `edited`), and each step's diff adds
+  `tests:` lines for a skip marker, removed assertions, a changed snapshot or runner config. The
+  dry run no longer reports an existing Test first test that fails by design. Run **Settings >
+  Update agent files** to pick it up, and see
+  [Verify evidence](../guide/planning.md#verify-evidence).
 - **The run summary says how many steps are proven.** `plan-tool.sh proof <plan>` prints one line for
   each step (proven, unproven, carried, not proven, no test, failed, not run or unknown) and two total
   lines. The run summary of `/whygraph-implement` in Claude Code and Cursor shows the totals as

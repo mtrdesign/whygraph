@@ -4,15 +4,19 @@
 // inside its CLI path, behind a main guard.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  childEnv,
+  copyShots,
+  e2eDeadline,
   escapeHtml,
   isAllowedUrl,
   maskAria,
@@ -21,6 +25,7 @@ import {
   parseProfile,
   resolveRoute,
   sanitizeRoute,
+  splitRunCommand,
   unnamedCounts,
   validRoute,
 } from '../../src/whygraph/assets/claude-code/skills/whygraph-ui-check/capture.mjs';
@@ -226,4 +231,152 @@ test('the main guard holds when the script runs through a symlink', () => {
   });
   assert.ok([0, 3].includes(run.status), `exit ${run.status}: ${run.stderr}`);
   assert.match(run.stdout, /^capture: (?:available|unavailable)/m);
+});
+
+
+// ---- plan 56 section 5.12: the --e2e runner mode -----------------------------
+
+test('childEnv drops the login and strip-list variables and sets npm_config_yes', () => {
+  const env = {
+    PATH: '/bin',
+    WHYGRAPH_UI_USER: 'u',
+    WHYGRAPH_UI_PASSWORD: 'p',
+    OPENAI_API_KEY: 'k',
+    AWS_SESSION_TOKEN: 't',
+    CLAUDE_CODE_OAUTH_TOKEN: 'o',
+    WHYGRAPH_TEST: 'w',
+    GITHUB_TOKEN: 'g',
+  };
+  assert.deepEqual(childEnv(env), { PATH: '/bin', GITHUB_TOKEN: 'g', npm_config_yes: 'false' });
+  const kept = childEnv({ ...env, WHYGRAPH_KEEP_SECRETS: '1' });
+  assert.equal(kept.OPENAI_API_KEY, 'k');
+  assert.equal(kept.WHYGRAPH_UI_USER, undefined);
+  assert.equal(kept.WHYGRAPH_UI_PASSWORD, undefined);
+});
+
+test('splitRunCommand splits on spaces and refuses a quote, a $ or a backtick', () => {
+  assert.deepEqual(splitRunCommand('npx cypress run --spec'), ['npx', 'cypress', 'run', '--spec']);
+  for (const bad of ['none', '', 'npx "cypress"', "npx 'x'", 'npx $X', 'npx `x`']) {
+    assert.equal(splitRunCommand(bad), null, bad);
+  }
+});
+
+test('e2eDeadline reads the Verify budget and caps it at 500 s', () => {
+  assert.equal(e2eDeadline('30'), 30);
+  assert.equal(e2eDeadline('580'), 500);
+  assert.equal(e2eDeadline(undefined), 500);
+  assert.equal(e2eDeadline('x'), 500);
+});
+
+function shotsRoot() {
+  const root = mkdtempSync(join(tmpdir(), 'shots-'));
+  mkdirSync(join(root, 'shots', 'login.cy.js'), { recursive: true });
+  mkdirSync(join(root, 'shots', 'cart.cy.js'), { recursive: true });
+  return root;
+}
+
+test('copyShots copies newer images, walks nested folders and avoids collisions', () => {
+  const root = shotsRoot();
+  writeFileSync(join(root, 'shots', 'login.cy.js', 'a.png'), 'x');
+  writeFileSync(join(root, 'shots', 'cart.cy.js', 'a.png'), 'y');
+  writeFileSync(join(root, 'shots', 'notes.txt'), 'z');
+  const old = join(root, 'shots', 'old.png');
+  writeFileSync(old, 'o');
+  utimesSync(old, new Date(1000), new Date(1000));
+  const out = join(root, 'out');
+  const res = copyShots(root, 'shots', out, Date.now() - 60000);
+  assert.deepEqual(res, { copied: 2, refused: null });
+  assert.deepEqual(readdirSync(join(out, 'shots')).sort(), ['cart.cy.js-a.png', 'login.cy.js-a.png']);
+});
+
+test('copyShots skips a symlinked file and refuses a symlinked folder', () => {
+  const root = shotsRoot();
+  const outside = mkdtempSync(join(tmpdir(), 'outside-'));
+  writeFileSync(join(outside, 'secret.png'), 's');
+  symlinkSync(join(outside, 'secret.png'), join(root, 'shots', 'x.png'));
+  symlinkSync(outside, join(root, 'shots', 'linked'));
+  const res = copyShots(root, 'shots', join(root, 'out'), 0);
+  assert.deepEqual(res, { copied: 0, refused: null });
+  symlinkSync(join(root, 'shots'), join(root, 'via-link'));
+  assert.equal(copyShots(root, 'via-link', join(root, 'out'), 0).refused, 'e2e_shots goes through a symlink');
+  assert.equal(copyShots(root, '../x', join(root, 'out'), 0).refused, 'e2e_shots is not a plain relative path');
+  assert.deepEqual(copyShots(root, 'missing', join(root, 'out'), 0), { copied: 0, refused: null });
+});
+
+test('copyShots stops at 40 files', () => {
+  const root = shotsRoot();
+  for (let i = 0; i < 45; i += 1) writeFileSync(join(root, 'shots', `s${String(i).padStart(2, '0')}.png`), 'x');
+  assert.equal(copyShots(root, 'shots', join(root, 'out'), 0).copied, 40);
+});
+
+async function e2eRepo(body, extra = '') {
+  const server = createServer((q, s) => s.end('ok'));
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const root = mkdtempSync(join(tmpdir(), 'e2e-'));
+  mkdirSync(join(root, '.whygraph', 'profiles'), { recursive: true });
+  mkdirSync(join(root, 'e2e'));
+  writeFileSync(
+    join(root, '.whygraph', 'profiles', 'ui.md'),
+    `base_url: http://127.0.0.1:${server.address().port}/\nstart: none\ne2e_run: node --test\ne2e_dir: e2e\ne2e_shots: none\n${extra}`,
+  );
+  writeFileSync(join(root, 'e2e', 'a.test.mjs'), body);
+  return { root, server };
+}
+
+function runE2e(root, env = {}) {
+  return new Promise((done) => {
+    const child = spawn(process.execPath, [SCRIPT, '--e2e', 'e2e/a.test.mjs', '--out', 'out'], {
+      cwd: root,
+      env: { ...process.env, ...env },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('exit', (code) => done({ code, stdout, stderr }));
+  });
+}
+
+test('--e2e exits 0 for a passing test and 2 for a failing one', async () => {
+  const pass = await e2eRepo("import {test} from 'node:test';\ntest('ok', () => {});\n");
+  const run = await runE2e(pass.root);
+  pass.server.close();
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  const fail = await e2eRepo("import {test} from 'node:test';\nimport a from 'node:assert';\ntest('no', () => a.equal(1, 2));\n");
+  const red = await runE2e(fail.root);
+  fail.server.close();
+  assert.equal(red.code, 2, red.stdout + red.stderr);
+  assert.match(red.stdout.trim().split('\n').at(-1), /^log: out\/e2e\.log$/);
+});
+
+test('--e2e exits 5 on the deadline and passes no secret to the runner', async () => {
+  const slow = await e2eRepo(
+    "import {test} from 'node:test';\nimport {writeFileSync} from 'node:fs';\n" +
+      "test('slow', async () => { writeFileSync('env.json', JSON.stringify(process.env)); await new Promise((r) => setTimeout(r, 20000)); });\n",
+  );
+  const run = await runE2e(slow.root, { WHYGRAPH_VERIFY_TIMEOUT: '3', WHYGRAPH_UI_PASSWORD: 'pw', OPENAI_API_KEY: 'k' });
+  slow.server.close();
+  assert.equal(run.code, 5, run.stdout + run.stderr);
+  assert.match(run.stderr, /timed out after 3 s/);
+  const seen = JSON.parse(readFileSync(join(slow.root, 'env.json'), 'utf8'));
+  assert.equal(seen.WHYGRAPH_UI_PASSWORD, undefined);
+  assert.equal(seen.OPENAI_API_KEY, undefined);
+  assert.equal(seen.npm_config_yes, 'false');
+});
+
+test('--e2e refuses a quoted e2e_run, a file outside e2e_dir and a remote base', async () => {
+  const quoted = await e2eRepo('', '');
+  writeFileSync(
+    join(quoted.root, '.whygraph', 'profiles', 'ui.md'),
+    "base_url: http://127.0.0.1:1/\ne2e_run: node '--test'\ne2e_dir: e2e\n",
+  );
+  quoted.server.close();
+  assert.equal((await runE2e(quoted.root)).code, 3);
+  const remote = await e2eRepo('', '');
+  writeFileSync(
+    join(remote.root, '.whygraph', 'profiles', 'ui.md'),
+    'base_url: http://dev.example.test/\nallow_hosts: dev.example.test\ne2e_run: node --test\ne2e_dir: e2e\n',
+  );
+  remote.server.close();
+  assert.equal((await runE2e(remote.root)).code, 3);
 });

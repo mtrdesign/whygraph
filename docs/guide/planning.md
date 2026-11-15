@@ -227,6 +227,8 @@ record of a run.
 
 - A `Verify` that fails before its step is done is a finding, unless an earlier step has not added its
   file yet. When the plan has a `## Setup` section, the script runs it once and tries again.
+- A failing full test command is not a finding when a Test first test already exists in its file.
+  That test fails before the change by design.
 - A call ends within the `Verify` deadline, and a plan with many steps takes more than one call. The
   planner repeats the call. The sixth call ends the work, and what it did not reach is named under
   `- not checked:`.
@@ -254,6 +256,39 @@ tree id equals the step's end tree. A step with no passing record is **escalated
 not trust the implementor's word. A `not literal` record passes, with a note in the evaluator's
 Confidence reason.
 
+#### The red run of a Test first step
+
+A step with a `**Test first:**` line names a test that must fail before the change. The implementor
+adds the test, then calls `plan-tool.sh red <plan> <N>`. The script runs the step's literal `Verify`
+once, before any change, and writes `steps/<N>.red`. The record holds the test, the command, the exit
+code and the end of the output. Its `result:` line is one of these:
+
+| Result | Meaning |
+|---|---|
+| `red` | The Verify failed, and the output names the test as failing. |
+| `red (unnamed)` | The Verify failed, but the output does not name the test. |
+| `red (did not run)` | The test could not be collected, as when it imports a symbol the step adds. |
+| `passed` | The test passed before the change. The step halts: the test does not cover it. |
+| `timeout` | The Verify did not finish within its deadline. |
+| `cannot run` | The command is not found. |
+| `not run: the code changed before the red run` | Code outside the test changed first, so the run proves nothing. |
+
+The script also copies the test to `.whygraph/plans/<stem>/testfirst/<N>/`. The copy is the reference
+for the guard. The script never runs a command that the plan does not name.
+
+#### The Test first guard
+
+The implementor must not edit the test to make it pass. So `verify` and `end` compare the test's block
+with the copy. The block is the test, its decorator lines and the lines up to its end. A skip marker
+added anywhere in the test file counts as an edit too. On an edit, `verify` runs nothing
+and prints `verify: test first edited` as its first line. The implementor halts on that line. It does not
+act on exit 5 alone, because a test runner can exit with 5 itself. `end` prints the same line and exits 5.
+
+!!! note "Limit of the guard"
+    The script finds the block by indent. A language that closes a test on a shallower line than it
+    opens it gets a shorter block. The guard never reports an edit that did not happen, but it can
+    miss one. Read the diff of a Test first step.
+
 #### Proof of a step
 
 `plan-tool.sh proof <plan>` reads those records and prints one line for each step. It runs no command
@@ -262,18 +297,25 @@ the check can tell the change from no change. The classes are:
 
 | Class | Meaning |
 |---|---|
-| proven | The Verify failed before the change and passes now. A test written first and seen red counts too. |
+| proven | The Verify failed before the change and passes now. A test written first and seen red counts too, also as `red unnamed` or `red did not run, then passed`. |
 | unproven | The Verify passed before the change. Read that step's diff first, because the check cannot show the change worked. |
 | carried | The Verify failed because an earlier step had not added a file yet. It says nothing about this step. |
-| not proven | A test was written first, but no record shows it failed before the change. |
+| not proven | A test was written first, but no record shows it failed before the change: no red record, or a red run that passed, timed out, could not run or did not run. |
+| edited | The Test first test differs from its copy, so the guard found an edit. It comes before every other class. |
 | no test | The Verify passed, but it ran no test, or it is not a literal command. |
 | failed | The Verify exited with a code other than 0. |
 | not run | The step has no Verify record. |
 | unknown | The run has no baseline for the step, such as a step before `--from-step`. |
 
+Each step's diff can add `tests:` lines for a person to read, such as
+`tests: step 2 tests/test_a.py: skip marker added: pytest.mark.skip`. The kinds are a skip marker
+added to a test file, assertion lines removed or changed in a test file, a changed snapshot or golden
+file, and a changed test runner config. Nothing stops on them, and no agent reads them.
+
 Two total lines follow: how many steps are proven, unproven, without a test or in another class, and how
 many Acceptance checks are literal, passed or ran no test. `unproven` is not a defect. A step that only
-moves or renames code has no failing test. The run summary of `/whygraph-implement` prints the two total
+moves or renames code has no failing test. `carried`, `not proven` and `edited` count under other.
+The run summary of `/whygraph-implement` prints the two total
 lines as `- Proof:`. `proof` speaks for the last run only, because each run starts with an empty baseline.
 
 !!! warning "The plan tool runs every Verify and Check, and the planner runs it before you read the plan"
@@ -429,7 +471,7 @@ Every stop prints one block that names the cause, and the next action:
 | `Verify cannot run: <misses>`, `Check cannot run: <misses>` | Make the command plain. A shell function such as `nvm` does not exist under `sh -c`. |
 | `a Verify changed the working tree at baseline: <paths>` | Add a cache or build output to `.gitignore`, or give the step a `Verify` that only checks. |
 | `Verify still fails: <excerpt>` | Read `steps/<N>.verify`. Fix the code or the step. |
-| `the Test first test passed before the change`, `... was edited`, `... cannot run` | The step's test does not cover the change, or was changed, or is not a plain command. Fix the test or the step. |
+| `the Test first test passed before the change`, `... was edited`, `... cannot run` | The step's test does not cover the change, or was changed, or is not a plain command. Fix the test or the step. `was edited` comes from the guard: `verify` printed `verify: test first edited`, or `end` exited 5. |
 | `permission denied: <command>` | Allow the command, or change the step. An unattended run needs a permission mode that does not prompt. |
 | `spec findings remain`, `escalate after amendment` | Read the evaluation above, then fix the code or edit the step. |
 | `a recorded constraint is at risk` | Read the review above. Change the step or the code, or record that the constraint no longer holds with `/whygraph-note`. |
@@ -848,7 +890,8 @@ In VS Code the prompt runs as the planner itself, so it asks its questions in th
 and has no terminal. It skips the dry run and the plan check. In Cursor the plan is run from a skill, and the review gate is skipped; run
 `/whygraph-review` from Claude Code if you want it. VS Code and Codex run one implementor for the
 whole plan, so the recovery ladder, the plan amender and the pre-flight are not there. They get the
-bounded Verify deadline, the plan tool and the new `--fix-attempts` default of 2. In VS Code the
+bounded Verify deadline, the plan tool and the new `--fix-attempts` default of 2. They run no `end`,
+so `verify` holds the Test first guard there: it prints `verify: test first edited` and the implementor halts. In VS Code the
 plan reviewers are started from the planner's `agents:` list.
 
 !!! warning "What Codex cannot enforce"

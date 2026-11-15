@@ -121,10 +121,9 @@ Then run these sub-steps in this order:
    - `2`: log `  - capture before: exit 2 - <first stderr line>` and continue. Nothing has changed yet, so there is nothing to fix.
    - `3`: halt with `capture unavailable: <first stderr line>`.
    - Any other code (1, 4, 127, a signal): halt with `capture error: <code>: <first stderr line>`.
-3. **Test first.** Skip this with `FINDINGS:`. Also skip it on a later run when the snapshot `.whygraph/plans/<stem>/testfirst/<N>/<file name>` exists and the named test is still in the test file. Otherwise:
-   - Add the named test to `<test file>`. Create the file when it does not exist.
-   - Copy `<test file>` to `.whygraph/plans/<stem>/testfirst/<N>/<file name>` (`<file name>` is the test file's base name).
-   - Run Verify. It must exit non-zero. An exit 0 halts with `the Test first test passed before the change; the step's test does not cover it`. An exit of 126 or 127 halts with `the Test first test cannot run: <command> not found`; it never counts as red.
+3. **Test first.** Skip this with `FINDINGS:`. Otherwise:
+   - Add the named test to `<test file>` only when the file does not hold it yet. Create the file when it does not exist.
+   - Run `<PLAN_TOOL> red <PLAN_PATH> <N>`. Exit 0: continue. Exit 1 halts with `the Test first test passed before the change; the step's test does not cover it`. Exit 4 halts with `the Test first test cannot run: <command> not found`. Exit 124 halts with `Verify timed out after <T> s`. Exit 5 or 6 halts with the line it printed.
 4. **Change.** Edit the listed `**Files:**`:
    - Use a read-then-edit pattern for in-place edits.
    - Use a write-new-file pattern only when the change is "create file X" and the file doesn't exist yet.
@@ -134,9 +133,10 @@ Then run these sub-steps in this order:
    Only touch lines the step calls for. The plan defines scope; do not "while I'm here" beyond it. Never touch a path the step's **Boundaries** names. If the change needs one, halt with `the change needs <path>, which the step's Boundaries names`. Never edit the Test first test.
 
    With `FINDINGS:`, do not re-apply the `**Change:**` paragraph. Apply only the findings whose file is in the step's **Files**. Each finding outside them is never applied: list it in the report under `## Escalated findings` as `- F<i>: <file>:<line> - outside the step's Files`.
-5. **Test edit check.** Run this when a Test first snapshot exists for the step. Run `git diff --no-index -- '<snapshot>' '<test file>'` (exit 1 only means the files differ). If a hunk overlaps the named test's lines in the snapshot, halt with `the Test first test was edited`.
+5. (The plan tool checks the Test first test in 6.)
 6. **Verify.** Run `<PLAN_TOOL> verify <PLAN_PATH> <N>` via the shell. Its output's first line is `verify: literal` or `verify: not literal`.
    - On `verify: literal`, the tool ran the step's commands. The exit code is the result.
+   - A first line `verify: test first edited` halts with `the Test first test was edited`.
    - On `verify: not literal`, the `**Verify:**` line is prose. Translate it to the smallest concrete command that proves the claim ("run pytest", "ensure the new function is importable"), and run that.
    - Capture stdout + stderr + exit code.
    - A record with `exit: 124` halts with `Verify timed out after <T> s`, with no fix attempts. `<T>` is the budget in the record.

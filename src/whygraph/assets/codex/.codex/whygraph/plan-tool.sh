@@ -40,6 +40,9 @@
 #   ready <plan> [<blob>]       say whether a failing baseline is a fault
 #   dryrun <plan>               run every Verify and Acceptance item 1 at
 #                               plan time; print the findings as a review
+#   red <plan> <N> [again] [<blob>]
+#                               run step N's Test first red, before the
+#                               change; record it in steps/<N>.red
 #
 # Usage errors exit 64 (EX_USAGE). The plan's files live in
 # .whygraph/plans/<stem>/steps/. A subcommand that takes a plan exits 77 when
@@ -106,7 +109,9 @@
 #
 # proof reads the plan and the records under steps/, runs no command and
 # writes no file. It exits 0. Per step it reads the last baseline line and
-# the exit of <N>.verify, and prints "proof: step <N> <class>". It fails
+# the exit of <N>.verify, and prints "proof: step <N> <class>". A Test first
+# step takes its class from steps/<N>.red, after the guard. Each step's diff
+# adds "tests:" pointer lines before the totals. It fails
 # closed: only a check that went red before the change prints "proven". A
 # step whose baseline failed because its Verify names a path or directory
 # that an earlier step's Files name prints "carried". Two totals follow:
@@ -131,6 +136,19 @@
 # for the same plan goes on, and the sixth call always ends it. The finished
 # call prints the findings in the plan reviewer's reply form, with a "- ran:"
 # line, and exits 0. A changed plan or a finished record starts again.
+#
+# red runs the Verify of a Test first step once, before the change, after it
+# copies the test file to testfirst/<N>/. It exits 0 for "red", "red
+# (unnamed)", "red (did not run)", a recorded red and "not run: the code
+# changed before the red run"; 1 when the test passed; 4 when the Verify
+# cannot run; 5 when the test file is unsafe, missing or lacks the test, or
+# (with again) the code changed; 6 without a Test first or a literal Verify;
+# 124 at the deadline. It never writes <N>.verify. verify and end compare the
+# test's block with that copy (the guard): an edit prints "verify: test first
+# edited" first, and verify runs nothing and exits 5; end exits 5, and 65
+# still wins. The block is found by indent, so a test that closes on a
+# shallower line than it opens gets a shorter block: the guard can miss an
+# edit there, and never reports a false one.
 #
 # Every bounded job gets npm_config_yes=false, and its process group is
 # killed after it exits. A setup or dryrun job also loses *_API_KEY,
@@ -185,6 +203,7 @@ usage: plan-tool.sh snapshot
        plan-tool.sh setup <plan> [<blob>]
        plan-tool.sh ready <plan> [<blob>]
        plan-tool.sh dryrun <plan>
+       plan-tool.sh red <plan> <N> [again] [<blob>]
 EOF
     exit 64
 }
@@ -1208,6 +1227,282 @@ END {
 }
 '
 
+# The collection-error phrases that only red reads: a test that could not be
+# collected, built or imported did not run. Matched as AWK_NO_TEST matches.
+AWK_NOT_COLLECTED='
+BEGIN {
+    count = split("found no collectors|error collecting|error: not found|[build failed]|no test files|err_module_not_found|cannot find module|no test suite found|1..0", PHRASE, "|")
+}
+{
+    line = tolower($0)
+    for (i = 1; i <= count; i++) {
+        at = 0
+        while ((k = index(substr(line, at + 1), PHRASE[i])) > 0) {
+            at += k
+            before = (at > 1) ? substr(line, at - 1, 1) : ""
+            after = substr(line, at + length(PHRASE[i]), 1)
+            if (before !~ /[a-z0-9]/ && after !~ /[a-z0-9]/) {
+                found = 1
+                exit
+            }
+        }
+    }
+}
+END {
+    exit found ? 0 : 1
+}
+'
+
+# 0 when a line of stdin holds a failure word: "fail", "error", "not ok", or
+# a mark a runner prints (U+2715 to U+2718, U+00D7, U+25CF, as bytes). With
+# NAME set, only a line that holds the test name counts, and the name is
+# removed first, so test_error_message does not match itself. A name needs
+# no letter, digit or _ right before or after it.
+AWK_FAILURE='
+BEGIN {
+    name = ENVIRON["NAME"]
+    marks = split("\342\234\225 \342\234\226 \342\234\227 \342\234\230 \303\227 \342\227\217", MARK, " ")
+}
+function strip_name(s,    out, at, before, after) {
+    out = ""
+    held = 0
+    while ((at = index(s, name)) > 0) {
+        before = (at > 1) ? substr(s, at - 1, 1) : ""
+        after = substr(s, at + length(name), 1)
+        if (before !~ /[A-Za-z0-9_]/ && after !~ /[A-Za-z0-9_]/) {
+            held = 1
+            out = out substr(s, 1, at - 1) " "
+        } else {
+            out = out substr(s, 1, at + length(name) - 1)
+        }
+        s = substr(s, at + length(name))
+    }
+    return out s
+}
+{
+    s = $0
+    if (name != "") {
+        s = strip_name(s)
+        if (!held)
+            next
+    }
+    low = tolower(s)
+    if (index(low, "fail") || index(low, "error") || index(low, "not ok")) {
+        found = 1
+        exit
+    }
+    for (i = 1; i <= marks; i++)
+        if (index(s, MARK[i])) {
+            found = 1
+            exit
+        }
+}
+END {
+    exit found ? 0 : 1
+}
+'
+
+# The block of the test named NAME in the file on stdin, printed line by
+# line, or nothing when the file has no such line. The name line is the first
+# definition: a quote right before the name, or def, fn, func or void. Else
+# the first line that holds the name. No letter, digit or _ may follow the
+# name. Decorator lines above it (@ or #[, also a multi-line one that closes
+# before the name line) belong to it, and the lines below it up to the next
+# non-blank line whose indent is not deeper, that line too when it starts
+# with }, ) or ].
+AWK_BLOCK='
+function holds(s,    at, after, rest) {
+    rest = s
+    while ((at = index(rest, NAME)) > 0) {
+        after = substr(rest, at + length(NAME), 1)
+        if (after !~ /[A-Za-z0-9_]/) {
+            HELD_AT = length(s) - length(rest) + at
+            return 1
+        }
+        rest = substr(rest, at + length(NAME))
+    }
+    return 0
+}
+function definition(s,    before) {
+    before = substr(s, 1, HELD_AT - 1)
+    return before ~ /["\047`]$/ || before ~ /(^|[^A-Za-z0-9_])(def|fn|func|void)[ \t]+$/
+}
+function indent(s) {
+    match(s, /^[ \t]*/)
+    return RLENGTH
+}
+function decorator(s) {
+    sub(/^[ \t]+/, "", s)
+    return substr(s, 1, 1) == "@" || substr(s, 1, 2) == "#["
+}
+function balance(from, to,    i, s, n) {
+    n = 0
+    for (i = from; i <= to; i++) {
+        s = L[i]
+        n += gsub(/[(\[]/, "", s)
+        s = L[i]
+        n -= gsub(/[)\]]/, "", s)
+    }
+    return n
+}
+BEGIN { NAME = ENVIRON["NAME"] }
+{ L[NR] = $0 }
+END {
+    first = 0
+    for (i = 1; i <= NR; i++)
+        if (holds(L[i])) {
+            if (!first)
+                first = i
+            if (definition(L[i])) {
+                at = i
+                break
+            }
+        }
+    if (!at)
+        at = first
+    if (!at)
+        exit
+    start = at
+    i = at - 1
+    while (i >= 1 && L[i] ~ /[^ \t]/) {
+        if (decorator(L[i])) {
+            start = i
+            i--
+            continue
+        }
+        found = 0
+        for (j = i - 1; j >= 1 && j >= i - 20 && L[j] ~ /[^ \t]/; j--)
+            if (decorator(L[j]) && balance(j, i) == 0) {
+                found = j
+                break
+            }
+        if (!found)
+            break
+        start = found
+        i = found - 1
+    }
+    deep = indent(L[at])
+    stop = at
+    for (i = at + 1; i <= NR; i++) {
+        if (L[i] !~ /[^ \t]/) {
+            continue
+        }
+        if (indent(L[i]) <= deep) {
+            t = L[i]
+            sub(/^[ \t]+/, "", t)
+            if (t ~ /^[})\]]/)
+                stop = i
+            break
+        }
+        stop = i
+    }
+    for (i = start; i <= stop; i++)
+        print L[i]
+}
+'
+
+# The skip markers of section 5.36, as fixed text with no letter or digit
+# right before them. Prints each line of stdin that holds one.
+AWK_MARKERS='
+BEGIN {
+    count = split(".skip(|.only(|.todo(|xit(|xdescribe(|xtest(|fit(|fdescribe(|pytest.mark.skip|pytest.mark.xfail|pytest.skip(|unittest.skip|@Disabled|@Ignore|t.Skip(|#[ignore]", MARKER, "|")
+}
+{
+    for (i = 1; i <= count; i++) {
+        rest = $0
+        while ((at = index(rest, MARKER[i])) > 0) {
+            before = (at > 1) ? substr(rest, at - 1, 1) : ""
+            # A marker that starts with "." follows a name, as in it.skip(.
+            if (substr(MARKER[i], 1, 1) == "." || before !~ /[A-Za-z0-9]/) {
+                print $0
+                next
+            }
+            rest = substr(rest, at + length(MARKER[i]))
+        }
+    }
+}
+'
+
+# The test-change pointers of proof, from the diff of step STEP on stdin
+# (section 5.36). A test file has a part tests, test, __tests__, e2e or
+# cypress, or a name that starts with test_ or holds _test., .test. or .spec.
+# Each line is a pointer for a person, never a verdict.
+AWK_TEST_CHANGES='
+BEGIN {
+    STEP = ENVIRON["STEP"]
+    count = split(".skip(|.only(|.todo(|xit(|xdescribe(|xtest(|fit(|fdescribe(|pytest.mark.skip|pytest.mark.xfail|pytest.skip(|unittest.skip|@Disabled|@Ignore|t.Skip(|#[ignore]", MARKER, "|")
+}
+function test_path(p,    n, parts, i, name) {
+    n = split(p, parts, "/")
+    for (i = 1; i < n; i++)
+        if (parts[i] == "tests" || parts[i] == "test" || parts[i] == "__tests__" || parts[i] == "e2e" || parts[i] == "cypress")
+            return 1
+    name = parts[n]
+    return index(name, "test_") == 1 || index(name, "_test.") || index(name, ".test.") || index(name, ".spec.")
+}
+function golden(p,    n, parts, i) {
+    if (p ~ /\.snap$/)
+        return 1
+    n = split(p, parts, "/")
+    for (i = 1; i <= n; i++)
+        if (parts[i] == "__snapshots__" || index(parts[i], "golden") == 1)
+            return 1
+    return 0
+}
+function runner_config(p,    name) {
+    name = p
+    sub(/^.*\//, "", name)
+    if (p == "conftest.py" || name == "package.json" || name == "pytest.ini" || name == "tox.ini" || name == "setup.cfg")
+        return 1
+    return name ~ /^(jest|vitest|playwright|cypress)\.config\./
+}
+function flush() {
+    if (path != "" && removed > 0)
+        printf "tests: step %s %s: %d assertion lines removed or changed\n", STEP, path, removed
+    removed = 0
+}
+/^diff --git / {
+    flush()
+    path = $0
+    sub(/^.* b\//, "", path)
+    is_test = test_path(path)
+    if (golden(path))
+        printf "tests: step %s %s: snapshot or golden file changed\n", STEP, path
+    if (runner_config(path))
+        printf "tests: step %s %s: test runner config changed\n", STEP, path
+    split("", SEEN)
+    next
+}
+/^(\+\+\+|---) / { next }
+is_test && /^\+/ {
+    # The longest marker that the line holds names it: pytest.mark.skip,
+    # not the .skip( inside it.
+    best = ""
+    for (i = 1; i <= count; i++) {
+        rest = $0
+        while ((at = index(rest, MARKER[i])) > 0) {
+            before = (at > 1) ? substr(rest, at - 1, 1) : ""
+            if (substr(MARKER[i], 1, 1) == "." || before !~ /[A-Za-z0-9]/) {
+                if (length(MARKER[i]) > length(best))
+                    best = MARKER[i]
+                break
+            }
+            rest = substr(rest, at + length(MARKER[i]))
+        }
+    }
+    if (best != "" && !(best in SEEN)) {
+        SEEN[best] = 1
+        printf "tests: step %s %s: skip marker added: %s\n", STEP, path, best
+    }
+    next
+}
+is_test && /^-/ {
+    if (index($0, "assert") || index($0, "expect(") || index($0, ".should"))
+        removed++
+}
+END { flush() }
+'
+
 # The page of brief, from the plan read from stdin. Fences count as in
 # AWK_VERIFY. Each group prints only when it has a line.
 AWK_BRIEF='
@@ -1995,12 +2290,17 @@ cmd_verify() {
     # The plan path is relative to the caller, so read it before the cd.
     plan_field "$plan" "$step" Verify >"$work/spans"
     [ $? -ne 3 ] || usage "no step $step in $plan"
+    cat <"$plan" >"$work/plan" || usage "cannot read $plan"
     stem=$(stem_of "$plan")
     cd "$root" || exit 1
     check_work_dir
     record=$steps_dir/$step.verify
     check_leaf "$record"
     mkdir -p "$steps_dir" || fail "cannot create $steps_dir"
+    if ! test_first_intact "$work/plan" "$step"; then
+        printf 'verify: test first edited\n'
+        exit 5
+    fi
 
     if [ ! -s "$work/spans" ]; then
         put_file "$record" 'exit: not literal'
@@ -2129,6 +2429,10 @@ cmd_end() {
                 ;;
         esac
     done <"$work/changed"
+    if ! test_first_intact "$work/plan" "$step"; then
+        printf 'verify: test first edited\n'
+        exit 5
+    fi
     [ "$code" -ne 0 ] || exit 0
     [ "$code" -ne 124 ] || [ ! -f "$work/timed-out" ] || exit 124
     case $code in
@@ -3331,6 +3635,246 @@ ran_no_test() {
     LC_ALL=C awk 'out { print } /^--- / { out = 1 }' <"$1" | LC_ALL=C awk "$AWK_NO_TEST"
 }
 
+# ---- red and the Test first guard (plan 56 sections 5.34 and 5.35).
+
+# Set tf_file and tf_name from step $2's Test first in plan file $1, as
+# "<test file>::<test name>". Returns 1 when the step names no test.
+test_first_of() {
+    tf=$(plan_field "$1" "$2" "Test first")
+    names_test_first "$tf" || return 1
+    word=$(printf '%s\n' "$tf" | LC_ALL=C awk '{ print $1; exit }' | LC_ALL=C tr -d '`"*')
+    word=${word%[.,;:]}
+    case $word in
+        *::*) ;;
+        *) return 2 ;;
+    esac
+    tf_file=${word%::*}
+    tf_name=${word##*::}
+    [ -n "$tf_file" ] && [ -n "$tf_name" ] || return 2
+}
+
+# 0 when file $1 holds the test name $2 with no letter, digit or _ after it.
+holds_test() {
+    [ -n "$(NAME=$2 LC_ALL=C awk "$AWK_BLOCK" <"$1")" ]
+}
+
+# The snapshot of step $1's Test first file, under the plan's work directory.
+snapshot_of() {
+    printf '.whygraph/plans/%s/testfirst/%s/%s\n' "$stem" "$1" "${tf_file##*/}"
+}
+
+# 0 when path $1 is a test file as section 5.36 names one.
+is_test_path() {
+    case /$1/ in
+        */tests/* | */test/* | */__tests__/* | */e2e/* | */cypress/*) return 0 ;;
+    esac
+    case ${1##*/} in
+        test_* | *_test.* | *.test.* | *.spec.*) return 0 ;;
+    esac
+    return 1
+}
+
+# The guard. 0 when step $2 of plan file $1 has no Test first, has no
+# snapshot, or its test block is as it was at the red run; else print the
+# finding on stderr and return 1. An added line that holds a skip marker
+# anywhere in the file counts as an edit too.
+test_first_intact() {
+    test_first_of "$1" "$2" || return 0
+    snap=$(snapshot_of "$2")
+    [ -f "$snap" ] || return 0
+    if [ ! -f "$tf_file" ] || [ -h "$tf_file" ]; then
+        printf 'the Test first test was edited: %s\n' "$tf_file" >&2
+        return 1
+    fi
+    NAME=$tf_name LC_ALL=C awk "$AWK_BLOCK" <"$snap" >"$work/block-before"
+    NAME=$tf_name LC_ALL=C awk "$AWK_BLOCK" <"$tf_file" >"$work/block-after"
+    LC_ALL=C awk "$AWK_MARKERS" <"$snap" | sort -u >"$work/markers-before"
+    added=$(LC_ALL=C awk "$AWK_MARKERS" <"$tf_file" | sort -u | comm -13 "$work/markers-before" -)
+    if [ ! -s "$work/block-after" ] || ! cmp -s "$work/block-before" "$work/block-after" || [ -n "$added" ]; then
+        printf 'the Test first test was edited: %s\n' "$tf_file" >&2
+        return 1
+    fi
+    return 0
+}
+
+# 0 when a step of plan file $1 has a Test first whose test file holds the
+# named test now, before the change.
+test_first_exists() {
+    for number in $(plan_field "$1" "" "" | sed -n 's/^step //p'); do
+        test_first_of "$1" "$number" || continue
+        [ -f "$tf_file" ] && [ ! -h "$tf_file" ] && holds_test "$tf_file" "$tf_name" && return 0
+    done
+    return 1
+}
+
+cmd_red() {
+    [ $# -ge 2 ] && [ $# -le 4 ] || usage
+    plan=$1
+    step=$2
+    shift 2
+    again=
+    blob=
+    if [ $# -gt 0 ] && [ "$1" = again ]; then
+        again=1
+        shift
+    fi
+    if [ $# -gt 0 ]; then
+        blob=$1
+        shift
+        is_object_id "$blob" || usage "not a blob id: $blob"
+    fi
+    [ $# -eq 0 ] || usage
+    check_step "$step"
+    [ -n "$blob" ] || [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    read_budget
+    choose_kill_form
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    plan_path=$plan
+    load_plan "$plan" "$blob"
+    plan_field "$work/plan" "$step" Verify >"$work/spans"
+    [ $? -ne 3 ] || usage "no step $step in $plan"
+
+    # 1. The Test first and a literal Verify.
+    test_first_of "$work/plan" "$step"
+    case $? in
+        1)
+            printf 'red: step %s has no Test first\n' "$step"
+            exit 6
+            ;;
+        2)
+            printf 'red: Test first is not <test file>::<test name>\n'
+            exit 5
+            ;;
+    esac
+    if [ ! -s "$work/spans" ]; then
+        printf 'red: Verify is not literal\n'
+        exit 6
+    fi
+
+    # 2. The test file.
+    path_is_safe "$tf_file" || {
+        printf 'red: the test file is not a plain relative path: %s\n' "$tf_file"
+        exit 5
+    }
+    if has_symlink_part "$tf_file"; then
+        printf 'red: the test file has a symlink on its path: %s\n' "$tf_file"
+        exit 5
+    fi
+    [ -f "$tf_file" ] || {
+        printf 'red: the test file does not exist: %s\n' "$tf_file"
+        exit 5
+    }
+    holds_test "$tf_file" "$tf_name" || {
+        printf 'red: %s does not hold %s\n' "$tf_file" "$tf_name"
+        exit 5
+    }
+
+    record=$steps_dir/$step.red
+    check_leaf "$record"
+    snap=$(snapshot_of "$step")
+    for part in ".whygraph/plans/$stem/testfirst" ".whygraph/plans/$stem/testfirst/$step"; do
+        [ ! -h "$part" ] || refuse "$part is a symlink"
+    done
+    check_leaf "$snap"
+
+    # 3. The skip rule.
+    if [ -z "$again" ]; then
+        if [ -f "$record" ] && grep -q '^result: red' "$record"; then
+            printf 'red: recorded\n'
+            exit 0
+        fi
+        if [ ! -f "$record" ] && [ -f "$snap" ]; then
+            printf 'red: recorded (snapshot only)\n'
+            exit 0
+        fi
+    fi
+
+    # 3a. Unchanged code: only test files and the plan may differ from t0.
+    tree=$(take_snapshot) || fail "snapshot failed"
+    changed=
+    t0=$(cat "$steps_dir/$step.t0" 2>/dev/null) || t0=
+    if is_object_id "$t0" && run_git cat-file -e "$t0^{tree}" 2>/dev/null; then
+        plan_rel=${plan_path#./}
+        changed=$(run_git -c core.quotePath=false diff --name-only --no-renames "$t0" "$tree" |
+            while IFS= read -r path; do
+                [ "$path" = "$tf_file" ] || [ "$path" = "$plan_rel" ] || is_test_path "$path" ||
+                    printf '%s\n' "$path"
+            done)
+    fi
+    if [ -n "$changed" ] && [ -n "$again" ]; then
+        printf 'red: the code changed since the step began\n'
+        exit 5
+    fi
+
+    # 4. The snapshot of the test file.
+    mkdir -p "${snap%/*}" || fail "cannot create ${snap%/*}"
+    start_write "$snap"
+    cat <"$tf_file" >"$tmp" || {
+        rm -f "$tmp"
+        fail "cannot read $tf_file"
+    }
+    finish_write "$snap"
+
+    if [ -n "$changed" ]; then
+        result='not run: the code changed before the red run'
+        start_write "$record"
+        {
+            printf 'test: %s::%s\n' "$tf_file" "$tf_name"
+            printf 'tree: %s\n' "$tree"
+            printf 'result: %s\n' "$result"
+        } >"$tmp"
+        finish_write "$record"
+        printf 'red: %s\n' "$result"
+        exit 0
+    fi
+
+    # 5. The red run. It never writes <N>.verify.
+    run_job
+    # 6. The result: the recorded runner output in tests/fixtures/red/ fixed
+    # this order.
+    exit_of=0
+    if [ "$code" -eq 0 ]; then
+        if LC_ALL=C awk "$AWK_NO_TEST" <"$work/output" || LC_ALL=C awk "$AWK_NOT_COLLECTED" <"$work/output"; then
+            result='red (did not run)'
+        else
+            result=passed
+            exit_of=1
+        fi
+    elif [ "$code" -eq 124 ] && [ -f "$work/timed-out" ]; then
+        result=timeout
+        exit_of=124
+    elif { [ "$code" -eq 126 ] || [ "$code" -eq 127 ]; } &&
+        cannot_run "$(sed -n 's/^command: //p' "$work/ran" | tail -n 1)" "$(all_files "$work/plan")"; then
+        result='cannot run'
+        exit_of=4
+    elif LC_ALL=C awk "$AWK_NOT_COLLECTED" <"$work/output"; then
+        result='red (did not run)'
+    elif NAME=$tf_name LC_ALL=C awk "$AWK_FAILURE" <"$work/output"; then
+        result=red
+    elif LC_ALL=C awk "$AWK_NO_TEST" <"$work/output" && ! NAME= LC_ALL=C awk "$AWK_FAILURE" <"$work/output"; then
+        result='red (did not run)'
+    else
+        result='red (unnamed)'
+    fi
+
+    # 7. The record.
+    start_write "$record"
+    {
+        printf 'test: %s::%s\n' "$tf_file" "$tf_name"
+        cat "$work/ran"
+        printf 'exit: %s\n' "$code"
+        printf 'tree: %s\n' "$tree"
+        printf 'result: %s\n' "$result"
+        printf '%s\n' '--- last 40 lines of output'
+        tail -n 40 "$work/output"
+    } >"$tmp"
+    finish_write "$record"
+    printf 'red: %s\n' "$result"
+    exit "$exit_of"
+}
+
 # ---- dryrun: the dry run of a plan at plan time (see the header comment).
 
 # 0 when unit $1 is marked done in the dry-run record.
@@ -3484,6 +4028,11 @@ dry_finish() {
     [ -z "$at" ] || printf 'plan\t%s\tSetup changed tracked files: %s\tMake each Setup command write only files that git ignores.\n' \
         "${at%%:*}" "$(dry_excerpt "${at#*setup changed: }")" >>"$work/lines"
     at=$(grep -n '^acceptance 1: ' "$record" | tail -n 1)
+    # A Test first test that exists already fails the full test command
+    # before the change by design: no finding then.
+    case ${at#*acceptance 1: } in
+        'fail '*) ! test_first_exists "$work/plan" || at= ;;
+    esac
     case ${at#*acceptance 1: } in
         'fail '*)
             printf 'acceptance\t%s\tThe full test command fails before the change: %s\tFix the environment, or name the failing tests under Risks.\n' \
@@ -3723,7 +4272,23 @@ cmd_proof() {
         if [ "$code" = 0 ] && ran_no_test "$record"; then
             class='no test (the Verify ran no test)'
         elif [ "$code" = 0 ] && [ "$base" = 'test first' ]; then
-            class='not proven (test first, no red record)'
+            # The red record decides. The guard runs first: end writes
+            # exit 0 to <N>.verify before it exits 5.
+            red_result=$(sed -n 's/^result: //p' "$steps_dir/$number.red" 2>/dev/null | head -n 1)
+            if ! test_first_intact "$work/plan" "$number" 2>/dev/null; then
+                class='edited (the Test first test was edited)'
+            else
+                case $red_result in
+                    red) class='proven (test first, red)' ;;
+                    'red (unnamed)') class='proven (test first, red unnamed)' ;;
+                    'red (did not run)') class='proven (test first, red did not run, then passed)' ;;
+                    passed) class='not proven (test first, passed before the change)' ;;
+                    timeout) class='not proven (test first, red timed out)' ;;
+                    'cannot run') class='not proven (test first, red cannot run)' ;;
+                    'not run: '*) class="not proven (test first, red not run: ${red_result#not run: })" ;;
+                    *) class='not proven (test first, no red record)' ;;
+                esac
+            fi
         elif [ "$code" = 0 ] && [ "${base#fail }" != "$base" ] &&
             waits_for_earlier "$work/plan" "$number"; then
             class='carried (failed before an earlier step)'
@@ -3749,9 +4314,12 @@ cmd_proof() {
             *) other=$((other + 1)) ;;
         esac
         printf 'proof: step %s %s\n' "$number" "$class"
+        [ ! -f "$steps_dir/$number.diff" ] ||
+            STEP=$number LC_ALL=C awk "$AWK_TEST_CHANGES" <"$steps_dir/$number.diff" >>"$work/tests"
     done <<EOF
 $scan
 EOF
+    [ ! -s "$work/tests" ] || cat "$work/tests"
     steps=$((proven + unproven + no_test + other))
     printf 'proof: %s of %s steps proven, %s unproven, %s no test, %s other\n' \
         "$proven" "$steps" "$unproven" "$no_test" "$other"
@@ -3800,5 +4368,6 @@ case $subcommand in
     setup) cmd_setup "$@" ;;
     ready) cmd_ready "$@" ;;
     dryrun) cmd_dryrun "$@" ;;
+    red) cmd_red "$@" ;;
     *) usage "unknown subcommand: $subcommand" ;;
 esac

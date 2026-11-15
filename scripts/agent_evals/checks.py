@@ -1477,6 +1477,54 @@ def step_diff_paths(stem: str, expected: dict[int, set[str]]) -> Check:
     return Check("each step diff holds only its paths", fn)
 
 
+def end_exit(step: int, code: int) -> Check:
+    """Pass when the main session's ``plan-tool.sh end`` of ``step`` exited ``code``.
+
+    The exit code is read from the ``Bash`` result: an ``Exit code N`` first
+    line, or 0 when the result has none.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        wanted: dict[str, int] = {}
+        for transcript in ctx.of_type("main"):
+            for record in transcript.assistant_records():
+                for block in (record.get("message") or {}).get("content") or []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    command = str((block.get("input") or {}).get("command", ""))
+                    if _tool_matches(str(block.get("name", "")), r"^Bash$") and any(
+                        kind == "end" and number == str(step)
+                        for kind, _plan, number in _PLAN_TOOL_RE.findall(command)
+                    ):
+                        wanted[str(block.get("id"))] = 0
+            for record in transcript.records:
+                content = (record.get("message") or {}).get("content")
+                if record.get("type") != "user" or not isinstance(content, list):
+                    continue
+                for block in content:
+                    if (
+                        not isinstance(block, dict)
+                        or block.get("type") != "tool_result"
+                    ):
+                        continue
+                    ident = str(block.get("tool_use_id"))
+                    if ident not in wanted:
+                        continue
+                    result = block.get("content")
+                    if isinstance(result, list):
+                        result = "".join(
+                            str(b.get("text", ""))
+                            for b in result
+                            if isinstance(b, dict)
+                        )
+                    match = re.match(r"Exit code (\d+)", str(result or ""))
+                    wanted[ident] = int(match.group(1)) if match else 0
+        codes = list(wanted.values())
+        return code in codes, f"end of step {step} exited {codes}"
+
+    return Check(f"end of step {step} exits {code}", fn)
+
+
 def begin_end_around_implementors() -> Check:
     """Pass when the main session runs ``begin`` before and ``end`` after each step run.
 

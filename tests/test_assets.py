@@ -5537,3 +5537,37 @@ def test_runnable_plan_contract() -> None:
         ) in skill, tree
         assert "| `Verify fails before any change: <lines>` |" in skill, tree
         assert "| `setup failed: <line>` |" in skill, tree
+
+
+# Plan 56 criterion 41: the implementor body as Phase 1 left it. Phase 2 moved
+# the red run and the test edit check into the plan tool, so it must not grow.
+_IMPLEMENTOR_LINES_BEFORE_PHASE_2 = 261
+
+
+def test_proven_steps_contract() -> None:
+    """Plan 56 Phase 2: the red run and the guard live in the plan tool."""
+    for tree in _AGENT_PATHS:
+        body = _agent_body(tree, "implementor")
+        assert len(body) <= _IMPLEMENTOR_LINES_BEFORE_PHASE_2, (tree, len(body))
+        text = "\n".join(body)
+        for phrase in (
+            "- Add the named test to `<test file>` only when the file does not hold "
+            "it yet. Create the file when it does not exist.",
+            "- Run `<PLAN_TOOL> red <PLAN_PATH> <N>`. Exit 0: continue.",
+            "Exit 1 halts with `the Test first test passed before the change; "
+            "the step's test does not cover it`.",
+            "Exit 4 halts with `the Test first test cannot run: <command> not found`.",
+            "Exit 124 halts with `Verify timed out after <T> s`.",
+            "Exit 5 or 6 halts with the line it printed.",
+            "5. (The plan tool checks the Test first test in 6.)",
+            "- A first line `verify: test first edited` halts with "
+            "`the Test first test was edited`.",
+        ):
+            assert phrase in text, (tree, phrase)
+        assert "git diff --no-index" not in text, tree
+    for tree in ("claude-code", "cursor"):
+        skill = _text(_IMPLEMENT_ENTRY[tree])
+        assert "a code outside 0, 1, 4, 5 and 124: stop as Step 2a says." in skill, tree
+        assert "- `end` exit 5: stop with `the Test first test was edited`." in skill, (
+            tree
+        )

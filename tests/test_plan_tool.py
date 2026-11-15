@@ -4426,9 +4426,11 @@ def test_dryrun_resumes_and_a_changed_plan_starts_again(
 
 def test_dryrun_a_short_deadline_takes_two_calls(repo: Path) -> None:
     """Plan 56 criterion 3: the first call exits 2, the second prints the block."""
-    text = _full_plan(("a.txt", "`sleep 1.5`", None), ("a.txt", "`sleep 1.5`", None))
+    # Criterion 3 names a 2 s deadline and 1.5 s commands; the same rule with
+    # more headroom keeps the test stable under a loaded parallel run.
+    text = _full_plan(("a.txt", "`sleep 3`", None), ("a.txt", "`sleep 3`", None))
     _write_plan(repo, text.split("\n## Acceptance")[0] + "\n")
-    env = {"WHYGRAPH_VERIFY_TIMEOUT": "2"}
+    env = {"WHYGRAPH_VERIFY_TIMEOUT": "5"}
     assert _dryrun(repo, env=env).returncode == 2
     last = _dryrun(repo, env=env)
     assert last.returncode == 0, last.stdout + last.stderr

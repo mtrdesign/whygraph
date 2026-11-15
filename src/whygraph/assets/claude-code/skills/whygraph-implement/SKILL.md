@@ -177,7 +177,8 @@ S1, S2, S1b, S6 and S7 each make one step run, in this order:
    - When `end` exits 0, run `sh .claude/skills/whygraph-plan/plan-tool.sh constraints <plan> <blob> <N>`. Print each line it prints.
 7. Apply the first rule that matches:
    - `end` exit 65 with the stderr line `the step changed the plan tool`: stop with `the change touched the plan tool`.
-   - `end` exit 65 otherwise, 77, or a code outside 0, 1, 4 and 124: stop as Step 2a says.
+   - `end` exit 65 otherwise, 77, or a code outside 0, 1, 4, 5 and 124: stop as Step 2a says.
+   - `end` exit 5: stop with `the Test first test was edited`.
    - `constraints` exit 65, 77, or a code outside 0, 1 and 6: stop as Step 2a says.
    - The `**Halt:**` starts with `permission denied:`: stop with the Halt text.
    - The `**Halt:**` starts with `the Test first test`: stop with the Halt text.

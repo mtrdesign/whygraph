@@ -1,7 +1,7 @@
 ---
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Runs as the planner - one researcher per knowledge source, then a synthesizer - splits a large task into child plans only when needed, and asks the few plan-shaping questions after research.
 name: whygraph-plan
-argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--refresh-profile] [--out <path>]
+argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]
 agent: whygraph-planner
 ---
 
@@ -13,7 +13,7 @@ You are in the main chat, so you are also the one who asks the user. Wherever yo
 
 You have no terminal here. Find files with the read and search tools. The edit tool creates a file's parent directory, so no directory needs creating first. Leave `created` out of a `tasks.json`.
 
-**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--refresh-profile] [--out <path>]`
+**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]`
 
 ## Step 1 - Parse arguments
 
@@ -28,11 +28,12 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--review` -> review the plan before it is handed over, in single-pass mode too.
 - `--no-review` -> skip the plan review.
 - `--no-dry-run` -> skip the dry run. Without it, the planner runs each Verify once before it hands the plan over.
+- `--no-e2e` -> plan no browser test. Without it, a UI plan in a repo with browser tests gets an end-to-end test step.
 - `--refresh-profile` -> derive the UI profile (`.whygraph/profiles/ui.md`) again, even when the cached one is fresh.
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--refresh-profile] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
@@ -101,6 +102,7 @@ PLAN_TOOL: sh .github/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>
 REVIEW: <yes | no | auto>
 DRY_RUN: <yes | no>
+E2E: <yes | no>
 ```
 
 - `MODE` is `shallow` for `--shallow`, `deep` for `--deep`, otherwise `auto`.
@@ -109,6 +111,7 @@ DRY_RUN: <yes | no>
 - `REFRESH_PROFILE` is `yes` for `--refresh-profile`, otherwise `no`.
 - `REVIEW` is `yes` for `--review`, `no` for `--no-review`, otherwise `auto`.
 - `DRY_RUN` is `no` for `--no-dry-run`, otherwise `yes`. `--no-questions` does not change it.
+- `E2E` is `no` for `--no-e2e`, otherwise `yes`. `--no-questions` does not change it.
 
 Now follow your planner instructions with this input, from Phase 0. Do not restate them here.
 
@@ -161,7 +164,7 @@ The task description is the path of a `tasks.json` that an earlier run wrote. Pl
    - `SPLIT: no`
    - `PARENT: <absolute path of the tasks.json>`
    - `OUT_PATH: <workspace root>/<the child's plan>`
-   - `MODE`, `REVIEW`, `DRY_RUN`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH` and `PLAN_TOOL` stay as Step 4 sets them from this run's flags.
+   - `MODE`, `REVIEW`, `DRY_RUN`, `SOURCES_DIR`, `SPINE_PATH`, `SOURCES`, `CAPTURE_PATH`, `PLAN_TOOL` and `E2E` stay as Step 4 sets them from this run's flags.
 5. Print `### <id>: <title>`, then follow Step 5 for this child. A child never splits.
 
 ## Step 7 - Print the result

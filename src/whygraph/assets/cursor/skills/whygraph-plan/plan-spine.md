@@ -2,7 +2,7 @@
 
 Read this file once before you write a plan. It says what a good plan holds. The plan format is the `## Plan format` section of this file.
 
-Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Setup, Acceptance, User journey, Self-review checklist, Plan format.
+Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Setup, Acceptance, User journey, End-to-end test, Self-review checklist, Plan format.
 
 ## Why a plan is a contract
 
@@ -129,6 +129,22 @@ Write this section only when a source reported a `### Journey` block. Write one 
 - State what holds after a refresh, a back action, a cancel and a direct link to a middle hop.
 - State what the user sees while slow work runs.
 
+## End-to-end test
+
+Write these lines only when a source reported an `### E2E` block with a test file.
+
+- One step writes the browser test. Its **Browser test** line ends in `red`: the test must fail before the feature exists.
+- The step that completes the user journey carries the same path. Its **Browser test** line ends in `green`.
+- Put the test file in **Boundaries** of every step after the one that writes it.
+- Assert what the user sees and can do. Never assert a class name or an internal id.
+- Find an element by its role or its label. Take visible text from the app's text source.
+- Reuse the login and data helpers the project has.
+- Use the real app. Never stub the app's own requests, unless the project's tests already do.
+- Keep the test to one journey.
+- The test must pass when it runs again. Give each record it creates a unique name.
+- Take a screenshot after each hop, when the runner can.
+- A browser test run may start the app and may add data. It is never a Verify.
+
 ## Self-review checklist
 
 Check each box before you hand the plan over.
@@ -223,6 +239,7 @@ Check each box before you hand the plan over.
    - **Model:** <haiku | sonnet | opus> - <one-line why>
    - **Routes:** <backticked paths relative to the app's base URL, space-separated, e.g. `/settings` - UI steps only, omit otherwise>
    - **Expected UI:** <what the user sees, per state: empty, loading, error, phone width, dark - UI steps only, omit otherwise>
+   - **Browser test:** <path of the browser test file> - <red | green> - UI steps only, omit otherwise
    - **Verify:** <specific test, assertion, or manual check>
 2. ...
 
@@ -230,7 +247,7 @@ Check each box before you hand the plan over.
 - <each major risk, deduplicated, verbatim quotes preserved>
 
 ## Acceptance
-1. <verifiable statement of what "done" means for the whole plan> - **Check:** `<literal command>`, or manual: <what to look at> with no backticks
+1. <verifiable statement of what "done" means for the whole plan> - **Check:** `<literal command>`, or manual: <what to look at> with no backticks, or e2e: <path of the browser test file> with no backticks
 2. ...
 
 ## Open questions

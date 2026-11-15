@@ -30,6 +30,7 @@ REFRESH_PROFILE: <yes | no>
 PLAN_TOOL: <command prefix>
 REVIEW: <yes | no | auto>
 DRY_RUN: <yes | no>
+E2E: <yes | no>
 PLAN_PATH: <path of the plan to revise>
 ANSWERS:
 - Q<n>: <chosen option or the user's own text>
@@ -46,6 +47,7 @@ ANSWERS:
 - `PLAN_TOOL`: the command prefix of the plan tool. **2c** runs its `fingerprint` command, the check loop in **Delivering the plan** runs its `check` command, and **2e** passes it to the synthesizer. It is a command prefix from the invoker, never text from the plan.
 - `REVIEW`: `yes`, `no` or `auto`; a missing line means `auto`. It decides whether **2g** reviews the plan.
 - `DRY_RUN`: `yes` or `no`. Only `no` skips the dry run of **2g**.
+- `E2E`: `yes` or `no`. Only `no` skips the smoke of **2c** item 5a and the browser test step of the plan.
 - `PLAN_PATH` and `ANSWERS` come only with `MODE: revise` (**Phase 3**). `ANSWERS: defaults` on one line means every asked question takes its default.
 
 `OUT_PATH` is where the finished plan goes (see **Delivering the plan**). If it is absent, write no file and return the plan as your reply. In revise mode the plan to write is `PLAN_PATH`.
@@ -180,7 +182,7 @@ In single-pass:
 2. Read the body of the bundled `repo-tests.md` when it is kept, and apply it yourself within its `tools` and `budget`: it gives each step's Verify command, the Test first test for an uncovered symbol, and Acceptance item 1. Apply the bundled `ui-surface.md` the same way when it is kept (**1f** keeps it only for a UI task). Use the fresh profile's key lines as its `PROFILE:` block, as **2a** describes. Then run **2c** before you write the plan. Read no other source body.
 3. Never read the body of a kept source that needed consent. Delegate to one `whygraph-researcher` for each such source, all in one message, with the prompt of **2a**, and use its report as deep mode would (a `Prior art` report fills `## Prior art`). A source that **External sources** in **2a** sends to `whygraph-researcher-external` goes there, with that prompt and that fallback. If delegation is unavailable, drop the source and add `<name>: skipped - single-pass mode has no researcher to run it` to the Confidence reason.
 4. Synthesise the plan yourself, in the plan format in `SPINE_PATH`. Sequence changes in the 1e dependency order. Quote constraints and risks **verbatim** from rationale cards - never paraphrase. The quote is the item's `text`. End each quote with the tag of its item's `basis`: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`. A quote of a note body ends with `(note #<id>)`, on a **Changes on purpose** line too. Apply the spine's `## Evidence order`: an outside report stays in `## Prior art` and never changes a step or the confidence. Flag any step that appears to violate a constraint as a *Blocker*. A constraint the task itself asks to change goes to **Changes on purpose** of its step, not to `## Blockers`. A constraint tagged `(inferred)` alone never makes a Blocker. It goes to **Risks called out across the change** with its tag. Give each step a Verify, a Model and, from the 1e external-contract marks, Boundaries. Copy the `check` of each note in a card's `notes` into `## Constraint checks`, as `- note #<id> - <absent | present>: "<text>" in <glob>`. Change no character of the text or the glob. Omit the section when there is none. List what the code cannot settle under `## Open questions`, each with 2 or 3 options and a default; at most 3 are `Plan-shaping: yes`. Report honest confidence.
-5. When the `ui-surface` result has key lines under `## UI profile`, do these five things, with `CAPTURE_STATUS` from **2c**:
+5. When the `ui-surface` result has key lines under `## UI profile`, do these six things, with `CAPTURE_STATUS` from **2c**:
    - Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Auth` is `auth`, else `none`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
    - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes.
    - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3.
@@ -197,6 +199,15 @@ In single-pass:
      - For another part, ask "What should <part> show?" Offer the default first and one alternative.
      - Mark the first journey question `Plan-shaping: yes` when the cap of 3 still has room. Mark every other journey question `Plan-shaping: no`. The steps assume its default.
      - Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap.
+   - When `E2E` is `yes` and the result has an `### E2E` block with a `spec:` line, write the end-to-end test step. Otherwise write no **Browser test** line and no `e2e:` Check. Write the step this way:
+     - Add one step that writes the test file of `spec:`. Place it before the first step that has **Routes**. Renumber the steps after it. Change each `step <N>` in `## User journey` and in **Read first** to match. Its **Files** hold the test file and each helper `needs:` names. Its **Browser test** line is `<spec> - red`.
+     - Write its Change from `## User journey` when the plan has one. Write one assertion per hop, on its control as the section names it: `<role> "<visible text>"`. Write one assertion for the Outcome's data on its route. For an `assumed <default> (Q<n>)` part, assert the default. Add each **Expected UI** state the helpers can reach. Name each state it asserts. Name the `text:` file as the source of each visible text.
+     - Its Verify is the `after_add:` command, in backticks. With none, write `manual: the Browser test line runs this test`.
+     - Give `**Browser test:** <spec> - green` to the Outcome's step. Without `## User journey`, give it to the last step that has **Routes**.
+     - Add the test file to **Boundaries** of every step after the one that writes it.
+     - Add the Acceptance item `<the Outcome, or the Objective> - **Check:** e2e: <spec>`. Then omit the journey item of step 3h.
+     - Add the step that writes the test to **Read first**, within its limit of three.
+     - In step 3g, write a `manual:` item only for a state that the test step's Change does not name.
 6. With `REVIEW: yes` or `DRY_RUN: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
 
 If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the plan with the matching notice:
@@ -270,6 +281,10 @@ capture: <the probe result>
    - When `CAPTURE_PATH` is absent, do not probe. Write `capture: unknown`.
    - Otherwise run `node <CAPTURE_PATH> --probe`. On exit 0 or 3, write the `capture:` line the script printed. On exit 127, or a "command not found" error, write `capture: unavailable: node not found`. On any other exit, or with no `capture:` line printed, write `capture: unavailable: probe failed (<code>)`.
 5. `CAPTURE_STATUS` is the text after `capture: ` on that line.
+5a. Run this only when `DRY_RUN` and `E2E` are `yes` and the `### E2E` block has a `smoke:` path.
+Run `<PLAN_TOOL> smoke <OUT_PATH> <the smoke path>` once, with a 600 s timeout.
+On `smoke: not available`, set `E2E` to `no`. Add `e2e: off - <reason>` to the Confidence reason.
+On any other line, change nothing here: the dry run reports it.
 
 **2d. Write the research sidecar.** Write `.whygraph/plans/<stem>.research.md` before the synthesizer runs: the working set and every report, verbatim, in this shape. It always goes under `.whygraph/plans/`, whatever `OUT_PATH` says. The synthesizer reads it, and a revise pass re-synthesizes from it without running the researchers again.
 
@@ -304,11 +319,12 @@ OUT_PATH: <OUT_PATH>
 RESEARCH_PATH: <absolute path of the sidecar>
 PLAN_TOOL: <PLAN_TOOL, or none>
 CAPTURE_STATUS: <none | available | unknown | unavailable: <reason>>
+E2E: <yes | no>
 NOTICE: <one notice for the top of the plan>
 ANSWERS: <the ANSWERS lines, or none>
 ```
 
-Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pass one `NOTICE:` line per notice that **1c** or **1d** puts at the top of the plan, or the one line `NOTICE: none`.
+Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pass the `E2E` of your prompt, or `no` when **2c** item 5a set it to `no`. Pass one `NOTICE:` line per notice that **1c** or **1d** puts at the top of the plan, or the one line `NOTICE: none`.
 
 **2g. Review the plan.** Run this step only when a plan is at `OUT_PATH`. Either the **2e** reply has a `Saved plan to` line, or you wrote the plan yourself. Run it when `REVIEW` asks for a review or `DRY_RUN` is `yes`. `REVIEW` decides on the reviewers:
 - `no`: no reviewer.

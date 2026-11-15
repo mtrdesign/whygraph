@@ -349,6 +349,7 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--no-questions` | Take every default. Every consent question is answered No. |
 | `--review` / `--no-review` | Force the [plan review](#plan-review), also for a single-pass plan, or skip it. Not both. Without either, a deep plan is reviewed and a single-pass plan is not. These are not the implement command's `--no-review`, which skips the review gate after each step. |
 | `--no-dry-run` | Skip the [dry run](#the-dry-run), which runs each `Verify` once before the plan is handed over. `--no-questions` does not skip it. |
+| `--no-e2e` | Plan no [browser test](#end-to-end-tests). Without it, a UI plan in a project with browser tests gets one. |
 | `--out <path>` | Save the plan at `<path>` instead of `.whygraph/plans/<name>.md`. |
 | `--refresh-profile` | Derive the [UI profile](#ui-evidence) again instead of reusing the cached one. |
 
@@ -364,6 +365,7 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--no-review` | Skip the review gate after each step. It is not the plan command's `--no-review`. |
 | `--no-eval` | Skip the [evaluator](#evaluation). |
 | `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
+| `--no-e2e` | Run no [browser test](#end-to-end-tests), in a step or in Acceptance. |
 | `--eval-fix-attempts N` | How many times a failed spec evaluation sends the step back to the implementor, 0 to 2. Default 1. |
 
 The command refuses a plan that has open Blockers or an unanswered plan-shaping question. A plan whose
@@ -862,6 +864,58 @@ so it writes the profile with `capture: unknown` and the script checks for itsel
 `capture.mjs` in a cloned repository is code that an agent runs, like any committed script: read it
 after a clone, as you would the `sources/` folder.
 
+### End-to-end tests
+
+When the project already has browser tests, a UI plan can carry one of its own. The plan names a new
+test file next to the existing ones. One step writes it and must see it fail, which is the step's
+**Browser test** line ending in `red`. The step that completes the user journey carries the same path,
+with a line ending in `green`. Acceptance gets an `e2e:` item for the file. A browser test is never a
+`Verify`, because it starts the app and adds data.
+
+WhyGraph runs the test through your project's own runner, never through its own browser.
+
+- **A Cypress project** (or any project whose runner is not Playwright) gets the runner your profile
+  names in `e2e_run`, such as `npx cypress run --spec`. The script runs it on one file, with no
+  shell. It never loads Playwright, so a Cypress-only project gets this and not the screenshots of
+  [What it captures](#what-it-captures).
+- **A Playwright project** gets the same, with `npx playwright test` as the runner. It also keeps
+  the capture of the routes, and the test can write its screenshots to `e2e_shots`. They show as
+  `Browser test evidence` in the run summary.
+
+Your profile holds the keys `e2e_run`, `e2e_dir`, `e2e_shots`, `e2e_start` and `e2e_base_url`. With
+`e2e_run: none`, or without a profile, the plan has no browser test.
+
+**What the test needs to run.** The test is only as good as the setup it runs in. It needs the
+database of the app, the seed data and the login of the project. The planner reads how your existing
+tests get each one and reuses the helpers. A missing piece is a plan-time finding, not a surprise in
+the middle of a run. The full test command runs once at plan time, with no retry. A flaky suite
+therefore shows up as a Blocker, and the plan does not hide it.
+
+**The plan-time smoke.** Before the plan is written, the planner runs one existing browser test that
+uses your login helper, once (`plan-tool.sh smoke`). It finds a missing database, seed, login or
+runner while you are present. The result is one line:
+
+| Line | Meaning |
+|---|---|
+| `smoke: pass` | Nothing to do. |
+| `smoke: fail: <last line>` | A Blocker: `An existing browser test fails before the change`. |
+| `smoke: timeout` | A Blocker: `An existing browser test did not finish`. |
+| `smoke: not available: <reason>` | E2E is off for this plan. The reason is in the Confidence reason as `e2e: off - <reason>`. |
+
+E2E is also off for `--no-e2e` and for `e2e_run: none`.
+`--no-dry-run` skips the smoke.
+
+**The trust root.** The red record and the copy of the test sit in `.whygraph/`, which git ignores.
+In Claude Code and Cursor, `plan-tool.sh begin` prints a `trust:` hash of the harness files, the
+profile, the saved login and the records of every earlier step. The skill gives it back to `end`, which
+exits 65 when it changed and names the paths. A later step cannot quietly change an earlier step's
+record. Step N's own record is left out, so a step can still change what it wrote itself.
+
+!!! warning "The limit in VS Code and Codex"
+    VS Code and Codex run no `end` and have no parent agent. A later step there can change an earlier
+    step's red record or test copy, and nothing flags it. Read the diff of a browser test step
+    yourself when the result matters.
+
 ## Differences between editors
 
 | | Claude Code | Cursor | VS Code | Codex |
@@ -881,6 +935,9 @@ after a clone, as you would the `sources/` folder.
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
 | Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |
 | UI evidence capture | Yes | Yes | Yes | Yes |
+| Browser test step in a plan (`--no-e2e` turns it off) | Yes | Yes | Yes | Yes |
+| Plan-time smoke of an existing browser test | Yes | Yes | No: the planner has no terminal | Yes |
+| Trust root across steps | Yes | Yes | No: no parent agent | No: no parent agent |
 | `/whygraph-ui-check` by hand | Yes | Yes | No | No |
 | Acceptance | Separate run | Separate run | At the end of the run | At the end of the run |
 | Questions | Dialog | Asked in chat | Asked in chat | Asked in chat |

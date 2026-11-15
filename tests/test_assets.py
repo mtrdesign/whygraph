@@ -833,6 +833,7 @@ def test_harness_frontmatter_wiring() -> None:
         "Read, Grep, Glob, ToolSearch, mcp__whygraph__*, mcp__codegraph__*"
     )
     assert _frontmatter(cc / "agents/researcher.md")["model"] == "sonnet"
+    assert _frontmatter(cc / "agents/researcher.md")["maxTurns"] == "40"
     assert _frontmatter(cc / "agents/synthesizer.md")["tools"] == (
         "Read, Grep, Glob, Bash, Write, Edit, TaskStop"
     )
@@ -856,6 +857,7 @@ def test_harness_frontmatter_wiring() -> None:
     assert _frontmatter(cc / "skills/whygraph-implement/SKILL.md")["allowed-tools"] == (
         "Agent, Read, mcp__whygraph__whygraph_propose_note, "
         "Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe), "
+        "Bash(node .claude/skills/whygraph-ui-check/capture.mjs --e2e *), "
         "Bash(sh .claude/skills/whygraph-plan/plan-tool.sh *), "
         "Bash(git hash-object --no-filters .claude/skills/whygraph-plan/plan-tool.sh)"
     )
@@ -2057,6 +2059,10 @@ def test_implement_skill_spells_every_plan_tool_call_one_way() -> None:
         words = re.sub(r"<[^<>]*>", "X", call)
         assert "$" not in words and "cd " not in words and "=" not in words, call
         assert not set("|<>;&'\"") & set(words), call
+    # Plan 56 D47: end carries the trust hash that begin printed.
+    assert [c for c in calls if c.startswith(prefix + "end ")] == [
+        prefix + "end <plan> <N> <t0> <blob> --trust <hash>"
+    ]
     # The self-hash is the second exact rule, spelled as the rule says.
     assert (
         cc.count(
@@ -2118,6 +2124,9 @@ def test_implement_stop_block_and_causes(tree: str) -> None:
         # Plan 56 section 5.8: the fresh-run stop.
         "Verify fails before any change: <lines>",
         "setup failed: <line>",
+        # Plan 56 section 5.25: the browser test rows.
+        "the browser test passed before the change",
+        "the browser test was edited",
     ):
         assert any(c.fullmatch(wanted) for _, c in causes), wanted
     # The Next of a baseline change says how to keep the Verify a pure check.
@@ -2142,6 +2151,9 @@ def test_implement_stop_block_and_causes(tree: str) -> None:
         "the Test first test cannot run: uv not found",
         "the Test first test was edited",
         "permission denied: uv run pytest",
+        # Plan 56 section 5.25: the browser test halt and the end exit 5 line.
+        "the browser test passed before the change",
+        "the browser test was edited: e2e/login.cy.ts",
     ):
         assert len({i for i, c in causes if c.match(halt)}) == 1, halt
 
@@ -2469,12 +2481,13 @@ def test_plan_reviewer_reply_shape() -> None:
         ui = body.split("## Lens ui", 1)[1].split("## Lens journey", 1)[0]
         journey = body.split("## Lens journey", 1)[1].split("## Reply format", 1)[0]
         assert re.findall(r"^(\d+)\. ", logic, re.M) == [str(i) for i in range(1, 12)]
-        assert re.findall(r"^(\d+)\. ", ui, re.M) == [str(i) for i in range(1, 7)]
+        assert re.findall(r"^(\d+)\. ", ui, re.M) == [str(i) for i in range(1, 8)]
         assert re.findall(r"^(\d+)\. ", journey, re.M) == [
             str(i) for i in range(1, 9)
         ], tree
         assert (
-            "`logic` runs its eleven checks, `ui` its six, `journey` its eight." in body
+            "`logic` runs its eleven checks, `ui` its seven, `journey` its eight."
+            in body
         )
         assert (
             "10. **Step-local Verify.** The Verify can pass when this step is done and no later step is."
@@ -3196,7 +3209,7 @@ def test_ui_surface_body() -> None:
         researcher = "\n".join(_agent_body(tree, "researcher"))
         assert "PROFILE:" in researcher, tree
         # Plan 52 step 1: the journey step, its triggers and the budget.
-        assert fm["budget"] == "26", tree
+        assert fm["budget"] == "33", tree
         for phrase in (
             "6. Trace the journey when one of these holds.",
             "The task adds a route.",
@@ -5229,7 +5242,10 @@ def test_user_journey_contract() -> None:
         # Step 1: the spine.
         spine = _spine(tree)
         contents = next(ln for ln in spine.splitlines() if ln.startswith("Contents:"))
-        assert "Acceptance, User journey, Self-review checklist" in contents, tree
+        assert (
+            "Acceptance, User journey, End-to-end test, Self-review checklist"
+            in contents
+        ), tree
         rules = spine.split("\n## User journey\n", 1)[1].split("\n## ", 1)[0]
         assert (
             "Write this section only when a source reported a `### Journey` block."
@@ -5289,15 +5305,16 @@ def test_user_journey_contract() -> None:
             "When the `ui-surface` result has key lines under `## UI profile`, do these ",
             1,
         )[1].split("\n6. ", 1)[0]
-        assert single.startswith("five things,"), tree
+        assert single.startswith("six things,"), tree
         head = (
             "\n   - When the result has a `### Journey` block, write `## User journey` "
             "in the spine's format from the block's lines:\n"
         )
         assert head in single, tree
         journey = single.split(head, 1)[1]
-        # The journey bullet is the last bullet of step 5.
-        assert "\n   - " not in "\n" + journey, tree
+        # The journey bullet is the fifth bullet of step 5, the 3j copy the sixth.
+        journey, e2e = journey.split("\n   - When `E2E` is `yes`", 1)
+        assert "\n   - " not in "\n" + journey + "\n" + e2e, tree
         for shared in _JOURNEY_SHARED:
             assert shared in journey, (tree, shared)
         assert (
@@ -5343,10 +5360,126 @@ def test_ui_profile_auth() -> None:
         )
         # Step 4: planner single-pass fill sentence.
         planner = "\n".join(_agent_body(tree, "planner"))
-        fill = planner.split("do these five things", 1)[1].split("\n   - ", 2)[1]
+        fill = planner.split("do these six things", 1)[1].split("\n   - ", 2)[1]
         assert "`Browser tests` is `tests`, `Auth` is `auth`, else `none`," in fill, (
             tree
         )
+
+
+_E2E_3J_BULLETS = (
+    "Add one step that writes the test file of `spec:`. Place it before the first "
+    "step that has **Routes**. Renumber the steps after it. Change each `step <N>` "
+    "in `## User journey` and in **Read first** to match. Its **Files** hold the "
+    "test file and each helper `needs:` names. Its **Browser test** line is "
+    "`<spec> - red`.",
+    "Write its Change from `## User journey` when the plan has one. Write one "
+    "assertion per hop, on its control as the section names it: "
+    '`<role> "<visible text>"`. Write one assertion for the Outcome\'s data on its '
+    "route. For an `assumed <default> (Q<n>)` part, assert the default. Add each "
+    "**Expected UI** state the helpers can reach. Name each state it asserts. Name "
+    "the `text:` file as the source of each visible text.",
+    "Its Verify is the `after_add:` command, in backticks. With none, write "
+    "`manual: the Browser test line runs this test`.",
+    "Give `**Browser test:** <spec> - green` to the Outcome's step. Without "
+    "`## User journey`, give it to the last step that has **Routes**.",
+    "Add the test file to **Boundaries** of every step after the one that writes it.",
+    "Add the Acceptance item `<the Outcome, or the Objective> - **Check:** e2e: "
+    "<spec>`. Then omit the journey item of step 3h.",
+    "Add the step that writes the test to **Read first**, within its limit of three.",
+    "In step 3g, write a `manual:` item only for a state that the test step's "
+    "Change does not name.",
+)
+
+
+def test_e2e_planning_contract() -> None:
+    """Plan 56 section 5.13: the plan writes a browser test, smoke-run at plan time."""
+    item5a = (
+        "5a. Run this only when `DRY_RUN` and `E2E` are `yes` and the `### E2E` "
+        "block has a `smoke:` path.\n"
+        "Run `<PLAN_TOOL> smoke <OUT_PATH> <the smoke path>` once, with a 600 s "
+        "timeout.\n"
+        "On `smoke: not available`, set `E2E` to `no`. Add `e2e: off - <reason>` "
+        "to the Confidence reason.\n"
+        "On any other line, change nothing here: the dry run reports it."
+    )
+    vscode_skip = "In VS Code no terminal is available to the planner: skip **5a**."
+    check7 = (
+        "7. **End-to-end test.** When a step has a **Browser test** line ending in "
+        "`red`, its Change names an assertion for the Outcome and for each state it "
+        "lists. The helpers it names exist at their `path:line`. The Change stubs "
+        "none of the app's own requests. A record the test creates has a unique "
+        "name, so the test passes when it runs again. A test step whose Change "
+        "names no assertion is a `should`."
+    )
+    for tree in _AGENT_PATHS:
+        # Synthesizer step 3j, after 3i and before 3k.
+        synth = "\n".join(_agent_body(tree, "synthesizer"))
+        assert (
+            synth.index("**3i. Setup.**")
+            < synth.index("**3j. End-to-end test.**")
+            < synth.index("**3k. Constraint checks.**")
+        ), tree
+        step3j = synth.split("**3j. End-to-end test.**", 1)[1].split("\n\n", 1)[0]
+        head, *bullets = step3j.splitlines()
+        assert head == (
+            " Apply this step only when `E2E` is `yes` and a report has an `### E2E` "
+            "block with a `spec:` line. Otherwise write no **Browser test** line and "
+            "no `e2e:` Check."
+        ), tree
+        assert bullets == ["- " + b for b in _E2E_3J_BULLETS], tree
+        shape = synth.split("## Inputs", 1)[1].split("```", 2)[1]
+        assert "\nE2E: <yes | no>\n" in shape, tree
+        # Planner single-pass step 5: the 3j bullets word for word, sixth thing.
+        planner = "\n".join(_agent_body(tree, "planner"))
+        single = planner.split("do these six things", 1)[1].split("\n6. ", 1)[0]
+        e2e_head = (
+            "\n   - When `E2E` is `yes` and the result has an `### E2E` block with a "
+            "`spec:` line, write the end-to-end test step. Otherwise write no "
+            "**Browser test** line and no `e2e:` Check. Write the step this way:\n"
+        )
+        copy = single.split(e2e_head, 1)[1].splitlines()
+        assert copy == ["     - " + b for b in _E2E_3J_BULLETS], tree
+        # Planner inputs and the 2e prompt.
+        assert "DRY_RUN: <yes | no>\nE2E: <yes | no>\nPLAN_PATH:" in planner, tree
+        assert (
+            "- `E2E`: `yes` or `no`. Only `no` skips the smoke of **2c** item 5a "
+            "and the browser test step of the plan."
+        ) in planner, tree
+        prompt2e = planner.split("**2e. ", 1)[1].split("**2g.", 1)[0]
+        assert "\nE2E: <yes | no>\n" in prompt2e, tree
+        assert (
+            "Pass the `E2E` of your prompt, or `no` when **2c** item 5a set it to `no`."
+        ) in prompt2e, tree
+        # Planner 2c item 5a, after the probe. VS Code skips it.
+        step2c = planner.split("**2c. ", 1)[1].split("**2d. ", 1)[0]
+        assert item5a in step2c, tree
+        assert step2c.index("4. Probe capture") < step2c.index("5a. "), tree
+        assert step2c.index("5. `CAPTURE_STATUS`") < step2c.index("5a. "), tree
+        assert (vscode_skip in step2c) == (tree == "vscode"), tree
+        # Plan reviewer ui check 7. The no-CodeGraph sentence has no ui clause.
+        reviewer = "\n".join(_agent_body(tree, "plan-reviewer"))
+        ui = reviewer.split("## Lens ui", 1)[1].split("## Lens journey", 1)[0]
+        assert check7 in ui, tree
+        assert "Run these seven checks for each step" in ui, tree
+        assert "`ui` its seven," in reviewer, tree
+        assert "In the ui lens" not in reviewer, tree
+    # Entry points: the `--no-e2e` flag and the `E2E` prompt line.
+    for tree, rel in _PLAN_ENTRY.items():
+        text = _text(rel)
+        assert "\nE2E: <yes | no>" in text, tree
+        if tree == "codex":
+            assert "# no only when they ask for `--no-e2e`" in text, tree
+            assert "`MODE`, `REVIEW` and the other lines stay the same." in text, tree
+            continue
+        assert "DRY_RUN: <yes | no>\nE2E: <yes | no>\n```" in text, tree
+        assert "[--no-dry-run] [--no-e2e] [--refresh-profile]" in text, tree
+        assert "[--no-dry-run] [--refresh-profile]" not in text, tree
+        assert "- `--no-e2e` -> plan no browser test." in text, tree
+        assert (
+            "- `E2E` is `no` for `--no-e2e`, otherwise `yes`. "
+            "`--no-questions` does not change it."
+        ) in text, tree
+        assert "`CAPTURE_PATH`, `PLAN_TOOL` and `E2E` stay" in text, tree
 
 
 def test_runnable_plan_spine_and_source() -> None:
@@ -5542,13 +5675,17 @@ def test_runnable_plan_contract() -> None:
 # Plan 56 criterion 41: the implementor body as Phase 1 left it. Phase 2 moved
 # the red run and the test edit check into the plan tool, so it must not grow.
 _IMPLEMENTOR_LINES_BEFORE_PHASE_2 = 261
+# Plan 56 Phase 4 (section 5.14) adds the browser test: the E2E input, the
+# browser_test field, sub-steps 5a and 7a, and Phase 2h item 2a.
+_IMPLEMENTOR_LINES_PHASE_4 = 10
 
 
 def test_proven_steps_contract() -> None:
     """Plan 56 Phase 2: the red run and the guard live in the plan tool."""
     for tree in _AGENT_PATHS:
         body = _agent_body(tree, "implementor")
-        assert len(body) <= _IMPLEMENTOR_LINES_BEFORE_PHASE_2, (tree, len(body))
+        limit = _IMPLEMENTOR_LINES_BEFORE_PHASE_2 + _IMPLEMENTOR_LINES_PHASE_4
+        assert len(body) <= limit, (tree, len(body))
         text = "\n".join(body)
         for phrase in (
             "- Add the named test to `<test file>` only when the file does not hold "
@@ -5568,6 +5705,131 @@ def test_proven_steps_contract() -> None:
     for tree in ("claude-code", "cursor"):
         skill = _text(_IMPLEMENT_ENTRY[tree])
         assert "a code outside 0, 1, 4, 5 and 124: stop as Step 2a says." in skill, tree
-        assert "- `end` exit 5: stop with `the Test first test was edited`." in skill, (
-            tree
-        )
+        assert (
+            "- `end` exit 5: stop with the line that `end` printed on stderr. It is "
+            "`the Test first test was edited` or `the browser test was edited`"
+        ) in skill, tree
+
+
+def test_e2e_spine_and_source() -> None:
+    """The spine holds the E2E section and the source plans the browser test."""
+    for tree, folder in _SOURCE_DIRS.items():
+        base = _ASSET_ROOT / folder
+        spine = (base / "plan-spine.md").read_text()
+        section = spine.split("## End-to-end test", 1)[1].split("## Self-review", 1)[0]
+        assert spine.index("## User journey") < spine.index("## End-to-end test"), tree
+        assert "End-to-end test, Self-review checklist" in spine, tree
+        for bullet in (
+            "Write these lines only when a source reported an `### E2E` block",
+            "Its **Browser test** line ends in `red`",
+            "carries the same path. Its **Browser test** line ends in `green`.",
+            "Put the test file in **Boundaries** of every step after",
+            "Never assert a class name or an internal id.",
+            "Find an element by its role or its label.",
+            "Reuse the login and data helpers the project has.",
+            "Never stub the app's own requests",
+            "Keep the test to one journey.",
+            "The test must pass when it runs again.",
+            "Give each record it creates a unique name.",
+            "Take a screenshot after each hop",
+            "It is never a Verify.",
+        ):
+            assert bullet in section, (tree, bullet)
+        assert (
+            "   - **Browser test:** <path of the browser test file> - <red | green>"
+            " - UI steps only, omit otherwise"
+        ) in spine, tree
+        assert spine.index("**Expected UI:**") < spine.index("**Browser test:**"), tree
+        assert "e2e: <path of the browser test file> with no backticks" in spine, tree
+        source = (base / "sources" / "ui-surface.md").read_text()
+        assert "budget: 33" in source, tree
+        for line in (
+            "   - `e2e_run`: the command that runs one browser test file",
+            "   - `e2e_dir`: the directory of those test files.",
+            "   - `e2e_shots`: the directory where the runner writes screenshots",
+            "   - `e2e_start` and `e2e_base_url`: the start command",
+            "7. When `e2e_run` is not `none`, plan the browser test of this task.",
+            "   - Name the new test file, under `e2e_dir`",
+            "   - Find the login helper and the data helpers",
+            "   - Name the data this task needs that no helper creates.",
+            "   - Find a command the repo runs after a test file is added",
+            "   - Find the file the visible text comes from",
+            "   - Name one existing browser test file that uses the login helper",
+            "- `### E2E`, with these lines:",
+            "  - `spec:`",
+            "  - `login:`",
+            "  - `seed:`",
+            "  - `needs:`",
+            "  - `text:`",
+            "  - `after_add:`",
+            "  - `smoke:` the existing test of the last bullet of step 7, else `none`.",
+            "  - Without a runner, write the single line `none: <reason>`.",
+        ):
+            assert line in source, (tree, line)
+        assert source.index("### Journey") < source.index("### E2E"), tree
+
+
+def test_e2e_contract() -> None:
+    """Plan 56 sections 5.14, 5.24, 5.25: the rows of the browser test in the harness."""
+    for tree in _AGENT_PATHS:
+        impl = "\n".join(_agent_body(tree, "implementor"))
+        red = impl.split("5a. **Browser test red.**", 1)[1].split("\n6. ", 1)[0]
+        for row in (
+            "Run it when `browser_test` ends in `red` and `E2E` is not `none`: "
+            "run `<PLAN_TOOL> red <PLAN_PATH> <N>`.",
+            "  - browser test red: ok` for `red: red`",
+            "  - browser test red: did not run` for `red: red (did not run)`",
+            "  - browser test: not run - <reason>` for `red: not run: <reason>`",
+            "Exit 1 halts with `the browser test passed before the change`.",
+        ):
+            assert row in red, (tree, row)
+        assert (
+            "In a step with a **Browser test** line, it halts with "
+            "`the browser test was edited`."
+        ) in impl, tree
+        green = impl.split("7a. **Browser test green.**", 1)[1].split("\n8. ", 1)[0]
+        for row in (
+            "Run this when `browser_test` ends in `green` and `E2E` is not `none`. "
+            "Never edit the test file in this step.",
+            "Check the path against `^[A-Za-z0-9._/-]+$`.",
+            "run `<E2E> --e2e '<path>' --out .whygraph/plans/<stem>/e2e/<N>`",
+            "log `  - browser test green: ok`",
+            "A path that does not match logs `  - browser test: not run - invalid path`.",
+            "  - browser test green: failed - <last line>` and go on. "
+            "This never halts the step.",
+        ):
+            assert row in green, (tree, row)
+        accept = impl.split("2a. **A browser test item.**", 1)[1].split("\n3. ", 1)[0]
+        for row in (
+            "For a Check of `e2e: <path>`, `accept` prints `accept: e2e <path>` and "
+            "runs nothing, so its exit decides nothing.",
+            "Exit 0 passes, 2 is `fail 2` and 5 is `fail 5`.",
+            "  - Acceptance <i>: browser test not run - <reason>`",
+            "The item then counts as `not literal`.",
+            "- Browser test evidence: .whygraph/plans/<stem>/e2e/acceptance/shots "
+            "(<n> images)",
+        ):
+            assert row in accept, (tree, row)
+    # The two skills: the trust root, the e2e Acceptance item and two stop rows.
+    trust = (
+        "Pass the `trust:` value that `begin` printed to `end` as `--trust <hash>`. "
+        "This `<hash>` is not the hash of Step 3a."
+    )
+    for tree, rel in _IMPLEMENT_ENTRY.items():
+        text = _text(rel)
+        if tree in ("claude-code", "cursor"):
+            assert trust in text, tree
+            assert "Keep the hash of the second, `trust: <hash>`, for `end`." in text
+            assert "Print each `outside Files:` and `trust:` line it prints." in text
+            assert "- Exit 0 with the line `accept: e2e <path>`: `accept` ran" in text
+            assert "Exit 5 is `fail 5`: a hung test fails." in text
+            assert (
+                "print `Browser test evidence: .whygraph/plans/<stem>/e2e/acceptance"
+                "/shots (<n> images)`"
+            ) in text, tree
+            assert "| `the browser test passed before the change` |" in text, tree
+            assert "| `the browser test was edited` |" in text, tree
+        else:
+            assert "--trust" not in text, tree
+            assert "the browser test was edited" not in text, tree
+        assert "--no-e2e" in text, tree

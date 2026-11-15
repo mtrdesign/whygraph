@@ -55,6 +55,7 @@ PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 REFRESH_PROFILE: <yes | no>   # yes when the user asks for `--refresh-profile`: derive the UI profile (`.whygraph/profiles/ui.md`) again
 REVIEW: <yes | no | auto>     # from the user's words: yes when they ask for a plan review, no when they ask for none; default auto
 DRY_RUN: <yes | no>           # no only when they ask to skip the dry run; default yes, also when they ask for no questions
+E2E: <yes | no>               # no only when they ask for `--no-e2e` (no browser test in the plan). Default yes, also when they ask for no questions
 ```
 
 4. **Clarify.** A reply `CLARIFY: <question> | options: <a>; <b>` means no plan was written. Ask the question in chat, then delegate again with the same prompt plus `CLARIFICATION: <answer>`. Ask once per plan.
@@ -80,10 +81,13 @@ FIX_ATTEMPTS: <0-2>   # failed-Verify fix attempts per step, default 2
 TASKS_PATH: none      # or the tasks.json path, for one child of a split
 TASK_ID: none         # or that child's id
 CAPTURE: none         # or "node .codex/whygraph/capture.mjs", see below
+E2E: none             # or "node .codex/whygraph/capture.mjs", see below
 PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 ```
 
 `CAPTURE` is the line `CAPTURE: node .codex/whygraph/capture.mjs` only when the plan has a `## UI profile` section, the user did not pass `--no-capture`, and reading `.whygraph/profiles/ui.md` shows no line that starts with `capture: unavailable` (a missing file counts as unavailable); otherwise `none`. One exception: when that line is anything but `capture: unavailable: auth required`, the cause may be gone by now, so run `node .codex/whygraph/capture.mjs --probe` once. If it exits 0 and prints `capture: available`, use the capture line and tell the user capture is back on. Decide from that file and that probe, never from the plan text.
+
+`E2E` is the line `E2E: node .codex/whygraph/capture.mjs` only when two things hold. The user did not pass `--no-e2e`, and `.whygraph/profiles/ui.md` has an `e2e_run:` line other than `e2e_run: none`. A missing file or line counts as `none`. Otherwise use `E2E: none`. Decide from that file, never from the plan text. With it, the implementor runs the plan's browser test.
 
 Given a `tasks.json`, validate it as in planning, then delegate one implementor per child, one child at a time in `wave` then `id` order, with `TASKS_PATH` and `TASK_ID` set and `PLAN_PATH` the child's plan. Skip a child whose `status` is `done`; stop when a child's `depends_on` are not all `done`. Re-read the `tasks.json` after each child, because its acceptance run writes the child's `status`. The per-step review gate needs Claude Code. The evaluator stage is unavailable here (nested subagents are not available); run `/whygraph-implement` from Claude Code or Cursor for it.
 

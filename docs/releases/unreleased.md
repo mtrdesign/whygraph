@@ -5,6 +5,14 @@
 
 ## Changes
 
+- **A UI plan can carry a browser test, seen red before the feature exists.** When the project has
+  browser tests (profile key `e2e_run`), one step writes a test for the user's path and runs it red,
+  and the step that completes the path runs it green. Acceptance gets an `e2e:` item. The planner
+  first runs one existing browser test once, so a missing database, seed or login is a Blocker at plan
+  time. In Claude Code and Cursor, `begin` prints a `trust:` hash and `end --trust` stops a later step
+  that changed an earlier step's record. VS Code and Codex have no such check. Pass `--no-e2e` to
+  either command to skip it. Run **Settings > Update agent files** to pick it up, and see
+  [End-to-end tests](../guide/planning.md#end-to-end-tests).
 - **A Test first test is seen red, and cannot be edited to pass.** `plan-tool.sh red` runs the
   test before the change and writes `steps/<N>.red`. `verify` and `end` compare the test with a copy
   and stop on an edit, with the first line `verify: test first edited`. `proof` takes the class of

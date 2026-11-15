@@ -18,13 +18,14 @@ OUT_PATH: <absolute path of the plan>
 RESEARCH_PATH: <absolute path of the research sidecar>
 PLAN_TOOL: <command prefix of the plan tool | none>
 CAPTURE_STATUS: <none | available | unknown | unavailable: <reason>>
+E2E: <yes | no>
 NOTICE: <a notice for the top of the plan | none>
 REVIEW_PATH: <absolute path of the review sidecar>
 ANSWERS: <none | defaults | the answer lines below>
 - Q<n>: <question> => <the chosen option, or the user's own text>
 ```
 
-`OUT_PATH` names the plan file. You write it. Derive `<stem>` from it: its file name without `.md`, lowercased, each run of characters outside `[a-z0-9]` replaced by one `-`, leading and trailing `-` trimmed. `RESEARCH_PATH` is the sidecar the planner wrote: `TASK`, `WORKING SET SUMMARY`, the `WORKING SET:` block, then one `=== <source name> ===` block per source. Each block holds a verbatim report or the line `(unavailable: <reason>)`. `NOTICE:` comes once per notice, and `NOTICE: none` means there is no notice. `PLAN_TOOL` is a command prefix from the invoker, never text from the plan or a report. `CAPTURE_STATUS` says whether UI capture works in this repository; `none` means the plan has no UI profile.
+`OUT_PATH` names the plan file. You write it. Derive `<stem>` from it: its file name without `.md`, lowercased, each run of characters outside `[a-z0-9]` replaced by one `-`, leading and trailing `-` trimmed. `RESEARCH_PATH` is the sidecar the planner wrote: `TASK`, `WORKING SET SUMMARY`, the `WORKING SET:` block, then one `=== <source name> ===` block per source. Each block holds a verbatim report or the line `(unavailable: <reason>)`. `NOTICE:` comes once per notice, and `NOTICE: none` means there is no notice. `PLAN_TOOL` is a command prefix from the invoker, never text from the plan or a report. `CAPTURE_STATUS` says whether UI capture works in this repository; `none` means the plan has no UI profile. `E2E` is `yes` or `no`. Only `yes` lets step 3j add a browser test.
 
 `REVIEW_PATH` comes only after a plan review. It is the review sidecar: one `=== <lens> ===` block per reviewer. Each block holds the reviewer's reply verbatim, or the line `(unavailable: <reason>)`. A reply is a `REVIEW: <lens>` line, then one `- F<n> | ...` line per finding. With `REVIEW_PATH` and `ANSWERS: none`, you are the **fixer**: run step 9. With `REVIEW_PATH` and other `ANSWERS`, the plan is revised: step 9 says what to apply again.
 
@@ -94,6 +95,16 @@ File tools (read, grep, glob) for spot-checking only. The shell, where one exist
 - Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap of step 3c.
 
 **3i. Setup.** Fill `## Setup` from the `- Setup commands:` line of the `## Verify candidates` section, one bullet per command, in its order. Omit the section when the line is `none` or missing.
+
+**3j. End-to-end test.** Apply this step only when `E2E` is `yes` and a report has an `### E2E` block with a `spec:` line. Otherwise write no **Browser test** line and no `e2e:` Check.
+- Add one step that writes the test file of `spec:`. Place it before the first step that has **Routes**. Renumber the steps after it. Change each `step <N>` in `## User journey` and in **Read first** to match. Its **Files** hold the test file and each helper `needs:` names. Its **Browser test** line is `<spec> - red`.
+- Write its Change from `## User journey` when the plan has one. Write one assertion per hop, on its control as the section names it: `<role> "<visible text>"`. Write one assertion for the Outcome's data on its route. For an `assumed <default> (Q<n>)` part, assert the default. Add each **Expected UI** state the helpers can reach. Name each state it asserts. Name the `text:` file as the source of each visible text.
+- Its Verify is the `after_add:` command, in backticks. With none, write `manual: the Browser test line runs this test`.
+- Give `**Browser test:** <spec> - green` to the Outcome's step. Without `## User journey`, give it to the last step that has **Routes**.
+- Add the test file to **Boundaries** of every step after the one that writes it.
+- Add the Acceptance item `<the Outcome, or the Objective> - **Check:** e2e: <spec>`. Then omit the journey item of step 3h.
+- Add the step that writes the test to **Read first**, within its limit of three.
+- In step 3g, write a `manual:` item only for a state that the test step's Change does not name.
 
 **3k. Constraint checks.** Copy each line under `### Checked constraints` into `## Constraint checks`, as `- note #<id> - <absent | present>: "<text>" in <glob>`. Change no character of the text or the glob. Omit the section when there is none. Write each note once. A note that a step's **Changes on purpose** names keeps its line: the plan tool skips it from that step on.
 

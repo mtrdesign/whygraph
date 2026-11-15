@@ -5,7 +5,7 @@ requires:
 tools: read, codegraph_search
 section: UI profile
 enabled: true
-budget: 26
+budget: 33
 consent: false
 ---
 
@@ -20,6 +20,10 @@ consent: false
    - `fixture`: a demo or fixture command, else `none`.
    - `auth`: `none`, or `required` when a login route guards the root.
    - `tests`: the browser test runner and its directory, else `none`.
+   - `e2e_run`: the command that runs one browser test file, without the file, such as `npx cypress run --spec`. Else `none`.
+   - `e2e_dir`: the directory of those test files.
+   - `e2e_shots`: the directory where the runner writes screenshots, else `none`.
+   - `e2e_start` and `e2e_base_url`: the start command and the base URL the browser tests need, when they differ from `start` and `base_url`. Else `none`.
    - `wait_for`: a root selector when it is obvious, else `none`.
    - `ignore_console` and `ignore_requests`: known dev noise for the framework found, such as Vite's HMR socket.
    - `derived_from`: the files you read.
@@ -42,6 +46,14 @@ consent: false
    - Find the guard of each route: the role or the login it needs.
    - Write `unknown` only after a grep for the route and the control's text finds nothing. Never guess a control or a landing.
 
+7. When `e2e_run` is not `none`, plan the browser test of this task. Use at most seven reads.
+   - Name the new test file, under `e2e_dir`, in the naming of its neighbours.
+   - Find the login helper and the data helpers the existing tests use. Report each with its `path:line`.
+   - Name the data this task needs that no helper creates.
+   - Find a command the repo runs after a test file is added, if there is one.
+   - Find the file the visible text comes from, such as a translation file.
+   - Name one existing browser test file that uses the login helper, if there is one.
+
 Report in this order:
 
 - `## UI profile` with the key lines from step 2. Leave out `fingerprint`, `generated` and `capture`, because the planner owns them.
@@ -52,6 +64,15 @@ Report in this order:
   - `entry:` the route, the control, the control's file, then `exists <path:line>`, `new` or `unknown`.
   - `hop:` one line per hop: the from-route, the action and its control, the control's file and the to-route. End it with `exists <path:line>`, `new` or `unknown`.
   - `outcome:`, `leaves early:` and `waits:`, each with its text or `unknown`.
+- `### E2E`, with these lines:
+  - `spec:` the new test file.
+  - `login:` the login helper, with its `path:line`.
+  - `seed:` the data helpers, each with its `path:line`.
+  - `needs:` the data that no helper creates.
+  - `text:` the file the visible text comes from.
+  - `after_add:` the command the repo runs after a test file is added, else `none`.
+  - `smoke:` the existing test of the last bullet of step 7, else `none`.
+  - Without a runner, write the single line `none: <reason>`.
 - `### Conventions`
 - `## Limitations`
 

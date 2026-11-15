@@ -3,7 +3,7 @@ name: whygraph-researcher
 description: Researches one knowledge source for a WhyGraph plan. Spawned by whygraph-planner - do not invoke directly.
 tools: Read, Grep, Glob, ToolSearch, mcp__whygraph__*, mcp__codegraph__*
 disallowedTools: Agent
-maxTurns: 30
+maxTurns: 40
 model: sonnet
 ---
 

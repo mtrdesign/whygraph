@@ -656,6 +656,124 @@ def setup_generated_file(ws: Workspace) -> None:
     (root / "src" / "labels.generated.js").unlink(missing_ok=True)
 
 
+# Plan 56 Phase 4 (U12): a tiny app that the profile's ``start`` command runs, and
+# an ``e2e_run: node --test`` profile. The browser test fetches the page over HTTP,
+# so no browser is needed. The setup hook commits the app and writes the profile,
+# which the mini repo's ``.gitignore`` keeps out of the tree.
+U12_PORT = 18913
+U12_SERVER = f"""import {{ createServer }} from 'node:http'
+import {{ readFileSync }} from 'node:fs'
+
+createServer((req, res) => {{
+  res.setHeader('content-type', 'text/html')
+  res.end(readFileSync(new URL('./index.html', import.meta.url)))
+}}).listen({U12_PORT}, '127.0.0.1')
+"""
+U12_PAGE = "<!doctype html>\n<html><body><h1>Welcome</h1></body></html>\n"
+U12_PROFILE = f"""---
+fingerprint: none
+generated: 2026-11-15
+---
+frontend_paths: .
+stack: a static page
+theme: none
+base_url: http://127.0.0.1:{U12_PORT}/
+start: node app/server.mjs
+start_dir: .
+fixture: none
+auth: none
+tests: node built-in runner (`node --test`, e2e/)
+e2e_run: node --test
+e2e_dir: e2e
+e2e_shots: none
+"""
+
+
+def setup_e2e_app(ws: Workspace) -> None:
+    """Commit U12's greeting test, the tiny app and write its UI profile."""
+    setup_greet_test(ws)
+    app = ws.dir / "app"
+    app.mkdir(exist_ok=True)
+    (app / "server.mjs").write_text(U12_SERVER, encoding="utf-8")
+    (app / "index.html").write_text(U12_PAGE, encoding="utf-8")
+    (ws.dir / "e2e").mkdir(exist_ok=True)
+    (ws.dir / "e2e" / ".gitkeep").write_text("", encoding="utf-8")
+    _commit(ws, "eval: the page and its server")
+    profiles = ws.dir / ".whygraph" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "ui.md").write_text(U12_PROFILE, encoding="utf-8")
+
+
+# P16: ui-demo with a text source file, an existing browser test and the e2e keys
+# of its profile. The hook edits ``.whygraph/profiles/ui.md`` in place (the file is
+# ignored, so ``git clean`` leaves it): it keeps a copy at ``ui.md.eval-backup``.
+P16_TEXT = (
+    "export const text = {\n"
+    "  title: 'Items',\n"
+    "  loading: 'Loading',\n"
+    "  add: 'Add item',\n"
+    "}\n"
+)
+P16_TEST = """import test from 'node:test'
+import assert from 'node:assert/strict'
+
+test('the list page loads', async () => {
+  const res = await fetch('http://127.0.0.1:5195/')
+  assert.equal(res.status, 200)
+})
+"""
+P16_KEYS = {
+    "e2e_run": "node --test",
+    "e2e_dir": "e2e",
+    "e2e_shots": "none",
+    "e2e_start": "none",
+    "e2e_base_url": "none",
+}
+P16_REPLACEMENTS = (
+    ("<h1>Items</h1>", "<h1>{text.title}</h1>"),
+    ("'Loading'", "text.loading"),
+    ("<button>Add item</button>", "<button>{text.add}</button>"),
+    (
+        "import { flags } from './flags.js'\n",
+        "import { flags } from './flags.js'\nimport { text } from './text.js'\n",
+    ),
+)
+
+
+def setup_e2e_profile(ws: Workspace) -> None:
+    """Add ui-demo's text file, an existing browser test and the profile's e2e keys.
+
+    Raises
+    ------
+    ValueError
+        When ``src/main.jsx`` does not hold a string the hook replaces.
+    """
+    root = ws.dir
+    main = root / "src" / "main.jsx"
+    source = main.read_text(encoding="utf-8")
+    for old, new in P16_REPLACEMENTS:
+        if old not in source:
+            raise ValueError(f"P16: src/main.jsx has no {old!r}")
+        source = source.replace(old, new, 1)
+    main.write_text(source, encoding="utf-8")
+    (root / "src" / "text.js").write_text(P16_TEXT, encoding="utf-8")
+    (root / "e2e").mkdir(exist_ok=True)
+    (root / "e2e" / "list.test.mjs").write_text(P16_TEST, encoding="utf-8")
+    profiles = root / ".whygraph" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    path = profiles / "ui.md"
+    if path.is_file():
+        backup = profiles / "ui.md.eval-backup"
+        if not backup.exists():
+            shutil.copy(path, backup)
+        lines = path.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = ["base_url: http://127.0.0.1:5195", "start: npm run dev", "auth: none"]
+    lines = [ln for ln in lines if ln.split(":", 1)[0] not in P16_KEYS]
+    lines += [f"{key}: {value}" for key, value in P16_KEYS.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def strip_substeps(text: str) -> str:
     """Delete the ``STRIPPED_SUBSTEPS`` items from an implementor's Phase 2.
 
@@ -731,6 +849,7 @@ PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
 REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
 PLAN_P14 = ".whygraph/plans/eval-p14.md"
+PLAN_P16 = ".whygraph/plans/eval-p16.md"
 REVIEW_P14 = ".whygraph/plans/eval-p14.review.md"
 
 # Plan 54's rationale benchmark (section 5.2). Two scratch repositories with
@@ -1006,6 +1125,24 @@ CASES: tuple[Case, ...] = (
             reaches_acceptance(),
             file_contains("mini/greet.py", "def greet"),
             record_ladder("u2", "reaches Acceptance, with or without a fix"),
+        ),
+    ),
+    Case(
+        id="U12",
+        name="browser test red then green",
+        prompts=(implement("u12", "--no-eval"),),
+        budget=2.5,
+        estimate=1.4,
+        plans=("u12.md",),
+        setup=setup_e2e_app,
+        checks=(
+            reaches_acceptance(),
+            plan_log_contains("u12", "browser test red: ok"),
+            plan_log_contains("u12", "browser test green: ok"),
+            plan_log_contains("u12", "- Acceptance: passed"),
+            file_contains(".whygraph/plans/u12/steps/1.red", "kind: browser"),
+            file_contains(".whygraph/plans/u12/steps/1.red", "result: red"),
+            step_diff_paths("u12", {2: {"app/index.html"}}),
         ),
     ),
     Case(
@@ -1429,6 +1566,37 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="P16",
+        name="plan with a browser test",
+        prompts=(
+            f"/whygraph-plan {EMPTY_STATE_TASK} --deep --no-questions --no-review "
+            f"--out {PLAN_P16}",
+        ),
+        budget=3.5,
+        estimate=2.5,
+        setup=setup_e2e_profile,
+        checks=(
+            plan_note(
+                PLAN_P16,
+                r"(?m)^ +- \*\*Browser test:\*\* \S+ - red[ \t]*$",
+                "one red Browser test line",
+            ),
+            plan_note(
+                PLAN_P16,
+                r"(?m)^ +- \*\*Browser test:\*\* \S+ - green[ \t]*$",
+                "one green Browser test line",
+            ),
+            plan_note(PLAN_P16, r"\*\*Check:\*\* e2e: \S+", "an e2e: Check"),
+            plan_note(
+                PLAN_P16,
+                r"(?m)^   - \*\*Change:\*\*[^\n]*src/text\.js[^\n]*\n"
+                r"(?:   - [^\n]*\n)*?   - \*\*Browser test:\*\* \S+ - red",
+                "the red step's Change names src/text.js",
+            ),
+            plan_tool_check("eval-p16"),
+        ),
+    ),
+    Case(
         id="P20",
         name="journey in a deep plan",
         prompts=(
@@ -1600,7 +1768,30 @@ def validate() -> list[str]:
     problems.extend(_probe_problems())
     problems.extend(_review_fixture_problems())
     problems.extend(_u17_fixture_problems())
+    problems.extend(_u12_fixture_problems())
     return problems
+
+
+def _u12_fixture_problems() -> list[str]:
+    """Check U12's plan: ``plan-tool.sh check`` exits 0 on it.
+
+    Returns
+    -------
+    list of str
+        One line per problem.
+    """
+    path = FIXTURES / "plans" / "u12.md"
+    if not path.is_file():
+        return ["U12: missing fixtures/plans/u12.md"]
+    out = subprocess.run(
+        ["sh", str(PLAN_TOOL), "check", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        return [f"u12.md: plan-tool.sh check exit {out.returncode}"]
+    return []
 
 
 def _u17_fixture_problems() -> list[str]:

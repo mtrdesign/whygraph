@@ -751,6 +751,20 @@ def plan_note(rel_path: str, pattern: str, label: str) -> Check:
     return Check(label, fn)
 
 
+def plan_lacks(rel_path: str, pattern: str, label: str) -> Check:
+    """Pass when a plan file exists and does not match a regular expression."""
+
+    def fn(ctx: Context) -> Outcome:
+        if not (ctx.workdir / rel_path).exists():
+            return False, f"{rel_path} is missing"
+        found = (
+            re.search(pattern, _text(ctx.workdir / rel_path), re.IGNORECASE) is not None
+        )
+        return not found, f"plan {'has' if found else 'lacks'} {label}"
+
+    return Check(f"no {label}", fn)
+
+
 def tool_called(pattern: str, label: str) -> Check:
     """Pass when any transcript holds a tool call whose bare name matches."""
 
@@ -1708,11 +1722,21 @@ class Seeded:
     at : tuple of (str, tuple of int)
         Path suffixes, each with the lines the evidence may name. A range in
         the evidence counts when it holds one of them.
+    plan : bool
+        Also accept a finding whose location is ``plan`` (a journey finding may
+        use it); its evidence must still be at a seeded line.
+    severity : str or None
+        The severity the finding must have, or ``None`` for any.
+    text : str or None
+        A regular expression the finding's defect must match, or ``None``.
     """
 
     label: str
     steps: tuple[int, ...]
     at: tuple[tuple[str, tuple[int, ...]], ...]
+    plan: bool = False
+    severity: str | None = None
+    text: str | None = None
 
     def matched_by(self, finding: Finding) -> bool:
         """Return whether a finding names this defect's step and seeded line."""
@@ -1721,7 +1745,14 @@ class Seeded:
             if finding.where.startswith("step")
             else []
         )
-        if not any(int(n) in self.steps for n in named):
+        if not (
+            any(int(n) in self.steps for n in named)
+            or (self.plan and finding.where == "plan")
+        ):
+            return False
+        if self.severity is not None and finding.severity != self.severity:
+            return False
+        if self.text is not None and not re.search(self.text, finding.defect):
             return False
         return any(
             path.endswith(suffix) and any(start <= n <= end for n in lines)
@@ -1730,18 +1761,21 @@ class Seeded:
         )
 
 
-def review_findings(expected: tuple[Seeded, ...]) -> Check:
+def review_findings(expected: tuple[Seeded, ...], lens: str = "") -> Check:
     """Pass when the reviewer reports every seeded defect, each at its seeded line.
 
     Each seeded defect needs its own finding that names one of its steps and
     gives evidence at one of its lines. Other findings are listed, not failed.
+    With ``lens``, a reply whose ``REVIEW:`` line names another lens fails.
     """
 
     def fn(ctx: Context) -> Outcome:
         text, where = _review_reply(ctx)
-        lens, findings = parse_review(text)
-        if lens is None:
+        found_lens, findings = parse_review(text)
+        if found_lens is None:
             return False, f"no REVIEW line in the {where}"
+        if lens and found_lens != lens:
+            return False, f"REVIEW lens is {found_lens}, not {lens}"
         used: set[int] = set()
         parts, missed = [], 0
         for seed in expected:
@@ -1760,6 +1794,56 @@ def review_findings(expected: tuple[Seeded, ...]) -> Check:
         return not missed, "; ".join(parts)
 
     return Check(f"reviewer finds {len(expected)} seeded defects", fn)
+
+
+def reviewer_read(path_text: str) -> Check:
+    """Pass when a plan reviewer transcript holds a ``Read`` call on a path."""
+
+    def fn(ctx: Context) -> Outcome:
+        calls = [
+            u
+            for t in ctx.of_type("whygraph-plan-reviewer")
+            for u in t.tool_uses()
+            if u.name == "Read" and path_text in str(u.input.get("file_path", ""))
+        ]
+        return bool(calls), f"{len(calls)} Read call(s) on {path_text}"
+
+    return Check(f"plan reviewer read {path_text}", fn)
+
+
+def review_fully_checked() -> Check:
+    """Pass when the reviewer's reply has no ``- not checked:`` line."""
+
+    def fn(ctx: Context) -> Outcome:
+        text, where = _review_reply(ctx)
+        lines = [
+            line.strip()
+            for line in text.splitlines()
+            if re.match(r"^\s*-\s*not checked:", line, re.IGNORECASE)
+        ]
+        return not lines, f"{len(lines)} not-checked line(s) in the {where}: {lines}"
+
+    return Check("review has no not-checked line", fn)
+
+
+def review_shoulds_by_check() -> Check:
+    """Record the reviewer's ``should`` findings grouped by their check name.
+
+    A finding starts its defect with the check name and a colon, such as
+    ``Hops:``. Never fails: the groups are the false-positive figure per check.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text, _where = _review_reply(ctx)
+        _lens, findings = parse_review(text)
+        groups: dict[str, int] = {}
+        for finding in findings:
+            if finding.severity == "should":
+                name = finding.defect.split(":", 1)[0].strip() or "unnamed"
+                groups[name] = groups.get(name, 0) + 1
+        return True, f"should findings by check: {groups}"
+
+    return Check("should findings by check", fn, record=True)
 
 
 def review_blocker_count(maximum: int) -> Check:

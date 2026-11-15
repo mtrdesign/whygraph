@@ -530,6 +530,10 @@ BEGIN {
     QUOTED_FIELD["Constraints to preserve"] = 1
     QUOTED_FIELD["Risks"] = 1
     QUOTED_FIELD["Changes on purpose"] = 1
+    JOURNEY_LABEL_COUNT = split("Actor,Entry,Hops,Outcome,Leaves early,Waits", JOURNEY_LABEL, ",")
+    for (i = 1; i <= JOURNEY_LABEL_COUNT; i++)
+        KNOWN_JOURNEY_LABEL[JOURNEY_LABEL[i]] = 1
+    LEAVES_COUNT = split("Refresh,Back,Cancel,Direct link", LEAVES, ",")
 
     section = ""
     field = ""
@@ -621,9 +625,11 @@ function check_field(name, value, at,    n, words, word, i) {
         n = spans_of(value)
         if (n <= 0)
             finding(at, "Routes has no backticked path")
-        for (i = 1; i <= n; i++)
+        for (i = 1; i <= n; i++) {
+            STEP_ROUTE[step_no, SPAN[i]] = 1
             if (SPAN[i] !~ ROUTE_RE)
                 finding(at, "Routes path fails the route pattern: " SPAN[i])
+        }
     } else if (name == "Change" || name == "Expected UI") {
         ste_feed(value, at)
     }
@@ -635,6 +641,7 @@ function on_step_line(s,    name, value) {
         in_step = 1
         step_at = NR
         step_no = substr(s, 1, index(s, ".") - 1)
+        STEP_SEEN[step_no] = 1
         split("", seen)
         return
     }
@@ -712,6 +719,195 @@ function on_question_line(s,    at) {
     }
 }
 
+# The "## User journey" checks. The section comes before "## Steps" and
+# "## Open questions", so the scan keeps each step citation, hop and (Q<n>)
+# with its line number, and journey_end compares them after the last step.
+# A hop line reads "- H<n>: `<from>` - <action> - `<to>` [(<state>)] - <step
+# N | exists path:LN | owned by tN>": its first two backticked spans are its
+# routes, and its step is the last "step N" after them. The Entry route is the
+# first span of its line, and the Outcome route the last span of its line.
+# A bare unknown is the lowercase word unknown on a line of the section,
+# outside backticked spans and double-quoted text. An assumed part reads
+# "assumed <default> (Q<n>)", which never holds that word.
+
+# The text after the n-th backtick of s, or "" when s has fewer.
+function after_ticks(s, n,    at) {
+    for (; n > 0; n--) {
+        at = index(s, "`")
+        if (at == 0)
+            return ""
+        s = substr(s, at + 1)
+    }
+    return s
+}
+
+# The number of the last "step <N>" in s, or "".
+function last_step(s,    number) {
+    number = ""
+    s = " " s
+    while (match(s, /[^A-Za-z][Ss]tep [0-9]+/)) {
+        number = substr(s, RSTART + 6, RLENGTH - 6)
+        s = substr(s, RSTART + RLENGTH)
+    }
+    return number
+}
+
+function journey_route(span, at) {
+    if (span !~ ROUTE_RE)
+        finding(at, "User journey route fails the route pattern: " span)
+}
+
+# Whether token is a relative path:line with no ".." part that does not
+# start with "-".
+function safe_path_line(token,    path, number, n, parts, i) {
+    path = token
+    sub(/:[^:]*$/, "", path)
+    number = token
+    sub(/^.*:/, "", number)
+    if (path == "" || number !~ /^[0-9]+$/)
+        return 0
+    if (substr(path, 1, 1) == "/" || substr(path, 1, 1) == "-")
+        return 0
+    n = split(path, parts, "/")
+    for (i = 1; i <= n; i++)
+        if (parts[i] == "..")
+            return 0
+    return 1
+}
+
+function on_journey_line(s,    label, value, count, name, text, at, token) {
+    if (s ~ /^[ \t]*-[ \t]+\*\*[A-Z][A-Za-z ]*:\*\*/) {
+        label = s
+        sub(/^[ \t]*-[ \t]+\*\*/, "", label)
+        sub(/:\*\*.*$/, "", label)
+        value = s
+        sub(/^[ \t]*-[ \t]+\*\*[^:]*:\*\*/, "", value)
+        journey_label = label
+        if (label in JOURNEY_LABEL_AT) {
+            if (label in KNOWN_JOURNEY_LABEL)
+                finding(NR, "User journey has more than one " label)
+        } else {
+            JOURNEY_LABEL_AT[label] = NR
+            if (label == "Leaves early") {
+                journey_leaves = value
+            } else if (label == "Entry" || label == "Outcome") {
+                count = spans_of(value)
+                if (count <= 0) {
+                    finding(NR, "User journey " label " has no route")
+                } else if (label == "Entry") {
+                    journey_entry = SPAN[1]
+                    journey_route(journey_entry, NR)
+                } else {
+                    journey_outcome = SPAN[count]
+                    journey_route(journey_outcome, NR)
+                }
+            }
+        }
+    } else if (s ~ /^[ \t]*-[ \t]+H[0-9]+:/) {
+        journey_label = "H"
+        name = s
+        sub(/^[ \t]*-[ \t]+/, "", name)
+        name = substr(name, 1, index(name, ":") - 1)
+        HOP_AT[++hops] = NR
+        HOP_NAME[hops] = name
+        if (spans_of(s) < 2) {
+            finding(NR, "User journey hop " name " needs a from-route and a to-route")
+        } else {
+            HOP_OK[hops] = 1
+            HOP_FROM[hops] = SPAN[1]
+            HOP_TO[hops] = SPAN[2]
+            journey_route(SPAN[1], NR)
+            journey_route(SPAN[2], NR)
+            HOP_STEP[hops] = last_step(after_ticks(s, 4))
+        }
+    } else if (journey_label == "Leaves early") {
+        journey_leaves = journey_leaves " " s
+    }
+
+    text = " " s
+    while (match(text, /[^A-Za-z][Ss]tep [0-9]+/)) {
+        CITE_AT[++cites] = NR
+        CITE_STEP[cites] = substr(text, RSTART + 6, RLENGTH - 6)
+        text = substr(text, RSTART + RLENGTH)
+    }
+    text = s
+    while (match(text, /\(Q[0-9]+\)/)) {
+        QREF_AT[++qrefs] = NR
+        QREF_NO[qrefs] = substr(text, RSTART + 2, RLENGTH - 3)
+        text = substr(text, RSTART + RLENGTH)
+    }
+    text = s
+    while ((at = index(text, "exists ")) > 0) {
+        text = substr(text, at + 7)
+        token = text
+        sub(/^[ \t]+/, "", token)
+        sub(/[ \t].*$/, "", token)
+        gsub(/`/, "", token)
+        sub(/[.,;)]+$/, "", token)
+        if (index(token, ":") > 0 && !safe_path_line(token))
+            finding(NR, "User journey exists span is not a safe path:line: " token)
+    }
+    text = s
+    gsub(/`[^`]*`/, " ", text)
+    gsub(/"[^"]*"/, " ", text)
+    if ((" " text " ") ~ /[^A-Za-z0-9_]unknown[^A-Za-z0-9_]/)
+        finding(NR, "User journey has a bare unknown")
+}
+
+# The checks that need the whole plan, run in END after close_step.
+function journey_end(    i, k, from, number, exempt) {
+    if (!journey_at)
+        return
+    for (i = 1; i <= JOURNEY_LABEL_COUNT; i++)
+        if (!(JOURNEY_LABEL[i] in JOURNEY_LABEL_AT))
+            finding(journey_at, "User journey misses " JOURNEY_LABEL[i])
+    if (!hops)
+        finding(journey_at, "User journey has no hop")
+    if ("Leaves early" in JOURNEY_LABEL_AT)
+        for (i = 1; i <= LEAVES_COUNT; i++)
+            if (index(journey_leaves, LEAVES[i] ":") == 0)
+                finding(JOURNEY_LABEL_AT["Leaves early"], "User journey Leaves early misses " LEAVES[i])
+
+    # The chain. A hop without both routes breaks it, so the next is not compared.
+    from = journey_entry
+    for (k = 1; k <= hops; k++) {
+        if (!HOP_OK[k]) {
+            from = ""
+            continue
+        }
+        if (from != "" && HOP_FROM[k] != from)
+            finding(HOP_AT[k], "User journey hop " HOP_NAME[k] " starts at " HOP_FROM[k] ", not at " from)
+        from = HOP_TO[k]
+    }
+    if (hops && from != "" && journey_outcome != "" && journey_outcome != from)
+        finding(JOURNEY_LABEL_AT["Outcome"], "User journey Outcome is on " journey_outcome ", not on the last hop target " from)
+
+    for (k = 1; k <= cites; k++)
+        if (!(CITE_STEP[k] in STEP_SEEN))
+            finding(CITE_AT[k], "User journey names step " CITE_STEP[k] ", which is not among the step numbers")
+
+    # A hop target needs the Routes of its step, unless the user was there
+    # before: the Entry route or the from-route of an earlier hop.
+    for (k = 1; k <= hops; k++) {
+        number = HOP_STEP[k]
+        if (!HOP_OK[k] || number == "" || !(number in STEP_SEEN) || HOP_TO[k] !~ ROUTE_RE)
+            continue
+        exempt = (HOP_TO[k] == journey_entry)
+        for (i = 1; i < k; i++)
+            if (HOP_OK[i] && HOP_FROM[i] == HOP_TO[k])
+                exempt = 1
+        if (!exempt && !((number, HOP_TO[k]) in STEP_ROUTE))
+            finding(HOP_AT[k], "User journey hop " HOP_NAME[k] ": step " number " Routes lack " HOP_TO[k])
+    }
+
+    for (k = 1; k <= qrefs; k++)
+        if (!(QREF_NO[k] in QUESTION_SEEN))
+            finding(QREF_AT[k], "User journey names Q" QREF_NO[k] ", which no question section holds")
+
+    if (!journey_walk)
+        finding(acceptance_at ? acceptance_at : journey_at, "Acceptance has no walk of ## User journey")
+}
+
 {
     line = $0
     if (line ~ /^[ \t]*(```|~~~)/) {
@@ -741,6 +937,8 @@ function on_question_line(s,    at) {
         } else if (line ~ /^## Acceptance[ \t]*$/) {
             section = "acceptance"
             have["## Acceptance"] = 1
+            if (!acceptance_at)
+                acceptance_at = NR
         } else if (line ~ /^## Open questions/) {
             section = "questions"
         } else if (line ~ /^## Risks called out/) {
@@ -749,6 +947,21 @@ function on_question_line(s,    at) {
             have["## Confidence:"] = 1
         } else if (line ~ /^## Constraint checks[ \t]*$/) {
             section = "constraints"
+        } else if (line ~ /^## User journey[ \t]*$/) {
+            section = "journey"
+            if (!journey_at)
+                journey_at = NR
+        } else if (line ~ /^## Resolved decisions[ \t]*$/) {
+            section = "resolved"
+        }
+    } else if (section == "journey") {
+        on_journey_line(line)
+    } else if (section == "resolved") {
+        if (line ~ /^\|[ \t]*Q[0-9]+[ \t]*\|/) {
+            number = line
+            sub(/^\|[ \t]*Q/, "", number)
+            sub(/[^0-9].*$/, "", number)
+            QUESTION_SEEN[number] = 1
         }
     } else if (section == "constraints") {
         if (line ~ /[^ \t]/ && constraint_finding(constraint_of(line)) != "")
@@ -757,7 +970,14 @@ function on_question_line(s,    at) {
         on_step_line(line)
     } else if (section == "acceptance") {
         on_acceptance_line(line)
+        if (in_item && index(line, "walk the journey of ## User journey") > 0)
+            journey_walk = 1
     } else if (section == "questions") {
+        if (line ~ /^- \*\*Q[0-9]+\.\*\*/) {
+            number = substr(line, 6)
+            sub(/[^0-9].*$/, "", number)
+            QUESTION_SEEN[number] = 1
+        }
         on_question_line(line)
     }
 
@@ -779,6 +999,7 @@ END {
     close_step()
     close_item()
     close_question()
+    journey_end()
     for (i = 1; i <= STRUCTURE_COUNT; i++)
         if (!(STRUCTURE[i] in have))
             finding(1, "missing " STRUCTURE[i])

@@ -2437,20 +2437,35 @@ def test_plan_reviewer_reply_shape() -> None:
     for tree in _AGENT_PATHS:
         body = "\n".join(_agent_body(tree, "plan-reviewer"))
         for phrase in (
-            "LENS: <logic | ui>",
-            "REVIEW: <logic | ui>",
+            "LENS: <logic | ui | journey>",
+            "REVIEW: <logic | ui | journey>",
             "`REVIEW: <lens> none`",
             "`REVIEW: ui none`",
+            "`REVIEW: journey none`",
+            "Run check 8 last.",
+            "- In the logic lens without the `codegraph_*` tools, use grep and read "
+            "for checks 2-4. Skip its check 7. In the journey lens, use grep and "
+            "read for checks 1, 2 and 6.",
             finding,
             "Report at most 12 findings, blockers first.",
         ):
             assert phrase in body, (tree, phrase)
         shape = body.split("## Reply format", 1)[1].split("```", 2)[1]
-        assert shape.strip().splitlines() == ["REVIEW: <logic | ui>", finding], tree
+        assert shape.strip().splitlines() == [
+            "REVIEW: <logic | ui | journey>",
+            finding,
+        ], tree
         logic = body.split("## Lens logic", 1)[1].split("## Lens ui", 1)[0]
-        ui = body.split("## Lens ui", 1)[1].split("## Reply format", 1)[0]
+        ui = body.split("## Lens ui", 1)[1].split("## Lens journey", 1)[0]
+        journey = body.split("## Lens journey", 1)[1].split("## Reply format", 1)[0]
         assert re.findall(r"^(\d+)\. ", logic, re.M) == [str(i) for i in range(1, 10)]
         assert re.findall(r"^(\d+)\. ", ui, re.M) == [str(i) for i in range(1, 7)]
+        assert re.findall(r"^(\d+)\. ", journey, re.M) == [
+            str(i) for i in range(1, 9)
+        ], tree
+        assert (
+            "`logic` runs its nine checks, `ui` its six, `journey` its eight." in body
+        )
 
 
 def test_plan_amender_tools() -> None:
@@ -2530,8 +2545,17 @@ def test_plan_amender_reply_shape() -> None:
 
 
 _OPUS_OVERRIDE = (
-    "In Claude Code, set the Agent tool's model to opus for the logic lens."
+    "In Claude Code, set the Agent tool's model to opus for the logic lens "
+    "and the journey lens."
 )
+
+# Each tree names its own way to start a subagent in planner 2g item 1.
+_REVIEW_SPAWN = {
+    "claude-code": "spawn",
+    "cursor": "delegate to",
+    "vscode": "hand off to",
+    "codex": "hand off to",
+}
 
 
 def test_plan_review_fan_out() -> None:
@@ -2546,9 +2570,16 @@ def test_plan_review_fan_out() -> None:
             "`whygraph-plan-reviewer`",
             "`LENS: logic`",
             "`LENS: ui`",
+            "`LENS: journey`",
+            f"When the plan has a `## User journey` section, {_REVIEW_SPAWN[tree]} "
+            "a third one with `LENS: journey`.",
             "`.whygraph/plans/<stem>.review.md`",
             "one `=== <lens> ===` block per reviewer",
             "=== logic ===\n<the reply verbatim, or (unavailable: <reason>)>",
+            "=== ui ===\n<the reply verbatim, or (unavailable: <reason>)>\n\n"
+            "=== journey ===\n<the reply verbatim, or (unavailable: <reason>)>",
+            "Write the `ui` block only when a `ui` reviewer ran. "
+            "Write the `journey` block only when a `journey` reviewer ran.",
             "`(unavailable: no REVIEW line)`",
             "`REVIEW_PATH: <absolute path of the review sidecar>`",
             "`review: failed - <reason>`",
@@ -2577,8 +2608,19 @@ def test_plan_review_fan_in() -> None:
         body = "\n".join(_agent_body(tree, "synthesizer"))
         assert "REVIEW_PATH: <absolute path of the review sidecar>" in body, tree
         fixer = body.split("**9. Fix from the review.**", 1)[1].split("## Output", 1)[0]
-        rules = re.findall(r"^(\d+a?)\. ", fixer, re.M)
-        assert rules == ["1", "2", "3", "3a", "4", "5", "6", "7", "8"], tree
+        rules = re.findall(r"^(\d+[a-z]?)\. ", fixer, re.M)
+        assert rules == [
+            "1",
+            "2",
+            "3",
+            "3a",
+            "3b",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+        ], tree
         for phrase in (
             # Rule 3: only the named lines, never the fixed sections.
             "Apply a verified finding by changing only the lines it names.",
@@ -3050,6 +3092,18 @@ def test_ui_surface_body() -> None:
             assert phrase in text, (tree, phrase)
         researcher = "\n".join(_agent_body(tree, "researcher"))
         assert "PROFILE:" in researcher, tree
+        # Plan 52 step 1: the journey step, its triggers and the budget.
+        assert fm["budget"] == "26", tree
+        for phrase in (
+            "6. Trace the journey when one of these holds.",
+            "The task adds a route.",
+            "The task adds or changes an action that moves the user to another route.",
+            "The task adds a flow of two or more steps inside one route.",
+            "Use at most six tool calls.",
+            "marked `(new)`",
+            "- `### Journey`, only when step 6 ran, with these lines:",
+        ):
+            assert phrase in text, (tree, phrase)
 
 
 def test_implement_probes_again_before_trusting_a_cached_unavailable() -> None:
@@ -5047,3 +5101,146 @@ def test_overlay_append_tools_error_installs_the_base(tmp_path: Path) -> None:
             "bad tool a'b",
         )
     ]
+
+
+def _spine(tree: str) -> str:
+    return (_ASSET_ROOT / _SOURCE_DIRS[tree] / "plan-spine.md").read_text()
+
+
+# Plan 52 section 4.4: strings that 3h and the planner's single-pass bullet share.
+_JOURNEY_SHARED = (
+    "Write `assumed <default> (Q<n>)` for each part the block marks `unknown`.",
+    "- **Journey hop H<n>:** <defect> - **Resolution needed:** <fix>",
+    'Give each assumed part one Open question: "Where does the user '
+    '<start | land after <action>>?"',
+    'For another part, ask "What should <part> show?"',
+    "Mark the first journey question `Plan-shaping: yes` when the cap of 3 still "
+    "has room.",
+    "manual: walk the journey of ## User journey from Entry to Outcome",
+)
+
+
+def test_user_journey_contract() -> None:
+    """Plan 52: the `## User journey` contract, one slice per rollout step."""
+    for tree in _SOURCE_DIRS:
+        # Step 1: the spine.
+        spine = _spine(tree)
+        contents = next(ln for ln in spine.splitlines() if ln.startswith("Contents:"))
+        assert "Acceptance, User journey, Self-review checklist" in contents, tree
+        rules = spine.split("\n## User journey\n", 1)[1].split("\n## ", 1)[0]
+        assert (
+            "Write this section only when a source reported a `### Journey` block."
+            in rules
+        ), tree
+        assert (
+            "Never write a bare `unknown`. Write `assumed <default> (Q<n>)`" in rules
+        ), tree
+        assert "The default landing is the route where the hop started." in rules, tree
+        assert "By default, a busy control is disabled until the work ends." in rules, (
+            tree
+        )
+        fmt = spine.split("## Plan format", 1)[1]
+        assert "\n## User journey\n*(only when a source reported a journey" in fmt, tree
+        for label in ("**Actor:**", "**Entry:**", "**Hops:**", "**Outcome:**"):
+            assert f"- {label}" in fmt, (tree, label)
+        assert "- **Leaves early:** Refresh:" in fmt, tree
+        assert "Cancel: <what remains" in fmt, tree
+        assert "- **Waits:**" in fmt, tree
+        assert (
+            "- **Journey hop H<n>:** <defect> - **Resolution needed:** <fix>" in fmt
+        ), tree
+        assert (
+            "- [ ] A `## User journey` has no bare `unknown`, "
+            "and each `(Q<n>)` names a question."
+        ) in spine, tree
+        # Step 3: synthesizer 3h, step 9 rule 3b.
+        synth = "\n".join(_agent_body(tree, "synthesizer"))
+        assert synth.index("**3g. UI.**") < synth.index("**3h. User journey.**"), tree
+        assert synth.index("**3h. User journey.**") < synth.index(
+            "**3k. Constraint checks.**"
+        ), tree
+        step3h = synth.split("**3h. User journey.**", 1)[1].split("**3k.", 1)[0]
+        for shared in _JOURNEY_SHARED:
+            assert shared in step3h, (tree, shared)
+        assert "or step 3h" in synth.split("**Routes** and **Expected UI**", 1)[1][:120]
+        fixer = synth.split("**9. Fix from the review.**", 1)[1]
+        rule3b = fixer.split("\n3b. ", 1)[1].split("\n4. ", 1)[0]
+        for sentence in (
+            "A `journey` finding never adds a step and never adds a file to **Files**.",
+            "Apply it only when its fix changes a line of `## User journey` or an "
+            "**Expected UI** line.",
+            "Edit an **Expected UI** line only when that step's **Files** hold the "
+            "control's file.",
+            "Never apply a fix that changes a landing or the **Outcome**.",
+            "A verified journey `blocker` that this rule does not apply goes to "
+            "`## Blockers`, as rule 5 writes it.",
+            "A `should` whose fix changes a landing or the **Outcome** becomes an "
+            "Open question with `Plan-shaping: no`.",
+            "Its default is the plan as written.",
+            "Any other verified `journey` finding follows rule 4.",
+        ):
+            assert sentence in rule3b, (tree, sentence)
+        # Step 4: planner single-pass step 5, revise and 2c.
+        planner = "\n".join(_agent_body(tree, "planner"))
+        single = planner.split(
+            "When the `ui-surface` result has key lines under `## UI profile`, do these ",
+            1,
+        )[1].split("\n6. ", 1)[0]
+        assert single.startswith("five things,"), tree
+        head = (
+            "\n   - When the result has a `### Journey` block, write `## User journey` "
+            "in the spine's format from the block's lines:\n"
+        )
+        assert head in single, tree
+        journey = single.split(head, 1)[1]
+        # The journey bullet is the last bullet of step 5.
+        assert "\n   - " not in "\n" + journey, tree
+        for shared in _JOURNEY_SHARED:
+            assert shared in journey, (tree, shared)
+        assert (
+            "     - When `PARENT` is not `none`, read it once. Mark a hop "
+            "`owned by t<N>` when its file is in that child's `files_hint`."
+        ) in journey, tree
+        revise = planner.split("## Phase 3", 1)[1].split("## Output format", 1)[0]
+        assert (
+            "re-derive the steps from the plan's `## Working set` table and the "
+            "answers. Rewrite each assumed part of `## User journey` whose answer "
+            "is not its default. A journey answer may add a step or change one."
+        ) in revise, tree
+        assert (
+            "Key lines are the lines of `ui-surface` step 2 only. Never copy a "
+            "`### Journey` line. Copy every other key line in the report's order:"
+        ) in planner, tree
+
+
+def test_ui_profile_auth() -> None:
+    """Plan 52 section 4.9: the `Auth` key reaches the plan, one slice per step."""
+    for tree in _SOURCE_DIRS:
+        # Step 1: the spine and the source.
+        assert (
+            '**Browser tests:** <runner and path, or "none"> '
+            "\u00b7 **Auth:** <none | required>"
+        ) in _spine(tree), tree
+        source = (
+            _ASSET_ROOT / _SOURCE_DIRS[tree] / "sources" / "ui-surface.md"
+        ).read_text()
+        assert (
+            "Add dark when `theme` is not `none`. "
+            "Add no permission when `auth` is `required`."
+        ) in source, tree
+        # Step 2: reviewer check 2.
+        reviewer = "\n".join(_agent_body(tree, "plan-reviewer"))
+        check2 = reviewer.split("## Lens ui", 1)[1].split("\n3. ", 1)[0]
+        assert "`**Auth:** required`" in check2, tree
+        assert "`auth: required`" not in check2, tree
+        # Step 3: synthesizer 3g fill sentence.
+        synth = "\n".join(_agent_body(tree, "synthesizer"))
+        assert "`Browser tests` is `tests`, `Auth` is `auth`, else `none`," in synth, (
+            tree
+        )
+        # Step 4: planner single-pass fill sentence.
+        planner = "\n".join(_agent_body(tree, "planner"))
+        fill = planner.split("do these five things", 1)[1].split("\n   - ", 2)[1]
+        assert "`Browser tests` is `tests`, `Auth` is `auth`, else `none`," in fill, (
+            tree
+        )

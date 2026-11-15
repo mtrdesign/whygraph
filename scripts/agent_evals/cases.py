@@ -26,6 +26,8 @@ from pathlib import Path
 from checks import (
     LADDER_CAUSES,
     Check,
+    Context,
+    RunResult,
     Seeded,
     agent_model,
     agent_dispatched,
@@ -51,6 +53,7 @@ from checks import (
     note_revision_proposed,
     plan_log_contains,
     plan_growth,
+    plan_lacks,
     plan_note,
     plan_review_kept,
     hidden_test,
@@ -70,8 +73,11 @@ from checks import (
     resolved_decisions_has,
     review_blocker_count,
     review_findings,
+    review_fully_checked,
     review_keeps_fixed_text,
+    review_shoulds_by_check,
     reviewer_codegraph_node,
+    reviewer_read,
     sidecar_blocks_match_researchers,
     step_diff_paths,
     stop_block,
@@ -157,6 +163,8 @@ class Case:
     tools : tuple of str
         Tools allowed on top of ``run.ALLOWED_TOOLS``, for example ``Skill``
         so the benchmark's agent can run the ``pre-edit`` skill.
+    retry : bool
+        ``False`` stops ``run.py`` from retrying a failed case once.
     """
 
     id: str
@@ -174,6 +182,7 @@ class Case:
     assets: Callable[[Path], None] | None = None
     repo: str | None = None
     tools: tuple[str, ...] = ()
+    retry: bool = True
 
     @property
     def kind(self) -> str:
@@ -273,7 +282,7 @@ def plan_reviewer_prompt(
     stem : str
         The plan's stem under ``.whygraph/plans/``.
     lens : str
-        ``logic`` or ``ui``.
+        ``logic``, ``ui`` or ``journey``.
     model : str
         The Agent tool model, as planner 2g sets it (``opus`` for ``logic``).
     ui_profile : str
@@ -349,6 +358,40 @@ def copy_plan(fixture: str, stem: str) -> Callable[[Workspace], None]:
     return setup
 
 
+def journey_overlay(ws: Workspace) -> None:
+    """Copy ``fixtures/journey`` over the workspace: a router, two screens, a ``main.jsx``
+    and a ``vite.config.js`` whose mock keeps a posted item.
+
+    The overlay is a working-tree change; ``run.py`` removes it after the case.
+    """
+    shutil.copytree(FIXTURES / "journey", ws.dir, dirs_exist_ok=True)
+
+
+def journey_setup(fixture: str, stem: str) -> Callable[[Workspace], None]:
+    """Return a setup hook: the journey overlay, then ``copy_plan(fixture, stem)``."""
+    plan = copy_plan(fixture, stem)
+
+    def setup(ws: Workspace) -> None:
+        journey_overlay(ws)
+        plan(ws)
+
+    return setup
+
+
+def journey_line(name: str, label: str) -> tuple[int, ...]:
+    """Return the 1-based line of ``- **<label>:**`` or ``  - <label>:`` in a plan fixture.
+
+    Empty when the fixture or the label is missing; ``validate`` reports that.
+    """
+    path = FIXTURES / "plans" / name
+    if not path.is_file():
+        return ()
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if line.startswith(f"- **{label}:**") or line.startswith(f"  - {label}:"):
+            return (number,)
+    return ()
+
+
 def step_field_line(name: str, step: int, field_name: str) -> tuple[int, ...]:
     """Return the 1-based line of a step's ``**<field_name>:**`` in a plan fixture.
 
@@ -409,7 +452,69 @@ P9_SEEDS = (
         ),
     ),
 )
-REVIEW_FIXTURES = ("p9.md", "p10.md")
+REVIEW_FIXTURES = ("p9.md", "p10.md", "p12.md", "p13.md")
+
+# Plan 52's journey fixture: ``fixtures/journey`` overlays ui-demo, and p12.md
+# seeds three defects in the journey of p13.md's task.
+JOURNEY_FILES = (
+    "src/routes.jsx",
+    "src/Items.jsx",
+    "src/Settings.jsx",
+    "src/main.jsx",
+    "vite.config.js",
+)
+JOURNEY_PLAN = "eval-p12.md"
+JOURNEY_UI_PROFILE = (
+    "- **Start:** `npx vite --port 5173` → http://127.0.0.1:5173 · "
+    "**Fixture mode:** none · **Browser tests:** none · **Auth:** none\n"
+    "- **Stack:** React 19, Vite, no component library, no theme mechanism · "
+    "**Conventions:** none"
+)
+# The ``Add item`` button of src/Items.jsx, the Entry control of both plans.
+ITEMS_ADD_LINE = 8
+
+
+def _p12(*labels: str) -> tuple[int, ...]:
+    """Return the p12.md lines of the journey labels (``Entry``, ``H2``, ``Waits``)."""
+    return tuple(n for label in labels for n in journey_line("p12.md", label))
+
+
+P12_SEEDS = (
+    Seeded(
+        "H2 cites step 2, whose Files lack src/NewItem.jsx",
+        (2,),
+        ((JOURNEY_PLAN, _p12("H2") + step_field_line("p12.md", 2, "Files")),),
+        plan=True,
+        severity="blocker",
+        text=r"NewItem|Save",
+    ),
+    Seeded(
+        "Entry cites a link Import items that no file holds",
+        (1,),
+        (
+            (JOURNEY_PLAN, _p12("Entry")),
+            ("src/Items.jsx", (ITEMS_ADD_LINE,)),
+        ),
+        plan=True,
+        severity="blocker",
+        text=r"Import items",
+    ),
+    Seeded(
+        "Waits is none, but step 2 posts to /api/items",
+        (2,),
+        (
+            (
+                JOURNEY_PLAN,
+                _p12("Waits")
+                + step_field_line("p12.md", 2, "Change")
+                + step_field_line("p12.md", 2, "Expected UI"),
+            ),
+        ),
+        plan=True,
+        severity="should",
+        text=r"[Ww]ait|[Ss]aving|post",
+    ),
+)
 
 
 GREET_TEST = """import unittest
@@ -1071,6 +1176,61 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="P12",
+        name="journey review: seeded defects",
+        prompts=(
+            plan_reviewer_prompt(
+                "eval-p12", "journey", "opus", ui_profile=JOURNEY_UI_PROFILE
+            ),
+        ),
+        budget=2.0,
+        estimate=0.25,
+        setup=journey_setup("p12.md", "eval-p12"),
+        checks=(
+            review_findings(P12_SEEDS, lens="journey"),
+            agent_model("whygraph-plan-reviewer", "opus"),
+        ),
+    ),
+    Case(
+        id="P13",
+        name="journey review: clean plan",
+        prompts=(
+            plan_reviewer_prompt(
+                "eval-p13", "journey", "opus", ui_profile=JOURNEY_UI_PROFILE
+            ),
+        ),
+        budget=2.0,
+        estimate=0.25,
+        setup=journey_setup("p13.md", "eval-p13"),
+        checks=(
+            review_blocker_count(0),
+            agent_model("whygraph-plan-reviewer", "opus"),
+            reviewer_read("src/routes.jsx"),
+            review_fully_checked(),
+            review_shoulds_by_check(),
+        ),
+    ),
+    Case(
+        id="P20",
+        name="journey in a deep plan",
+        prompts=(
+            "/whygraph-plan add a page to create an item --deep --no-questions "
+            "--out .whygraph/plans/eval-p20.md",
+        ),
+        budget=6.0,
+        estimate=3.0,
+        setup=journey_overlay,
+        retry=False,
+        checks=(
+            plan_note(
+                ".whygraph/plans/eval-p20.md",
+                r"(?m)^## User journey[ \t]*$",
+                "user journey section",
+            ),
+            plan_tool_check("eval-p20"),
+        ),
+    ),
+    Case(
         id="P11",
         name="plan review in a deep plan",
         prompts=(),
@@ -1083,6 +1243,10 @@ CASES: tuple[Case, ...] = (
             plan_growth("eval-p2", 25),
             review_keeps_fixed_text("eval-p2"),
             plan_note(REVIEW_P2, r"(?m)^=== ui ===[ \t]*$", "review sidecar ui block"),
+            plan_lacks(PLAN_P2, r"(?m)^## User journey[ \t]*$", "user journey section"),
+            plan_lacks(
+                REVIEW_P2, r"(?m)^=== journey ===[ \t]*$", "journey review block"
+            ),
             record_review_cost(),
         ),
     ),
@@ -1261,7 +1425,7 @@ def _review_fixture_problems() -> list[str]:
     for name in REVIEW_FIXTURES:
         path = FIXTURES / "plans" / name
         if not path.is_file():
-            problems.append(f"P9/P10: missing fixtures/plans/{name}")
+            problems.append(f"P9/P10/P12/P13: missing fixtures/plans/{name}")
             continue
         out = subprocess.run(
             ["sh", str(PLAN_TOOL), "check", str(path)],
@@ -1277,6 +1441,96 @@ def _review_fixture_problems() -> list[str]:
         found = _p9(key)
         if not found or text not in lines[found[0] - 1]:
             problems.append(f"P9: step {step} {field_name} does not hold {text!r}")
+    problems.extend(_journey_fixture_problems())
+    return problems
+
+
+def _golden_journey_reply() -> str:
+    """Return a reply with one finding per P12 seed, at its seeded line."""
+    plan = f".whygraph/plans/{JOURNEY_PLAN}"
+    h2, files = _p12("H2")[0], step_field_line("p12.md", 2, "Files")[0]
+    entry, waits = _p12("Entry")[0], _p12("Waits")[0]
+    return "\n".join(
+        (
+            "REVIEW: journey",
+            f"- F1 | blocker | step 2 | Hops: step 2 lacks NewItem.jsx for Save "
+            f"| evidence: {plan}:{h2}, {plan}:{files} | fix: add the file",
+            f"- F2 | blocker | plan | Entry: no link Import items exists "
+            f"| evidence: {plan}:{entry}, src/Items.jsx:{ITEMS_ADD_LINE} "
+            "| fix: use the Add item button",
+            f"- F3 | should | step 2 | Waits: the post to /api/items shows nothing "
+            f"| evidence: {plan}:{waits} | fix: say what the user sees",
+        )
+    )
+
+
+def _decoy_journey_reply() -> str:
+    """Return a reply with seed 1 at a wrong line and seed 2 as a ``should``."""
+    plan = f".whygraph/plans/{JOURNEY_PLAN}"
+    waits = _p12("Waits")[0]
+    return "\n".join(
+        (
+            "REVIEW: journey",
+            f"- F1 | blocker | step 2 | Hops: step 2 lacks NewItem.jsx for Save "
+            f"| evidence: {plan}:1 | fix: add the file",
+            f"- F2 | should | plan | Entry: no link Import items exists "
+            f"| evidence: {plan}:{_p12('Entry')[0]} | fix: use the Add item button",
+            f"- F3 | should | step 2 | Waits: the post to /api/items shows nothing "
+            f"| evidence: {plan}:{waits} | fix: say what the user sees",
+        )
+    )
+
+
+def _journey_fixture_problems() -> list[str]:
+    """Check plan 52's journey fixture: files, P12's seeds, and P13's ``exists`` lines.
+
+    Returns
+    -------
+    list of str
+        One line per missing file, seed that is not a real defect, or
+        ``review_findings`` verdict that is wrong on the golden or decoy reply.
+    """
+    problems = []
+    tree = FIXTURES / "journey"
+    for rel in JOURNEY_FILES:
+        if not (tree / rel).is_file():
+            problems.append(f"P12/P13: missing fixtures/journey/{rel}")
+    if problems or not (FIXTURES / "plans" / "p12.md").is_file():
+        return problems
+    items = (tree / "src" / "Items.jsx").read_text(encoding="utf-8").splitlines()
+    if len(items) < ITEMS_ADD_LINE or "Add item" not in items[ITEMS_ADD_LINE - 1]:
+        problems.append(
+            f"P12: src/Items.jsx:{ITEMS_ADD_LINE} is not the Add item button"
+        )
+    if any("Import items" in p.read_text("utf-8") for p in tree.rglob("*.jsx")):
+        problems.append("P12: a fixtures/journey file holds Import items")
+    p12 = (FIXTURES / "plans" / "p12.md").read_text(encoding="utf-8").splitlines()
+    for label, text in (("Entry", "Import items"), ("H2", "Save"), ("Waits", "none")):
+        found = _p12(label)
+        if not found or text not in p12[found[0] - 1]:
+            problems.append(f"P12: the {label} line does not hold {text!r}")
+    files = step_field_line("p12.md", 2, "Files")
+    if not files or "src/NewItem.jsx" in p12[files[0] - 1]:
+        problems.append("P12: step 2 Files must lack src/NewItem.jsx")
+    for label, reply, want in (
+        ("golden", _golden_journey_reply(), True),
+        ("decoy", _decoy_journey_reply(), False),
+    ):
+        ctx = Context(workdir=Path("."), runs=[RunResult(prompt="", reply=reply)])
+        ok = review_findings(P12_SEEDS, lens="journey").run(ctx)[0]
+        if ok != want:
+            problems.append(f"P12: the {label} reply {'fails' if want else 'passes'}")
+    p13 = FIXTURES / "plans" / "p13.md"
+    if p13.is_file():
+        for rel, number in re.findall(
+            r"exists ([^\s:]+):(\d+)", p13.read_text("utf-8")
+        ):
+            path = tree / rel
+            lines = path.read_text("utf-8").splitlines() if path.is_file() else []
+            if int(number) > len(lines) or not lines[int(number) - 1].strip():
+                problems.append(
+                    f"P13: exists {rel}:{number} is not a line of the fixture"
+                )
     return problems
 
 

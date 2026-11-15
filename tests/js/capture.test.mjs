@@ -327,7 +327,11 @@ function runE2e(root, env = {}) {
   return new Promise((done) => {
     const child = spawn(process.execPath, [SCRIPT, '--e2e', 'e2e/a.test.mjs', '--out', 'out'], {
       cwd: root,
-      env: { ...process.env, ...env },
+      // The outer test runner's context would make the inner node --test
+      // report to it instead of setting its own exit code.
+      env: Object.fromEntries(
+        Object.entries({ ...process.env, ...env }).filter(([k]) => k !== 'NODE_TEST_CONTEXT'),
+      ),
     });
     let stdout = '';
     let stderr = '';

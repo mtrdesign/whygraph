@@ -7,7 +7,7 @@
 #   check <plan>                lint a plan; 0 clean, 1 findings
 #   verify <plan> <N>           run step N's literal Verify and record it
 #   begin <plan> <N>            start step N; print its start tree
-#   end <plan> <N> <t0> [<blob>]
+#   end <plan> <N> <t0> [<blob>] [--trust <hash>]
 #                               run step N's Verify; write its end tree and diff
 #   pass <plan> <N>             mark step N done (after the command's gates)
 #   next <plan>                 print the first step not done, or "done"
@@ -43,6 +43,8 @@
 #   red <plan> <N> [again] [<blob>]
 #                               run step N's Test first red, before the
 #                               change; record it in steps/<N>.red
+#   smoke <out path> <test file>
+#                               run one existing browser test at plan time
 #
 # Usage errors exit 64 (EX_USAGE). The plan's files live in
 # .whygraph/plans/<stem>/steps/. A subcommand that takes a plan exits 77 when
@@ -150,6 +152,17 @@
 # shallower line than it opens gets a shorter block: the guard can miss an
 # edit there, and never reports a false one.
 #
+# A red Browser test line makes red run the capture script's --e2e mode on
+# that file instead of the Verify; its record has "kind: browser" and the
+# guard compares the whole file. smoke runs one existing browser test once
+# at plan time, writes steps/smoke and prints "smoke: pass", "smoke: fail:
+# <last line>", "smoke: timeout" or "smoke: not available: <reason>".
+# begin also prints "trust: <hash>" and writes steps/<N>.trust: the hash of
+# the plan tool's directory, the capture script, the UI profile and saved
+# login, and the red records and snapshots of every earlier step. end with
+# --trust <hash> exits 65 when that hash changed, and names the paths when
+# steps/<N>.trust still hashes to the passed value.
+#
 # Every bounded job gets npm_config_yes=false, and its process group is
 # killed after it exits. A setup or dryrun job also loses *_API_KEY,
 # AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, CLAUDE_CODE_OAUTH_TOKEN and
@@ -181,7 +194,7 @@ usage: plan-tool.sh snapshot
        plan-tool.sh check <plan>
        plan-tool.sh verify <plan> <N>
        plan-tool.sh begin <plan> <N>
-       plan-tool.sh end <plan> <N> <t0> [<blob>]
+       plan-tool.sh end <plan> <N> <t0> [<blob>] [--trust <hash>]
        plan-tool.sh pass <plan> <N>
        plan-tool.sh next <plan>
        plan-tool.sh changed <before> <after>
@@ -204,6 +217,7 @@ usage: plan-tool.sh snapshot
        plan-tool.sh ready <plan> [<blob>]
        plan-tool.sh dryrun <plan>
        plan-tool.sh red <plan> <N> [again] [<blob>]
+       plan-tool.sh smoke <out path> <test file>
 EOF
     exit 64
 }
@@ -330,6 +344,10 @@ in_items && /^[0-9]+\. / {
 in_items && in_block {
     at = index($0, "**Check:**")
     if (at > 0) {
+        if (RAW == "raw") {
+            print substr($0, at + 10)
+            exit
+        }
         count = literal_spans(substr($0, at + 10))
         # A span that starts with "manual:" is never a command.
         if (count > 0 && index(SPAN[1], "manual:") == 1)
@@ -601,6 +619,7 @@ BEGIN {
     KNOWN_FIELD["Routes"] = 1
     KNOWN_FIELD["Expected UI"] = 1
     KNOWN_FIELD["Changes on purpose"] = 1
+    KNOWN_FIELD["Browser test"] = 1
     n = split("haiku,sonnet,opus,fable", words, ",")
     for (i = 1; i <= n; i++)
         MODEL[words[i]] = 1
@@ -719,7 +738,11 @@ function close_step(    i) {
         for (i = 1; i <= REQUIRED_COUNT; i++)
             if (!(REQUIRED[i] in seen))
                 finding(step_at, "step " step_no ": missing " REQUIRED[i])
+        if (step_browser_red && step_test_first)
+            finding(step_at, "Browser test red and Test first on one step")
     }
+    step_browser_red = 0
+    step_test_first = 0
     in_step = 0
     field = ""
 }
@@ -742,8 +765,39 @@ function close_question() {
     in_question = 0
 }
 
+# The Browser test line: "<path> - red" or "<path> - green" (plan 56 5.11).
+function check_browser_test(value, at,    path, kind) {
+    sub(/^[ \t]+/, "", value)
+    sub(/[ \t]+$/, "", value)
+    gsub(/`/, "", value)
+    if (value !~ / - (red|green)$/) {
+        finding(at, "Browser test is not \"<path> - red\" or \"<path> - green\"")
+        return
+    }
+    kind = substr(value, length(value) - 2) == "red" ? "red" : "green"
+    path = substr(value, 1, length(value) - length(kind) - 3)
+    if (path == "" || path ~ /^[\/-]/ || path ~ /[^A-Za-z0-9._\/-]/ || ("/" path "/") ~ /\/\.\.\//) {
+        finding(at, "Browser test path is not a plain relative path")
+        return
+    }
+    BROWSER_PATH[path] = 1
+    if (kind == "red") {
+        BROWSER_RED[path] = 1
+        step_browser_red = 1
+    } else if (!(path in BROWSER_RED)) {
+        finding(at, "Browser test green has no red step before it")
+    }
+}
+
 function check_field(name, value, at,    n, words, word, i) {
-    if (name == "Model") {
+    if (name == "Browser test") {
+        check_browser_test(value, at)
+    } else if (name == "Test first") {
+        word = value
+        gsub(/[`"*]/, "", word)
+        sub(/^[ \t]+/, "", word)
+        step_test_first = (tolower(word) !~ /^none([.,;:]|[ \t]|$)/ && word != "")
+    } else if (name == "Model") {
         n = split(value, words, " ")
         word = (n > 0) ? tolower(words[1]) : ""
         if (!(word in MODEL))
@@ -1109,6 +1163,14 @@ function journey_end(    i, k, from, number, exempt) {
         on_acceptance_line(line)
         if (in_item && index(line, "walk the journey of ## User journey") > 0)
             journey_walk = 1
+        # An e2e: Check stands in for the walk (plan 56 W1).
+        if (in_item && line ~ /\*\*Check:\*\*[ \t]*e2e:/) {
+            journey_walk = 1
+            e2e = line
+            sub(/^.*\*\*Check:\*\*[ \t]*e2e:[ \t]*/, "", e2e)
+            sub(/[ \t].*$/, "", e2e)
+            E2E_CHECK[e2e] = NR
+        }
     } else if (section == "questions") {
         if (line ~ /^- \*\*Q[0-9]+\.\*\*/) {
             number = substr(line, 6)
@@ -1139,6 +1201,9 @@ END {
     journey_end()
     if (setup_count > 5)
         finding(setup_at, "Setup has more than 5 commands")
+    for (e2e in E2E_CHECK)
+        if (!(e2e in BROWSER_PATH))
+            finding(E2E_CHECK[e2e], "Check e2e: names a path no step\047s Browser test line holds")
     for (i = 1; i <= STRUCTURE_COUNT; i++)
         if (!(STRUCTURE[i] in have))
             finding(1, "missing " STRUCTURE[i])
@@ -2358,17 +2423,44 @@ cmd_begin() {
     fi
     append_line "$attempts" "$step begin $t0"
     printf '%s\n' "$t0"
+    # The trust root (section 5.24): the caller keeps the hash for end.
+    trust_file=$steps_dir/$step.trust
+    check_leaf "$trust_file"
+    trust_manifest "$step" >"$steps_dir/.trust.$$" || fail "cannot write $trust_file"
+    mv -f "$steps_dir/.trust.$$" "$trust_file" || fail "cannot write $trust_file"
+    printf 'trust: %s\n' "$(run_git hash-object --stdin <"$trust_file")"
 }
 
 cmd_end() {
-    [ $# -eq 3 ] || [ $# -eq 4 ] || usage
-    plan=$1
-    step=$2
-    t0=$3
-    blob=${4:-}
+    # end <plan> <N> <t0> [<blob>] [--trust <hash>]
+    trust=
+    count=0
+    plan=
+    step=
+    t0=
+    blob=
+    while [ $# -gt 0 ]; do
+        if [ "$1" = --trust ]; then
+            [ $# -ge 2 ] || usage
+            trust=$2
+            is_object_id "$trust" || usage "not a trust hash: $trust"
+            shift 2
+            continue
+        fi
+        count=$((count + 1))
+        case $count in
+            1) plan=$1 ;;
+            2) step=$1 ;;
+            3) t0=$1 ;;
+            4) blob=$1 ;;
+            *) usage ;;
+        esac
+        shift
+    done
+    [ "$count" -ge 3 ] || usage
     check_step "$step"
     is_object_id "$t0" || usage "not a tree id: $t0"
-    [ $# -eq 3 ] || is_object_id "$blob" || usage "not a blob id: $blob"
+    [ -z "$blob" ] || is_object_id "$blob" || usage "not a blob id: $blob"
     [ -n "$blob" ] || [ -f "$plan" ] || usage "no such plan: $plan"
     root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
     read_budget
@@ -2429,6 +2521,25 @@ cmd_end() {
                 ;;
         esac
     done <"$work/changed"
+    if [ -n "$trust" ]; then
+        trust_manifest "$step" >"$work/trust"
+        if [ "$(run_git hash-object --stdin <"$work/trust")" != "$trust" ]; then
+            trust_file=$steps_dir/$step.trust
+            if [ -f "$trust_file" ] && [ "$(run_git hash-object --stdin <"$trust_file")" = "$trust" ]; then
+                # The label is the line without its state: "- <id>", "x <id>",
+                # "none", "other" or "link <target>".
+                LC_ALL=C comm -3 "$trust_file" "$work/trust" | sed 's/^[[:space:]]*//' |
+                    sed -E 's/ (- [^ ]+|x [^ ]+|none|other|link .*)$//' |
+                    LC_ALL=C sort -u | while IFS= read -r label; do
+                        printf 'trust: changed: %s\n' "$label"
+                    done
+            else
+                printf 'trust: changed\n'
+            fi
+            printf 'plan-tool.sh: a trusted file changed during the step\n' >&2
+            exit 65
+        fi
+    fi
     if ! test_first_intact "$work/plan" "$step"; then
         printf 'verify: test first edited\n'
         exit 5
@@ -2706,6 +2817,19 @@ cmd_accept() {
     check_leaf "$record"
     mkdir -p "$steps_dir" || fail "cannot create $steps_dir"
 
+    # An e2e: Check runs nothing here: the caller runs the browser test.
+    raw=$(plan_field "$work/plan" "$item" Check raw | sed 's/^[ 	]*//')
+    case $raw in
+        e2e:*)
+            e2e_path=${raw#e2e:}
+            e2e_path=$(printf '%s\n' "$e2e_path" | LC_ALL=C awk '{ print $1; exit }')
+            if path_is_safe "$e2e_path" && [ -n "$e2e_path" ]; then
+                put_file "$record" 'exit: e2e'
+                printf 'accept: e2e %s\n' "$e2e_path"
+                exit 0
+            fi
+            ;;
+    esac
     # A manual: or prose Check, or an item without one.
     if [ ! -s "$work/spans" ]; then
         put_file "$record" 'exit: not literal'
@@ -3559,6 +3683,8 @@ EOF
         esac
         if waits_for_earlier "$2" "$number"; then
             printf 'ready: step %s waits for an earlier step\n' "$number"
+        elif browser_test_of "$2" "$number" && [ "$bt_kind" = red ]; then
+            printf 'ready: step %s writes its browser test\n' "$number"
         else
             printf 'not ready: step %s: %s\n' "$number" "${result#fail *: }"
             not_ready=1
@@ -3635,6 +3761,141 @@ ran_no_test() {
     LC_ALL=C awk 'out { print } /^--- / { out = 1 }' <"$1" | LC_ALL=C awk "$AWK_NO_TEST"
 }
 
+# ---- the browser test (plan 56 sections 5.11, 5.13, 5.24, 5.25).
+
+# The capture script: in the tool's own directory (VS Code, Codex), else in
+# ../whygraph-ui-check/ (Claude Code, Cursor), with no symlink on its path.
+# Prints its absolute path, or returns 1.
+find_capture() {
+    for candidate in "$tool_dir/capture.mjs" "$tool_dir/../whygraph-ui-check/capture.mjs"; do
+        [ -n "$tool_dir" ] && [ -f "$candidate" ] || continue
+        dir=$(cd "$(dirname "$candidate")" && pwd -P) || continue
+        [ ! -h "$candidate" ] && [ ! -h "$(dirname "$candidate")" ] || continue
+        printf '%s/capture.mjs\n' "$dir"
+        return 0
+    done
+    return 1
+}
+
+# Set bt_path and bt_kind from step $2's Browser test line in plan file $1.
+# Returns 1 when the step has none or the line is malformed.
+browser_test_of() {
+    bt=$(plan_field "$1" "$2" "Browser test" | LC_ALL=C tr -d '`')
+    bt_kind=${bt##* - }
+    bt_path=${bt% - *}
+    bt_path=$(printf '%s' "$bt_path" | LC_ALL=C awk '{ sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print }')
+    case $bt_kind in
+        red | green) ;;
+        *) return 1 ;;
+    esac
+    [ -n "$bt_path" ] && [ "$bt_path" != "$bt" ] && path_is_safe "$bt_path"
+}
+
+# 0 when the whole browser test file of every red step up to $2 is as its
+# red run saw it. A difference prints the finding on stderr.
+# Its loop variable is its own: a caller's loop may use number.
+browser_intact() {
+    for bi_step in $(plan_field "$1" "" "" | sed -n 's/^step //p'); do
+        [ "$bi_step" -le "$2" ] || break
+        browser_test_of "$1" "$bi_step" && [ "$bt_kind" = red ] || continue
+        snap=.whygraph/plans/$stem/testfirst/$bi_step/${bt_path##*/}
+        [ -f "$snap" ] || continue
+        if [ ! -f "$bt_path" ] || [ -h "$bt_path" ] || ! cmp -s "$snap" "$bt_path"; then
+            printf 'the browser test was edited: %s\n' "$bt_path" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Run the capture script's --e2e mode on $1 with --out $2, as one bounded
+# job without the strip list. Sets code and the job's output files.
+run_capture_e2e() {
+    capture=$(find_capture) || return 1
+    printf "node '%s' --e2e %s --out %s\n" "$capture" "$1" "$2" >"$work/spans"
+    saved_budget=$budget
+    budget=580
+    strip_secrets
+    run_job
+    rm -f "$work/strip"
+    budget=$saved_budget
+    return 0
+}
+
+# The trust list of step $2 (section 5.24): the plan tool's directory, the
+# capture script, the UI profile and saved login, and the red records and
+# snapshots of every step before $2. One sorted line per path.
+trust_manifest() {
+    {
+        for f in "$tool_dir"/*; do
+            [ -f "$f" ] || [ -h "$f" ] || continue
+            state_line "tool ${f##*/}" "$f"
+        done
+        capture=$(find_capture) && state_line capture "$capture"
+        state_line profile .whygraph/profiles/ui.md
+        state_line login .whygraph/profiles/ui-auth.json
+        for record in "$steps_dir"/*.red; do
+            [ -e "$record" ] || [ -h "$record" ] || continue
+            number=${record##*/}
+            number=${number%.red}
+            case $number in '' | *[!0123456789]*) continue ;; esac
+            [ "$number" -lt "$1" ] || continue
+            state_line "red $number" "$record"
+        done
+        for snap in ".whygraph/plans/$stem/testfirst"/*/*; do
+            [ -e "$snap" ] || [ -h "$snap" ] || continue
+            number=${snap%/*}
+            number=${number##*/}
+            case $number in '' | *[!0123456789]*) continue ;; esac
+            [ "$number" -lt "$1" ] || continue
+            state_line "snapshot $number ${snap##*/}" "$snap"
+        done
+    } | LC_ALL=C sort
+}
+
+# smoke <out path> <test file>: run one existing browser test at plan time.
+cmd_smoke() {
+    [ $# -eq 2 ] || usage
+    plan=$1
+    test_file=$2
+    path_is_safe "$test_file" || usage "not a plain relative path: $test_file"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    choose_kill_form
+    budget=580
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    stem=$(stem_of "$plan")
+    cd "$root" || exit 1
+    check_work_dir
+    mkdir -p "$steps_dir" || fail "cannot create $steps_dir"
+    record=$steps_dir/smoke
+    check_leaf "$record"
+    if ! run_capture_e2e "$test_file" ".whygraph/plans/$stem/e2e/smoke"; then
+        line='smoke: not available: no capture script'
+        code=1
+        : >"$work/output"
+    else
+        last=$(LC_ALL=C awk 'NF { l = $0 } END { print l }' <"$work/output")
+        case $code in
+            0) line='smoke: pass' ;;
+            2) line="smoke: fail: $last" ;;
+            5) line='smoke: timeout' ;;
+            *) line="smoke: not available: $last" ;;
+        esac
+    fi
+    start_write "$record"
+    {
+        printf 'test: %s\n' "$test_file"
+        printf 'exit: %s\n' "$code"
+        printf 'result: %s\n' "${line#smoke: }"
+        printf '%s\n' '--- last 40 lines of output'
+        tail -n 40 "$work/output"
+    } >"$tmp"
+    finish_write "$record"
+    printf '%s\n' "$line"
+    exit 0
+}
+
 # ---- red and the Test first guard (plan 56 sections 5.34 and 5.35).
 
 # Set tf_file and tf_name from step $2's Test first in plan file $1, as
@@ -3679,6 +3940,7 @@ is_test_path() {
 # finding on stderr and return 1. An added line that holds a skip marker
 # anywhere in the file counts as an edit too.
 test_first_intact() {
+    browser_intact "$1" "$2" || return 1
     test_first_of "$1" "$2" || return 0
     snap=$(snapshot_of "$2")
     [ -f "$snap" ] || return 0
@@ -3700,8 +3962,8 @@ test_first_intact() {
 # 0 when a step of plan file $1 has a Test first whose test file holds the
 # named test now, before the change.
 test_first_exists() {
-    for number in $(plan_field "$1" "" "" | sed -n 's/^step //p'); do
-        test_first_of "$1" "$number" || continue
+    for tfe_step in $(plan_field "$1" "" "" | sed -n 's/^step //p'); do
+        test_first_of "$1" "$tfe_step" || continue
         [ -f "$tf_file" ] && [ ! -h "$tf_file" ] && holds_test "$tf_file" "$tf_name" && return 0
     done
     return 1
@@ -3736,21 +3998,33 @@ cmd_red() {
     plan_field "$work/plan" "$step" Verify >"$work/spans"
     [ $? -ne 3 ] || usage "no step $step in $plan"
 
-    # 1. The Test first and a literal Verify.
-    test_first_of "$work/plan" "$step"
-    case $? in
-        1)
-            printf 'red: step %s has no Test first\n' "$step"
+    # 1. The Test first and a literal Verify, or a red Browser test line,
+    # whose test is the whole file and whose red run is the capture script.
+    browser=
+    if browser_test_of "$work/plan" "$step" && [ "$bt_kind" = red ]; then
+        if names_test_first "$(plan_field "$work/plan" "$step" "Test first")"; then
+            printf 'red: Browser test red and Test first on one step\n'
             exit 6
-            ;;
-        2)
-            printf 'red: Test first is not <test file>::<test name>\n'
-            exit 5
-            ;;
-    esac
-    if [ ! -s "$work/spans" ]; then
-        printf 'red: Verify is not literal\n'
-        exit 6
+        fi
+        browser=1
+        tf_file=$bt_path
+        tf_name=
+    else
+        test_first_of "$work/plan" "$step"
+        case $? in
+            1)
+                printf 'red: step %s has no Test first\n' "$step"
+                exit 6
+                ;;
+            2)
+                printf 'red: Test first is not <test file>::<test name>\n'
+                exit 5
+                ;;
+        esac
+        if [ ! -s "$work/spans" ]; then
+            printf 'red: Verify is not literal\n'
+            exit 6
+        fi
     fi
 
     # 2. The test file.
@@ -3766,7 +4040,7 @@ cmd_red() {
         printf 'red: the test file does not exist: %s\n' "$tf_file"
         exit 5
     }
-    holds_test "$tf_file" "$tf_name" || {
+    [ -n "$browser" ] || holds_test "$tf_file" "$tf_name" || {
         printf 'red: %s does not hold %s\n' "$tf_file" "$tf_name"
         exit 5
     }
@@ -3797,9 +4071,13 @@ cmd_red() {
     t0=$(cat "$steps_dir/$step.t0" 2>/dev/null) || t0=
     if is_object_id "$t0" && run_git cat-file -e "$t0^{tree}" 2>/dev/null; then
         plan_rel=${plan_path#./}
+        # A browser step writes the helpers its Files name, never feature code.
+        own_files=
+        [ -z "$browser" ] || own_files=$(plan_field "$work/plan" "$step" Files)
         changed=$(run_git -c core.quotePath=false diff --name-only --no-renames "$t0" "$tree" |
             while IFS= read -r path; do
                 [ "$path" = "$tf_file" ] || [ "$path" = "$plan_rel" ] || is_test_path "$path" ||
+                    { [ -n "$browser" ] && [ -z "$(named_outside "$path" "$own_files")" ]; } ||
                     printf '%s\n' "$path"
             done)
     fi
@@ -3821,7 +4099,12 @@ cmd_red() {
         result='not run: the code changed before the red run'
         start_write "$record"
         {
-            printf 'test: %s::%s\n' "$tf_file" "$tf_name"
+            if [ -n "$browser" ]; then
+                printf 'test: %s\n' "$tf_file"
+                printf 'kind: browser\n'
+            else
+                printf 'test: %s::%s\n' "$tf_file" "$tf_name"
+            fi
             printf 'tree: %s\n' "$tree"
             printf 'result: %s\n' "$result"
         } >"$tmp"
@@ -3831,11 +4114,41 @@ cmd_red() {
     fi
 
     # 5. The red run. It never writes <N>.verify.
-    run_job
+    exit_of=0
+    if [ -n "$browser" ]; then
+        code=
+        if run_capture_e2e "$tf_file" ".whygraph/plans/$stem/e2e/$step"; then
+            last=$(LC_ALL=C awk 'NF { l = $0 } END { print l }' <"$work/output")
+            case $code in
+                0)
+                    result=passed
+                    exit_of=1
+                    ;;
+                5) result='not run: timed out' ;;
+                2)
+                    if LC_ALL=C awk "$AWK_NO_TEST" <"$work/output" ||
+                        LC_ALL=C grep -qiE 'no spec files were found|error preparing this test file' "$work/output"; then
+                        result='red (did not run)'
+                    else
+                        result=red
+                    fi
+                    ;;
+                *) result="not run: $last" ;;
+            esac
+        else
+            result='not run: no capture script'
+            code=none
+            : >"$work/ran"
+            : >"$work/output"
+        fi
+    else
+        run_job
+    fi
     # 6. The result: the recorded runner output in tests/fixtures/red/ fixed
     # this order.
-    exit_of=0
-    if [ "$code" -eq 0 ]; then
+    if [ -n "$browser" ]; then
+        :
+    elif [ "$code" -eq 0 ]; then
         if LC_ALL=C awk "$AWK_NO_TEST" <"$work/output" || LC_ALL=C awk "$AWK_NOT_COLLECTED" <"$work/output"; then
             result='red (did not run)'
         else
@@ -3862,7 +4175,12 @@ cmd_red() {
     # 7. The record.
     start_write "$record"
     {
-        printf 'test: %s::%s\n' "$tf_file" "$tf_name"
+        if [ -n "$browser" ]; then
+            printf 'test: %s\n' "$tf_file"
+            printf 'kind: browser\n'
+        else
+            printf 'test: %s::%s\n' "$tf_file" "$tf_name"
+        fi
         cat "$work/ran"
         printf 'exit: %s\n' "$code"
         printf 'tree: %s\n' "$tree"
@@ -3996,6 +4314,7 @@ dry_finish() {
         case $result in
             'fail '*)
                 waits_for_earlier "$work/plan" "$number" && continue
+                { browser_test_of "$work/plan" "$number" && [ "$bt_kind" = red ]; } && continue
                 printf 'step %s\t%s\tVerify fails before the change: %s\tUse a Verify that passes before the change, or fix the environment.\n' \
                     "$number" "$at" "$(dry_excerpt "${result#fail *: }")"
                 ;;
@@ -4044,6 +4363,17 @@ dry_finish() {
                 "${at%%:*}" "${seconds%%:*}" >>"$work/lines"
             ;;
     esac
+    at=$(grep -n '^smoke: ' "$record" | tail -n 1)
+    if [ -n "$at" ]; then
+        smoke_line=${at#*smoke: }
+        smoke_test=${smoke_line%% *}
+        case ${smoke_line#* } in
+            fail*) printf 'plan\t%s\tAn existing browser test fails before the change: %s\tFix the database, seed data or login the test needs, or plan with --no-e2e.\n' \
+                "${at%%:*}" "$smoke_test" >>"$work/lines" ;;
+            timeout) printf 'plan\t%s\tAn existing browser test did not finish in %s s: %s\tMake the test finish, or plan with --no-e2e.\n' \
+                "${at%%:*}" "$([ "$deadline" -gt 500 ] && echo 500 || echo "$deadline")" "$smoke_test" >>"$work/lines" ;;
+        esac
+    fi
     at=$(grep -n '^changed: ' "$record" | tail -n 1)
     [ -z "$at" ] || printf 'plan\t%s\tA Verify changed the working tree: %s\tMake each Verify write only files that git ignores.\n' \
         "${at%%:*}" "$(dry_excerpt "${at#*changed: }")" >>"$work/lines"
@@ -4219,6 +4549,40 @@ EOF
         dry_mark acceptance
     fi
 
+    # 6a. A failing plan-time E2E smoke runs once more, in a call of its own,
+    # so the check after a fix sees the machine as it is now (D46).
+    smoke_record=$steps_dir/smoke
+    if [ -f "$smoke_record" ] && ! dry_done smoke; then
+        smoke_result=$(sed -n 's/^result: //p' "$smoke_record" | head -n 1)
+        smoke_test=$(sed -n 's/^test: //p' "$smoke_record" | head -n 1)
+        case $smoke_result in
+            fail* | timeout)
+                [ "$ran_here" -eq 0 ] || dry_more
+                if path_is_safe "$smoke_test" && run_capture_e2e "$smoke_test" ".whygraph/plans/$stem/e2e/smoke"; then
+                    ran_here=1
+                    last=$(LC_ALL=C awk 'NF { l = $0 } END { print l }' <"$work/output")
+                    case $code in
+                        0) smoke_result=pass ;;
+                        2) smoke_result="fail: $last" ;;
+                        5) smoke_result=timeout ;;
+                        *) smoke_result="not available: $last" ;;
+                    esac
+                    start_write "$smoke_record"
+                    {
+                        printf 'test: %s\n' "$smoke_test"
+                        printf 'exit: %s\n' "$code"
+                        printf 'result: %s\n' "$smoke_result"
+                        printf '%s\n' '--- last 40 lines of output'
+                        tail -n 40 "$work/output"
+                    } >"$tmp"
+                    finish_write "$smoke_record"
+                fi
+                ;;
+        esac
+        printf 'smoke: %s %s\n' "$smoke_test" "$smoke_result" >>"$record"
+        dry_mark smoke
+    fi
+
     # 7. The tree test, then the block.
     dry_finish
 }
@@ -4269,8 +4633,21 @@ cmd_proof() {
         ' <"$steps_dir/baseline")
         record=$steps_dir/$number.verify
         code=$(record_exit "$record")
+        browser_red=
+        grep -qx 'kind: browser' "$steps_dir/$number.red" 2>/dev/null && browser_red=1
         if [ "$code" = 0 ] && ran_no_test "$record"; then
             class='no test (the Verify ran no test)'
+        elif [ "$code" = 0 ] && [ -n "$browser_red" ]; then
+            red_result=$(sed -n 's/^result: //p' "$steps_dir/$number.red" | head -n 1)
+            if ! test_first_intact "$work/plan" "$number" 2>/dev/null; then
+                class='edited (the browser test was edited)'
+            else
+                case $red_result in
+                    red) class='proven (browser test, red)' ;;
+                    '') class='not proven (browser test, no red record)' ;;
+                    *) class="not proven (browser test, $red_result)" ;;
+                esac
+            fi
         elif [ "$code" = 0 ] && [ "$base" = 'test first' ]; then
             # The red record decides. The guard runs first: end writes
             # exit 0 to <N>.verify before it exits 5.
@@ -4332,6 +4709,10 @@ EOF
     exit 0
 }
 
+# The directory of this script, before any cd: the capture script and the
+# trust root are found from it.
+tool_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || tool_dir=
+
 [ $# -ge 1 ] || usage
 subcommand=$1
 shift
@@ -4369,5 +4750,6 @@ case $subcommand in
     ready) cmd_ready "$@" ;;
     dryrun) cmd_dryrun "$@" ;;
     red) cmd_red "$@" ;;
+    smoke) cmd_smoke "$@" ;;
     *) usage "unknown subcommand: $subcommand" ;;
 esac

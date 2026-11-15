@@ -1401,7 +1401,10 @@ def _run(
 def _begin(repo: Path, posix: str, step: str = "1") -> str:
     run = _run(repo, posix, "begin", "plans/p.md", step)
     assert run.returncode == 0, run.stderr
-    return run.stdout.strip()
+    # The first line is the start tree; the second is the trust hash.
+    lines = run.stdout.splitlines()
+    assert len(lines) == 2 and lines[1].startswith("trust: "), run.stdout
+    return lines[0]
 
 
 def _end(
@@ -3798,6 +3801,323 @@ def test_brief_usage_errors_exit_64(tmp_path: Path, args: tuple[str, ...]) -> No
     assert _tool(tmp_path, *args).returncode == 64
 
 
+# ---- the browser test (plan 56 sections 5.11, 5.13, 5.24, 5.25) -----------------
+
+_STUB_CAPTURE = """const out = process.env.STUB_OUT || '';
+if (out) process.stdout.write(out + '\\n');
+if (process.env.STUB_LOG) require('fs').writeFileSync(process.env.STUB_LOG, process.argv.slice(2).join(' '));
+process.exit(Number(process.env.STUB_EXIT || '0'));
+"""
+
+
+def _tool_beside_capture(tmp_path: Path, layout: str) -> Path:
+    """A copy of the plan tool with a stub capture script, in a tree layout."""
+    if layout == "skills":
+        tool = tmp_path / "t" / "skills" / "whygraph-plan" / "plan-tool.sh"
+        capture = tmp_path / "t" / "skills" / "whygraph-ui-check" / "capture.mjs"
+    else:
+        tool = tmp_path / "t" / "whygraph" / "plan-tool.sh"
+        capture = tmp_path / "t" / "whygraph" / "capture.mjs"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    capture.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_SCRIPT, tool)
+    capture.write_text(
+        _STUB_CAPTURE.replace("require('fs')", "(await import('node:fs'))")
+    )
+    return tool
+
+
+def _btool(repo: Path, tool: Path, *args: str, env: dict[str, str] | None = None):
+    return subprocess.run(
+        ["sh", str(tool), *args],
+        cwd=repo,
+        env={**_env(), **(env or {})},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        start_new_session=True,
+    )
+
+
+def _browser_plan(
+    *,
+    test_first: str = "none",
+    verify: str = "manual: the Browser test line runs this test",
+) -> str:
+    return f"""# Plan: B
+
+**Status:** x
+**Objective:** x
+**Non-goals:** x
+
+## Steps
+
+1. **Write the browser test**
+   - **Files:** e2e/a.cy.js, e2e/support/seed.js
+   - **Change:** Write the test.
+   - **Boundaries:** none
+   - **Constraints to preserve:** none
+   - **Risks:** none
+   - **Test first:** {test_first}
+   - **Model:** sonnet - x
+   - **Browser test:** e2e/a.cy.js - red
+   - **Verify:** {verify}
+2. **Build it**
+   - **Files:** src/a.js
+   - **Change:** Build it.
+   - **Boundaries:** e2e/a.cy.js
+   - **Constraints to preserve:** none
+   - **Risks:** none
+   - **Test first:** none
+   - **Model:** sonnet - x
+   - **Browser test:** e2e/a.cy.js - green
+   - **Verify:** `true`
+
+## Acceptance
+1. It works - **Check:** e2e: e2e/a.cy.js
+
+## Confidence: high
+x
+"""
+
+
+def test_check_a_browser_test_plan(tmp_path: Path) -> None:
+    text = _browser_plan()
+    assert _check(tmp_path, text).returncode == 0
+    _assert_one_finding(
+        tmp_path,
+        _browser_plan(test_first="tests/a_test.py::test_a"),
+        _line_of(text, "1. **Write"),
+        "Browser test red and Test first on one step",
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            "e2e/a.cy.js - red",
+            "e2e/a.cy.js red",
+            'Browser test is not "<path> - red" or "<path> - green"',
+        ),
+        (
+            "e2e/a.cy.js - red",
+            "../a.cy.js - red",
+            "Browser test path is not a plain relative path",
+        ),
+        (
+            "e2e/a.cy.js - green",
+            "e2e/b.cy.js - green",
+            "Browser test green has no red step before it",
+        ),
+        (
+            "e2e: e2e/a.cy.js",
+            "e2e: e2e/c.cy.js",
+            "Check e2e: names a path no step's Browser test line holds",
+        ),
+    ],
+)
+def test_check_browser_test_findings(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    text = _browser_plan().replace(old, new, 1)
+    run = _check(tmp_path, text)
+    assert run.returncode == 1 and message in run.stdout, run.stdout
+
+
+def test_check_an_e2e_check_counts_as_the_journey_walk(tmp_path: Path) -> None:
+    text = (
+        _browser_plan()
+        .replace(
+            "## Steps\n",
+            "## User journey\n- **Actor:** signed out\n"
+            '- **Entry:** `/` - button "Add" - exists src/a.js:1\n'
+            '- **Hops:**\n  - H1: `/` - select button "Add" - `/new` - step 2\n'
+            "- **Outcome:** the new name on `/new` - step 2\n"
+            "- **Leaves early:** Refresh: x. Back: x. Cancel: nothing. Direct link: x.\n"
+            "- **Waits:** none\n\n## Steps\n",
+            1,
+        )
+        .replace(
+            "   - **Files:** src/a.js\n",
+            "   - **Files:** src/a.js\n   - **Routes:** `/new`\n",
+            1,
+        )
+    )
+    run = _check(tmp_path, text)
+    assert "Acceptance has no walk" not in run.stdout, run.stdout
+
+
+def test_accept_an_e2e_check(repo: Path) -> None:
+    _write_plan(repo, _browser_plan())
+    run = _tool(repo, "accept", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (0, "accept: e2e e2e/a.cy.js\n")
+    assert (repo / _STEPS / "acceptance.1").read_text() == "exit: e2e\n"
+
+
+def test_ready_a_browser_red_step(repo: Path) -> None:
+    _write_plan(repo, _browser_plan(verify="`npx cypress run --spec e2e/a.cy.js`"))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: fail 1: no spec\n")
+    run = _tool(repo, "ready", "plans/p.md")
+    assert run.stdout == "ready: step 1 writes its browser test\nready: ok\n"
+
+
+def _browser_repo(repo: Path) -> None:
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "a.cy.js").write_text("it('adds', () => {});\n")
+    _write_plan(repo, _browser_plan())
+
+
+@pytest.mark.parametrize("layout", ["skills", "flat"])
+@pytest.mark.parametrize(
+    ("exit_code", "out", "result", "red_exit"),
+    [
+        ("0", "ok", "passed", 1),
+        ("2", "1 failing", "red", 0),
+        ("2", "Error: No spec files were found", "red (did not run)", 0),
+        ("5", "slow", "not run: timed out", 0),
+        ("3", "capture: no usable e2e_run", "not run: capture: no usable e2e_run", 0),
+    ],
+)
+def test_red_a_browser_test(
+    repo: Path,
+    tmp_path: Path,
+    layout: str,
+    exit_code: str,
+    out: str,
+    result: str,
+    red_exit: int,
+) -> None:
+    tool = _tool_beside_capture(tmp_path, layout)
+    _browser_repo(repo)
+    log = tmp_path / "argv.txt"
+    run = _btool(
+        repo,
+        tool,
+        "red",
+        "plans/p.md",
+        "1",
+        env={"STUB_EXIT": exit_code, "STUB_OUT": out, "STUB_LOG": str(log)},
+    )
+    assert (run.returncode, run.stdout) == (red_exit, f"red: {result}\n"), run.stderr
+    record = (repo / _STEPS / "1.red").read_text()
+    assert record.startswith("test: e2e/a.cy.js\nkind: browser\n")
+    assert log.read_text() == "--e2e e2e/a.cy.js --out .whygraph/plans/p/e2e/1"
+
+
+def test_red_a_browser_test_without_a_capture_script(
+    repo: Path, tmp_path: Path
+) -> None:
+    tool = tmp_path / "lone" / "plan-tool.sh"
+    tool.parent.mkdir()
+    shutil.copy(_SCRIPT, tool)
+    _browser_repo(repo)
+    run = _btool(repo, tool, "red", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (0, "red: not run: no capture script\n")
+
+
+def test_browser_guard_and_proof(repo: Path, tmp_path: Path) -> None:
+    tool = _tool_beside_capture(tmp_path, "skills")
+    _browser_repo(repo)
+    assert (
+        _btool(repo, tool, "red", "plans/p.md", "1", env={"STUB_EXIT": "2"}).stdout
+        == "red: red\n"
+    )
+    _steps_file(repo, "1.verify", _record("0", "ok\n"))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: not literal\n")
+    proof = _btool(repo, tool, "proof", "plans/p.md").stdout.splitlines()
+    assert proof[0] == "proof: step 1 proven (browser test, red)"
+    (repo / "e2e" / "a.cy.js").write_text("it.skip('adds', () => {});\n")
+    run = _btool(repo, tool, "verify", "plans/p.md", "2")
+    assert (run.returncode, run.stdout) == (5, "verify: test first edited\n")
+    assert "the browser test was edited: e2e/a.cy.js" in run.stderr
+    proof = _btool(repo, tool, "proof", "plans/p.md").stdout.splitlines()
+    assert proof[0] == "proof: step 1 edited (the browser test was edited)"
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "line"),
+    [
+        ("0", "smoke: pass"),
+        ("2", "smoke: fail: 1 failing"),
+        ("5", "smoke: timeout"),
+        ("3", "smoke: not available: 1 failing"),
+    ],
+)
+def test_smoke(repo: Path, tmp_path: Path, exit_code: str, line: str) -> None:
+    tool = _tool_beside_capture(tmp_path, "flat")
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "old.cy.js").write_text("it('x', () => {});\n")
+    run = _btool(
+        repo,
+        tool,
+        "smoke",
+        ".whygraph/plans/p.md",
+        "e2e/old.cy.js",
+        env={"STUB_EXIT": exit_code, "STUB_OUT": "1 failing"},
+    )
+    assert (run.returncode, run.stdout) == (0, line + "\n"), run.stderr
+    record = (repo / _STEPS / "smoke").read_text()
+    assert record.startswith(
+        f"test: e2e/old.cy.js\nexit: {exit_code}\nresult: {line[7:]}\n"
+    )
+
+
+@pytest.mark.parametrize(("exit_code", "found"), [("2", True), ("0", False)])
+def test_dryrun_runs_a_failing_smoke_again(
+    repo: Path, tmp_path: Path, exit_code: str, found: bool
+) -> None:
+    tool = _tool_beside_capture(tmp_path, "flat")
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "old.cy.js").write_text("it('x', () => {});\n")
+    _write_plan(repo, _full_plan(("a.txt", "`true`", None)))
+    _steps_file(
+        repo, "smoke", "test: e2e/old.cy.js\nexit: 2\nresult: fail: 1 failing\n"
+    )
+    env = {"STUB_EXIT": exit_code, "STUB_OUT": "1 failing"}
+    for _ in range(6):
+        run = _btool(repo, tool, "dryrun", "plans/p.md", env=env)
+        if run.returncode == 0:
+            break
+    findings = _findings(run.stdout)
+    assert (
+        any(
+            "An existing browser test fails before the change: e2e/old.cy.js" in f
+            for f in findings
+        )
+        == found
+    ), run.stdout
+
+
+def test_trust_root(repo: Path, posix: str) -> None:
+    _write_plan(repo, _steps_plan(("a.txt", "`true`"), ("a.txt", "`true`")))
+    (repo / ".whygraph" / "profiles").mkdir(parents=True)
+    (repo / ".whygraph" / "profiles" / "ui.md").write_text(
+        "base_url: http://127.0.0.1:1/\n"
+    )
+    _steps_file(repo, "1.red", "result: red\n")
+    run = _run(repo, posix, "begin", "plans/p.md", "2")
+    t0, trust = run.stdout.splitlines()
+    trust = trust.removeprefix("trust: ")
+    assert (repo / _STEPS / "2.trust").exists()
+    # Step 2's own red record does not count.
+    _steps_file(repo, "2.red", "result: red\n")
+    assert _end(repo, posix, t0, "--trust", trust, step="2").returncode == 0
+    (repo / ".whygraph" / "profiles" / "ui.md").write_text(
+        "base_url: http://127.0.0.1:2/\n"
+    )
+    run = _end(repo, posix, t0, "--trust", trust, step="2")
+    assert run.returncode == 65, run.stdout + run.stderr
+    assert "trust: changed: profile" in run.stdout
+    (repo / _STEPS / "1.red").unlink()
+    run = _end(repo, posix, t0, "--trust", trust, step="2")
+    assert "trust: changed: red 1" in run.stdout
+    # A changed list names no path.
+    _steps_file(repo, "2.trust", "forged\n")
+    run = _end(repo, posix, t0, "--trust", trust, step="2")
+    assert run.returncode == 65 and run.stdout.splitlines()[-1] == "trust: changed"
+
+
 # ---- red and the Test first guard (plan 56 sections 5.34, 5.35) -------------------
 
 _RED = Path(__file__).resolve().parent / "fixtures" / "red"
@@ -4856,6 +5176,7 @@ _PLAN_COMMANDS = [
     ("ready", "plans/p.md"),
     ("dryrun", "plans/p.md"),
     ("red", "plans/p.md", "1"),
+    ("smoke", "plans/p.md", "e2e/x.cy.js"),
 ]
 
 

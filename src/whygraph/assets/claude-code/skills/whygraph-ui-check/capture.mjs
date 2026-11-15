@@ -3,9 +3,14 @@
 //
 //   node capture.mjs --tag <before|after> --out <dir> [--reset] <route>...
 //   node capture.mjs --probe
+//   node capture.mjs --e2e <test file> --out <dir>
 //
 // Exit codes: 0 done, 2 a gate fired (one stderr line per new signal),
 // 3 capture unavailable (one stderr line with the reason), 4 usage error.
+// With --e2e: 0 the test passed, 2 it failed, 5 it ran out of time, 3 not
+// available, 4 usage error, 1 the script's own error. The --e2e mode runs the
+// project's own browser test runner (profile key e2e_run) on one file, with
+// no shell, and never loads Playwright.
 //
 // Every setting that widens what the script does (base URL, start command,
 // allowed hosts, masks) comes only from the untracked profile
@@ -16,6 +21,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -53,6 +59,14 @@ const NO_MOTION =
 const CSP =
   "default-src 'none'; img-src 'self' file: data:; style-src 'unsafe-inline'";
 const INDEX_MARK = '<!-- whygraph-capture-index -->';
+// The login variables (plan 56 D6): never passed to the app or a runner.
+const LOGIN_VARS = ['WHYGRAPH_UI_USER', 'WHYGRAPH_UI_PASSWORD'];
+// The strip list (plan 56 D43), the same as the plan tool's.
+const STRIP = /(_API_KEY$|^AWS_SECRET_ACCESS_KEY$|^AWS_SESSION_TOKEN$|^CLAUDE_CODE_OAUTH_TOKEN$|^WHYGRAPH_)/;
+const E2E_MAX_SECONDS = 500;
+const SHOT_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+const SHOT_MAX_FILES = 40;
+const SHOT_MAX_BYTES = 20 * 1024 * 1024;
 
 // ---------------------------------------------------------------- pure parts
 
@@ -169,7 +183,7 @@ export function parseProfile(text) {
   const profile = {};
   for (const raw of String(text).split('\n')) {
     const line = raw.replace(/\r$/, '');
-    const m = /^([a-z_]+):(?:\s(.*))?$/.exec(line);
+    const m = /^([a-z][a-z0-9_]*):(?:\s(.*))?$/.exec(line);
     if (!m) continue;
     const value = (m[2] || '').trim();
     profile[m[1]] = LIST_KEYS.has(m[1])
@@ -181,6 +195,97 @@ export function parseProfile(text) {
   }
   for (const key of LIST_KEYS) if (!(key in profile)) profile[key] = [];
   return profile;
+}
+
+/**
+ * The environment of a child the script starts (the app, a test runner): no
+ * login variable, no strip-list variable unless WHYGRAPH_KEEP_SECRETS=1, and
+ * npm_config_yes=false so npx never fetches a missing package.
+ */
+export function childEnv(env) {
+  const keep = env.WHYGRAPH_KEEP_SECRETS === '1';
+  const out = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (LOGIN_VARS.includes(name)) continue;
+    if (!keep && STRIP.test(name)) continue;
+    out[name] = value;
+  }
+  out.npm_config_yes = 'false';
+  return out;
+}
+
+/** The argv of e2e_run, split on spaces, or null when it holds a quote, a $ or a backtick. */
+export function splitRunCommand(command) {
+  if (!command || command === 'none' || /["'$`]/.test(command)) return null;
+  const argv = command.split(' ').filter(Boolean);
+  return argv.length ? argv : null;
+}
+
+/** The --e2e deadline in seconds: WHYGRAPH_VERIFY_TIMEOUT, at most 500. */
+export function e2eDeadline(value) {
+  const n = /^[1-9][0-9]*$/.test(String(value || '')) ? parseInt(value, 10) : 540;
+  return Math.min(n, E2E_MAX_SECONDS);
+}
+
+/** True when a path relative to root is plain: no .., not absolute, no empty part. */
+export function plainRelative(rel) {
+  if (!rel || isAbsolute(rel) || rel.includes('\\')) return false;
+  return rel.split('/').every((part) => part && part !== '.' && part !== '..');
+}
+
+function hasSymlinkPart(root, rel) {
+  let path = root;
+  for (const part of rel.split('/')) {
+    path = join(path, part);
+    try {
+      if (lstatSync(path).isSymbolicLink()) return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Copy the screenshots under `shotsRel` (relative to root) newer than
+ * `sinceMs` to `<outDir>/shots/`. Only .png, .jpg, .jpeg and .webp, at most
+ * 40 files and 20 MB. A symlinked file or directory below it is skipped; a
+ * symlink on the path of `shotsRel` itself refuses the copy. Each copy is
+ * named by its path under `shotsRel`, with / written as -. Returns
+ * `{ copied, refused }`.
+ */
+export function copyShots(root, shotsRel, outDir, sinceMs) {
+  if (!shotsRel || shotsRel === 'none') return { copied: 0, refused: null };
+  if (!plainRelative(shotsRel)) return { copied: 0, refused: 'e2e_shots is not a plain relative path' };
+  if (hasSymlinkPart(root, shotsRel)) return { copied: 0, refused: 'e2e_shots goes through a symlink' };
+  const top = join(root, shotsRel);
+  if (!existsSync(top)) return { copied: 0, refused: null };
+  const found = [];
+  const walk = (dir, prefix) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      const st = lstatSync(path);
+      if (st.isSymbolicLink()) continue;
+      if (st.isDirectory()) walk(path, `${prefix}${name}/`);
+      else if (st.isFile()) {
+        const dot = name.lastIndexOf('.');
+        const ext = dot >= 0 ? name.slice(dot).toLowerCase() : '';
+        if (SHOT_EXT.has(ext) && st.mtimeMs >= sinceMs) found.push({ path, rel: `${prefix}${name}`, size: st.size });
+      }
+    }
+  };
+  walk(top, '');
+  const dest = join(outDir, 'shots');
+  let copied = 0;
+  let bytes = 0;
+  for (const f of found) {
+    if (copied >= SHOT_MAX_FILES || bytes + f.size > SHOT_MAX_BYTES) break;
+    mkdirSync(dest, { recursive: true });
+    copyFileSync(f.path, join(dest, f.rel.split('/').join('-')));
+    copied += 1;
+    bytes += f.size;
+  }
+  return { copied, refused: null };
 }
 
 // ----------------------------------------------------------------- CLI parts
@@ -209,12 +314,15 @@ function isMain() {
 }
 
 function parseArgs(argv) {
-  const args = { probe: false, tag: null, out: null, reset: false, routes: [] };
+  const args = { probe: false, e2e: null, tag: null, out: null, reset: false, routes: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--probe') args.probe = true;
     else if (a === '--reset') args.reset = true;
-    else if (a === '--tag' || a === '--out') {
+    else if (a === '--e2e') {
+      if (i + 1 >= argv.length) throw new UsageError('--e2e needs a test file');
+      args.e2e = argv[(i += 1)];
+    } else if (a === '--tag' || a === '--out') {
       if (i + 1 >= argv.length) throw new UsageError(`${a} needs a value`);
       args[a.slice(2)] = argv[(i += 1)];
     } else if (a.startsWith('--')) throw new UsageError(`unknown option: ${a}`);
@@ -224,6 +332,11 @@ function parseArgs(argv) {
     if (args.tag || args.out || args.reset || args.routes.length) {
       throw new UsageError('--probe takes no other argument');
     }
+    return args;
+  }
+  if (args.e2e !== null) {
+    if (args.tag || args.reset || args.routes.length) throw new UsageError('--e2e takes only --out');
+    if (!args.out) throw new UsageError('--out <dir> is required');
     return args;
   }
   if (args.tag !== 'before' && args.tag !== 'after') throw new UsageError('--tag must be before or after');
@@ -250,7 +363,7 @@ function compilePatterns(list, key) {
   });
 }
 
-function loadProfile(root) {
+function loadProfile(root, { e2e = false } = {}) {
   let path = root;
   for (const part of PROFILE_PATH.split('/')) {
     path = join(path, part);
@@ -265,7 +378,8 @@ function loadProfile(root) {
   const git = spawnSync('git', ['ls-files', '--error-unmatch', PROFILE_PATH], { cwd: root, stdio: 'ignore' });
   if (git.status === 0) throw new Unavailable('profile is tracked by git');
   const profile = parseProfile(readFileSync(path, 'utf8'));
-  if (profile.auth === 'required') throw new Unavailable('the app requires a login (auth: required)');
+  // An end-to-end test logs in itself.
+  if (!e2e && profile.auth === 'required') throw new Unavailable('the app requires a login (auth: required)');
   if (!profile.base_url) throw new Unavailable('the profile has no base_url');
   if (!isAllowedUrl(profile.base_url, profile.allow_hosts)) {
     throw new Unavailable(`base_url is not on an allowed host: ${profile.base_url}`);
@@ -359,8 +473,7 @@ async function stopServer() {
   if (state.pidFile) rmSync(state.pidFile, { force: true });
 }
 
-async function ensureServer(root, profile, out) {
-  const base = profile.base_url;
+async function ensureServer(root, profile, out, { base = profile.base_url, start = null } = {}) {
   const pidFile = join(dirname(resolve(out)), '.server.pid');
   if (existsSync(pidFile)) {
     const old = parseInt(readFileSync(pidFile, 'utf8'), 10);
@@ -375,7 +488,7 @@ async function ensureServer(root, profile, out) {
     say(`server: reusing ${base}`);
     return;
   }
-  const command = profile.fixture && profile.fixture !== 'none' ? profile.fixture : profile.start;
+  const command = start || (profile.fixture && profile.fixture !== 'none' ? profile.fixture : profile.start);
   if (!command || command === 'none') {
     throw new Unavailable(`${base} does not answer and the profile has no start command`);
   }
@@ -383,7 +496,13 @@ async function ensureServer(root, profile, out) {
   const logPath = join(dirname(pidFile), '.server.log');
   mkdirSync(dirname(pidFile), { recursive: true });
   const log = openSync(logPath, 'w');
-  const child = spawn(command, { shell: true, cwd, detached: true, stdio: ['ignore', log, log] });
+  const child = spawn(command, {
+    shell: true,
+    cwd,
+    detached: true,
+    env: childEnv(process.env),
+    stdio: ['ignore', log, log],
+  });
   closeSync(log);
   let exited = null;
   child.on('exit', (code, signal) => {
@@ -802,6 +921,78 @@ async function capture(args) {
   return gates.length ? 2 : 0;
 }
 
+function tailLines(path, n) {
+  try {
+    return readFileSync(path, 'utf8').split('\n').filter((l, i, a) => i < a.length - 1 || l).slice(-n);
+  } catch {
+    return [];
+  }
+}
+
+async function e2e(args) {
+  const root = process.cwd();
+  const out = resolve(root, args.out);
+  const profile = loadProfile(root, { e2e: true });
+  const argv = splitRunCommand(profile.e2e_run);
+  if (!argv) throw new Unavailable('the profile has no usable e2e_run (none, missing, or a quote, $ or backtick)');
+  const dir = profile.e2e_dir && profile.e2e_dir !== 'none' ? profile.e2e_dir.replace(/\/+$/, '') : '';
+  if (!plainRelative(args.e2e) || !dir || !plainRelative(dir) || !args.e2e.startsWith(`${dir}/`)) {
+    throw new Unavailable(`the test file is not a plain relative path under e2e_dir: ${args.e2e}`);
+  }
+  insideRoot(root, args.e2e, 'the test file');
+  if (hasSymlinkPart(root, args.e2e) || !existsSync(join(root, args.e2e))) {
+    throw new Unavailable(`the test file does not exist: ${args.e2e}`);
+  }
+  const base = profile.e2e_base_url && profile.e2e_base_url !== 'none' ? profile.e2e_base_url : profile.base_url;
+  // A loopback host only: allow_hosts never widens this mode.
+  if (!base || !isAllowedUrl(base, [])) throw new Unavailable(`the e2e base URL is not a loopback host: ${base}`);
+  const start = profile.e2e_start && profile.e2e_start !== 'none' ? profile.e2e_start : null;
+  mkdirSync(out, { recursive: true });
+  await ensureServer(root, profile, join(out, 'e2e'), { base, start });
+  const seconds = e2eDeadline(process.env.WHYGRAPH_VERIFY_TIMEOUT);
+  const logPath = join(out, 'e2e.log');
+  const log = openSync(logPath, 'w');
+  const began = Date.now();
+  const child = spawn(argv[0], [...argv.slice(1), args.e2e], {
+    cwd: root,
+    detached: true,
+    env: childEnv(process.env),
+    stdio: ['ignore', log, log],
+  });
+  closeSync(log);
+  const result = await new Promise((done) => {
+    let timer = null;
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      done({ error: firstLine(err) });
+    });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      done({ code, signal });
+    });
+    timer = setTimeout(() => done({ timeout: true }), seconds * 1000);
+  });
+  // The runner's process group, also after a normal exit: Cypress can leave
+  // an Electron process behind.
+  if (child.pid) {
+    killGroup(child.pid, 'SIGTERM');
+    for (let i = 0; i < 30 && groupAlive(child.pid); i += 1) await new Promise((r) => setTimeout(r, 100));
+    if (groupAlive(child.pid)) killGroup(child.pid, 'SIGKILL');
+  }
+  await stopServer();
+  if (result.error) throw new Unavailable(`the e2e_run program cannot start: ${result.error}`);
+  const shots = copyShots(root, profile.e2e_shots, out, began);
+  say(shots.refused ? `shots: 0 (${shots.refused})` : `shots: ${shots.copied} in ${relative(root, join(out, 'shots')) || '.'}`);
+  if (!result.timeout && result.code === 0) return 0;
+  for (const line of tailLines(logPath, 40)) say(line);
+  const appLog = join(out, '.server.log');
+  const logs = [`log: ${relative(root, logPath)}`];
+  if (existsSync(appLog)) logs.push(`app log: ${relative(root, appLog)}`);
+  if (result.timeout) process.stderr.write(`timed out after ${seconds} s\n`);
+  say(logs.join('; '));
+  return result.timeout ? 5 : 2;
+}
+
 function probe() {
   const root = process.cwd();
   try {
@@ -843,7 +1034,7 @@ async function main() {
     return finish(4, `usage: ${err.message}`);
   }
   try {
-    const code = args.probe ? probe() : await capture(args);
+    const code = args.probe ? probe() : args.e2e !== null ? await e2e(args) : await capture(args);
     return finish(code);
   } catch (err) {
     if (err instanceof UsageError) return finish(4, `usage: ${err.message}`);

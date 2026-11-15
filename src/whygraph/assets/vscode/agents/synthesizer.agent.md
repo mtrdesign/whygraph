@@ -62,7 +62,7 @@ File tools (read, grep, glob) for spot-checking only. The shell, where one exist
 - **Risks** - verbatim quotes from the `## Constraints / risks cited verbatim` section; "none recorded" if absent. Copy the tag after each quote with it.
 - **Test first** - for a step symbol that the `## Verify candidates` section flags **uncovered**, the `<test file>::<test name>` that entry names; "none" otherwise. Never take Test first from a covered entry.
 - **Model** - `haiku`, `sonnet` or `opus` by the spine's `## Model per step` ladder, lowercase, with a one-line why.
-- **Routes** and **Expected UI** - only on the steps that step 3g names; omit both lines otherwise.
+- **Routes** and **Expected UI** - only on the steps that step 3g or step 3h names; omit both lines otherwise.
 - **Verify** - the literal command(s) the `Verify candidates` section lists for this step's symbols, copied verbatim in backticks (e.g. `uv run pytest tests/test_cache.py::test_key_is_content_addressable -q`). For a Test first step, Verify runs the named test with the command the uncovered entry gives. Never write a prose Verify such as "run the tests". If the `Verify candidates` section is missing or its report is unavailable, use the narrowest command the repo's test setup supports and say so in the confidence reason.
 
 **3b. Prior art.** Fill `## Prior art` from every report section whose heading starts with `## Prior art` (for example `Prior art` and `Prior art (external)`): one line per entry, its title or PR number and its URL or path copied verbatim, then a one-line takeaway in your own words. Never paste article text. A directly relevant entry from this repository may also be cited in the step it informs. Apply the spine's `## Evidence order` to every `(external)` entry: it stays in `## Prior art`, ends with `(external)`, and never changes a step. Omit the section when no report has an entry.
@@ -76,10 +76,25 @@ File tools (read, grep, glob) for spot-checking only. The shell, where one exist
 **3f. Writing rules.** Apply the spine's `## Writing rules` to every `Change`, `Expected UI`, Acceptance statement and Open question. Never apply them to a verbatim quote.
 
 **3g. UI.** Apply this step only when a report has key lines under `## UI profile`. A report whose `## UI profile` is the single line `not a UI task` has none. Without key lines, omit `## UI profile`, Routes and Expected UI, and add no UI Acceptance item.
-- Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
+- Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Auth` is `auth`, else `none`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
 - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes. When `ANSWERS` answers the states question, shape Expected UI by that answer.
 - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3 in step 3d.
 - Add the Acceptance item that `CAPTURE_STATUS` selects. For `available` or `unknown`, add `manual: open .whygraph/plans/<stem>/ui/index.html and compare before and after for each UI step`. For `unavailable: <reason>`, add one `manual:` item per Expected UI state instead, and name the reason in the confidence reason. For `none`, add no UI item. These items do not count toward the six-item cap of step 3c.
+
+**3h. User journey.** Apply this step only when a report has a `### Journey` block. Otherwise omit `## User journey`.
+- Fill `## User journey` in the spine's format from the block's lines.
+- Give each hop the step whose **Files** hold its control's file. Write `exists <path:line>` for a hop the block marks `exists`.
+- Add each hop target to the **Routes** of the step that builds it. Skip a target that is the Entry route or an earlier hop's from-route.
+- Add a hop control's file to the step that builds the hop target. Do this only when no step's **Files** hold it and the block names it with `path:line`.
+- A hop is unbuilt when no step's **Files** hold its control's file. Write a Blocker for it: `- **Journey hop H<n>:** <defect> - **Resolution needed:** <fix>`.
+- When `PARENT` is not `none`, mark a hop `owned by t<N>` when its file is in that child's `files_hint`.
+- Add the hop action to the **Expected UI** of its step when that line does not name it.
+- Write `assumed <default> (Q<n>)` for each part the block marks `unknown`. Take the default from the spine's `## User journey` rules.
+- Give each assumed part one Open question: "Where does the user <start | land after <action>>?" Take its options from the routes under `### Routes`, the default first. Ask about the entry first.
+- For another part, ask "What should <part> show?" Offer the default first and one alternative.
+- Mark the first journey question `Plan-shaping: yes` when the cap of 3 still has room. Mark every other journey question `Plan-shaping: no`. The steps assume its default.
+- When `ANSWERS` gives a journey question a non-default answer, rewrite that part and the steps by it.
+- Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap of step 3c.
 
 **3k. Constraint checks.** Copy each line under `### Checked constraints` into `## Constraint checks`, as `- note #<id> - <absent | present>: "<text>" in <glob>`. Change no character of the text or the glob. Omit the section when there is none. Write each note once. A note that a step's **Changes on purpose** names keeps its line: the plan tool skips it from that step on.
 
@@ -121,6 +136,7 @@ The `QUESTIONS:` block holds at most 3 lines, one per `Plan-shaping: yes` entry 
 2. For each finding, check its evidence: read the file at its `path:line`, or grep for the name it gives. A finding with no `path:line`, or whose evidence does not hold, is **refuted**.
 3. Apply a verified finding by changing only the lines it names. Never change the Objective, Non-goals, Resolved decisions or a verbatim quote. A finding whose fix would change one becomes an Open question. Never add a command span to a Verify or Check.
 3a. A Verify fix may only re-point one span at a test that the finding's evidence names. Keep the span's program, subcommands and flags. Swap a path only for a path, and a test id only for a test id. The new Verify follows the spine's `## Verify is a literal command` section. It runs a test that reaches the step's symbol. Any other Verify fix becomes an Open question.
+3b. A `journey` finding never adds a step and never adds a file to **Files**. Apply it only when its fix changes a line of `## User journey` or an **Expected UI** line. Edit an **Expected UI** line only when that step's **Files** hold the control's file. Never apply a fix that changes a landing or the **Outcome**. A verified journey `blocker` that this rule does not apply goes to `## Blockers`, as rule 5 writes it. A `should` whose fix changes a landing or the **Outcome** becomes an Open question with `Plan-shaping: no`. Its default is the plan as written. Any other verified `journey` finding follows rule 4.
 4. A verified finding that needs the user's choice becomes an Open question with `Plan-shaping: yes`, within the cap of 3. Past the cap, a `blocker` goes to `## Blockers` and a `should` is `deferred: question cap`. A revise adds no `Plan-shaping: yes` question. There, a finding that `ANSWERS` answered is `asked Q<n>`, and any other is past the cap.
 5. A verified `blocker` that you cannot fix goes to `## Blockers` as `- **Review finding F<n> (<lens>):** <defect> - **Resolution needed:** <fix>`. Never drop one: the implement command refuses a plan with open Blockers, so a broken plan never starts a run.
 6. Size cap: the plan may grow at most 25% in lines over the baseline. Apply verified blockers first, then shoulds in reviewer order. Skip a should whose edit would take growth past 25%, as `deferred: size`. Neither `## Plan review` nor blocker edits count toward growth. A `blocker` is never deferred.

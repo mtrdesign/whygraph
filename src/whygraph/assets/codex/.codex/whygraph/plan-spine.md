@@ -2,7 +2,7 @@
 
 Read this file once before you write a plan. It says what a good plan holds. The plan format is the `## Plan format` section of this file.
 
-Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Acceptance, Self-review checklist, Plan format.
+Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Acceptance, User journey, Self-review checklist, Plan format.
 
 ## Why a plan is a contract
 
@@ -95,6 +95,27 @@ A Verify and a Check run under `sh -c`, with no shell profile, no terminal and c
 - A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
 - A Check must finish within 9 minutes. For a longer suite, item 1 names the fastest full command, such as a parallel run. Item 1 may instead be `manual:` with the command to run.
 
+## User journey
+
+Write this section only when a source reported a `### Journey` block. Write one journey per section.
+
+- Name the actor: signed in as a role, or signed out.
+- Start at a route that exists today, or at one that another child builds. Name the control that starts the journey.
+- Name each control as `<role> "<visible text>"`, such as `button "Save"`.
+- Write one hop per line: where the user is, what the user does, where the user lands.
+- Write each hop target as a backticked route. Add `(<state>)` for a new state of that route.
+- End each hop with the step that builds it, or with `exists` and its `path:line`.
+- Mark a hop that another child builds as `owned by t<N>`.
+- Never write a bare `unknown`. Write `assumed <default> (Q<n>)`, and give the part Open question Q<n>.
+- The default entry is the existing route whose path the new route extends. Else it is the first route under `### Routes`.
+- The default landing is the route where the hop started.
+- By default, a refresh and a direct link load the route by itself. Back returns to the from-route.
+- After a direct link, Back leaves the app by default.
+- By default, a busy control is disabled until the work ends.
+- State the outcome: the data the user sees when it worked, and on which route.
+- State what holds after a refresh, a back action, a cancel and a direct link to a middle hop.
+- State what the user sees while slow work runs.
+
 ## Self-review checklist
 
 Check each box before you hand the plan over.
@@ -108,6 +129,7 @@ Check each box before you hand the plan over.
 - [ ] Each question has options and a default.
 - [ ] No em dash or en dash appears. Use a plain hyphen.
 - [ ] The writing rules hold in each `Change` line.
+- [ ] A `## User journey` has no bare `unknown`, and each `(Q<n>)` names a question.
 
 ## Plan format
 
@@ -140,8 +162,19 @@ Check each box before you hand the plan over.
 
 ## UI profile
 *(only when a source reported a frontend surface - otherwise omit this section entirely)*
-- **Start:** `<command>` → <base URL> · **Fixture mode:** <command or "none"> · **Browser tests:** <runner and path, or "none">
+- **Start:** `<command>` → <base URL> · **Fixture mode:** <command or "none"> · **Browser tests:** <runner and path, or "none"> · **Auth:** <none | required>
 - **Stack:** <framework, component library, theme mechanism> · **Conventions:** <path to the always-on file's `## UI conventions` heading, or "none">
+
+## User journey
+*(only when a source reported a journey - otherwise omit this section entirely)*
+- **Actor:** <signed in as <role> | signed out>
+- **Entry:** `<route that exists today>` - <role> "<visible text>" - <step <N> | exists path/to/file.tsx:LN | owned by t<N>>
+- **Hops:**
+  - H1: `<from route>` - <the action on <role> "<visible text>"> - `<to route>`[ (<new state>)] - <step <N> | exists path:LN | owned by t<N>>
+  - H2: ...
+- **Outcome:** <the data the user sees when it worked, such as the new item's name> on `<route>` - step <N>
+- **Leaves early:** Refresh: <what holds>. Back: <what holds>. Cancel: <what remains, or "nothing">. Direct link: <what holds>.
+- **Waits:** <what the user sees while slow work runs, and how the user learns it finished, or "none">
 
 ## Blockers
 *(only include if a constraint is at risk - otherwise omit this section entirely)*
@@ -150,6 +183,7 @@ Check each box before you hand the plan over.
 - **Why it's a blocker:** <one-line>
 - **Resolution needed:** <what the user has to confirm before proceeding>
 - **Review finding F<n> (<lens>):** <defect> - **Resolution needed:** <fix>
+- **Journey hop H<n>:** <defect> - **Resolution needed:** <fix>
 
 ## Constraint checks
 *(only when a confirmed note carries a check - otherwise omit this section entirely; the implement command searches for each text after every step)*

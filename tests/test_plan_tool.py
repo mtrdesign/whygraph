@@ -714,6 +714,240 @@ def test_check_ignores_fenced_code(tmp_path: Path) -> None:
     assert _check(tmp_path, text).returncode == 0, _check(tmp_path, text).stdout
 
 
+# ---- user journey ---------------------------------------------------------
+
+
+def _journey_step(n: int, title: str, routes: str = "") -> str:
+    routes_line = f"   - **Routes:** {routes}\n" if routes else ""
+    return (
+        f"{n}. **{title}**\n"
+        f"   - **Files:** src/step{n}.jsx\n"
+        f"   - **Change:** {title}.\n"
+        "   - **Boundaries:** none\n"
+        "   - **Constraints to preserve:** none recorded\n"
+        "   - **Risks:** none recorded\n"
+        "   - **Test first:** none\n"
+        "   - **Model:** sonnet - small\n"
+        f"{routes_line}"
+        "   - **Verify:** `true`\n"
+    )
+
+
+# A three-step plan whose journey comes before `## Steps` and cites step 3. H2
+# lands on an assumed route whose Q1 is a `## Resolved decisions` row, and the
+# Waits line names an API path that is not a route.
+_JOURNEY_PLAN = (
+    "# Plan: Add a page to create an item\n"
+    "\n"
+    "**Status:** PROPOSAL - nothing implemented yet.\n"
+    "**Objective:** Add a page to create an item.\n"
+    "**Non-goals:** none\n"
+    "\n"
+    "## Resolved decisions\n"
+    "\n"
+    "| # | Question | Decision |\n"
+    "|---|---|---|\n"
+    "| Q1 | Where does the user land after Save? | default: `/` |\n"
+    "\n"
+    "## User journey\n"
+    "- **Actor:** signed out\n"
+    '- **Entry:** `/` - button "Add item" - exists src/Items.jsx:12\n'
+    "- **Hops:**\n"
+    '  - H1: `/` - select button "Add item" - `/items/new` - step 1\n'
+    '  - H2: `/items/new` - submit button "Save" - assumed `/` (Q1)'
+    " (new item listed) - step 3\n"
+    "- **Outcome:** the new item's name in the list on `/` - step 3\n"
+    "- **Leaves early:** Refresh: the form loads empty. Back: returns to `/`.\n"
+    "  Cancel: nothing is saved. Direct link: the form loads empty.\n"
+    '- **Waits:** button "Save" reads "Saving" until `/api/items?draft=1` answers.\n'
+    "\n"
+    "## Steps\n"
+    "\n"
+    + _journey_step(1, "Add the route", "`/items/new`")
+    + _journey_step(2, "Add the form")
+    + _journey_step(3, "Save the item")
+    + "\n"
+    "## Acceptance\n"
+    "1. The suite passes - **Check:** `true`\n"
+    "2. The user reaches the new item - **Check:** manual: walk the journey of"
+    " ## User journey from Entry to Outcome\n"
+    "\n"
+    "## Confidence: high\n"
+    "A reason.\n"
+)
+
+
+def _journey(old: str, new: str) -> str:
+    assert old in _JOURNEY_PLAN, old
+    return _JOURNEY_PLAN.replace(old, new, 1)
+
+
+def _assert_findings(tmp_path: Path, text: str, wanted: list[tuple[int, str]]) -> None:
+    run = _check(tmp_path, text)
+    assert run.returncode == 1, run.stdout + run.stderr
+    findings = run.stdout.splitlines()
+    assert len(findings) == len(wanted), findings
+    for finding, (line, message) in zip(findings, wanted):
+        assert finding == f"line {line}: {message}", findings
+
+
+def test_check_journey_well_formed(tmp_path: Path) -> None:
+    run = _check(tmp_path, _JOURNEY_PLAN)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout == ""
+
+
+def test_check_journey_question_under_open_questions(tmp_path: Path) -> None:
+    text = _journey(
+        "| Q1 | Where does the user land after Save? | default: `/` |\n",
+        "| Q2 | Which page? | default: `/` |\n",
+    )
+    text = text.replace(
+        "\n## Confidence: high",
+        "\n## Open questions\n"
+        "- **Q1.** Where does the user land? **Options:** `/` / `/items`"
+        " **Default:** `/` **Plan-shaping:** no\n"
+        "\n## Confidence: high",
+    )
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_check_without_a_journey_needs_no_walk(tmp_path: Path) -> None:
+    start = _JOURNEY_PLAN.index("## User journey")
+    end = _JOURNEY_PLAN.index("## Steps")
+    text = _JOURNEY_PLAN[:start] + _JOURNEY_PLAN[end:]
+    text = text.replace(
+        "manual: walk the journey of ## User journey from Entry to Outcome",
+        "manual: open the page",
+    )
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "needle", "message"),
+    [
+        (
+            "`/items/new` - step 1",
+            "`/items/new` - step 9",
+            "H1:",
+            "User journey names step 9, which is not among the step numbers",
+        ),
+        (
+            "`/items/new` - submit",
+            "`/items/edit` - submit",
+            "H2:",
+            "User journey hop H2 starts at /items/edit, not at /items/new",
+        ),
+        (
+            "in the list on `/` - step 3",
+            "in the list on `/items/new` - step 3",
+            "**Outcome:**",
+            "User journey Outcome is on /items/new, not on the last hop target /",
+        ),
+        (
+            "  Cancel: nothing is saved. Direct link:",
+            "  Direct link:",
+            "**Leaves early:**",
+            "User journey Leaves early misses Cancel",
+        ),
+        (
+            '- **Waits:** button "Save" reads "Saving" until `/api/items?draft=1` answers.\n',
+            "",
+            "## User journey",
+            "User journey misses Waits",
+        ),
+        (
+            "`/items/new` - step 1\n  - H2: `/items/new`",
+            "`/items/42` - step 1\n  - H2: `/items/42`",
+            "H1:",
+            "User journey hop H1: step 1 Routes lack /items/42",
+        ),
+        (
+            '- **Waits:** button "Save" reads "Saving" until `/api/items?draft=1` answers.',
+            "- **Waits:** unknown",
+            "**Waits:**",
+            "User journey has a bare unknown",
+        ),
+        (
+            "(Q1)",
+            "(Q4)",
+            "H2:",
+            "User journey names Q4, which no question section holds",
+        ),
+        (
+            "exists src/Items.jsx:12",
+            "exists ../a.jsx:3",
+            "**Entry:**",
+            "User journey exists span is not a safe path:line: ../a.jsx:3",
+        ),
+        (
+            "manual: walk the journey of ## User journey from Entry to Outcome",
+            "manual: open the page",
+            "## Acceptance",
+            "Acceptance has no walk of ## User journey",
+        ),
+        (
+            '  - H1: `/` - select button "Add item" - `/items/new` - step 1',
+            '  - H1: `/` - select button "Add item" - step 1',
+            "H1:",
+            "User journey hop H1 needs a from-route and a to-route",
+        ),
+    ],
+)
+def test_check_journey_finding(
+    tmp_path: Path, old: str, new: str, needle: str, message: str
+) -> None:
+    text = _journey(old, new)
+    _assert_findings(tmp_path, text, [(_line_of(text, needle), message)])
+
+
+def test_check_journey_route_pattern(tmp_path: Path) -> None:
+    # The last hop target and the Outcome agree, so only the pattern fails, and
+    # Routes do not check a target that fails it.
+    text = _journey("assumed `/` (Q1)", "assumed `home` (Q1)")
+    text = text.replace("in the list on `/`", "in the list on `home`", 1)
+    _assert_findings(
+        tmp_path,
+        text,
+        [
+            (_line_of(text, "H2:"), "User journey route fails the route pattern: home"),
+            (
+                _line_of(text, "**Outcome:**"),
+                "User journey route fails the route pattern: home",
+            ),
+        ],
+    )
+
+
+def test_check_journey_two_entry_lines(tmp_path: Path) -> None:
+    entry = '- **Entry:** `/` - button "Add item" - exists src/Items.jsx:12\n'
+    text = _journey(entry, entry + entry)
+    second = _line_of(text, "**Entry:**") + 1
+    _assert_findings(tmp_path, text, [(second, "User journey has more than one Entry")])
+
+
+def test_check_journey_without_a_hop(tmp_path: Path) -> None:
+    start = _JOURNEY_PLAN.index("  - H1:")
+    end = _JOURNEY_PLAN.index("- **Outcome:**")
+    text = _JOURNEY_PLAN[:start] + _JOURNEY_PLAN[end:]
+    _assert_findings(
+        tmp_path,
+        text,
+        [(_line_of(text, "## User journey"), "User journey has no hop")],
+    )
+
+
+def test_check_journey_ignores_fenced_lines(tmp_path: Path) -> None:
+    text = _journey(
+        "- **Hops:**\n",
+        "- **Hops:**\n```\n  - H9: `bad` - step 7 unknown (Q8)\n```\n",
+    )
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
 # ---- verify ---------------------------------------------------------------
 
 

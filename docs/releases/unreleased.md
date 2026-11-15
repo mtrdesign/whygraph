@@ -5,6 +5,14 @@
 
 ## Changes
 
+- **A plan checks the user's path through the screens.** When a task moves the user between
+  screens, the plan gets a `## User journey` section (the actor, the entry control, one line per hop
+  tied to a step or to existing code, the outcome, what holds on refresh, back, cancel and a direct
+  link, and what the user sees while slow work runs). In Claude Code a journey reviewer checks it
+  against the router and the code, and `plan-tool.sh check` lints its lines. A plan's `## UI profile`
+  now also carries `**Auth:**`, so the UX/UI reviewer asks for a no-permission state when a login is
+  required. Run **Settings > Update agent files** to pick it up, and see
+  [Plan review](../guide/planning.md#plan-review).
 - **Every constraint on a rationale card names its source.** Each item of a card's `constraints`
   and `risks` is now an object with its `text`, a `basis` (`quoted`, `cited`, `inferred` or
   `unknown`) and the commits, PRs or issues behind it. The planning agents quote the `text` as before

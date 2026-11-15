@@ -5,7 +5,7 @@ requires:
 tools: read, codegraph_search
 section: UI profile
 enabled: true
-budget: 20
+budget: 26
 consent: false
 ---
 
@@ -28,13 +28,30 @@ consent: false
    - Report each route as a backticked path relative to the base URL, such as `/projects/42`.
    - A path must match `^/[A-Za-z0-9._~/%-]*$`.
    - Give a route with a parameter a concrete example value. Never write a full URL or a screen name.
-5. Propose the states to specify for each route: empty, loading, error and phone width. Add dark when `theme` is not `none`. Add the states this task itself needs.
+5. Propose the states to specify for each route: empty, loading, error and phone width. Add dark when `theme` is not `none`. Add no permission when `auth` is `required`. Add the states this task itself needs.
+6. Trace the journey when one of these holds. Otherwise skip this step.
+   - The task adds a route.
+   - The task adds or changes an action that moves the user to another route.
+   - The task adds a flow of two or more steps inside one route.
+
+   Use at most six tool calls.
+   - List each route the task adds under `### Routes`, marked `(new)`.
+   - Find the control that leads to the first route: a link, a menu item or a redirect. Report its `path:line`.
+   - Name each control as `<role> "<visible text>"`. Name the file that holds it, or the file that will hold it.
+   - Follow each action to where the user lands. Read the handler of the action.
+   - Find the guard of each route: the role or the login it needs.
+   - Write `unknown` only after a grep for the route and the control's text finds nothing. Never guess a control or a landing.
 
 Report in this order:
 
 - `## UI profile` with the key lines from step 2. Leave out `fingerprint`, `generated` and `capture`, because the planner owns them.
 - `### Routes`
 - `### Proposed states`
+- `### Journey`, only when step 6 ran, with these lines:
+  - `actor:` signed in as a role, or signed out.
+  - `entry:` the route, the control, the control's file, then `exists <path:line>`, `new` or `unknown`.
+  - `hop:` one line per hop: the from-route, the action and its control, the control's file and the to-route. End it with `exists <path:line>`, `new` or `unknown`.
+  - `outcome:`, `leaves early:` and `waits:`, each with its text or `unknown`.
 - `### Conventions`
 - `## Limitations`
 

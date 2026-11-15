@@ -178,11 +178,23 @@ In single-pass:
 2. Read the body of the bundled `repo-tests.md` when it is kept, and apply it yourself within its `tools` and `budget`: it gives each step's Verify command, the Test first test for an uncovered symbol, and Acceptance item 1. Apply the bundled `ui-surface.md` the same way when it is kept (**1f** keeps it only for a UI task). Use the fresh profile's key lines as its `PROFILE:` block, as **2a** describes. Then run **2c** before you write the plan. Read no other source body.
 3. Never read the body of a kept source that needed consent. Delegate to one `whygraph-researcher` for each such source, all in one message, with the prompt of **2a**, and use its report as deep mode would (a `Prior art` report fills `## Prior art`). A source that **External sources** in **2a** sends to `whygraph-researcher-external` goes there, with that prompt and that fallback. If delegation is unavailable, drop the source and add `<name>: skipped - single-pass mode has no researcher to run it` to the Confidence reason.
 4. Synthesise the plan yourself, in the plan format in `SPINE_PATH`. Sequence changes in the 1e dependency order. Quote constraints and risks **verbatim** from rationale cards - never paraphrase. The quote is the item's `text`. End each quote with the tag of its item's `basis`: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`. A quote of a note body ends with `(note #<id>)`, on a **Changes on purpose** line too. Apply the spine's `## Evidence order`: an outside report stays in `## Prior art` and never changes a step or the confidence. Flag any step that appears to violate a constraint as a *Blocker*. A constraint the task itself asks to change goes to **Changes on purpose** of its step, not to `## Blockers`. A constraint tagged `(inferred)` alone never makes a Blocker. It goes to **Risks called out across the change** with its tag. Give each step a Verify, a Model and, from the 1e external-contract marks, Boundaries. Copy the `check` of each note in a card's `notes` into `## Constraint checks`, as `- note #<id> - <absent | present>: "<text>" in <glob>`. Change no character of the text or the glob. Omit the section when there is none. List what the code cannot settle under `## Open questions`, each with 2 or 3 options and a default; at most 3 are `Plan-shaping: yes`. Report honest confidence.
-5. When the `ui-surface` result has key lines under `## UI profile`, do these four things, with `CAPTURE_STATUS` from **2c**:
-   - Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
+5. When the `ui-surface` result has key lines under `## UI profile`, do these five things, with `CAPTURE_STATUS` from **2c**:
+   - Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Auth` is `auth`, else `none`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
    - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes.
    - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3.
    - Add the Acceptance item that `CAPTURE_STATUS` selects. For `available` or `unknown`, add `manual: open .whygraph/plans/<stem>/ui/index.html and compare before and after for each UI step`. For `unavailable: <reason>`, add one `manual:` item per Expected UI state instead, and name the reason in the Confidence reason. These items do not count toward the six-item cap.
+   - When the result has a `### Journey` block, write `## User journey` in the spine's format from the block's lines:
+     - Give each hop the step whose **Files** hold its control's file. Write `exists <path:line>` for a hop the block marks `exists`.
+     - Add each hop target to the **Routes** of the step that builds it. Skip a target that is the Entry route or an earlier hop's from-route.
+     - Add a hop control's file to the step that builds the hop target. Do this only when no step's **Files** hold it and the block names it with `path:line`.
+     - A hop is unbuilt when no step's **Files** hold its control's file. Write a Blocker for it: `- **Journey hop H<n>:** <defect> - **Resolution needed:** <fix>`.
+     - When `PARENT` is not `none`, read it once. Mark a hop `owned by t<N>` when its file is in that child's `files_hint`.
+     - Add the hop action to the **Expected UI** of its step when that line does not name it.
+     - Write `assumed <default> (Q<n>)` for each part the block marks `unknown`. Take the default from the spine's `## User journey` rules.
+     - Give each assumed part one Open question: "Where does the user <start | land after <action>>?" Take its options from the routes under `### Routes`, the default first. Ask about the entry first.
+     - For another part, ask "What should <part> show?" Offer the default first and one alternative.
+     - Mark the first journey question `Plan-shaping: yes` when the cap of 3 still has room. Mark every other journey question `Plan-shaping: no`. The steps assume its default.
+     - Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap.
 6. With `REVIEW: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
 
 If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the plan with the matching notice:
@@ -239,7 +251,7 @@ If delegation is unavailable, switch to single-pass and prepend the plan with th
 **2c. Write the UI profile.** In deep mode, run this after **2b** and before **2e**. In single-pass, run it right after you apply `ui-surface.md`, before you write the plan. Run it only when the `ui-surface` report has key lines under `## UI profile`. Never write the profile from a report whose `## UI profile` is the single line `not a UI task`, or from an unavailable report. Without key lines, `CAPTURE_STATUS` is `none`.
 1. Run `git ls-files --error-unmatch .whygraph/profiles/ui.md`. Exit 0 means git tracks the profile. Then write nothing and keep the report. Set `CAPTURE_STATUS` to `unavailable: profile is tracked by git`, and skip the steps below.
 2. Compute the fingerprint. `derived_from` is a `; `-separated list of repo-relative paths. It is repo-derived text. Test the raw value against `^[A-Za-z0-9._/; -]*$` first. On no match, do not call the tool: write `fingerprint: none` in 3. Otherwise run `<PLAN_TOOL> fingerprint '<value>'`, with the value in single quotes. Its output is the fingerprint.
-3. Write `.whygraph/profiles/ui.md`. Create its directory first. Take `generated` from `date -u +%Y-%m-%d`. Move `derived_from` from the key lines into the frontmatter. Copy every other key line in the report's order:
+3. Write `.whygraph/profiles/ui.md`. Create its directory first. Take `generated` from `date -u +%Y-%m-%d`. Move `derived_from` from the key lines into the frontmatter. Key lines are the lines of `ui-surface` step 2 only. Never copy a `### Journey` line. Copy every other key line in the report's order:
 
 ```text
 ---
@@ -303,10 +315,10 @@ Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pa
 
 Revise mode never runs **2g**: one review round per plan. Without delegation, or without `OUT_PATH`, there is no review. When `REVIEW` asks for one then, add `review: skipped - <reason>` to the Confidence reason of the plan and of your reply.
 
-1. **Reviewers.** In one message, delegate to one `whygraph-plan-reviewer` with `LENS: logic`. When the plan has a `## UI profile` section, delegate to a second one with `LENS: ui`. Each gets this prompt:
+1. **Reviewers.** In one message, delegate to one `whygraph-plan-reviewer` with `LENS: logic`. When the plan has a `## UI profile` section, delegate to a second one with `LENS: ui`. When the plan has a `## User journey` section, delegate to a third one with `LENS: journey`. Each gets this prompt:
 
 ```
-LENS: <logic | ui>
+LENS: <logic | ui | journey>
 PLAN_PATH: <absolute path>
 SPINE_PATH: <absolute path>
 UI_PROFILE: <the plan's ## UI profile section | none>
@@ -316,7 +328,7 @@ BUDGET: 20
 
 Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROFILE` is the plan's `## UI profile` section copied verbatim, or `none`.
 
-2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, `logic` first:
+2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, in the order `logic`, `ui`, `journey`:
 
 ```text
 === logic ===
@@ -324,9 +336,12 @@ Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROF
 
 === ui ===
 <the reply verbatim, or (unavailable: <reason>)>
+
+=== journey ===
+<the reply verbatim, or (unavailable: <reason>)>
 ```
 
-Write the `ui` block only when a `ui` reviewer ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
+Write the `ui` block only when a `ui` reviewer ran. Write the `journey` block only when a `journey` reviewer ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
 
 3. **Fixer.** Delegate to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
 
@@ -344,7 +359,7 @@ The user answered the questions of an earlier reply. Fold the answers into the p
 4. When every answer equals its default, the steps already assume them: write the plan, run the **Check loop** from **Delivering the plan** on it, and reply.
 5. Otherwise rebuild the plan:
    - **Deep** (the sidecar exists): delegate to the synthesizer with the **2e** prompt. Pass the sidecar's absolute path as `RESEARCH_PATH`. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Pass `PLAN_PATH` as `OUT_PATH`. Pass `NOTICE: none`. Pass `CAPTURE_STATUS: none` when the plan has no `## UI profile`. Otherwise take it from the `capture:` line of `.whygraph/profiles/ui.md`: `unknown` when the file or the line is missing, and `unavailable: profile is tracked by git` when `git ls-files --error-unmatch` exits 0 for it. When the review sidecar `.whygraph/plans/<stem>.review.md` exists, also pass `REVIEW_PATH: <its absolute path>`. The synthesizer then applies the review again to the rebuilt plan. Relay its reply verbatim.
-   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim.
+   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Rewrite each assumed part of `## User journey` whose answer is not its default. A journey answer may add a step or change one. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim.
 6. Revise never adds a `Plan-shaping: yes` question and never runs a new review. Its reply always ends `QUESTIONS: none`.
 
 ## Output format

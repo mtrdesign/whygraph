@@ -21,7 +21,7 @@ flowchart LR
     planner -- "small or mechanical" --> single["Single-pass plan"]
     planner -- "otherwise" --> res["One researcher per source<br/>(in parallel)"]
     res --> synth["Synthesizer writes the plan<br/>and runs the plan check"]
-    synth --> rev["Plan review: a logic reviewer, and a UX/UI<br/>reviewer for a screen change (in parallel)"]
+    synth --> rev["Plan review: a logic reviewer, and a UX/UI<br/>reviewer for a screen change,<br/>and a journey reviewer for a multi-screen change (in parallel)"]
     rev --> fix["Fixer checks each finding<br/>and applies or refutes it"]
     single -. "only with --review" .-> rev
     single --> q{"Plan-shaping<br/>questions?"}
@@ -77,8 +77,8 @@ ladder, no review gate and no evaluator (see [Differences between editors](#diff
    set, Prior art, Blockers, Steps, Risks, Acceptance, Open questions and Confidence. Every step names
    its files, its boundaries, a literal `Verify` command and the model that should run it.
 4. **Review.** Before you are asked anything, the planner sends a deep plan to a reviewer that checks it
-   against the code: the **logic** lens (and the **UX/UI** lens when the plan has a `## UI profile`).
-   See [Plan review](#plan-review).
+   against the code: the **logic** lens, the **UX/UI** lens when the plan has a `## UI profile`, and
+   the **journey** lens when the plan has a `## User journey`. See [Plan review](#plan-review).
 5. **Questions.** You are asked after the review, never before it. At most three questions, each with
    options and a default, and only when your answer changes the shape of the plan. A review finding
    that needs your choice is one of those three, so you are never asked twice. The planner then
@@ -150,8 +150,17 @@ line but not a plan whose logic is wrong: a step placed before its dependency, a
   the Objective, and each **Model** tag fits the ladder.
 - The **UX/UI** reviewer runs only when the plan has a `## UI profile`. It checks that each route is
   rendered by the step's files, that each expected state is named, that each error state has a way out,
-  that the profile's conventions are named, and that a UI Acceptance item exists.
-- Both are read-only. Each reports at most 12 findings as `F<n> | blocker | should | ...`, and every
+  that the profile's conventions are named, and that a UI Acceptance item exists. When the plan's UI profile says `**Auth:** required`, it also
+  requires a no-permission state.
+- The **journey** reviewer runs only when the plan has a `## User journey` section. It checks the
+  journey against the router and the code: the entry route and its control exist, each hop lands on a
+  route some step renders, each hop starts where the one before it ended, the outcome names data the
+  user sees, a refresh, back, cancel or direct link behaves as written, the actor can pass each route's
+  guard, and slow work says what the user sees meanwhile. It also compares the journey with one
+  existing flow of the same kind. A missing entry point, a hop that no step builds and a broken chain
+  are Blockers. A single-pass plan gets the section but no journey review unless you pass `--review`,
+  and a revise after your answers is not reviewed again.
+- All three are read-only. Each reports at most 12 findings as `F<n> | blocker | should | ...`, and every
   finding names a `path:line` as evidence. A reviewer that cannot check something ends its reply with
   a `not checked:` line.
 - A **fixer** (a fresh synthesizer run) re-checks each finding against the code and **refutes** one whose
@@ -174,12 +183,34 @@ the planner applies the findings itself, under the same rules. `--no-review` ski
 cannot run, or a reviewer that is unavailable, is named in the plan's Confidence reason and never
 blocks the plan.
 
+#### User journey
+
+When a task moves the user between screens, the plan carries a `## User journey` section: the path a
+person takes through the app, one hop per line, each tied to the step that builds it or to the code
+that already does. For example:
+
+```markdown
+## User journey
+- **Actor:** signed in as admin
+- **Entry:** `/projects` - button "New project" - step 2
+- **Hops:**
+  - H1: `/projects` - click button "New project" - `/projects/new` - step 2
+  - H2: `/projects/new` - submit button "Create" - `/projects/<id>` - step 3
+- **Outcome:** the new project's name on `/projects/<id>` - step 3
+- **Leaves early:** Refresh: the form is empty. Back: `/projects`. Cancel: nothing. Direct link: loads the form.
+- **Waits:** the "Create" button is disabled until the project exists
+```
+
+A part the planner could not learn is written as `assumed <default> (Q<n>)` and becomes an open
+question, never a bare `unknown`.
+
 ### The plan check
 
 After it writes a plan, the planner runs `plan-tool.sh check <plan>`, a small shell script that ships
 with the agent files. It lints the plan for what a script can judge: every step has its required lines,
 each Verify is a literal command or starts with `manual:`, each Model is a known one, a step that shows a
-screen has a valid Routes path, at most three questions are plan-shaping, and no sentence is too long or
+screen has a valid Routes path, a `## User journey` has its lines, a chain of hops that joins up, real
+step numbers and a walk item in Acceptance, at most three questions are plan-shaping, and no sentence is too long or
 joins two actions. It exits 0 for a clean plan. Otherwise it prints one `line <n>: <message>` for each
 finding. The planner fixes the named lines and checks again, at most twice, and any finding left is
 named in the plan's Confidence reason. When the synthesizer writes the plan, it runs the check itself.
@@ -563,7 +594,7 @@ Every stage runs in your editor, against your own model account.
 | Research | One researcher per kept source, on a fast model, with the source's `budget` as a cap on tool calls. This is the largest part of a plan. `--shallow` skips it. |
 | Plan check | No model run. A shell script lints the plan. A finding costs one short fix by the planner or synthesizer, at most two. |
 | Synthesis | One synthesizer run. |
-| Plan review | A deep plan only, unless you pass `--review`. One logic reviewer on a strong model and, for a screen change, one UX/UI reviewer on a fast model, each with a budget of 20 tool calls, then one fixer run. `--no-review` skips it. |
+| Plan review | A deep plan only, unless you pass `--review`. One logic reviewer on a strong model, for a screen change one UX/UI reviewer on a fast model and, for a journey, one journey reviewer on a strong model in Claude Code, each with a budget of 20 tool calls, then one fixer run. `--no-review` skips it. |
 | Questions | No model run. One dialog, then one short revise pass. A revise where you took every default does not run the research again. |
 | Implement | One implementor per step, each at the model the plan names for it. A fresh context per step keeps the runs small, and a cheap step can run on a cheap model. The pre-flight and the Verify records are scripts, so they add no model cost, only the time your own commands take. |
 | Recovery | Only for a step that fails. At worst: the first run, one retry on the next model up, one short plan-amender run and a final run, plus one findings re-run and one constraint re-run. A step that passes costs none of it. |
@@ -621,7 +652,7 @@ project.
 
 When a task touches a UI, the planner derives a profile of your front end and caches it in
 `.whygraph/profiles/ui.md`: the stack, the command that starts the app and the directory to run it
-in, the base URL, the routes and the theme mechanism, a login requirement, your browser tests, and
+in, the base URL, the routes and the theme mechanism, a login requirement (carried into the plan's `## UI profile` as `**Auth:**`), your browser tests, and
 patterns for console and request noise. A second plan in the same project reuses it. The profile is
 derived again when one of the files it came from changes, and `--refresh-profile` forces it.
 
@@ -710,7 +741,7 @@ after a clone, as you would the `sources/` folder.
 | Source that reaches an outside service | Yes | Yes | No | Yes, unenforced |
 | Web best-practices source (`best-practices.md`) | Yes | No | No | No |
 | One implementor per step, at the step's model | Yes | Yes, but every step on one model unless you pass `--model <model-id>` | No, one run | No, one run |
-| Plan review (logic and UX/UI reviewers, then a fixer) | Yes: the logic reviewer on a strong model, the UX/UI reviewer on a fast one | Yes: both on the model the editor picks | Yes: both on the model the editor picks | Yes: both on the model the editor picks, read-only by written rule only |
+| Plan review (logic, UX/UI and journey reviewers, then a fixer) | Yes: the logic and journey reviewers on a strong model, the UX/UI reviewer on a fast one | Yes: both on the model the editor picks | Yes: both on the model the editor picks | Yes: both on the model the editor picks, read-only by written rule only |
 | Recovery ladder and plan amendment | Yes | Yes, on one model (the retry repeats it) | No | No |
 | Pre-flight probe and baseline of every Verify | Yes | Yes | No | No |
 | One-page brief of the plan before the pre-flight | Yes | Yes | No | No |

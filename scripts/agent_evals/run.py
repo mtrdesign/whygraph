@@ -939,7 +939,11 @@ def main(argv: list[str] | None = None) -> int:
                 first = run_attempt(case, companions, 1, args, out)
                 attempts = [first]
                 involved = [case, *companions]
-                retry = any(first.failed(c.id) for c in involved) and not first.refused
+                retry = (
+                    case.retry
+                    and any(first.failed(c.id) for c in involved)
+                    and not first.refused
+                )
                 if retry:
                     attempts.append(run_attempt(case, companions, 2, args, out))
                 for attempt in attempts:

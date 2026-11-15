@@ -14,6 +14,7 @@ skipped, so a baseline never tests what is not built yet.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -35,6 +36,7 @@ from checks import (
     at_stage,
     attempt_count,
     begin_end_around_implementors,
+    capture_after_holds,
     children_in_order,
     constraint_quotes_tagged,
     file_contains,
@@ -72,6 +74,7 @@ from checks import (
     record_review_cost,
     reply_contains,
     reply_matches,
+    secret_absent,
     reply_starts_with,
     researchers_reached_mcp,
     resolved_decisions_has,
@@ -774,6 +777,51 @@ def setup_e2e_profile(ws: Workspace) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# U13 (plan 56 Phase 5): ui-demo behind a login. The overlay in ``fixtures/login``
+# gates ``/`` on a cookie that a good post to ``/login`` sets, and keeps only the
+# hash of the password. The password is made up and lives in ``Case.env`` only.
+U13_STEM = "eval-u13"
+U13_USER = "ada"
+U13_PASSWORD = "eval-pw-7Q3x9-no-real-account"
+U13_KEYS = {
+    "base_url": "http://127.0.0.1:5195",
+    "start": "npm run dev",
+    "start_dir": ".",
+    "auth": "required",
+    "login_route": "/login",
+    "login_fields": "input[name=user]; input[name=password]; button[type=submit]",
+    "wait_for": "#root",
+    "capture": "available",
+}
+
+
+def setup_login(ws: Workspace) -> None:
+    """Add the login overlay, the profile keys and the U13 plan to ui-demo.
+
+    The hook edits the ignored ``.whygraph/profiles/ui.md`` in place and keeps the
+    first copy at ``ui.md.eval-backup``: restore it by hand after the run.
+    """
+    root = ws.dir
+    config = (FIXTURES / "login" / "vite.config.js").read_text(encoding="utf-8")
+    digest = hashlib.sha256(U13_PASSWORD.encode("utf-8")).hexdigest()
+    (root / "vite.config.js").write_text(
+        config.replace("{{PASSWORD_SHA256}}", digest), encoding="utf-8"
+    )
+    profiles = root / ".whygraph" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    path = profiles / "ui.md"
+    lines: list[str] = []
+    if path.is_file():
+        backup = profiles / "ui.md.eval-backup"
+        if not backup.exists():
+            shutil.copy(path, backup)
+        lines = path.read_text(encoding="utf-8").splitlines()
+    lines = [ln for ln in lines if ln.split(":", 1)[0] not in U13_KEYS]
+    lines += [f"{key}: {value}" for key, value in U13_KEYS.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    copy_plan("u13.md", U13_STEM)(ws)
+
+
 def strip_substeps(text: str) -> str:
     """Delete the ``STRIPPED_SUBSTEPS`` items from an implementor's Phase 2.
 
@@ -1143,6 +1191,21 @@ CASES: tuple[Case, ...] = (
             file_contains(".whygraph/plans/u12/steps/1.red", "kind: browser"),
             file_contains(".whygraph/plans/u12/steps/1.red", "result: red"),
             step_diff_paths("u12", {2: {"app/index.html"}}),
+        ),
+    ),
+    Case(
+        id="U13",
+        name="capture behind a login",
+        prompts=(implement(U13_STEM, "--no-eval"),),
+        budget=2.0,
+        estimate=1.5,
+        setup=setup_login,
+        env={"WHYGRAPH_UI_USER": U13_USER, "WHYGRAPH_UI_PASSWORD": U13_PASSWORD},
+        repo="ui-demo",
+        checks=(
+            reaches_acceptance(),
+            capture_after_holds(U13_STEM, 1, "Your items"),
+            secret_absent(U13_PASSWORD, U13_STEM),
         ),
     ),
     Case(
@@ -1769,6 +1832,7 @@ def validate() -> list[str]:
     problems.extend(_review_fixture_problems())
     problems.extend(_u17_fixture_problems())
     problems.extend(_u12_fixture_problems())
+    problems.extend(_u13_fixture_problems())
     return problems
 
 
@@ -1792,6 +1856,33 @@ def _u12_fixture_problems() -> list[str]:
     if out.returncode != 0:
         return [f"u12.md: plan-tool.sh check exit {out.returncode}"]
     return []
+
+
+def _u13_fixture_problems() -> list[str]:
+    """Check U13's plan and overlay: ``plan-tool.sh check`` exits 0, no password in a file.
+
+    Returns
+    -------
+    list of str
+        One line per problem.
+    """
+    path = FIXTURES / "plans" / "u13.md"
+    config = FIXTURES / "login" / "vite.config.js"
+    if not path.is_file() or not config.is_file():
+        return ["U13: missing fixtures/plans/u13.md or fixtures/login/vite.config.js"]
+    problems = []
+    for fixture in (path, config):
+        if U13_PASSWORD in fixture.read_text(encoding="utf-8"):
+            problems.append(f"U13: {fixture.name} holds the password")
+    out = subprocess.run(
+        ["sh", str(PLAN_TOOL), "check", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        problems.append(f"u13.md: plan-tool.sh check exit {out.returncode}")
+    return problems
 
 
 def _u17_fixture_problems() -> list[str]:

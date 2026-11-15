@@ -37,6 +37,8 @@
 #   brief <plan>                print a page about the plan for a person
 #   proof <plan>                print which steps proved their change
 #   setup <plan> [<blob>]       run the "## Setup" commands once
+#   format <plan> <t0> [<blob>] run the Format command on the files changed
+#                               since tree <t0>
 #   ready <plan> [<blob>]       say whether a failing baseline is a fault
 #   dryrun <plan>               run every Verify and Acceptance item 1 at
 #                               plan time; print the findings as a review
@@ -132,6 +134,16 @@
 # Verify names a path, or a directory, of an earlier step's Files waits for
 # that step; any other "fail" prints "not ready" and exits 1.
 #
+# A "- Format: `<command>`" bullet under "## Setup" is not a Setup command:
+# setup never runs it, and the limit of 5 does not count it. check allows
+# one. format runs it once, as setup runs its job, with each file that
+# differs between tree <t0> and the working tree and still exists appended
+# as a quoted argument. It leaves out the plan, .whygraph/, symlinks and
+# each path that path_is_safe refuses, and runs nothing when no file is
+# left. It prints "format: <k> files, exit <code>" and exits 0, 1 when the
+# command failed, 3 at the deadline and 6 when the plan has no Format
+# bullet. It writes no record.
+#
 # dryrun runs no agent, changes no tracked file and never writes
 # steps/baseline: its record is steps/dryrun, and steps/setup when it runs
 # Setup. One call ends within the Verify budget. A call with work left
@@ -217,6 +229,7 @@ usage: plan-tool.sh snapshot
        plan-tool.sh brief <plan>
        plan-tool.sh proof <plan>
        plan-tool.sh setup <plan> [<blob>]
+       plan-tool.sh format <plan> <t0> [<blob>]
        plan-tool.sh ready <plan> [<blob>]
        plan-tool.sh dryrun <plan>
        plan-tool.sh red <plan> <N> [again] [<blob>]
@@ -281,7 +294,8 @@ function literal_spans(text,    count, i, n, words) {
 # ("amended ?" for any other "- " line there). A Verify or Check whose first
 # span starts with "manual:" prints no span: it is not literal. With N empty
 # and F "Setup", it prints the command of each "## Setup" bullet, and
-# returns 3 when the plan has no such section.
+# returns 3 when the plan has no such section. A "- Format:" bullet is not a
+# Setup command: F "Format" prints its command, and returns 3 without one.
 AWK_VERIFY='
 # Whether line s starts with the field name; then VALUE is the text after it.
 function field_value(s, name) {
@@ -310,10 +324,18 @@ in_fence {
         found = 1
     next
 }
-# F "Setup" prints the one span of each bullet under "## Setup".
-F == "Setup" {
-    if (in_setup && $0 ~ /^[ \t]*- / && spans_of($0) == 1 && SPAN[1] ~ /[^ \t]/)
-        print SPAN[1]
+# F "Setup" prints the one span of each bullet under "## Setup", except
+# the Format bullet. F "Format" prints the span of the Format bullet.
+F == "Setup" || F == "Format" {
+    if (in_setup && $0 ~ /^[ \t]*- / && spans_of($0) == 1 && SPAN[1] ~ /[^ \t]/) {
+        if ($0 !~ /^[ \t]*- Format:/) {
+            if (F == "Setup")
+                print SPAN[1]
+        } else if (F == "Format") {
+            print SPAN[1]
+            found = 1
+        }
+    }
     next
 }
 N == "" && in_log && index($0, "- [x] Step ") == 1 {
@@ -668,10 +690,15 @@ function hidden_text(s,    i) {
 }
 
 # A bullet under "## Setup": one literal command, no shell syntax, no git push.
+# The one Format bullet does not count toward the limit of 5.
 function on_setup_line(s,    span, i, words, n, part) {
     if (s !~ /^[ \t]*- /)
         return
-    setup_count++
+    if (s ~ /^[ \t]*- Format:/) {
+        if (++format_count == 2)
+            finding(NR, "Setup has more than one Format bullet")
+    } else
+        setup_count++
     if (spans_of(s) != 1 || SPAN[1] !~ /[^ \t]/) {
         finding(NR, "Setup line has no literal command")
         return
@@ -3648,6 +3675,70 @@ cmd_setup() {
     exit $?
 }
 
+# format <plan> <t0> [<blob>]: run the Format command of the plan on the
+# files that differ between tree <t0> and the working tree (see the header
+# comment). Each path passes path_is_safe, so single quotes hold it whole.
+cmd_format() {
+    [ $# -eq 2 ] || [ $# -eq 3 ] || usage
+    plan=$1
+    t0=$2
+    blob=${3:-}
+    is_object_id "$t0" || usage "not a tree id: $t0"
+    [ -z "$blob" ] || is_object_id "$blob" || usage "not a blob id: $blob"
+    [ -n "$blob" ] || [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    run_git cat-file -e "$t0^{tree}" 2>/dev/null || usage "no such tree: $t0"
+    read_budget
+    choose_kill_form
+    # The plan path is relative to the caller: resolve it before the cd.
+    plan_at=
+    if [ -f "$plan" ]; then
+        plan_at=$(cd "$(dirname "$plan")" 2>/dev/null && pwd -P)/${plan##*/} || plan_at=
+    fi
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    load_plan "$plan" "$blob"
+    root=$(pwd -P)
+    fmt_command=$(plan_field "$work/plan" "" Format | head -n 1)
+    [ -n "$fmt_command" ] || {
+        printf 'format: no Format command\n'
+        exit 6
+    }
+    now=$(take_snapshot) || fail "snapshot failed"
+    run_git -c core.quotePath=false diff --name-only --no-renames "$t0" "$now" >"$work/paths" ||
+        fail "git diff failed"
+    count=0
+    unsafe=0
+    while IFS= read -r path; do
+        case $path in
+            .whygraph | .whygraph/*) continue ;;
+        esac
+        [ "$root/$path" != "$plan_at" ] || continue
+        [ -f "$path" ] && [ ! -h "$path" ] || continue
+        if ! path_is_safe "$path"; then
+            unsafe=$((unsafe + 1))
+            continue
+        fi
+        fmt_command="$fmt_command '$path'"
+        count=$((count + 1))
+    done <"$work/paths"
+    [ "$unsafe" -eq 0 ] || printf 'format: unsafe paths left out: %s\n' "$unsafe"
+    if [ "$count" -eq 0 ]; then
+        printf 'format: 0 files, exit 0\n'
+        exit 0
+    fi
+    printf '%s\n' "$fmt_command" >"$work/spans"
+    strip_secrets
+    run_job
+    rm -f "$work/strip"
+    printf 'format: %s files, exit %s\n' "$count" "$code"
+    if [ "$code" -eq 124 ] && [ -f "$work/timed-out" ]; then
+        exit 3
+    fi
+    [ "$code" -eq 0 ] || exit 1
+    exit 0
+}
+
 # The ready test on record $1 (a baseline or a dry-run record) for plan
 # file $2. With $3 "resume", a run that a .done marker or a logged pass
 # shows is not fresh prints "ready: resumed". For the last result line of
@@ -4753,6 +4844,7 @@ case $subcommand in
     brief) cmd_brief "$@" ;;
     proof) cmd_proof "$@" ;;
     setup) cmd_setup "$@" ;;
+    format) cmd_format "$@" ;;
     ready) cmd_ready "$@" ;;
     dryrun) cmd_dryrun "$@" ;;
     red) cmd_red "$@" ;;

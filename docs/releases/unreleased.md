@@ -5,6 +5,13 @@
 
 ## Changes
 
+- **UI capture works behind a login.** Set `WHYGRAPH_UI_USER` and `WHYGRAPH_UI_PASSWORD`, or run
+  `node capture.mjs --login` once to save a session in `.whygraph/profiles/ui-auth.json`. The profile
+  gets `login_route` and `login_fields`, and the planner no longer skips a project with a login. Both
+  ways work only on a loopback host. A saved login that expired ends a step as `not run`, not a halt.
+  The variables are visible to commands the agent runs itself: use a throwaway dev account. Run
+  **Settings > Update agent files** to pick it up, and see
+  [Capturing behind a login](../guide/planning.md#capturing-behind-a-login).
 - **A UI plan can carry a browser test, seen red before the feature exists.** When the project has
   browser tests (profile key `e2e_run`), one step writes a test for the user's path and runs it red,
   and the step that completes the path runs it green. Acceptance gets an `e2e:` item. The planner

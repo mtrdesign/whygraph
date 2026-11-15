@@ -93,12 +93,13 @@ A Verify must pass when its own step is done. A later step must not be needed. R
 
 ## Setup
 
-Write this section only when a source reported setup commands.
+Write this section only when a source reported setup commands. A format command alone gets the section too.
 
 - List the commands that make a fresh checkout ready for the tests: install, then generate.
 - Write one literal command in each bullet. Use no shell syntax.
 - A setup command may change only files that git ignores.
 - The harness runs these commands itself when a Verify fails before any change.
+- Write a reported format command as the last bullet: `Format:`, then the command in backticks. It is not a setup command. The harness runs it on the changed files after the last step.
 
 ## Acceptance
 
@@ -209,8 +210,9 @@ Check each box before you hand the plan over.
 - **Waits:** <what the user sees while slow work runs, and how the user learns it finished, or "none">
 
 ## Setup
-*(only when a source reported setup commands - otherwise omit this section entirely)*
+*(only when a source reported setup commands or a format command - otherwise omit this section entirely)*
 - `<literal command>` - <what it prepares>
+- Format: `<command>`
 
 ## Blockers
 *(only include if a constraint is at risk - otherwise omit this section entirely)*

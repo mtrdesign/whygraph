@@ -21,3 +21,4 @@ A Verify and a Check run under `sh -c`, with no shell profile, no terminal and c
 
 Report the project's full test command first, as `- Test commands: ...`; the synthesizer makes it Acceptance item 1.
 Then report `- Setup commands: <command>; <command>`, or `- Setup commands: none`.
+Then report the formatter the repo uses, as `- Format command: <command that rewrites the files given as arguments>`, or `- Format command: none`.

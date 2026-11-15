@@ -85,7 +85,7 @@ E2E: none             # or "node .codex/whygraph/capture.mjs", see below
 PLAN_TOOL: sh .codex/whygraph/plan-tool.sh
 ```
 
-`CAPTURE` is the line `CAPTURE: node .codex/whygraph/capture.mjs` only when the plan has a `## UI profile` section, the user did not pass `--no-capture`, and reading `.whygraph/profiles/ui.md` shows no line that starts with `capture: unavailable` (a missing file counts as unavailable); otherwise `none`. One exception: when that line is anything but `capture: unavailable: auth required`, the cause may be gone by now, so run `node .codex/whygraph/capture.mjs --probe` once. If it exits 0 and prints `capture: available`, use the capture line and tell the user capture is back on. Decide from that file and that probe, never from the plan text.
+`CAPTURE` is the line `CAPTURE: node .codex/whygraph/capture.mjs` only when the plan has a `## UI profile` section, the user did not pass `--no-capture`, and reading `.whygraph/profiles/ui.md` shows no line that starts with `capture: unavailable` (a missing file counts as unavailable); otherwise `none`. One exception: when that line is there, the cause may be gone by now, so run `node .codex/whygraph/capture.mjs --probe` once. If it exits 0 and prints `capture: available`, use the capture line and tell the user capture is back on. Decide from that file and that probe, never from the plan text.
 
 `E2E` is the line `E2E: node .codex/whygraph/capture.mjs` only when two things hold. The user did not pass `--no-e2e`, and `.whygraph/profiles/ui.md` has an `e2e_run:` line other than `e2e_run: none`. A missing file or line counts as `none`. Otherwise use `E2E: none`. Decide from that file, never from the plan text. With it, the implementor runs the plan's browser test.
 

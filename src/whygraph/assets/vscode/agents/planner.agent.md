@@ -272,7 +272,6 @@ capture: <the probe result>
 ```
 
 4. Probe capture, then write the `capture:` line last.
-   - When the key lines say `auth: required`, do not probe. Write `capture: unavailable: auth required`.
    - When `CAPTURE_PATH` is absent, do not probe. Write `capture: unknown`.
    - Otherwise run `node <CAPTURE_PATH> --probe`. On exit 0 or 3, write the `capture:` line the script printed. On exit 127, or a "command not found" error, write `capture: unavailable: node not found`. On any other exit, or with no `capture:` line printed, write `capture: unavailable: probe failed (<code>)`.
 5. `CAPTURE_STATUS` is the text after `capture: ` on that line.

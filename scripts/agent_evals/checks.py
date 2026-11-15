@@ -2297,3 +2297,57 @@ def record_review_cost() -> Check:
         )
 
     return Check("review cost share", fn, record=True)
+
+
+def capture_after_holds(stem: str, step: int, text: str) -> Check:
+    """Pass when an after capture of the step has ``text`` in an ARIA snapshot.
+
+    The step's ``ui/index.html`` must exist too. Used for a route behind a login.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        ui = ctx.workdir / ".whygraph" / "plans" / stem / "ui"
+        if not (ui / "index.html").is_file():
+            return False, "ui/index.html is missing"
+        shots = sorted((ui / str(step) / "after").glob("*.aria.txt"))
+        ok = any(text in _text(path) for path in shots)
+        return (
+            ok,
+            f"{len(shots)} after snapshots, {'one holds' if ok else 'none holds'} {text!r}",
+        )
+
+    return Check(f"after capture of step {step} shows {text}", fn)
+
+
+def secret_absent(secret: str, stem: str) -> Check:
+    """Pass when no plan file of ``stem`` and no session transcript holds ``secret``.
+
+    The detail names the files only, never the secret.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        plans = ctx.workdir / ".whygraph" / "plans"
+        found = []
+        for root in (plans / f"{stem}.md", plans / stem, plans / f"{stem}.research.md"):
+            files = (
+                [root]
+                if root.is_file()
+                else sorted(root.rglob("*"))
+                if root.is_dir()
+                else []
+            )
+            for path in files:
+                if path.is_file() and secret in _text(path):
+                    found.append(str(path.relative_to(ctx.workdir)))
+        transcripts = ctx.all_transcripts()
+        for transcript in transcripts:
+            if secret in _text(transcript.path):
+                found.append(f"{transcript.agent_type} transcript")
+        if found:
+            return False, "the password is in " + ", ".join(found)
+        return (
+            True,
+            f"the password is in no plan file and none of {len(transcripts)} transcripts",
+        )
+
+    return Check("the password is in no plan file or transcript", fn)

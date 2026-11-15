@@ -19,6 +19,7 @@ consent: false
    - `base_url`, `start` and `start_dir`: take them from the `dev` or `start` script, a Makefile target, or a README line.
    - `fixture`: a demo or fixture command, else `none`.
    - `auth`: `none`, or `required` when a login route guards the root.
+   - `login_route` and `login_fields`: when `auth` is `required`, the route of the login form, and the selectors of its user field, its password field and its submit control, separated by `; `. Read the login page and the login helper of the browser tests. Else `none`.
    - `tests`: the browser test runner and its directory, else `none`.
    - `e2e_run`: the command that runs one browser test file, without the file, such as `npx cypress run --spec`. Else `none`.
    - `e2e_dir`: the directory of those test files.

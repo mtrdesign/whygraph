@@ -799,6 +799,8 @@ do not copy one from a repository you do not trust.
 | `allow_hosts` | Extra hosts the capture may visit. Loopback hosts are always allowed. |
 | `mask` | Patterns for text that changes on every load, such as a clock. Matches are replaced before snapshots are compared. |
 | `ignore_console` and `ignore_requests` | Known noise, such as a dev server's reload socket, that is not a defect. |
+| `auth` | `none`, or `required` when a login route guards the app. |
+| `login_route` and `login_fields` | With `auth: required`: the route of the login form, then the selectors of its user field, its password field and its submit control, separated by `; `. |
 | `capture` | `available`, `unknown` or `unavailable: <reason>`, from a probe the planner runs. |
 
 ### Your UI standards
@@ -845,6 +847,33 @@ failed request, phone-width overflow or unnamed control that shows up on two run
 loop, with the signal quoted. You can also run it by hand in Claude Code and Cursor:
 `/whygraph-ui-check <route...> [--tag before|after] [--out DIR]` prints the path of the sheet.
 `--no-capture` skips capture for a run.
+
+### Capturing behind a login
+
+When `auth` is `required`, the script logs in by one of two ways. It tries them in this order.
+
+1. **Form login.** Export `WHYGRAPH_UI_USER` and `WHYGRAPH_UI_PASSWORD` in the shell that runs the
+   agent. The script opens `login_route`, fills the two fields and selects the submit control. It
+   waits at most 15 seconds for the page to leave the login route. Nothing is written to disk.
+   While it logs in, it blocks every request to a host other than the app's. The login page itself
+   is never captured. A login that fails prints `login failed: still on <login_route>`.
+2. **Saved login.** Run `node <path to capture.mjs> --login`. A browser window opens. Log in,
+   then close the window. The script saves the session to `.whygraph/profiles/ui-auth.json`.
+   A login through an identity provider on another host works here.
+
+When both exist, the form login wins, because it cannot expire overnight. With neither, capture stops
+with `login not set up`. When a saved login ends, a probe prints `capture: unavailable: the saved login
+expired`. In a run, the implementor then logs `capture: not run` for that step and goes on.
+
+Limits:
+
+- Both ways work only when the app runs on a loopback host. `allow_hosts` does not change that.
+- The state file holds a live session. Keep it out of git: the script refuses it when git tracks it,
+  and when it is a symlink. Delete it when you finish.
+- The names of the two variables are fixed. A profile cannot name another variable.
+- The plan tool removes both variables from every command it runs, such as Setup, Verify and Check.
+- The two variables are still visible to every command the agent runs itself, such as an `npm install`
+  inside a step. Use a throwaway dev account, never a real one.
 
 ### Without Node
 

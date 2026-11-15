@@ -267,6 +267,13 @@ def repo(tmp_path: Path) -> Path:
         ("ready",),
         ("ready", "plan.md", "x"),
         ("dryrun",),
+        ("format",),
+        ("format", "plan.md"),
+        ("format", "plan.md", "x"),
+        ("format", "plan.md", "a" * 40),
+        ("format", "does-not-exist.md", "a" * 40),
+        ("format", "plan.md", "a" * 40, "blob"),
+        ("format", "plan.md", "a" * 40, "b" * 40, "extra"),
         ("dryrun", "plan.md", "x"),
         ("red",),
         ("red", "plan.md"),
@@ -4567,6 +4574,159 @@ def test_setup_never_sees_the_login_variables(
     assert seen["npm_config_yes"] == "false"
 
 
+# ---- format (plan 56 section 5.20) ------------------------------------------------
+
+_FMT_SCRIPT = "printf '%s\\n' \"$@\" > gen/args\n"
+
+
+def _format_repo(repo: Path) -> None:
+    """Ignore ``gen/`` and put the Format script there: it records its arguments."""
+    _gen_repo(repo)
+    (repo / "gen").mkdir()
+    (repo / "gen" / "fmt.sh").write_text(_FMT_SCRIPT)
+
+
+def _format(
+    repo: Path, posix: str, t0: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return _run(repo, posix, "format", "plans/p.md", t0, env=env)
+
+
+def test_check_setup_two_format_bullets(tmp_path: Path) -> None:
+    bullets = "- `npm ci`\n- Format: `npx prettier --write`\n- Format: `ruff format`\n"
+    text = _CLEAN_PLAN.replace("## Steps\n", f"## Setup\n{bullets}\n## Steps\n", 1)
+    _assert_one_finding(
+        tmp_path,
+        text,
+        _line_of(text, "- Format: `ruff format`"),
+        "Setup has more than one Format bullet",
+    )
+
+
+def test_check_setup_format_is_not_counted(tmp_path: Path) -> None:
+    bullets = "".join(f"- `make s{i}`\n" for i in range(5))
+    bullets += "- Format: `uv run ruff format`\n"
+    text = _CLEAN_PLAN.replace("## Steps\n", f"## Setup\n{bullets}\n## Steps\n", 1)
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout
+
+
+def test_check_setup_format_has_the_setup_rules(tmp_path: Path) -> None:
+    text = _CLEAN_PLAN.replace(
+        "## Steps\n", "## Setup\n- Format: `ruff format && make`\n\n## Steps\n", 1
+    )
+    _assert_one_finding(
+        tmp_path,
+        text,
+        _line_of(text, "- Format:"),
+        "Setup command has shell syntax: ruff format && make",
+    )
+
+
+def test_setup_never_runs_the_format_bullet(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    plan = _setup_plan(("`mkdir -p gen`", "`touch gen/ok`", "Format: `touch gen/fmt`"))
+    _write_plan(repo, plan)
+    run = _run(repo, posix, "setup", "plans/p.md")
+    assert (run.returncode, run.stdout) == (0, "setup: 2 of 2 commands ran, exit 0\n")
+    assert (repo / "gen/ok").exists() and not (repo / "gen/fmt").exists()
+
+
+def test_format_passes_the_changed_files_that_exist(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    for name in ("d.txt", "e.txt"):
+        (repo / name).write_text(f"{name}\n")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "more files")
+    _write_plan(repo, _setup_plan(("`true`", "Format: `sh gen/fmt.sh`")))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    (repo / "b.txt").write_text("new\n")
+    (repo / "d.txt").unlink()
+    (repo / "link.txt").symlink_to("e.txt")
+    run = _format(repo, posix, t0)
+    assert (run.returncode, run.stdout) == (0, "format: 2 files, exit 0\n"), run.stderr
+    assert (repo / "gen/args").read_text() == "a.txt\nb.txt\n"
+
+
+def test_format_leaves_out_an_unsafe_path(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    _write_plan(repo, _setup_plan(("Format: `sh gen/fmt.sh`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    (repo / "has space.txt").write_text("new\n")
+    (repo / "-n.txt").write_text("new\n")
+    run = _format(repo, posix, t0)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout == "format: unsafe paths left out: 2\nformat: 1 files, exit 0\n"
+    assert (repo / "gen/args").read_text() == "a.txt\n"
+
+
+def test_format_never_passes_the_plan(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "p.md").write_text(_setup_plan(("Format: `sh gen/fmt.sh`",)))
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "tracked plan")
+    t0 = _snapshot(repo)
+    with (repo / "docs" / "p.md").open("a") as plan:
+        plan.write("\n## Implementation log\n\n- Polish: applied 0 of 0\n")
+    (repo / "a.txt").write_text("changed\n")
+    run = _run(repo, posix, "format", "docs/p.md", t0)
+    assert (run.returncode, run.stdout) == (0, "format: 1 files, exit 0\n"), run.stderr
+    assert (repo / "gen/args").read_text() == "a.txt\n"
+
+
+def test_format_with_no_changed_file_runs_nothing(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    _write_plan(repo, _setup_plan(("Format: `sh gen/fmt.sh`",)))
+    run = _format(repo, posix, _snapshot(repo))
+    assert (run.returncode, run.stdout) == (0, "format: 0 files, exit 0\n")
+    assert not (repo / "gen/args").exists()
+
+
+def test_format_a_failing_command_exits_1(repo: Path, posix: str) -> None:
+    _write_plan(repo, _setup_plan(("Format: `false`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _format(repo, posix, t0)
+    assert (run.returncode, run.stdout) == (1, "format: 1 files, exit 1\n")
+
+
+def test_format_without_a_bullet_exits_6(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    _write_plan(repo, _setup_plan(("`true`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _format(repo, posix, t0)
+    assert (run.returncode, run.stdout) == (6, "format: no Format command\n")
+    assert not (repo / "gen/args").exists()
+
+
+def test_format_strips_secrets(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("Format: `sh -c 'env > gen/env' fmt`",)))
+    (repo / "gen").mkdir()
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _format(repo, posix, t0, env={**_SECRETS, **_LOGIN})
+    assert run.returncode == 0, run.stdout + run.stderr
+    seen = _env_names(repo / "gen/env")
+    assert "OPENAI_API_KEY" not in seen and "WHYGRAPH_PROBE_X" not in seen
+    assert "WHYGRAPH_UI_PASSWORD" not in seen
+    assert seen["GITHUB_TOKEN"] == "kept1"
+
+
+def test_format_deadline_exits_3(repo: Path, marker: str) -> None:
+    _write_plan(repo, _setup_plan((f"Format: `sh -c 'sleep {marker}' fmt`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _tool(repo, "format", "plans/p.md", t0, env={"WHYGRAPH_VERIFY_TIMEOUT": "1"})
+    assert run.returncode == 3, run.stdout + run.stderr
+    assert run.stdout == "format: 1 files, exit 124\n"
+    assert _sleeps(marker) == []
+
+
 def test_verify_leaves_no_background_process(repo: Path, marker: str) -> None:
     _write_plan(repo, _full_plan(("a.txt", f"`sh -c 'sleep {marker} &'`", None)))
     run = _tool(repo, "verify", "plans/p.md", "1")
@@ -5228,6 +5388,7 @@ _PLAN_COMMANDS = [
     ("amend-check", "plans/p.md", _BLOB_ARG, "1"),
     ("proof", "plans/p.md"),
     ("setup", "plans/p.md"),
+    ("format", "plans/p.md", _T0_ARG),
     ("ready", "plans/p.md"),
     ("dryrun", "plans/p.md"),
     ("red", "plans/p.md", "1"),

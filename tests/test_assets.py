@@ -2041,7 +2041,7 @@ def test_implement_entry_points() -> None:
 _PLAN_TOOL_SUBCOMMANDS = (
     "snapshot|begin|end|pass|next|changed|probe|baseline|accept|attempt|amends"
     "|save|restore|log-check|state|amend-check|constraints|brief|proof"
-    "|setup|ready|dryrun"
+    "|setup|ready|dryrun|format"
 )
 
 
@@ -2127,6 +2127,8 @@ def test_implement_stop_block_and_causes(tree: str) -> None:
         # Plan 56 section 5.25: the browser test rows.
         "the browser test passed before the change",
         "the browser test was edited",
+        # Plan 56 section 5.20: the polish run.
+        "acceptance failed after the polish run: <items>",
     ):
         assert any(c.fullmatch(wanted) for _, c in causes), wanted
     # The Next of a baseline change says how to keep the Verify a pure check.
@@ -2186,6 +2188,60 @@ def test_implement_run_summary(tree: str) -> None:
     print_at = acceptance.index("Print the run summary (Step 7).")
     assert acceptance.index("`STEP_RANGE: acceptance`") < print_at
     assert print_at < acceptance.index("`acceptance failed: <item numbers>`")
+
+
+def test_polish_contract() -> None:
+    """Plan 56 section 5.20: the Format command, the polish mode and Step 3e-bis."""
+    for tree, folder in _SOURCE_DIRS.items():
+        base = _ASSET_ROOT / folder
+        source = (base / "sources" / "repo-tests.md").read_text()
+        assert (
+            "`- Format command: <command that rewrites the files given as arguments>`"
+        ) in source, tree
+        assert "`- Format command: none`" in source, tree
+        spine = (base / "plan-spine.md").read_text()
+        block = spine.split("\n## Setup\n*(only when", 1)[1].split("\n## ", 1)[0]
+        assert block.splitlines()[-1] == "- Format: `<command>`", tree
+        synth = "\n".join(_agent_body(tree, "synthesizer"))
+        step3i = synth.split("**3i. Setup.**", 1)[1].split("**3j.", 1)[0]
+        assert "Then read the `- Format command:` line of that section." in step3i
+        assert "write the last bullet as `Format:` and the command" in step3i, tree
+        body = "\n".join(_agent_body(tree, "implementor"))
+        assert "STEP_RANGE: <N | N- | N-M | auto | acceptance | polish>" in body
+        assert "`FINDINGS needs STEP_RANGE: <N> or polish.`" in body, tree
+        polish = body.split("## Phase 2p - The polish run", 1)[1]
+        polish = polish.split("\n## Phase 3", 1)[0]
+        for phrase in (
+            "No step's **Files** holds the path",
+            "A step's **Boundaries** names the path",
+            # V17: no Phase 2 guard sees a polish edit.
+            "The path is a step's **Test first** file or **Browser test** file",
+            "Change nothing else. Run no Verify",
+            "Write no file under `.whygraph/plans/<stem>/steps/`",
+            "`  - F<i>: applied` or `  - F<i>: skipped: <why>`",
+        ):
+            assert phrase in polish, (tree, phrase)
+    for tree in ("claude-code", "cursor"):
+        text = _text(_IMPLEMENT_ENTRY[tree])
+        assert "[--no-eval] [--no-polish] [--eval-fix-attempts N]" in text, tree
+        assert "- `--no-polish` -> skip the polish run" in text, tree
+        bis = text.split("### Step 3e-bis - Polish run", 1)[1].split("\n### ", 1)[0]
+        assert "(skip with `--no-polish` or `--no-eval`)" in bis, tree
+        spawn = bis.index("`STEP_RANGE: polish`")
+        call = (
+            f"`{_PLAN_TOOL_CMDS[tree]} format <plan> <t0> <blob>` after the polish run"
+        )
+        # V17: format runs after the polish edits, then Acceptance again.
+        assert spawn < bis.index(call) < bis.index("Run item 1 of Step 3d again"), tree
+        assert "`acceptance failed after the polish run: <item numbers>`" in bis
+        assert "`Polish: applied <k> of <n> quality findings`" in bis, tree
+        if tree == "claude-code":
+            assert "Set the Agent tool's `model` to `sonnet`." in bis
+    for tree in ("vscode", "codex"):
+        assert "3e-bis" not in _text(_IMPLEMENT_ENTRY[tree]), tree
+    for rel in _PLAN_TOOL_COPIES:
+        tool = (_ASSET_ROOT / rel).read_text()
+        assert 'format) cmd_format "$@" ;;' in tool, rel
 
 
 def test_implement_constraint_line_only_where_the_gate_runs() -> None:
@@ -3280,13 +3336,11 @@ def test_implement_probes_again_before_trusting_a_cached_unavailable() -> None:
     """A cached `capture: unavailable` cannot turn capture off for good.
 
     The planner writes that line once; the cause (no Node, no browser) may be
-    gone by implement time. Only `auth required` stands, since the probe cannot
-    see it.
+    gone by implement time. The probe now decides a login too (plan 56, 5.15).
     """
     for tree, rel in _IMPLEMENT_ENTRY.items():
         text = _text(rel)
         assert f"node {_CAPTURE_PATHS[tree]} --probe" in text, tree
-        assert "`capture: unavailable: auth required`" in text, tree
         assert "prints `capture: available`" in text, tree
 
 
@@ -5732,13 +5786,22 @@ _IMPLEMENTOR_LINES_BEFORE_PHASE_2 = 261
 # Plan 56 Phase 4 (section 5.14) adds the browser test: the E2E input, the
 # browser_test field, sub-steps 5a and 7a, and Phase 2h item 2a.
 _IMPLEMENTOR_LINES_PHASE_4 = 10
+# Plan 56 Phase 5 (section 5.17, V28): the expired-login sentence.
+_IMPLEMENTOR_LINES_PHASE_5 = 1
+# Plan 56 section 5.20 (V17): the polish mode, Phase 2p and its report lines.
+_IMPLEMENTOR_LINES_POLISH = 18
 
 
 def test_proven_steps_contract() -> None:
     """Plan 56 Phase 2: the red run and the guard live in the plan tool."""
     for tree in _AGENT_PATHS:
         body = _agent_body(tree, "implementor")
-        limit = _IMPLEMENTOR_LINES_BEFORE_PHASE_2 + _IMPLEMENTOR_LINES_PHASE_4
+        limit = (
+            _IMPLEMENTOR_LINES_BEFORE_PHASE_2
+            + _IMPLEMENTOR_LINES_PHASE_4
+            + _IMPLEMENTOR_LINES_PHASE_5
+            + _IMPLEMENTOR_LINES_POLISH
+        )
         assert len(body) <= limit, (tree, len(body))
         text = "\n".join(body)
         for phrase in (
@@ -5887,3 +5950,32 @@ def test_e2e_contract() -> None:
             assert "--trust" not in text, tree
             assert "the browser test was edited" not in text, tree
         assert "--no-e2e" in text, tree
+
+
+def test_login_contract() -> None:
+    """Plan 56 sections 5.15 and 5.17: the login keys and the expired-login rule."""
+    key = (
+        "   - `login_route` and `login_fields`: when `auth` is `required`, the route "
+        "of the login form, and the selectors of its user field, its password field "
+        "and its submit control, separated by `; `."
+    )
+    gone_planner = "do not probe. Write `capture: unavailable: auth required`."
+    gone_entry = "`capture: unavailable: auth required`"
+    expired = (
+        "When that line starts with `the saved login expired`, do not halt. "
+        "Log `capture: not run - <line>` and continue."
+    )
+    for tree, directory in _SOURCE_DIRS.items():
+        source = (_ASSET_ROOT / directory / "sources" / "ui-surface.md").read_text()
+        auth = source.index("   - `auth`:")
+        assert source.index(key) > auth, tree
+        planner = "\n".join(_agent_body(tree, "planner"))
+        assert gone_planner not in planner, tree
+        assert "When `CAPTURE_PATH` is absent, do not probe." in planner, tree
+        entry = _text(_IMPLEMENT_ENTRY[tree])
+        assert gone_entry not in entry, tree
+        impl = "\n".join(_agent_body(tree, "implementor"))
+        assert expired in impl, tree
+        assert impl.index(expired) > impl.index(
+            "`3`: halt with `capture unavailable: <first stderr line>`."
+        ), tree

@@ -823,7 +823,10 @@ def dry_run(cases: list[Case], args: argparse.Namespace) -> int:
         total += case.estimate
         extras = "".join(
             [
-                *(f", env {k}={v}" for k, v in case.env.items()),
+                *(
+                    f", env {k}={'(set)' if 'PASSWORD' in k else v}"
+                    for k, v in case.env.items()
+                ),
                 *(f", +{tool}" for tool in case.tools),
                 ", transformed assets" if case.assets else "",
             ]

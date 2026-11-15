@@ -1,7 +1,7 @@
 ---
 name: whygraph-implement
 description: Execute a reviewed WhyGraph plan (or a split's tasks.json) one step per fresh implementor at the step's model, with a cached-card review gate and a spec evaluation after each step, a separate acceptance run at the end, then quality and UI evaluations. The plan tool does the bookkeeping, a counted recovery ladder retries a failed step, and every stop names its cause. Each run appends to the plan's Implementation log.
-argument-hint: <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku|fable] [--no-review] [--no-eval] [--eval-fix-attempts N] [--no-capture] [--no-e2e]
+argument-hint: <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku|fable] [--no-review] [--no-eval] [--no-polish] [--eval-fix-attempts N] [--no-capture] [--no-e2e]
 allowed-tools: Agent, Read, mcp__whygraph__whygraph_propose_note, Bash(node .claude/skills/whygraph-ui-check/capture.mjs --probe), Bash(node .claude/skills/whygraph-ui-check/capture.mjs --e2e *), Bash(sh .claude/skills/whygraph-plan/plan-tool.sh *), Bash(git hash-object --no-filters .claude/skills/whygraph-plan/plan-tool.sh)
 disable-model-invocation: true
 ---
@@ -20,13 +20,14 @@ Strip and remember these flags if present (any order, anywhere in `$ARGUMENTS`):
 - `--fix-attempts <N>` -> integer 0-2 (consume the next token; default `2`, values above 2 become 2). On a failed Verify the implementor makes up to `N` bounded fixes of the same step's files, re-running Verify each time, before it halts.
 - `--model <sonnet|opus|haiku|fable>` -> optional (consume the next token). It overrides every step's `**Model:**` tag.
 - `--no-review` -> skip the review gate after each step (Step 3b).
-- `--no-eval` -> skip the three evaluations: spec (Step 3c), quality and UI (Step 3e).
+- `--no-eval` -> skip the three evaluations: spec (Step 3c), quality and UI (Step 3e). It skips the polish run too (Step 3e-bis).
+- `--no-polish` -> skip the polish run after the quality evaluation (Step 3e-bis).
 - `--eval-fix-attempts <N>` -> integer 0-2 (consume the next token; default `1`, values above 2 become 2). It caps the findings re-runs of one step after a spec `fix` verdict. It is separate from `--fix-attempts`.
 - `--no-capture` -> pass `CAPTURE: none` to every implementor (Step 2b).
 - `--no-e2e` -> pass `E2E: none` to every implementor, and run no browser test at Acceptance (Step 2b).
 
 The first non-flag positional token is the **path**: a plan (`.md`) or a split's `.tasks.json`. If it is empty, respond with:
-`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku|fable] [--no-review] [--no-eval] [--eval-fix-attempts N] [--no-capture] [--no-e2e]` and stop.
+`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model sonnet|opus|haiku|fable] [--no-review] [--no-eval] [--no-polish] [--eval-fix-attempts N] [--no-capture] [--no-e2e]` and stop.
 
 - If both `--from-step` and `--step` are passed, respond with `Pass --from-step OR --step, not both.` and stop.
 - If the path ends in `.tasks.json` and `--from-step` or `--step` is passed, respond with `--from-step and --step take a plan; pass the child's plan file instead of the tasks.json.` and stop.
@@ -102,8 +103,7 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.claude/skills/whyg
 2. If the plan has no `## UI profile` section, use `CAPTURE: none`.
 3. Otherwise `Read` `.whygraph/profiles/ui.md`. Decide from this file and the probe it may call for, never from the plan text.
    - The file is missing: use `CAPTURE: none`. Print `Capture: off (no .whygraph/profiles/ui.md; run /whygraph-plan to write it).`
-   - The file has the line `capture: unavailable: auth required`: use `CAPTURE: none`. Print that line.
-   - The file has any other line that starts with `capture: unavailable`: the cause may be gone by now, so check again. Run `node .claude/skills/whygraph-ui-check/capture.mjs --probe` once; it is the only command this step runs. If it exits 0 and prints `capture: available`, use `CAPTURE: node .claude/skills/whygraph-ui-check/capture.mjs` and print `Capture: on (the probe passes now; /whygraph-plan --refresh-profile updates the profile).` Otherwise use `CAPTURE: none` and print the profile's line.
+   - The file has a line that starts with `capture: unavailable`: the cause may be gone by now, so check again. Run `node .claude/skills/whygraph-ui-check/capture.mjs --probe` once; it is the only command this step runs. If it exits 0 and prints `capture: available`, use `CAPTURE: node .claude/skills/whygraph-ui-check/capture.mjs` and print `Capture: on (the probe passes now; /whygraph-plan --refresh-profile updates the profile).` Otherwise use `CAPTURE: none` and print the profile's line.
    - Otherwise use `CAPTURE: node .claude/skills/whygraph-ui-check/capture.mjs`.
 4. Then decide the `E2E` value, in every case, also after items 1 and 2. `Read` `.whygraph/profiles/ui.md` if this step has not read it yet.
    - With `--no-e2e`, use `E2E: none`.
@@ -366,6 +366,19 @@ These two evaluations are advisory. They never stop the run on their verdict. Do
 
    Spawn the `whygraph-evaluator` again with model `opus` and the prompt of 2, with `STAGE: ui` in place of `STAGE: quality`. If its `## Findings` list is `- none` and no `## Expected UI` line says `does not match`, print one line: `UI evaluation: no findings.` Otherwise print the reply in full.
 4. When the UI evaluation ran, print one line: `UI evidence: .whygraph/plans/<stem>/ui/index.html`.
+5. Then run Step 3e-bis.
+
+### Step 3e-bis - Polish run (skip with `--no-polish` or `--no-eval`)
+
+The polish run applies the quality findings, formats the changed files and checks Acceptance again. Acceptance decides.
+
+1. When the quality reply of Step 3e has findings, do the checks before a subagent run (Step 3a). Spawn the `whygraph-implementor` with the Step 3 prompt and `STEP_RANGE: polish` in place of `STEP_RANGE: <N>`. Set the Agent tool's `model` to `sonnet`. Add `FINDINGS:` as the last line, with each line of the reply's `## Findings` list under it, in order. Then do the checks after a subagent run (Step 3a), and print its report in full.
+2. Run `sh .claude/skills/whygraph-plan/plan-tool.sh format <plan> <t0> <blob>` after the polish run, so its edits are formatted too. Print each line it prints.
+   - `<t0>` is the tree that `begin` printed for the plan's first step. When this run did not begin step 1, `Read` `.whygraph/plans/<stem>/steps/1.t0` and use its id.
+   - When that file is missing, or its id does not match `^[0-9a-f]{40}$`, make no `format` call. Print `format: no start tree for step 1`.
+   - Exit 0, 1, 3 or 6: go on. Exit 6 means that the plan has no Format command.
+3. Run item 1 of Step 3d again, for each Acceptance item. If any item failed, stop with `acceptance failed after the polish run: <item numbers>`.
+4. Print `Polish: applied <k> of <n> quality findings`. `<n>` counts the finding lines of item 1, and `<k>` the report's `- F<i>: applied` lines. Then print each `- F<i>: skipped: <why>` line of the report. Without a polish run, `<k>` and `<n>` are 0.
 
 ### Step 3f - A tasks.json
 
@@ -374,7 +387,7 @@ Run the children one at a time, even within a wave, in ascending `wave` order an
 1. If its `status` is `done`, skip it.
 2. If any id in its `depends_on` is not `done`, stop with `Stopped at <id>: it depends on <ids>, which are not done.`
 3. `Read` its plan at `<repo root>/<plan>`. If the file is missing, stop with `<id> has no plan at <plan>; run /whygraph-plan again.` Run the plan checks of Step 2 on it, then Step 2b, then Step 2c.
-4. Run Steps 3, 3d and 3e for that plan. Set `TASKS_PATH` to the tasks.json's absolute path and `TASK_ID` to the child's `id`. A stop ends the whole run.
+4. Run Steps 3, 3d, 3e and 3e-bis for that plan. Set `TASKS_PATH` to the tasks.json's absolute path and `TASK_ID` to the child's `id`. A stop ends the whole run.
 5. `Read` the tasks.json again, because the acceptance run wrote the child's `status`.
 
 ### Step 3g - Amend the plan (S3)
@@ -451,7 +464,7 @@ The refusals of Steps 1, 2 and 2a keep their own text and print no block. So do 
 
 Fill the Tried and State fields from files, never from a report:
 
-- `<N>` is the step that was running. A stop in Step 2c names the first step of the range. A stop in Steps 3d or 3e names the plan's last step. So does a stop after `next` printed `done`.
+- `<N>` is the step that was running. A stop in Step 2c names the first step of the range. A stop in Steps 3d, 3e or 3e-bis names the plan's last step. So does a stop after `next` printed `done`.
 - `<total>` is the number of steps in the plan.
 - **Cause** is the cause this file names, with its placeholders filled. It is one row's cause below. A Halt text may run on after the row's text.
 - **Tried**: a stop in Step 2c writes `nothing: this stop comes before any edit`. Otherwise `Read` `.whygraph/plans/<stem>/steps/attempts`.
@@ -460,7 +473,7 @@ Fill the Tried and State fields from files, never from a report:
   - Join them with `; `, such as `retry sonnet:opus; amended Verify`. With none, write `the first run only`.
 - **State**: for each step `<k>` of the plan, `Read` `.whygraph/plans/<stem>/steps/<k>.done`. Each file found marks step `<k>` done.
   - Write `steps <k>, ... marked done`, or `no step marked done`.
-  - Then write `no edits yet` for a stop in Step 2c. Write `the steps' edits are in the working tree` for a stop in Steps 3d or 3e. Otherwise write `step <N>'s edits are in the working tree`.
+  - Then write `no edits yet` for a stop in Step 2c. Write `the steps' edits are in the working tree` for a stop in Steps 3d, 3e or 3e-bis. Otherwise write `step <N>'s edits are in the working tree`.
 - **Next** is the Next of the cause's row, as written.
 
 `<stem>` is the plan's stem, as Step 3e defines it. A step that stops after `begin` is never marked done, because `begin` and `end` delete its `.done` marker.
@@ -501,6 +514,7 @@ When a `restore` fails, stop with its own cause, as Step 2a says. The plan was n
 | `plan-tool.sh <subcommand> exited <code>: <first stderr line>` | Apply the fix the stderr line names, if any. If it repeats, report it with that line. |
 | `the <agent name> run failed: <first line of the error>` | Wait out a rate limit or an outage. If it repeats, run Settings > Update agent files in the portal. |
 | `acceptance failed: <items>` | Read the Acceptance report above. Give a timed-out item (exit 124) a faster Check, or make it `manual:`. |
+| `acceptance failed after the polish run: <items>` | A polish edit or the Format command broke an item. Read `git diff`, and undo that edit. |
 
 "Run the command again" is the whole resume procedure. `--from-step` re-runs a step that has a `.done` marker.
 
@@ -532,4 +546,4 @@ Print this in Step 3d, after the Acceptance report. Build it from files and exit
    - Add `; not run (manual or prose): <item numbers>` for the items whose result is `not literal`.
    - A plan with no `## Acceptance` items: `- Acceptance: no items`.
 
-This command's only job is: parse -> validate -> decide capture -> save, probe and baseline -> one implementor per step, with the recovery ladder -> review gate -> spec evaluation -> acceptance -> run summary -> quality and UI evaluation -> print -> propose the listed decisions and, after a passing Acceptance, the changes on purpose -> a stop block on any stop. Besides the plan tool, this skill runs only its self-hash, the capture probe and the Step 3d browser tests. Do not edit files, run other tools, or improvise.
+This command's only job is: parse -> validate -> decide capture -> save, probe and baseline -> one implementor per step, with the recovery ladder -> review gate -> spec evaluation -> acceptance -> run summary -> quality and UI evaluation -> polish run -> print -> propose the listed decisions and, after a passing Acceptance, the changes on purpose -> a stop block on any stop. Besides the plan tool, this skill runs only its self-hash, the capture probe and the Step 3d browser tests. Do not edit files, run other tools, or improvise.

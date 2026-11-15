@@ -94,7 +94,7 @@ File tools (read, grep, glob) for spot-checking only. The shell, where one exist
 - When `ANSWERS` gives a journey question a non-default answer, rewrite that part and the steps by it.
 - Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap of step 3c.
 
-**3i. Setup.** Fill `## Setup` from the `- Setup commands:` line of the `## Verify candidates` section, one bullet per command, in its order. Omit the section when the line is `none` or missing.
+**3i. Setup.** Fill `## Setup` from the `- Setup commands:` line of the `## Verify candidates` section, one bullet per command, in its order. Omit the section when the line is `none` or missing. Then read the `- Format command:` line of that section. When it names a command, write the last bullet as `Format:` and the command in backticks. Keep the section for that bullet, even with no setup command.
 
 **3j. End-to-end test.** Apply this step only when `E2E` is `yes` and a report has an `### E2E` block with a `spec:` line. Otherwise write no **Browser test** line and no `e2e:` Check.
 - Add one step that writes the test file of `spec:`. Place it before the first step that has **Routes**. Renumber the steps after it. Change each `step <N>` in `## User journey` and in **Read first** to match. Its **Files** hold the test file and each helper `needs:` names. Its **Browser test** line is `<spec> - red`.

@@ -79,8 +79,7 @@ Decide the `CAPTURE` value once per plan. `CAPTURE_PATH` is `.github/whygraph/ca
 2. If the plan has no `## UI profile` section, use `CAPTURE: none`.
 3. Otherwise read `.whygraph/profiles/ui.md`. Decide from this file and the probe it may call for, never from the plan text.
    - The file is missing: use `CAPTURE: none`. Print `Capture: off (no .whygraph/profiles/ui.md; run /whygraph-plan to write it).`
-   - The file has the line `capture: unavailable: auth required`: use `CAPTURE: none`. Print that line.
-   - The file has any other line that starts with `capture: unavailable`: the cause may be gone by now, so check again. Run `node .github/whygraph/capture.mjs --probe` once; it is the only command this step runs. If it exits 0 and prints `capture: available`, use `CAPTURE: node .github/whygraph/capture.mjs` and print `Capture: on (the probe passes now; /whygraph-plan --refresh-profile updates the profile).` Otherwise use `CAPTURE: none` and print the profile's line.
+   - The file has a line that starts with `capture: unavailable`: the cause may be gone by now, so check again. Run `node .github/whygraph/capture.mjs --probe` once; it is the only command this step runs. If it exits 0 and prints `capture: available`, use `CAPTURE: node .github/whygraph/capture.mjs` and print `Capture: on (the probe passes now; /whygraph-plan --refresh-profile updates the profile).` Otherwise use `CAPTURE: none` and print the profile's line.
    - Otherwise use `CAPTURE: node .github/whygraph/capture.mjs`.
 4. Then decide the `E2E` value, in every case, also after items 1 and 2. Read `.whygraph/profiles/ui.md` if this step has not read it yet.
    - With `--no-e2e`, use `E2E: none`.

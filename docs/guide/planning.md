@@ -230,6 +230,28 @@ tree id equals the step's end tree. A step with no passing record is **escalated
 not trust the implementor's word. A `not literal` record passes, with a note in the evaluator's
 Confidence reason.
 
+#### Proof of a step
+
+`plan-tool.sh proof <plan>` reads those records and prints one line for each step. It runs no command
+and writes no file. A step is **proven** when its Verify failed before the change and passes now, so
+the check can tell the change from no change. The classes are:
+
+| Class | Meaning |
+|---|---|
+| proven | The Verify failed before the change and passes now. A test written first and seen red counts too. |
+| unproven | The Verify passed before the change. Read that step's diff first, because the check cannot show the change worked. |
+| carried | The Verify failed because an earlier step had not added a file yet. It says nothing about this step. |
+| not proven | A test was written first, but no record shows it failed before the change. |
+| no test | The Verify passed, but it ran no test, or it is not a literal command. |
+| failed | The Verify exited with a code other than 0. |
+| not run | The step has no Verify record. |
+| unknown | The run has no baseline for the step, such as a step before `--from-step`. |
+
+Two total lines follow: how many steps are proven, unproven, without a test or in another class, and how
+many Acceptance checks are literal, passed or ran no test. `unproven` is not a defect. A step that only
+moves or renames code has no failing test. The run summary of `/whygraph-implement` prints the two total
+lines as `- Proof:`. `proof` speaks for the last run only, because each run starts with an empty baseline.
+
 !!! warning "The implement command pre-approves the plan tool, which runs every Verify and Check"
     `/whygraph-implement` is allowed to call `plan-tool.sh` without a prompt, and the tool runs whatever
     command a plan names in a `Verify` line or an Acceptance Check, as written. In a permission mode

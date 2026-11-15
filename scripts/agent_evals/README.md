@@ -167,3 +167,29 @@ WHYGRAPH_EVAL_U17_NOTE=<note id> uv run python scripts/agent_evals/run.py --case
 `fixtures/mini` is a small Python repo; its `.gitignore` holds `.whygraph/`, so a Verify record never enters a tree. Every other mini case runs `python3 -m unittest`, so a file one case needs comes from its `setup` hook (U2's test), never from `fixtures/mini`. `validate()` runs `plan-tool.sh probe` on each U fixture and expects misses only in `u8.md`. `fixtures/plans` are plan files copied into `.whygraph/plans/`. `fixtures/evaluator/<kind>` hold a plan and its `steps/1.{diff,t0,t1,verify}`; if you change `fixtures/mini`, regenerate these diffs so they still apply and keep `tree:` equal to `1.t1`. `fixtures/sources/evil.md` is the hostile source, written with a placeholder for the canary port. `fixtures/plans/p9.md` and `p10.md` are ui-demo plans for the `P` review cases, copied by their `setup` hooks.
 
 This folder's `.gitignore` re-includes `fixtures/plans/`, which the root `.gitignore`'s `plans/` rule would otherwise hide.
+
+## Session audit (`audit.py`)
+
+`audit.py` reads one Claude Code session and prints what the run did, so a real run can be read in a minute and compared with an earlier one. It reuses the transcript loader of `checks.py`.
+
+```bash
+uv run python scripts/agent_evals/audit.py <session id | path to <config>/projects/<dir>/<id>.jsonl> [--json]
+uv run python scripts/agent_evals/audit.py --compare <record A> <record B>
+uv run python scripts/agent_evals/audit.py --self-check
+```
+
+It prints these blocks:
+
+- **Run**: start, end, wall minutes, the Claude Code version.
+- **Agents**: per agent type (the plan reviewer is split by the `LENS:` line of its prompt into `(logic)`, `(ui)` and `(journey)`): runs, minutes split into model time, tool time and time waiting on the person, input, output, cache-read and cache-creation tokens, models, and compactions. Each API message counts once, however many rows it has. Every token total is labelled `transcript tokens: lower bound`, because harness-side summary requests are not in the transcripts.
+- **Stops**: each user turn after the first, each question dialog, each `## Run stopped` block with its Cause line.
+- **Plan tool**: each `plan-tool.sh` call with its subcommand, step and exit code, and `no-change re-runs: step <N> <k>` when a `verify` or `end` gives the same result again (compared by a hash, the result is never printed).
+- **Review**: per lens, the findings of the reviewer replies and the `applied`, `refuted`, `asked`, `blocked` and `deferred` counts of the fixer's lines; journey findings also per check. Counts only.
+- **Friction**: failed tool calls per tool, and long assistant outputs that repeat an earlier one.
+- **Flags**: Bash commands that match a fixed list (a network client, a read of a `.env` file, a write under `.git/` or an agent directory, `git push`, a command naming `ui-auth.json`, `WHYGRAPH_UI_` or a `testfirst/` path), cut at 120 characters. A flag is a pointer for a person, not a verdict.
+
+It prints no prompt text and no file content, and makes no network call. `--json` prints a record; `--compare` prints two records side by side, each count also per plan step, with no judging word. The output of a real session stays out of tracked files: keep it in a private, untracked place.
+
+Claude Code deletes session transcripts after 30 days by default. Before you read a run, raise `cleanupPeriodDays` or copy its session folder to a private, untracked place.
+
+`--self-check` runs the tool on `fixtures/audit` (a hand-written session with one subagent, made-up text, laid out as `projects/fixture/session.jsonl`) and compares the output with `expected.txt`, and a compare of the hand-written record `before.json` with it against `expected-compare.txt`. Never copy a real session into the repository.

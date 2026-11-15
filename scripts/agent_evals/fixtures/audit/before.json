@@ -1,0 +1,154 @@
+{
+  "session": "before-run",
+  "steps": 4,
+  "run": {
+    "start": "2026-10-20T09:00:00+00:00",
+    "end": "2026-10-20T09:52:00+00:00",
+    "wall_minutes": 52.0,
+    "version": "2.0.9"
+  },
+  "agents": {
+    "main": {
+      "runs": 1,
+      "minutes": {
+        "model": 21.5,
+        "tool": 14.25,
+        "person": 16.25
+      },
+      "tokens": {
+        "input": 900,
+        "output": 4100,
+        "cache_read": 61000,
+        "cache_creation": 5200,
+        "total": 71200
+      },
+      "models": [
+        "model-a"
+      ],
+      "compactions": 2
+    },
+    "plan-reviewer (journey)": {
+      "runs": 2,
+      "minutes": {
+        "model": 0.1,
+        "tool": 0.02,
+        "person": 0.0
+      },
+      "tokens": {
+        "input": 110,
+        "output": 50,
+        "cache_read": 500,
+        "cache_creation": 500,
+        "total": 1160
+      },
+      "models": [
+        "model-b"
+      ],
+      "compactions": 0
+    },
+    "plan-reviewer (logic)": {
+      "runs": 1,
+      "minutes": {
+        "model": 3.0,
+        "tool": 1.5,
+        "person": 0.0
+      },
+      "tokens": {
+        "input": 200,
+        "output": 400,
+        "cache_read": 9000,
+        "cache_creation": 800,
+        "total": 10400
+      },
+      "models": [
+        "model-b"
+      ],
+      "compactions": 0
+    }
+  },
+  "stops": {
+    "user_turns": 3,
+    "questions": 2,
+    "run_stopped": []
+  },
+  "plan_tool": {
+    "calls": [
+      {
+        "sub": "verify",
+        "step": "1",
+        "exit": 0
+      },
+      {
+        "sub": "verify",
+        "step": "1",
+        "exit": 0
+      },
+      {
+        "sub": "verify",
+        "step": "1",
+        "exit": 0
+      },
+      {
+        "sub": "verify",
+        "step": "1",
+        "exit": 0
+      },
+      {
+        "sub": "end",
+        "step": "2",
+        "exit": 1
+      }
+    ],
+    "by_sub": {
+      "end": 1,
+      "verify": 4
+    },
+    "failed": 1,
+    "no_change_reruns": {
+      "1": 2
+    }
+  },
+  "review": {
+    "journey": {
+      "replies": 1,
+      "findings": 3,
+      "blocker": 1,
+      "should": 2,
+      "applied": 2,
+      "refuted": 0,
+      "asked": 0,
+      "blocked": 0,
+      "deferred": 1,
+      "checks": {
+        "Hops": 2,
+        "Entry": 1
+      }
+    },
+    "logic": {
+      "replies": 1,
+      "findings": 0,
+      "blocker": 0,
+      "should": 0,
+      "applied": 0,
+      "refuted": 0,
+      "asked": 0,
+      "blocked": 0,
+      "deferred": 0,
+      "checks": {}
+    }
+  },
+  "friction": {
+    "failed_calls": {
+      "Bash": 3,
+      "Read": 1
+    },
+    "repeated_outputs": 1
+  },
+  "flags": [
+    {
+      "agent": "main",
+      "kind": "git push",
+      "command": "git push origin made-up"
+    }
+  ]
+}

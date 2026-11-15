@@ -484,6 +484,7 @@ Print this in Step 3d, after the Acceptance report. Build it from files and exit
 ## Run summary
 
 - <one line per rung, amendment and not-literal Verify>
+- Proof: <text>
 - Acceptance: <status>
 ```
 
@@ -496,6 +497,7 @@ Print this in Step 3d, after the Acceptance report. Build it from files and exit
    - A Files entry -> `- Step <N>: Files amended - <old> -> <new>`
 3. For each step `<N>` of the plan, `Read` `.whygraph/plans/<stem>/steps/<N>.verify`. When it has the line `exit: not literal`, write `- Step <N>: Verify not run (manual or prose): <Verify text>`. `<Verify text>` is the text after the step's `**Verify:**` label.
 4. When items 1 to 3 wrote no line, write `- no recovery was needed`.
+4a. Run `sh .claude/skills/whygraph-plan/plan-tool.sh proof <plan>`. Write its last two lines, each as `- Proof: <text after "proof: ">`. Write each `tests:` line it prints as `- Test change to read: <text after "tests: ">`.
 5. Write the Acceptance line last, from the results Step 3d item 1 kept. `accept` ran before the Acceptance log run, so the line never depends on that run.
    - No item failed: `- Acceptance: passed`. Any item failed: `- Acceptance: failed: <item numbers>`.
    - Add `; not run (manual or prose): <item numbers>` for the items whose result is `not literal`.

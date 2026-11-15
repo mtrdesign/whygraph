@@ -2038,7 +2038,7 @@ def test_implement_entry_points() -> None:
 
 _PLAN_TOOL_SUBCOMMANDS = (
     "snapshot|begin|end|pass|next|changed|probe|baseline|accept|attempt|amends"
-    "|save|restore|log-check|state|amend-check|constraints|brief"
+    "|save|restore|log-check|state|amend-check|constraints|brief|proof"
 )
 
 
@@ -2158,8 +2158,14 @@ def test_implement_run_summary(tree: str) -> None:
         "`- no recovery was needed`",
         "`accept` ran before the Acceptance log run",
         "`- Acceptance: failed: <item numbers>`",
+        "- Proof: <text>\n- Acceptance: <status>\n```",
+        f"4a. Run `sh .{tree.split('-')[0]}/skills/whygraph-plan/plan-tool.sh proof <plan>`."
+        ' Write its last two lines, each as `- Proof: <text after "proof: ">`.'
+        " Write each `tests:` line it prints as"
+        ' `- Test change to read: <text after "tests: ">`.',
     ):
         assert phrase in summary, phrase
+    assert summary.index("\n4. ") < summary.index("\n4a. ") < summary.index("\n5. ")
     acceptance = cc.split("### Step 3d - Acceptance", 1)[1].split("\n### ", 1)[0]
     print_at = acceptance.index("Print the run summary (Step 7).")
     assert acceptance.index("`STEP_RANGE: acceptance`") < print_at
@@ -2917,6 +2923,20 @@ def test_implementor_saves_both_step_trees() -> None:
     skill = (_ASSET_ROOT / "claude-code/skills/whygraph-implement/SKILL.md").read_text()
     assert "Never read `<N>.t0` back." in skill
     assert "Never take them from the report's `- Step <N>: <t0> <t1>` line." in skill
+
+
+def test_implementors_run_proof_after_the_last_accept() -> None:
+    """All four bodies log the proof lines, with ACCEPTANCE: inline only."""
+    sentence = (
+        "With `ACCEPTANCE: inline`, run `<PLAN_TOOL> proof <PLAN_PATH>` after the last"
+        " `accept`. Add its last two lines under `- Acceptance:` in the log, each as"
+        ' `- Proof: <text after "proof: ">`.'
+    )
+    for tree in _AGENT_PATHS:
+        body = "\n".join(_agent_body(tree, "implementor"))
+        assert body.count(sentence) == 1, tree
+    codex = _text("codex/.codex/agents/implementor.toml")
+    assert codex.count('"""') == 2
 
 
 def test_acceptance_with_only_manual_items_is_not_logged_as_passed() -> None:

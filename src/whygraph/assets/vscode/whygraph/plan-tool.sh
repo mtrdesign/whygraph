@@ -35,6 +35,7 @@
 #                               search for each line of "## Constraint
 #                               checks"; 1 when one is broken
 #   brief <plan>                print a page about the plan for a person
+#   proof <plan>                print which steps proved their change
 #
 # Usage errors exit 64 (EX_USAGE). The plan's files live in
 # .whygraph/plans/<stem>/steps/. A subcommand that takes a plan exits 77 when
@@ -99,6 +100,17 @@
 # Model, and whether it has a Changes on purpose field), and the first line
 # of each Acceptance item. A part the plan lacks prints nothing. It exits 0.
 #
+# proof reads the plan and the records under steps/, runs no command and
+# writes no file. It exits 0. Per step it reads the last baseline line and
+# the exit of <N>.verify, and prints "proof: step <N> <class>". It fails
+# closed: only a check that went red before the change prints "proven". A
+# step whose baseline failed because its Verify names a path or directory
+# that an earlier step's Files name prints "carried". Two totals follow:
+# the steps, and the Acceptance checks. baseline first empties the baseline
+# file, so proof speaks for the last run only, and a step before
+# --from-step prints "unknown". An "unproven" step is not a defect: a step
+# that only moves code has no red test.
+#
 # The plan parser reads step lines only under "## Steps", Acceptance items
 # only under "## Acceptance", and skips fenced lines.
 #
@@ -143,6 +155,7 @@ usage: plan-tool.sh snapshot
        plan-tool.sh amend-check <plan> <blob> <N>
        plan-tool.sh constraints <plan> [<blob>] [<N>]
        plan-tool.sh brief <plan>
+       plan-tool.sh proof <plan>
 EOF
     exit 64
 }
@@ -2994,6 +3007,148 @@ cmd_brief() {
     LC_ALL=C awk "$AWK_BRIEF" <"$1" || fail "cannot read $1"
 }
 
+# 0 when a word of step $2's Verify spans in plan file $1 is a path that the
+# Files of an earlier step name, or a directory that holds such a path: the
+# Verify waits for an earlier step (R17). A "::<test id>" suffix and a
+# leading ./ are cut from each word.
+waits_for_earlier() {
+    files=$(plan_field "$1" "" "" | while read -r kind number; do
+        [ "$kind" = step ] || continue
+        [ "$number" != "$2" ] || break
+        plan_field "$1" "$number" Files
+        printf ','
+    done)
+    entries=$(FILES=$files LIST=1 LC_ALL=C awk "$AWK_OUTSIDE" </dev/null |
+        LC_ALL=C awk -F '\t' '$1 != "-" { print $1 }')
+    [ -n "$entries" ] || return 1
+    plan_field "$1" "$2" Verify | LC_ALL=C tr ' \t' '\n\n' | ENTRIES=$entries LC_ALL=C awk '
+        BEGIN { count = split(ENVIRON["ENTRIES"], ENTRY, "\n") }
+        {
+            word = $0
+            sub(/::.*$/, "", word)
+            sub(/^\.\//, "", word)
+            if (word == "")
+                next
+            dir = word
+            sub(/\/+$/, "", dir)
+            for (i = 1; i <= count; i++) {
+                e = ENTRY[i]
+                if (word == e || (substr(e, length(e)) == "/" && index(word, e) == 1) ||
+                    (dir != "" && index(e, dir "/") == 1)) {
+                    found = 1
+                    exit
+                }
+            }
+        }
+        END { exit found ? 0 : 1 }
+    '
+}
+
+# The exit value of record $1: the first "exit:" line before the output, or
+# "missing" when there is no record.
+record_exit() {
+    if [ ! -f "$1" ]; then
+        printf 'missing\n'
+        return
+    fi
+    LC_ALL=C awk '/^--- / { exit } /^exit: / { print substr($0, 7); found = 1; exit } END { if (!found) print "missing" }' <"$1"
+}
+
+# 0 when the output part of record $1 holds a phrase of AWK_NO_TEST.
+ran_no_test() {
+    LC_ALL=C awk 'out { print } /^--- / { out = 1 }' <"$1" | LC_ALL=C awk "$AWK_NO_TEST"
+}
+
+cmd_proof() {
+    [ $# -eq 1 ] || usage
+    plan=$1
+    [ -f "$plan" ] || usage "no such plan: $plan"
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    work=$(mktemp -d) || exit 1
+    trap 'rm -rf "$work"' EXIT
+    # The plan path is relative to the caller, so read it before the cd.
+    cat <"$plan" >"$work/plan" || usage "cannot read $plan"
+    scan=$(plan_field "$work/plan" "" "")
+    stem=$(stem_of "$plan")
+    cd "$root" || exit 1
+    check_work_dir
+    proven=0
+    unproven=0
+    no_test=0
+    other=0
+    items=0
+    literal=0
+    passed=0
+    empty=0
+    while read -r kind number; do
+        case $kind in
+            step) ;;
+            item)
+                items=$((items + 1))
+                [ -z "$(plan_field "$work/plan" "$number" Check)" ] || literal=$((literal + 1))
+                record=$steps_dir/acceptance.$number
+                if [ "$(record_exit "$record")" = 0 ]; then
+                    if ran_no_test "$record"; then
+                        empty=$((empty + 1))
+                    else
+                        passed=$((passed + 1))
+                    fi
+                fi
+                continue
+                ;;
+            *) continue ;;
+        esac
+        base=
+        [ ! -f "$steps_dir/baseline" ] || base=$(LC_ALL=C awk -v n="$number" '
+            $1 == "step" && $2 == n { r = substr($0, index($0, ": ") + 2) }
+            END { print r }
+        ' <"$steps_dir/baseline")
+        record=$steps_dir/$number.verify
+        code=$(record_exit "$record")
+        if [ "$code" = 0 ] && ran_no_test "$record"; then
+            class='no test (the Verify ran no test)'
+        elif [ "$code" = 0 ] && [ "$base" = 'test first' ]; then
+            class='not proven (test first, no red record)'
+        elif [ "$code" = 0 ] && [ "${base#fail }" != "$base" ] &&
+            waits_for_earlier "$work/plan" "$number"; then
+            class='carried (failed before an earlier step)'
+        elif [ "$code" = 0 ] && [ "${base#fail }" != "$base" ]; then
+            class='proven (failed before the change)'
+        elif [ "$code" = 0 ] && [ "$base" = pass ]; then
+            class='unproven (passed before the change)'
+        elif [ "$code" = 0 ] && [ "$base" = 'pass (no test ran)' ]; then
+            class='no test (the Verify ran no test)'
+        elif [ "$base" = 'not literal' ] || [ "$code" = 'not literal' ]; then
+            class='no test (the Verify is not literal)'
+        elif [ "$code" = missing ]; then
+            class='not run'
+        elif [ "$code" != 0 ]; then
+            class=failed
+        else
+            class='unknown (no baseline in this run)'
+        fi
+        case $class in
+            proven*) proven=$((proven + 1)) ;;
+            unproven*) unproven=$((unproven + 1)) ;;
+            'no test'*) no_test=$((no_test + 1)) ;;
+            *) other=$((other + 1)) ;;
+        esac
+        printf 'proof: step %s %s\n' "$number" "$class"
+    done <<EOF
+$scan
+EOF
+    steps=$((proven + unproven + no_test + other))
+    printf 'proof: %s of %s steps proven, %s unproven, %s no test, %s other\n' \
+        "$proven" "$steps" "$unproven" "$no_test" "$other"
+    if [ "$items" -eq 0 ]; then
+        printf 'proof: no Acceptance items\n'
+    else
+        printf 'proof: %s of %s Acceptance checks are literal, %s passed, %s ran no test\n' \
+            "$literal" "$items" "$passed" "$empty"
+    fi
+    exit 0
+}
+
 [ $# -ge 1 ] || usage
 subcommand=$1
 shift
@@ -3026,5 +3181,6 @@ case $subcommand in
     amend-check) cmd_amend_check "$@" ;;
     constraints) cmd_constraints "$@" ;;
     brief) cmd_brief "$@" ;;
+    proof) cmd_proof "$@" ;;
     *) usage "unknown subcommand: $subcommand" ;;
 esac

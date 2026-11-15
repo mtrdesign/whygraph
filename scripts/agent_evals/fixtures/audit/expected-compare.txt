@@ -1,0 +1,83 @@
+A: before-run (4 steps)
+B: session (1 steps)
+
+== Run ==
+                                                     A   A/step         B   B/step
+wall minutes                                        52       13      4.67     4.67
+
+== Agents ==
+                                                     A   A/step         B   B/step
+main runs                                            1     0.25         1        1
+main model minutes                                21.5     5.38      1.23     1.23
+main tool minutes                                14.25     3.56      0.68     0.68
+main person minutes                              16.25     4.06      2.67     2.67
+main input tokens                                  900      225       138      138
+main output tokens                                4100     1025       170      170
+main cache_read tokens                           61000    15250      3680     3680
+main cache_creation tokens                        5200     1300       230      230
+main total tokens                                71200    17800      4218     4218
+main compactions                                     2      0.5         1        1
+plan-reviewer (journey) runs                         2      0.5         1        1
+plan-reviewer (journey) model minutes              0.1     0.03       0.1      0.1
+plan-reviewer (journey) tool minutes              0.02     0.01      0.02     0.02
+plan-reviewer (journey) person minutes               0        0         0        0
+plan-reviewer (journey) input tokens               110     27.5       110      110
+plan-reviewer (journey) output tokens               50     12.5        50       50
+plan-reviewer (journey) cache_read tokens          500      125       500      500
+plan-reviewer (journey) cache_creation tokens       500      125       500      500
+plan-reviewer (journey) total tokens              1160      290      1160     1160
+plan-reviewer (journey) compactions                  0        0         0        0
+plan-reviewer (logic) runs                           1     0.25         0        0
+plan-reviewer (logic) model minutes                  3     0.75         0        0
+plan-reviewer (logic) tool minutes                 1.5     0.38         0        0
+plan-reviewer (logic) person minutes                 0        0         0        0
+plan-reviewer (logic) input tokens                 200       50         0        0
+plan-reviewer (logic) output tokens                400      100         0        0
+plan-reviewer (logic) cache_read tokens           9000     2250         0        0
+plan-reviewer (logic) cache_creation tokens        800      200         0        0
+plan-reviewer (logic) total tokens               10400     2600         0        0
+plan-reviewer (logic) compactions                    0        0         0        0
+
+== Stops ==
+                                                     A   A/step         B   B/step
+user turns                                           3     0.75         1        1
+question dialogs                                     2      0.5         1        1
+run stopped                                          0        0         1        1
+
+== Plan tool ==
+                                                     A   A/step         B   B/step
+calls                                                5     1.25         3        3
+failed                                               1     0.25         0        0
+end calls                                            1     0.25         1        1
+verify calls                                         4        1         2        2
+no-change re-runs                                    2      0.5         1        1
+
+== Review ==
+                                                     A   A/step         B   B/step
+journey findings                                     3     0.75         1        1
+journey applied                                      2      0.5         0        0
+journey refuted                                      0        0         0        0
+journey asked                                        0        0         0        0
+journey blocked                                      0        0         1        1
+journey deferred                                     1     0.25         0        0
+journey check Entry                                  1     0.25         0        0
+journey check Hops                                   2      0.5         1        1
+logic findings                                       0        0         0        0
+logic applied                                        0        0         0        0
+logic refuted                                        0        0         0        0
+logic asked                                          0        0         0        0
+logic blocked                                        0        0         0        0
+logic deferred                                       0        0         0        0
+
+== Friction ==
+                                                     A   A/step         B   B/step
+failed Bash                                          3     0.75         1        1
+failed Read                                          1     0.25         0        0
+repeated outputs                                     1     0.25         0        0
+
+== Flags ==
+                                                     A   A/step         B   B/step
+git push                                             1     0.25         0        0
+network client                                       0        0         1        1
+
+transcript tokens: lower bound

@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-11-01T10:00:12.000Z","message":{"role":"user","content":"LENS: journey\nPLAN_PATH: demo.md\nBUDGET: 20"}}
+{"type":"assistant","timestamp":"2026-11-01T10:00:14.000Z","message":{"id":"r1","model":"model-b","usage":{"input_tokens":50,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":500},"content":[{"type":"tool_use","id":"tr1","name":"Read","input":{"file_path":"demo.md"}}]}}
+{"type":"user","timestamp":"2026-11-01T10:00:15.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tr1","content":"made-up plan text"}]}}
+{"type":"assistant","timestamp":"2026-11-01T10:00:19.000Z","message":{"id":"r2","model":"model-b","usage":{"input_tokens":60,"output_tokens":30,"cache_read_input_tokens":500,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"REVIEW: journey\n- F1 | blocker | Hops: step 2 cites a control that no step renders | evidence: made up"}]}}

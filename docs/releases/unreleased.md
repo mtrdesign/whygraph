@@ -5,6 +5,12 @@
 
 ## Changes
 
+- **The run summary says how many steps are proven.** `plan-tool.sh proof <plan>` prints one line for
+  each step (proven, unproven, carried, not proven, no test, failed, not run or unknown) and two total
+  lines. The run summary of `/whygraph-implement` in Claude Code and Cursor shows the totals as
+  `- Proof:`, and the implementor logs them under `- Acceptance:` in VS Code and Codex. An `unproven`
+  step asks a person to read its diff first. Run **Settings > Update agent files** to pick it up, and
+  see [Verify evidence](../guide/planning.md#verify-evidence).
 - **A plan checks the user's path through the screens.** When a task moves the user between
   screens, the plan gets a `## User journey` section (the actor, the entry control, one line per hop
   tied to a step or to existing code, the outcome, what holds on refresh, back, cancel and a direct

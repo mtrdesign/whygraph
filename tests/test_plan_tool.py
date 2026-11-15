@@ -256,6 +256,9 @@ def repo(tmp_path: Path) -> Path:
         ("constraints", "plan.md", "1", "a" * 40),
         ("constraints", "plan.md", "a" * 40, "1", "extra"),
         ("constraints", "plan.md", "a" * 40, "x"),
+        ("proof",),
+        ("proof", "does-not-exist.md"),
+        ("proof", "plan.md", "x"),
     ],
 )
 def test_usage_errors_exit_64(repo: Path, args: tuple[str, ...]) -> None:
@@ -3745,6 +3748,198 @@ def test_brief_usage_errors_exit_64(tmp_path: Path, args: tuple[str, ...]) -> No
     assert _tool(tmp_path, *args).returncode == 64
 
 
+# ---- proof (plan 56 section 5.31) -------------------------------------------------
+
+_KEY = "a" * 40
+
+
+def _record(code: str, output: str = "") -> str:
+    """A ``<N>.verify`` or ``acceptance.<i>`` record in the shape the tool writes."""
+    return (
+        f"command: x\nexit: {code}\ntree: {'b' * 40}\n"
+        f"--- last 40 lines of output\n{output}"
+    )
+
+
+def _proof_setup(
+    repo: Path,
+    steps: list[tuple[str, str]],
+    baseline: list[tuple[int, str]],
+    records: dict[str, str],
+    checks: tuple[str, ...] = ("`true`",),
+) -> list[str]:
+    """Write a plan of ``(Files, Verify)`` steps and its records; run ``proof``."""
+    _write_plan(repo, _full_plan(*((f, v, None) for f, v in steps), checks=checks))
+    if baseline:
+        _steps_file(
+            repo,
+            "baseline",
+            "".join(f"step {n} {_KEY}: {r}\n" for n, r in baseline),
+        )
+    for name, text in records.items():
+        _steps_file(repo, name, text)
+    run = _tool(repo, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    return run.stdout.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("base", "record", "line"),
+    [
+        (
+            "pass",
+            _record("0", "collected 0 items\n"),
+            "no test (the Verify ran no test)",
+        ),
+        ("fail 1: x", _record("0", "0 passing\n"), "no test (the Verify ran no test)"),
+        (
+            "test first",
+            _record("0", "1 passed\n"),
+            "not proven (test first, no red record)",
+        ),
+        (
+            "fail 1: boom",
+            _record("0", "1 passed\n"),
+            "proven (failed before the change)",
+        ),
+        ("pass", _record("0", "1 passed\n"), "unproven (passed before the change)"),
+        ("pass (no test ran)", _record("0"), "no test (the Verify ran no test)"),
+        ("not literal", _record("not literal"), "no test (the Verify is not literal)"),
+        ("pass", _record("1", "1 failed\n"), "failed"),
+        ("fail 1: boom", None, "not run"),
+        (None, _record("0", "1 passed\n"), "unknown (no baseline in this run)"),
+        (
+            "timeout 540: x",
+            _record("0", "1 passed\n"),
+            "unknown (no baseline in this run)",
+        ),
+        (
+            "cannot run 127: x",
+            _record("0", "1 passed\n"),
+            "unknown (no baseline in this run)",
+        ),
+    ],
+)
+def test_proof_classes(
+    repo: Path, base: str | None, record: str | None, line: str
+) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`pytest tests/a_test.py`")],
+        [(1, base)] if base else [],
+        {"1.verify": record} if record else {},
+    )
+    assert lines[0] == f"proof: step 1 {line}"
+
+
+def test_proof_takes_the_last_baseline_line(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`pytest tests/a_test.py`")],
+        [(1, "pass"), (1, "fail 1: boom")],
+        {"1.verify": _record("0", "1 passed\n")},
+    )
+    assert lines[0] == "proof: step 1 proven (failed before the change)"
+
+
+@pytest.mark.parametrize(
+    ("files", "verify"),
+    [
+        ("tests/new_test.py (new)", "`pytest tests/new_test.py::test_limit -q`"),
+        ("`pkg/foo/new_test.go`", "`go test ./pkg/foo`"),
+        ("tests/", "`pytest tests/new_test.py`"),
+    ],
+)
+def test_proof_carried_by_an_earlier_step(
+    repo: Path, posix: str, files: str, verify: str
+) -> None:
+    _write_plan(repo, _full_plan((files, "`true`", None), ("src/b.py", verify, None)))
+    _steps_file(
+        repo, "baseline", f"step 1 {_KEY}: pass\nstep 2 {_KEY}: fail 1: no module\n"
+    )
+    _steps_file(repo, "2.verify", _record("0", "1 passed\n"))
+    run = _run(repo, posix, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert "proof: step 2 carried (failed before an earlier step)" in run.stdout
+
+
+def test_proof_own_files_do_not_carry(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("tests/a_test.py", "`pytest tests/a_test.py`")],
+        [(1, "fail 1: boom")],
+        {"1.verify": _record("0", "1 passed\n")},
+    )
+    assert lines[0] == "proof: step 1 proven (failed before the change)"
+
+
+def test_proof_a_later_step_does_not_carry(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`pytest tests/b_test.py`"), ("tests/b_test.py", "`true`")],
+        [(1, "fail 1: boom"), (2, "pass")],
+        {"1.verify": _record("0", "1 passed\n"), "2.verify": _record("0", "ok\n")},
+    )
+    assert lines[0] == "proof: step 1 proven (failed before the change)"
+
+
+def test_proof_totals(repo: Path, posix: str) -> None:
+    _write_plan(
+        repo,
+        _full_plan(
+            *(("src/a.py", "`pytest tests/a_test.py`", None) for _ in range(5)),
+            checks=("`pytest`", "manual: open the page", "`pytest -k none`"),
+        ),
+    )
+    _steps_file(
+        repo,
+        "baseline",
+        "".join(
+            f"step {n} {_KEY}: {r}\n"
+            for n, r in [(1, "fail 1: x"), (2, "pass"), (3, "test first"), (4, "pass")]
+        ),
+    )
+    _steps_file(repo, "1.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "2.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "3.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "4.verify", _record("0", "no tests ran\n"))
+    _steps_file(repo, "acceptance.1", _record("0", "9 passed\n"))
+    _steps_file(repo, "acceptance.2", "exit: not literal\n")
+    _steps_file(repo, "acceptance.3", _record("0", "no tests ran\n"))
+    run = _run(repo, posix, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines()[-2:] == [
+        "proof: 1 of 5 steps proven, 1 unproven, 1 no test, 2 other",
+        "proof: 2 of 3 Acceptance checks are literal, 1 passed, 1 ran no test",
+    ]
+
+
+def test_proof_without_acceptance(repo: Path) -> None:
+    _write_plan(
+        repo, "# Plan: Test\n\n## Steps\n\n1. **Step 1**\n   - **Verify:** `true`\n"
+    )
+    run = _tool(repo, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines() == [
+        "proof: step 1 not run",
+        "proof: 0 of 1 steps proven, 0 unproven, 0 no test, 1 other",
+        "proof: no Acceptance items",
+    ]
+
+
+def test_proof_runs_nothing_and_writes_nothing(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("ran", "`touch ran`", None), checks=("`touch ran`",)))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: fail 1: x\n")
+    _steps_file(repo, "1.verify", _record("0", "1 passed\n"))
+    before = sorted(p.name for p in (repo / _STEPS).iterdir())
+    tree = _snapshot(repo)
+    run = _run(repo, posix, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert not (repo / "ran").exists()
+    assert sorted(p.name for p in (repo / _STEPS).iterdir()) == before
+    assert _snapshot(repo) == tree
+
+
 # ---- refusals -------------------------------------------------------------------
 
 _T0_ARG = "<t0>"
@@ -3767,6 +3962,7 @@ _PLAN_COMMANDS = [
     ("log-check", "plans/p.md", _BLOB_ARG),
     ("state", "plans/p.md"),
     ("amend-check", "plans/p.md", _BLOB_ARG, "1"),
+    ("proof", "plans/p.md"),
 ]
 
 

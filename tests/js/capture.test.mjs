@@ -6,7 +6,18 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,13 +29,19 @@ import {
   copyShots,
   e2eDeadline,
   escapeHtml,
+  filterState,
   isAllowedUrl,
+  LOGIN_VARS,
+  loginCase,
   maskAria,
   newSignals,
   normaliseConsole,
+  onLoginRoute,
   parseProfile,
   resolveRoute,
   sanitizeRoute,
+  saveLoginState,
+  savedLoginExpiry,
   splitRunCommand,
   unnamedCounts,
   validRoute,
@@ -396,4 +413,481 @@ test('parseProfile drops a trailing note and backticks from a value', () => {
   assert.equal(p.base_url, 'http://127.0.0.1:5195');
   assert.equal(p.start, 'npm run dev');
   assert.equal(p.e2e_run, 'npx cypress run --spec');
+});
+
+// ---- plan 56 section 5.16: log in, or use a saved login ----------------------
+//
+// The browser cases use the playground's Playwright (src/playground/node_modules)
+// and skip when it is not installed or chromium cannot launch.
+
+const REPO = fileURLToPath(new URL('../..', import.meta.url));
+const PW_MODULES = join(REPO, 'src', 'playground', 'node_modules');
+const PASSWORD = 'Pw-7c1f-do-not-print';
+const USER = 'dev-user-41d2';
+const LOGIN_ENV = { WHYGRAPH_UI_USER: USER, WHYGRAPH_UI_PASSWORD: PASSWORD };
+const AUTH_FILE = join('.whygraph', 'profiles', 'ui-auth.json');
+
+async function playwrightState() {
+  try {
+    const req = createRequire(join(PW_MODULES, 'x.js'));
+    const { chromium } = req('playwright');
+    if (!existsSync(chromium.executablePath())) return { installed: false, launches: false };
+    try {
+      const browser = await chromium.launch({ headless: true });
+      await browser.close();
+      return { installed: true, launches: true };
+    } catch {
+      return { installed: true, launches: false };
+    }
+  } catch {
+    return { installed: false, launches: false };
+  }
+}
+
+const PW = await playwrightState();
+const NO_PW = PW.installed ? false : 'the playground Playwright or its chromium is not installed';
+const NO_BROWSER = PW.launches ? false : 'chromium from the playground Playwright cannot launch';
+
+function profileText(base, extra = '') {
+  return [
+    `base_url: ${base}`,
+    'start: none',
+    'theme: none',
+    'frontend_paths: .',
+    'ignore_requests: /favicon.ico',
+    'auth: required',
+    'login_route: `/login`',
+    'login_fields: `#user`; `#pass`; `button[type=submit]`',
+    extra,
+    '',
+  ].join('\n');
+}
+
+function loginRepo(base, { extra = '', playwright = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'login-'));
+  mkdirSync(join(root, '.whygraph', 'profiles'), { recursive: true });
+  writeFileSync(join(root, '.whygraph', 'profiles', 'ui.md'), profileText(base, extra));
+  if (playwright) symlinkSync(PW_MODULES, join(root, 'node_modules'));
+  return root;
+}
+
+function runScript(root, args, env = {}) {
+  return new Promise((done) => {
+    const clean = Object.fromEntries(
+      Object.entries({ ...process.env, ...env }).filter(
+        ([k]) => k !== 'NODE_TEST_CONTEXT' && (!k.startsWith('WHYGRAPH_UI_') || k in env),
+      ),
+    );
+    const child = spawn(process.execPath, [SCRIPT, ...args], { cwd: root, env: clean });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.on('exit', (code) => done({ code, stdout, stderr }));
+  });
+}
+
+function allFiles(dir) {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) out.push(...allFiles(path));
+    else out.push(path);
+  }
+  return out;
+}
+
+function assertNoSecret(root, ...texts) {
+  for (const text of texts) {
+    assert.ok(!text.includes(PASSWORD), `the password leaked: ${text}`);
+    assert.ok(!text.includes(USER), `the user name leaked: ${text}`);
+  }
+  for (const file of allFiles(root)) {
+    const body = readFileSync(file).toString('latin1');
+    assert.ok(!body.includes(PASSWORD), `the password is in ${file}`);
+    assert.ok(!body.includes(USER), `the user name is in ${file}`);
+  }
+}
+
+function cookie(name, value, domain, expires) {
+  return { name, value, domain, path: '/', expires, httpOnly: true, secure: false, sameSite: 'Lax' };
+}
+
+function writeState(root, state) {
+  writeFileSync(join(root, AUTH_FILE), JSON.stringify(state));
+}
+
+const LATER = Math.floor(Date.now() / 1000) + 7200;
+const EARLIER = Math.floor(Date.now() / 1000) - 7200;
+
+// A local app with a login form: POST /login with the right user and password
+// sets sid=good and redirects to /; every other page redirects to /login
+// without it. The login page also asks another origin for a beacon.
+async function loginApp({ otherPort = 0, slowLogin = false } = {}) {
+  const posted = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const authed = /(?:^|; )sid=good(?:;|$)/.test(req.headers.cookie || '');
+    if (url.pathname === '/login' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (d) => (body += d));
+      req.on('end', () => {
+        const form = new URLSearchParams(body);
+        posted.push({ user: form.get('user'), pass: form.get('pass') });
+        const ok = !slowLogin && form.get('user') === USER && form.get('pass') === PASSWORD;
+        const signedIn = { 'Set-Cookie': 'sid=good; Path=/; Max-Age=3600; HttpOnly', Location: '/' };
+        res.writeHead(302, ok ? signedIn : { Location: '/login' });
+        res.end();
+      });
+      return;
+    }
+    if (url.pathname === '/login') {
+      const beacon = otherPort
+        ? `<img src="http://127.0.0.1:${otherPort}/pixel.png" alt="">` +
+          `<script>fetch('http://127.0.0.1:${otherPort}/beacon').catch(() => {})</script>`
+        : '';
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        `<!doctype html><title>Sign in</title><main><h1>Sign in page</h1>${beacon}<form method="post" action="/login">` +
+          '<label>User <input id="user" name="user"></label><label>Password <input id="pass" name="pass" type="password"></label>' +
+          '<button type="submit">Sign in</button></form></main>',
+      );
+      return;
+    }
+    if (url.pathname === '/favicon.ico') {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    if (!authed) {
+      res.writeHead(302, { Location: '/login' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<!doctype html><title>Home</title><main><h1>Dashboard home</h1></main>');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { server, posted, base: `http://127.0.0.1:${server.address().port}/` };
+}
+
+async function otherOrigin() {
+  const hits = [];
+  const server = createServer((req, res) => {
+    hits.push(req.url);
+    res.end('x');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { server, hits, port: server.address().port };
+}
+
+test('the password is absent from every output (no browser)', async () => {
+  // Every exit path that needs no browser, with both variables set.
+  const remote = loginRepo('http://dev.example.test/', { extra: 'allow_hosts: dev.example.test' });
+  const local = loginRepo('http://127.0.0.1:1/');
+  const runs = [
+    await runScript(remote, ['--probe'], LOGIN_ENV),
+    await runScript(remote, ['--tag', 'before', '--out', 'out', '/'], LOGIN_ENV),
+    await runScript(remote, ['--login'], LOGIN_ENV),
+    await runScript(local, ['--probe'], LOGIN_ENV),
+    await runScript(local, ['--tag', 'before', '--out', 'out', '/'], LOGIN_ENV),
+    await runScript(local, ['--tag', 'after', '--out', 'out', '/'], LOGIN_ENV),
+  ];
+  for (const run of runs) assertNoSecret(remote, run.stdout, run.stderr);
+  assertNoSecret(local);
+  assert.ok(!existsSync(join(local, AUTH_FILE)));
+});
+
+test('the password is absent from every output (form login)', { skip: NO_BROWSER, timeout: 120000 }, async () => {
+  const app = await loginApp();
+  const root = loginRepo(app.base, { playwright: true });
+  const run = await runScript(root, ['--tag', 'before', '--out', 'out', '/'], LOGIN_ENV);
+  const after = await runScript(root, ['--tag', 'after', '--out', 'out', '/'], LOGIN_ENV);
+  app.server.close();
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  assert.equal(after.code, 0, after.stdout + after.stderr);
+  // The fill typed the password into the form, and only there.
+  assert.ok(app.posted.length >= 2 && app.posted.every((p) => p.pass === PASSWORD && p.user === USER));
+  assertNoSecret(root, run.stdout, run.stderr, after.stdout, after.stderr);
+  assert.ok(!existsSync(join(root, AUTH_FILE)), 'a form login writes no state file');
+  // The captured page is the app behind the login, never the login page.
+  for (const tag of ['before', 'after']) {
+    const arias = readdirSync(join(root, 'out', tag)).filter((n) => n.endsWith('.aria.txt'));
+    assert.ok(arias.length > 0, tag);
+    for (const name of arias) {
+      const text = readFileSync(join(root, 'out', tag, name), 'utf8');
+      assert.match(text, /Dashboard home/);
+      assert.doesNotMatch(text, /Sign in page/);
+    }
+  }
+  assert.ok(!readFileSync(join(root, 'out', 'signals.json'), 'utf8').includes('/login'));
+});
+
+test('a failed form login prints one line and nothing else', { skip: NO_BROWSER, timeout: 120000 }, async () => {
+  const app = await loginApp({ slowLogin: true });
+  const root = loginRepo(app.base, { playwright: true });
+  const began = Date.now();
+  const run = await runScript(root, ['--tag', 'before', '--out', 'out', '/'], LOGIN_ENV);
+  app.server.close();
+  assert.equal(run.code, 3, run.stdout + run.stderr);
+  assert.equal(run.stderr, 'login failed: still on /login\n');
+  assert.ok(Date.now() - began >= 14000, 'it waits for the form to be left');
+  assert.ok(Date.now() - began < 60000);
+  assertNoSecret(root, run.stdout, run.stderr);
+  const shots = existsSync(join(root, 'out', 'before')) ? readdirSync(join(root, 'out', 'before')) : [];
+  assert.deepEqual(shots, [], 'the login page is never captured');
+});
+
+test('the form login aborts every request to another origin', { skip: NO_BROWSER, timeout: 120000 }, async () => {
+  const other = await otherOrigin();
+  const app = await loginApp({ otherPort: other.port });
+  const root = loginRepo(app.base, { playwright: true });
+  const run = await runScript(root, ['--tag', 'before', '--out', 'out', '/'], LOGIN_ENV);
+  app.server.close();
+  other.server.close();
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  assert.deepEqual(other.hits, []);
+});
+
+test('the form login wins over a saved login', { skip: NO_BROWSER, timeout: 120000 }, async () => {
+  const app = await loginApp();
+  const root = loginRepo(app.base, { playwright: true });
+  // A saved login that the app no longer accepts: only the form login succeeds.
+  writeState(root, { cookies: [cookie('sid', 'stale', '127.0.0.1', LATER)], origins: [] });
+  const run = await runScript(root, ['--tag', 'before', '--out', 'out', '/'], LOGIN_ENV);
+  app.server.close();
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  assert.ok(app.posted.length >= 1);
+});
+
+test('a saved login captures, and an expired one exits 3 with the --login hint', { skip: NO_BROWSER, timeout: 120000 }, async () => {
+  const app = await loginApp();
+  const root = loginRepo(app.base, { playwright: true });
+  writeState(root, { cookies: [cookie('sid', 'good', '127.0.0.1', LATER)], origins: [] });
+  const live = await runScript(root, ['--tag', 'before', '--out', 'out', '/']);
+  assert.equal(live.code, 0, live.stdout + live.stderr);
+  assert.match(readdirSync(join(root, 'out', 'before')).join(' '), /\.png/);
+  writeState(root, { cookies: [cookie('sid', 'stale', '127.0.0.1', LATER)], origins: [] });
+  const gone = await runScript(root, ['--tag', 'after', '--out', 'out', '/']);
+  app.server.close();
+  assert.equal(gone.code, 3, gone.stdout + gone.stderr);
+  assert.match(gone.stderr, /^the saved login expired: run node \S*capture\.mjs --login\n$/);
+  assert.equal(app.posted.length, 0);
+  assert.deepEqual(readdirSync(join(root, 'out', 'after')), [], 'the login page is never captured');
+});
+
+test('loginCase resolves the four cases in order', () => {
+  const base = 'http://127.0.0.1:5173/';
+  const p = parseProfile(profileText(base));
+  const none = parseProfile(profileText(base).replace('auth: required', 'auth: none'));
+  assert.deepEqual(loginCase(none, LOGIN_ENV, true, 's.mjs'), { kind: 'none' });
+  assert.deepEqual(loginCase(p, LOGIN_ENV, false, 's.mjs'), { kind: 'form' });
+  assert.deepEqual(loginCase(p, LOGIN_ENV, true, 's.mjs'), { kind: 'form' }, 'the form login wins');
+  assert.deepEqual(loginCase(p, {}, true, 's.mjs'), { kind: 'saved' });
+  assert.deepEqual(loginCase(p, { WHYGRAPH_UI_USER: USER }, true, 's.mjs'), { kind: 'saved' });
+  const notSetUp = {
+    kind: 'unavailable',
+    reason: 'login not set up: export WHYGRAPH_UI_USER and WHYGRAPH_UI_PASSWORD, or run node s.mjs --login',
+  };
+  assert.deepEqual(loginCase(p, {}, false, 's.mjs'), notSetUp);
+  assert.deepEqual(loginCase(p, { WHYGRAPH_UI_USER: USER, WHYGRAPH_UI_PASSWORD: '' }, false, 's.mjs'), notSetUp);
+  // Without a login route or three fields there is no form login.
+  const noFields = parseProfile(profileText(base).replace(/^login_fields: .*$/m, 'login_fields: `#user`; `#pass`'));
+  assert.deepEqual(loginCase(noFields, LOGIN_ENV, false, 's.mjs'), notSetUp);
+  assert.deepEqual(loginCase(noFields, LOGIN_ENV, true, 's.mjs'), { kind: 'saved' });
+  const noRoute = parseProfile(profileText(base).replace(/^login_route: .*$/m, 'login_route: none'));
+  assert.deepEqual(loginCase(noRoute, LOGIN_ENV, false, 's.mjs'), notSetUp);
+});
+
+test('loginCase reads only the two fixed variable names', () => {
+  const p = parseProfile(
+    profileText('http://127.0.0.1:5173/', 'user_var: MY_USER\npassword_var: MY_SECRET\nlogin_user_env: MY_USER'),
+  );
+  const env = { MY_USER: 'x', MY_SECRET: 'y', WHYGRAPH_UI_USER_X: 'z' };
+  assert.equal(loginCase(p, env, false, 's.mjs').kind, 'unavailable');
+  assert.deepEqual(LOGIN_VARS, ['WHYGRAPH_UI_USER', 'WHYGRAPH_UI_PASSWORD']);
+});
+
+test('loginCase refuses a host that is not loopback, whatever allow_hosts says', () => {
+  const p = parseProfile(profileText('http://dev.example.test/', 'allow_hosts: dev.example.test'));
+  for (const [env, saved] of [
+    [LOGIN_ENV, false],
+    [{}, true],
+    [LOGIN_ENV, true],
+  ]) {
+    const c = loginCase(p, env, saved, 's.mjs');
+    assert.equal(c.kind, 'unavailable');
+    assert.match(c.reason, /loopback/);
+  }
+});
+
+test('parseProfile reads login_route and the three login_fields', () => {
+  const p = parseProfile(profileText('http://127.0.0.1:5173/'));
+  assert.equal(p.login_route, '/login');
+  assert.deepEqual(p.login_fields, ['#user', '#pass', 'button[type=submit]']);
+  const plain = parseProfile('login_fields: input[name=email]; input[name=password]; form button\n');
+  assert.deepEqual(plain.login_fields, ['input[name=email]', 'input[name=password]', 'form button']);
+});
+
+test('onLoginRoute compares the path only', () => {
+  assert.equal(onLoginRoute('http://127.0.0.1:1/login', '/login'), true);
+  assert.equal(onLoginRoute('http://127.0.0.1:1/login/?next=/x#y', '/login'), true);
+  assert.equal(onLoginRoute('http://127.0.0.1:1/', '/login'), false);
+  assert.equal(onLoginRoute('http://127.0.0.1:1/login-help', '/login'), false);
+  assert.equal(onLoginRoute('not a url', '/login'), false);
+});
+
+test('filterState keeps only the base host cookies and the base origin storage', () => {
+  const state = {
+    cookies: [
+      cookie('sid', 'a', '127.0.0.1', LATER),
+      cookie('dot', 'b', '.127.0.0.1', LATER),
+      cookie('idp', 'c', 'login.example.test', LATER),
+      cookie('lh', 'd', 'localhost', LATER),
+      cookie('sub', 'e', '.example.test', LATER),
+    ],
+    origins: [
+      { origin: 'http://127.0.0.1:5173', localStorage: [{ name: 't', value: '1' }], indexedDB: [{ name: 'db' }] },
+      { origin: 'http://127.0.0.1:9999', localStorage: [{ name: 'o', value: '2' }] },
+      { origin: 'https://login.example.test', localStorage: [{ name: 'i', value: '3' }] },
+    ],
+  };
+  const kept = filterState(state, 'http://127.0.0.1:5173/');
+  assert.deepEqual(
+    kept.cookies.map((c) => c.name),
+    ['sid', 'dot'],
+  );
+  assert.deepEqual(kept.origins, [{ origin: 'http://127.0.0.1:5173', localStorage: [{ name: 't', value: '1' }] }]);
+  assert.doesNotMatch(JSON.stringify(kept), /example\.test|9999/);
+  assert.deepEqual(filterState({}, 'http://127.0.0.1:5173/'), { cookies: [], origins: [] });
+  assert.deepEqual(filterState(null, 'http://127.0.0.1:5173/'), { cookies: [], origins: [] });
+  const v6 = filterState({ cookies: [cookie('s', 'x', '::1', LATER), cookie('t', 'y', '[::1]', LATER)] }, 'http://[::1]:3000/');
+  assert.equal(v6.cookies.length, 2);
+});
+
+test('savedLoginExpiry reads the base host cookies only', () => {
+  const base = 'http://127.0.0.1:5173/';
+  const now = Date.now();
+  const live = savedLoginExpiry({ cookies: [cookie('a', '1', '127.0.0.1', EARLIER), cookie('b', '2', '127.0.0.1', LATER)] }, base, now);
+  assert.equal(live.expired, false);
+  assert.equal(live.expires.getTime(), LATER * 1000);
+  const past = savedLoginExpiry(
+    { cookies: [cookie('a', '1', '127.0.0.1', EARLIER), cookie('idp', '2', 'login.example.test', LATER)] },
+    base,
+    now,
+  );
+  assert.deepEqual(past, { expired: true, expires: null });
+  const session = savedLoginExpiry({ cookies: [cookie('a', '1', '127.0.0.1', -1)] }, base, now);
+  assert.deepEqual(session, { expired: false, expires: null });
+  assert.deepEqual(savedLoginExpiry({ cookies: [] }, base, now), { expired: false, expires: null });
+});
+
+test('saveLoginState writes a filtered 0600 file and refuses a symlink', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'save-'));
+  const path = join(dir, 'ui-auth.json');
+  saveLoginState(path, { cookies: [cookie('sid', 'a', '127.0.0.1', LATER), cookie('x', 'b', 'evil.test', LATER)] }, 'http://127.0.0.1:1/');
+  assert.equal(lstatSync(path).mode & 0o777, 0o600);
+  const saved = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(
+    saved.cookies.map((c) => c.name),
+    ['sid'],
+  );
+  saveLoginState(path, { cookies: [] }, 'http://127.0.0.1:1/');
+  assert.equal(lstatSync(path).mode & 0o777, 0o600);
+  assert.deepEqual(readdirSync(dir), ['ui-auth.json'], 'no temporary file is left');
+  const target = join(dir, 'target.json');
+  writeFileSync(target, 'keep');
+  const link = join(dir, 'link.json');
+  symlinkSync(target, link);
+  assert.throws(() => saveLoginState(link, { cookies: [] }, 'http://127.0.0.1:1/'), /symlink/);
+  assert.equal(readFileSync(target, 'utf8'), 'keep');
+});
+
+test('--probe resolves the login case without a browser', async () => {
+  const notSetUp = loginRepo('http://127.0.0.1:1/');
+  const a = await runScript(notSetUp, ['--probe']);
+  assert.equal(a.code, 3);
+  assert.match(
+    a.stdout,
+    /^capture: unavailable: login not set up: export WHYGRAPH_UI_USER and WHYGRAPH_UI_PASSWORD, or run node \S*capture\.mjs --login$/m,
+  );
+  const expired = loginRepo('http://127.0.0.1:1/');
+  writeState(expired, { cookies: [cookie('sid', 'a', '127.0.0.1', EARLIER), cookie('idp', 'b', 'login.example.test', LATER)] });
+  const b = await runScript(expired, ['--probe']);
+  assert.equal(b.code, 3);
+  assert.equal(b.stdout, 'capture: unavailable: the saved login expired\n');
+  const remote = loginRepo('http://dev.example.test/', { extra: 'allow_hosts: dev.example.test' });
+  const c = await runScript(remote, ['--probe'], LOGIN_ENV);
+  assert.equal(c.code, 3);
+  assert.match(c.stdout, /^capture: unavailable: .*loopback/);
+});
+
+test('--probe prints the expiry of a live saved login', { skip: NO_PW }, async () => {
+  const root = loginRepo('http://127.0.0.1:1/', { playwright: true });
+  writeState(root, { cookies: [cookie('sid', 'a', '127.0.0.1', LATER)] });
+  const run = await runScript(root, ['--probe']);
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  const date = new Date(LATER * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  assert.equal(run.stdout, `capture: available (saved login expires ${date})\n`);
+  const form = await runScript(root, ['--probe'], LOGIN_ENV);
+  assert.equal(form.stdout, 'capture: available\n');
+});
+
+test('a symlinked or tracked saved login is refused', async () => {
+  const linked = loginRepo('http://127.0.0.1:1/');
+  const outside = join(mkdtempSync(join(tmpdir(), 'outside-')), 'state.json');
+  writeFileSync(outside, JSON.stringify({ cookies: [cookie('sid', 'a', '127.0.0.1', LATER)] }));
+  symlinkSync(outside, join(linked, AUTH_FILE));
+  for (const args of [['--probe'], ['--tag', 'before', '--out', 'out', '/'], ['--login']]) {
+    const run = await runScript(linked, args);
+    assert.equal(run.code, 3, run.stdout + run.stderr);
+    assert.match(run.stdout + run.stderr, /symlink/);
+  }
+  const tracked = loginRepo('http://127.0.0.1:1/');
+  writeState(tracked, { cookies: [cookie('sid', 'a', '127.0.0.1', LATER)] });
+  spawnSync('git', ['init', '-q'], { cwd: tracked });
+  spawnSync('git', ['add', '-f', AUTH_FILE], { cwd: tracked });
+  for (const args of [['--probe'], ['--tag', 'before', '--out', 'out', '/'], ['--login']]) {
+    const run = await runScript(tracked, args);
+    assert.equal(run.code, 3, run.stdout + run.stderr);
+    assert.match(run.stdout + run.stderr, /tracked by git/);
+  }
+});
+
+test('--login refuses a host that is not loopback and takes no other argument', async () => {
+  const remote = loginRepo('http://dev.example.test/', { extra: 'allow_hosts: dev.example.test' });
+  const run = await runScript(remote, ['--login']);
+  assert.equal(run.code, 3, run.stdout + run.stderr);
+  assert.match(run.stderr, /loopback/);
+  const usage = await runScript(remote, ['--login', '--tag', 'before']);
+  assert.equal(usage.code, 4);
+  assert.ok(!existsSync(join(remote, AUTH_FILE)));
+});
+
+test('a capture without a login set up exits 3 with the setup line', async () => {
+  const root = loginRepo('http://127.0.0.1:1/');
+  const run = await runScript(root, ['--tag', 'before', '--out', 'out', '/']);
+  assert.equal(run.code, 3, run.stdout + run.stderr);
+  assert.match(
+    run.stderr,
+    /^login not set up: export WHYGRAPH_UI_USER and WHYGRAPH_UI_PASSWORD, or run node \S*capture\.mjs --login\n$/,
+  );
+});
+
+test('--e2e passes neither login variable to the test', async () => {
+  const repo = await e2eRepo(
+    "import {test} from 'node:test';\nimport {writeFileSync} from 'node:fs';\n" +
+      "test('env', () => { writeFileSync('env.json', JSON.stringify(process.env)); });\n",
+    'auth: required\n',
+  );
+  const run = await runE2e(repo.root, { ...LOGIN_ENV, WHYGRAPH_KEEP_SECRETS: '1', OTHER_VAR: 'kept' });
+  repo.server.close();
+  assert.equal(run.code, 0, run.stdout + run.stderr);
+  const seen = JSON.parse(readFileSync(join(repo.root, 'env.json'), 'utf8'));
+  assert.equal(seen.WHYGRAPH_UI_USER, undefined);
+  assert.equal(seen.WHYGRAPH_UI_PASSWORD, undefined);
+  assert.equal(seen.OTHER_VAR, 'kept');
+  assertNoSecret(repo.root, run.stdout, run.stderr);
 });

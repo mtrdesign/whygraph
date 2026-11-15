@@ -4,6 +4,7 @@
 //   node capture.mjs --tag <before|after> --out <dir> [--reset] <route>...
 //   node capture.mjs --probe
 //   node capture.mjs --e2e <test file> --out <dir>
+//   node capture.mjs --login
 //
 // Exit codes: 0 done, 2 a gate fired (one stderr line per new signal),
 // 3 capture unavailable (one stderr line with the reason), 4 usage error.
@@ -16,10 +17,19 @@
 // allowed hosts, masks) comes only from the untracked profile
 // `.whygraph/profiles/ui.md` in the working directory. The script uses the
 // project's own Playwright (1.49 or newer) and never installs anything.
+//
+// With `auth: required` a capture logs in first, on a loopback base host
+// only. A form login (WHYGRAPH_UI_USER and WHYGRAPH_UI_PASSWORD set, and the
+// profile's login_route and three login_fields) wins; it runs once per run,
+// keeps the session in memory and blocks every other origin while it runs.
+// Otherwise the saved login `.whygraph/profiles/ui-auth.json` is used, which
+// --login writes from a headed browser the person drives. The password is
+// typed into the form and never printed, logged or written.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   existsSync,
@@ -29,6 +39,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -36,7 +47,11 @@ import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+class Unavailable extends Error {}
+class UsageError extends Error {}
+
 const PROFILE_PATH = '.whygraph/profiles/ui.md';
+const AUTH_PATH = '.whygraph/profiles/ui-auth.json';
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
 const ROUTE_PATTERN = /^\/[A-Za-z0-9._~/%-]*$/;
 const LIST_KEYS = new Set([
@@ -46,6 +61,7 @@ const LIST_KEYS = new Set([
   'mask',
   'ignore_console',
   'ignore_requests',
+  'login_fields',
 ]);
 const UNNAMED_LINE =
   /^\s*- (button|link|textbox|checkbox|radio|combobox|switch|tab|menuitem|slider|searchbox|spinbutton)(?: \[[^\]]*\])?:?$/;
@@ -59,8 +75,16 @@ const NO_MOTION =
 const CSP =
   "default-src 'none'; img-src 'self' file: data:; style-src 'unsafe-inline'";
 const INDEX_MARK = '<!-- whygraph-capture-index -->';
-// The login variables (plan 56 D6): never passed to the app or a runner.
-const LOGIN_VARS = ['WHYGRAPH_UI_USER', 'WHYGRAPH_UI_PASSWORD'];
+// The login variables (plan 56 D6): fixed names, never read from the profile,
+// never passed to the app or a runner.
+const USER_VAR = 'WHYGRAPH_UI_USER';
+const PASSWORD_VAR = 'WHYGRAPH_UI_PASSWORD';
+export const LOGIN_VARS = [USER_VAR, PASSWORD_VAR];
+// Variables that make Playwright log its calls and protocol messages, which
+// would hold the typed password.
+const DEBUG_VARS = ['DEBUG', 'DEBUG_FILE', 'PWDEBUG'];
+const LOGIN_WAIT_MS = 15000;
+const LOGIN_SAVE_MS = 2000;
 // The strip list (plan 56 D43), the same as the plan tool's.
 const STRIP = /(_API_KEY$|^AWS_SECRET_ACCESS_KEY$|^AWS_SESSION_TOKEN$|^CLAUDE_CODE_OAUTH_TOKEN$|^WHYGRAPH_)/;
 const E2E_MAX_SECONDS = 500;
@@ -197,6 +221,7 @@ export function parseProfile(text) {
       ? value
           .split('; ')
           .map((v) => v.trim())
+          .map((v) => (m[1] === 'login_fields' ? v.replace(/^`([^`]*)`$/, '$1').trim() : v))
           .filter(Boolean)
       : value;
   }
@@ -295,10 +320,120 @@ export function copyShots(root, shotsRel, outDir, sinceMs) {
   return { copied, refused: null };
 }
 
-// ----------------------------------------------------------------- CLI parts
+/** True when the path of `url` is `route` (a trailing slash, query and fragment aside). */
+export function onLoginRoute(url, route) {
+  let path;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  const trim = (p) => (p.length > 1 ? p.replace(/\/+$/, '') : p);
+  return trim(path) === trim(String(route));
+}
 
-class Unavailable extends Error {}
-class UsageError extends Error {}
+function loginRouteOf(profile) {
+  return validRoute(profile.login_route) ? profile.login_route : null;
+}
+
+function loginFieldsOf(profile) {
+  const fields = profile.login_fields || [];
+  return fields.length === 3 ? fields : null;
+}
+
+/**
+ * Which login a capture uses, first match wins: `none` for `auth: none`,
+ * `form` when both login variables are set and the profile gives
+ * login_route and three login_fields, `saved` when the saved login exists,
+ * else `unavailable` with the reason. Both logins need a loopback base host;
+ * allow_hosts never widens this. Only the two fixed variable names are read
+ * from `env`, and only to see whether they are set.
+ */
+export function loginCase(profile, env, savedExists, script) {
+  if (profile.auth !== 'required') return { kind: 'none' };
+  if (!isAllowedUrl(profile.base_url, [])) {
+    return { kind: 'unavailable', reason: `a login runs only on a loopback host, not ${hostOf(profile.base_url)}` };
+  }
+  const varsSet = LOGIN_VARS.every((name) => typeof env[name] === 'string' && env[name] !== '');
+  if (varsSet && loginRouteOf(profile) && loginFieldsOf(profile)) return { kind: 'form' };
+  if (savedExists) return { kind: 'saved' };
+  return {
+    kind: 'unavailable',
+    reason: `login not set up: export ${USER_VAR} and ${PASSWORD_VAR}, or run node ${script} --login`,
+  };
+}
+
+function bareHost(host) {
+  return String(host || '')
+    .toLowerCase()
+    .replace(/^\./, '')
+    .replace(/^\[(.*)\]$/, '$1');
+}
+
+function baseHostCookies(state, base) {
+  const host = bareHost(new URL(base).hostname);
+  const cookies = state && Array.isArray(state.cookies) ? state.cookies : [];
+  return cookies.filter((c) => c && typeof c === 'object' && bareHost(c.domain) === host);
+}
+
+/**
+ * The part of a Playwright storage state that may be kept: the cookies of
+ * the base URL host and the local storage of the base origin. A cookie of
+ * another host, another origin's storage and anything but localStorage are
+ * dropped.
+ */
+export function filterState(state, base) {
+  const origin = new URL(base).origin;
+  const origins = state && Array.isArray(state.origins) ? state.origins : [];
+  return {
+    cookies: baseHostCookies(state, base),
+    origins: origins
+      .filter((o) => o && o.origin === origin)
+      .map((o) => ({ origin: o.origin, localStorage: Array.isArray(o.localStorage) ? o.localStorage : [] })),
+  };
+}
+
+/**
+ * The expiry of a saved login, read from the `expires` field (seconds) of the
+ * base host's cookies. `expired` is true when there is such a cookie and every
+ * one has passed. `expires` is the latest future expiry, or null when no
+ * cookie has one (session cookies, or no cookie).
+ */
+export function savedLoginExpiry(state, base, nowMs = Date.now()) {
+  const cookies = baseHostCookies(state, base);
+  const dated = cookies.map((c) => Number(c.expires)).filter((e) => Number.isFinite(e) && e > 0);
+  const session = cookies.length - dated.length;
+  const live = dated.filter((e) => e * 1000 > nowMs);
+  if (cookies.length && !session && !live.length) return { expired: true, expires: null };
+  return { expired: false, expires: live.length ? new Date(Math.max(...live) * 1000) : null };
+}
+
+/**
+ * Write the filtered storage state to `path` with mode 0600: a new temporary
+ * file in the same directory, renamed over `path`. Throws when `path` is a
+ * symlink.
+ */
+export function saveLoginState(path, state, base) {
+  let st = null;
+  try {
+    st = lstatSync(path);
+  } catch {
+    st = null;
+  }
+  if (st && st.isSymbolicLink()) throw new Unavailable(`the saved login path is a symlink: ${path}`);
+  const tmp = `${path}.${process.pid}.tmp`;
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, `${JSON.stringify(filterState(state, base), null, 2)}\n`, { mode: 0o600, flag: 'wx' });
+  try {
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
+// ----------------------------------------------------------------- CLI parts
 
 const state = { server: null, pidFile: null };
 
@@ -321,10 +456,11 @@ function isMain() {
 }
 
 function parseArgs(argv) {
-  const args = { probe: false, e2e: null, tag: null, out: null, reset: false, routes: [] };
+  const args = { probe: false, login: false, e2e: null, tag: null, out: null, reset: false, routes: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--probe') args.probe = true;
+    else if (a === '--login') args.login = true;
     else if (a === '--reset') args.reset = true;
     else if (a === '--e2e') {
       if (i + 1 >= argv.length) throw new UsageError('--e2e needs a test file');
@@ -335,9 +471,9 @@ function parseArgs(argv) {
     } else if (a.startsWith('--')) throw new UsageError(`unknown option: ${a}`);
     else args.routes.push(a);
   }
-  if (args.probe) {
-    if (args.tag || args.out || args.reset || args.routes.length) {
-      throw new UsageError('--probe takes no other argument');
+  if (args.probe || args.login) {
+    if ((args.probe && args.login) || args.e2e !== null || args.tag || args.out || args.reset || args.routes.length) {
+      throw new UsageError(`${args.probe ? '--probe' : '--login'} takes no other argument`);
     }
     return args;
   }
@@ -370,7 +506,7 @@ function compilePatterns(list, key) {
   });
 }
 
-function loadProfile(root, { e2e = false } = {}) {
+function loadProfile(root) {
   let path = root;
   for (const part of PROFILE_PATH.split('/')) {
     path = join(path, part);
@@ -385,8 +521,6 @@ function loadProfile(root, { e2e = false } = {}) {
   const git = spawnSync('git', ['ls-files', '--error-unmatch', PROFILE_PATH], { cwd: root, stdio: 'ignore' });
   if (git.status === 0) throw new Unavailable('profile is tracked by git');
   const profile = parseProfile(readFileSync(path, 'utf8'));
-  // An end-to-end test logs in itself.
-  if (!e2e && profile.auth === 'required') throw new Unavailable('the app requires a login (auth: required)');
   if (!profile.base_url) throw new Unavailable('the profile has no base_url');
   if (!isAllowedUrl(profile.base_url, profile.allow_hosts)) {
     throw new Unavailable(`base_url is not on an allowed host: ${profile.base_url}`);
@@ -396,6 +530,44 @@ function loadProfile(root, { e2e = false } = {}) {
   profile.requestIgnore = compilePatterns(profile.ignore_requests, 'ignore_requests');
   profile.dirs = [...new Set([root, ...profile.frontend_paths.map((p) => insideRoot(root, p, 'frontend_paths'))])];
   return profile;
+}
+
+// The saved login: null when it does not exist. Refused when its path goes
+// through a symlink or git tracks it; the file holds a live session.
+function savedLoginPath(root) {
+  if (hasSymlinkPart(root, AUTH_PATH)) throw new Unavailable(`the saved login path goes through a symlink: ${AUTH_PATH}`);
+  const git = spawnSync('git', ['ls-files', '--error-unmatch', AUTH_PATH], { cwd: root, stdio: 'ignore' });
+  if (git.status === 0) throw new Unavailable(`the saved login is tracked by git: ${AUTH_PATH}`);
+  return join(root, AUTH_PATH);
+}
+
+function readSavedLogin(root, base) {
+  const path = savedLoginPath(root);
+  if (!existsSync(path)) return null;
+  try {
+    return filterState(JSON.parse(readFileSync(path, 'utf8')), base);
+  } catch {
+    throw new Unavailable(`the saved login is not valid JSON: ${AUTH_PATH}; run node ${scriptShown(root)} --login`);
+  }
+}
+
+function scriptShown(root) {
+  const self = fileURLToPath(import.meta.url);
+  const rel = relative(root, self);
+  return rel.startsWith('..') || isAbsolute(rel) ? self : rel;
+}
+
+// Resolve the login of a capture or a probe; throws Unavailable when there is
+// none. Returns { kind, saved }. Nothing here reads the password.
+function resolveLogin(root, profile) {
+  if (profile.auth !== 'required') return { kind: 'none', saved: null };
+  let saved = null;
+  if (isAllowedUrl(profile.base_url, [])) saved = readSavedLogin(root, profile.base_url);
+  const found = loginCase(profile, process.env, saved !== null, scriptShown(root));
+  if (found.kind === 'unavailable') throw new Unavailable(found.reason);
+  // Playwright's debug logs would hold the protocol messages, the password too.
+  for (const name of DEBUG_VARS) delete process.env[name];
+  return { kind: found.kind, saved: found.kind === 'saved' ? saved : null };
 }
 
 function versionAtLeast(version, [major, minor]) {
@@ -570,6 +742,46 @@ function hostOf(url) {
   }
 }
 
+function sameOrigin(url, origin) {
+  try {
+    return new URL(url).origin === origin;
+  } catch {
+    return false;
+  }
+}
+
+// The form login: once per run, in one context that reaches only the base
+// origin. Returns the storage state, kept in memory. Every failure is the one
+// line `login failed: still on <login_route>`, so no error text can carry the
+// password.
+async function formLogin(browser, profile) {
+  const route = loginRouteOf(profile);
+  const [userField, passwordField, submit] = loginFieldsOf(profile);
+  const failed = () => new Unavailable(`login failed: still on ${route}`);
+  let context = null;
+  try {
+    context = await browser.newContext({ serviceWorkers: 'block', acceptDownloads: false });
+    const origin = new URL(profile.base_url).origin;
+    await context.route('**/*', (r) =>
+      sameOrigin(r.request().url(), origin) ? r.continue() : r.abort('blockedbyclient'),
+    );
+    const page = await context.newPage();
+    page.setDefaultTimeout(LOGIN_WAIT_MS);
+    await page.goto(resolveRoute(route, profile.base_url).href, { waitUntil: 'load', timeout: 60000 });
+    await page.fill(userField, process.env[USER_VAR]);
+    await page.fill(passwordField, process.env[PASSWORD_VAR]);
+    await page.click(submit);
+    await page.waitForURL((url) => !onLoginRoute(String(url), route), { timeout: LOGIN_WAIT_MS });
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    if (onLoginRoute(page.url(), route)) throw failed();
+    return filterState(await context.storageState(), profile.base_url);
+  } catch {
+    throw failed();
+  } finally {
+    if (context) await context.close().catch(() => {});
+  }
+}
+
 async function captureVariant(browser, ctx, v) {
   const { profile, theme, out, tag } = ctx;
   const [width, height] = v.size;
@@ -580,6 +792,7 @@ async function captureVariant(browser, ctx, v) {
     reducedMotion: 'reduce',
     serviceWorkers: 'block',
     acceptDownloads: false,
+    ...(ctx.storageState ? { storageState: ctx.storageState } : {}),
   });
   const files = {
     png: join(out, tag, `${v.name}__${v.theme}__${width}.png`),
@@ -689,6 +902,10 @@ async function captureVariant(browser, ctx, v) {
       });
     }
     check(page.url());
+    if (ctx.expiryRoute && onLoginRoute(page.url(), ctx.expiryRoute)) {
+      removeFiles();
+      throw new Unavailable(`the saved login expired: run node ${ctx.script} --login`);
+    }
     await page.screenshot({ path: files.png, fullPage: true, animations: 'disabled' });
     const raw = await page.locator('body').ariaSnapshot({ timeout: 30000 });
     const overflow = await page.evaluate(
@@ -830,6 +1047,7 @@ async function capture(args) {
     return 0;
   }
   const profile = loadProfile(root);
+  const login = resolveLogin(root, profile);
   const { chromium } = loadPlaywright(root, profile);
   const theme = parseTheme(profile.theme);
   const variants = [];
@@ -859,7 +1077,18 @@ async function capture(args) {
   } catch (err) {
     throw new Unavailable(`chromium did not start: ${firstLine(err)}`);
   }
-  const ctx = { profile, theme, out, tag: args.tag };
+  const ctx = { profile, theme, out, tag: args.tag, storageState: null, expiryRoute: null, script: scriptShown(root) };
+  if (login.kind === 'form') {
+    try {
+      ctx.storageState = await formLogin(browser, profile);
+    } catch (err) {
+      await browser.close().catch(() => {});
+      throw err;
+    }
+  } else if (login.kind === 'saved') {
+    ctx.storageState = login.saved;
+    ctx.expiryRoute = loginRouteOf(profile);
+  }
   const hasBefore = existsSync(marker);
   const beforeEntries = hasBefore ? readSignals(out).filter((e) => e.tag === 'before') : [];
   const results = [];
@@ -939,7 +1168,8 @@ function tailLines(path, n) {
 async function e2e(args) {
   const root = process.cwd();
   const out = resolve(root, args.out);
-  const profile = loadProfile(root, { e2e: true });
+  // An end-to-end test logs in itself.
+  const profile = loadProfile(root);
   const argv = splitRunCommand(profile.e2e_run);
   if (!argv) throw new Unavailable('the profile has no usable e2e_run (none, missing, or a quote, $ or backtick)');
   const dir = profile.e2e_dir && profile.e2e_dir !== 'none' ? profile.e2e_dir.replace(/\/+$/, '') : '';
@@ -1004,8 +1234,17 @@ function probe() {
   const root = process.cwd();
   try {
     const profile = loadProfile(root);
+    const login = resolveLogin(root, profile);
+    let note = '';
+    if (login.kind === 'saved') {
+      const { expired, expires } = savedLoginExpiry(login.saved, profile.base_url);
+      if (expired) throw new Unavailable('the saved login expired');
+      note = expires
+        ? ` (saved login expires ${expires.toISOString().replace(/\.\d{3}Z$/, 'Z')})`
+        : ' (saved login has no expiry date)';
+    }
     loadPlaywright(root, profile);
-    say('capture: available');
+    say(`capture: available${note}`);
     return 0;
   } catch (err) {
     if (err instanceof Unavailable) {
@@ -1014,6 +1253,60 @@ function probe() {
     }
     throw err;
   }
+}
+
+// --login: a headed browser the person drives at login_route (or the base
+// URL). The storage state is saved every 2 s while a page is open, filtered
+// to the base host's cookies and the base origin's local storage, mode 0600.
+// No request is blocked here: the person may log in through another host.
+async function loginMode() {
+  const root = process.cwd();
+  const profile = loadProfile(root);
+  if (!isAllowedUrl(profile.base_url, [])) {
+    throw new Unavailable(`a login runs only on a loopback host, not ${hostOf(profile.base_url)}`);
+  }
+  const path = savedLoginPath(root);
+  for (const name of DEBUG_VARS) delete process.env[name];
+  const { chromium } = loadPlaywright(root, profile);
+  await ensureServer(root, profile, join(root, '.whygraph', 'profiles', 'login'));
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: false });
+  } catch (err) {
+    throw new Unavailable(`chromium did not start: ${firstLine(err)}`);
+  }
+  const route = loginRouteOf(profile);
+  const start = route ? resolveRoute(route, profile.base_url).href : profile.base_url;
+  let saves = 0;
+  try {
+    const context = await browser.newContext({ acceptDownloads: false });
+    const page = await context.newPage();
+    say(`login: log in in the browser window, then close it (${start})`);
+    await page.goto(start, { waitUntil: 'load', timeout: 60000 }).catch(() => {});
+    const save = async () => {
+      saveLoginState(path, await context.storageState(), profile.base_url);
+      saves += 1;
+    };
+    while (browser.isConnected() && context.pages().length) {
+      await save().catch((err) => {
+        if (err instanceof Unavailable) throw err;
+      });
+      await new Promise((r) => setTimeout(r, LOGIN_SAVE_MS));
+    }
+    if (browser.isConnected()) await save().catch(() => {});
+  } finally {
+    await browser.close().catch(() => {});
+  }
+  if (!saves) throw new Unavailable('the login was not saved: the browser closed before its state could be read');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  const { expired, expires } = savedLoginExpiry(state, profile.base_url);
+  const when = expired
+    ? 'it has already expired'
+    : expires
+      ? `expires ${expires.toISOString().replace(/\.\d{3}Z$/, 'Z')}`
+      : 'no expiry date';
+  say(`login: saved to ${AUTH_PATH} (${when})`);
+  return 0;
 }
 
 let finishing = null;
@@ -1041,7 +1334,13 @@ async function main() {
     return finish(4, `usage: ${err.message}`);
   }
   try {
-    const code = args.probe ? probe() : args.e2e !== null ? await e2e(args) : await capture(args);
+    const code = args.probe
+      ? probe()
+      : args.login
+        ? await loginMode()
+        : args.e2e !== null
+          ? await e2e(args)
+          : await capture(args);
     return finish(code);
   } catch (err) {
     if (err instanceof UsageError) return finish(4, `usage: ${err.message}`);

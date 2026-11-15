@@ -56,8 +56,9 @@
 #
 # end exits 0 when Verify passes or is not literal, 1 when it fails, 4 when
 # it exits 126 or 127 and its first word is not a command, and 124 when the
-# budget ran out. It exits 65 when the step changed a copy of this tool; 65
-# wins over the others. A <blob> that does not hash to its id exits 65.
+# budget ran out. It exits 65 when the step changed a copy of this tool or
+# of the capture script (the directory of either, in any of the four agent
+# trees); 65 wins over the others. A <blob> that does not hash to its id exits 65.
 #
 # probe runs no command. It exits 4 when the first word of a command, or a
 # script that sh or bash would read, is missing. baseline exits 0 for any
@@ -163,8 +164,10 @@
 # --trust <hash> exits 65 when that hash changed, and names the paths when
 # steps/<N>.trust still hashes to the passed value.
 #
-# Every bounded job gets npm_config_yes=false, and its process group is
-# killed after it exits. A setup or dryrun job also loses *_API_KEY,
+# Every bounded job gets npm_config_yes=false and loses WHYGRAPH_UI_USER and
+# WHYGRAPH_UI_PASSWORD, whatever WHYGRAPH_KEEP_SECRETS says: only the
+# capture script reads the login. Its process group is killed after it
+# exits. A setup or dryrun job also loses *_API_KEY,
 # AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, CLAUDE_CODE_OAUTH_TOKEN and
 # WHYGRAPH_*, unless the caller set WHYGRAPH_KEEP_SECRETS=1.
 #
@@ -2071,6 +2074,8 @@ read_budget() {
 BOUNDED_JOB='
 npm_config_yes=false
 export npm_config_yes
+# Only the capture script reads the login variables (see the header comment).
+unset WHYGRAPH_UI_USER WHYGRAPH_UI_PASSWORD
 # A setup or dry-run job loses the strip list (see the header comment).
 if [ -f "$1/strip" ]; then
     for name in $(env | sed -n "s/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p"); do
@@ -2515,7 +2520,8 @@ cmd_end() {
 
     while IFS= read -r path; do
         case $path in
-            .claude/skills/whygraph-plan/* | .cursor/skills/whygraph-plan/* | .github/whygraph/* | .codex/whygraph/*)
+            .claude/skills/whygraph-plan/* | .cursor/skills/whygraph-plan/* | .github/whygraph/* | .codex/whygraph/* | \
+                .claude/skills/whygraph-ui-check/* | .cursor/skills/whygraph-ui-check/*)
                 printf 'plan-tool.sh: the step changed the plan tool: %s\n' "$path" >&2
                 exit 65
                 ;;

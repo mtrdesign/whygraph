@@ -145,7 +145,7 @@ The `tasks.json` example:
 }
 ```
 
-**1d. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (up to about a minute when commits still need descriptions); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers get the cards inlined (deep mode); warming the cache here also makes any card they fetch later a cache hit instead of a parallel generation. A card with `partial: true` is usable: note `partial` on the card you pass on, and do not re-ask in a loop.
+**1d. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (up to about a minute when commits still need descriptions); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers read the cards in the research sidecar (deep mode). Warming the cache here also makes any card they fetch later a cache hit instead of a parallel generation. A card with `partial: true` is usable: note `partial` on the card you pass on, and do not re-ask in a loop.
 
 For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count`, `purpose`, `constraints[]` and `risks[]` (each item's `text` verbatim, with its `basis` and `refs`), and `is_empty` (no rationale recorded, or `purpose` and `why` both blank). Also read `freshness` from `whygraph://repo/overview` once; when `commits_behind` is greater than 0, start the plan with *Note: history is N commits behind HEAD.* (N = `commits_behind`).
 
@@ -217,6 +217,8 @@ If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the pla
 
 You are an orchestrator. Do **not** synthesise yourself.
 
+**Sidecar head.** Before **2a**, check that the Agent tool is available. Without it, write no sidecar and take the single-pass fallback of **2a**. With it, write the sidecar head as **2d** item 1 says.
+
 **2a. Spawn one researcher per kept source, in parallel.** In a single message, spawn one `whygraph-researcher` subagent per source on the kept list, except a source that **External sources** below sends to `whygraph-researcher-external`, via the Agent tool. Each gets a prompt of the form:
 
 ```
@@ -232,14 +234,7 @@ SOURCE:
 --- lens ---
 (read the file at path: - its body is your lens)
 
-WORKING SET:
-- qualified_name: <qn>
-  file: <path>:<lines>
-  purpose: <one line>
-  constraints: [<verbatim>, ...]
-  risks: [<verbatim>, ...]
-  evidence: <N commits, M PRs>
-- ...
+WORKING_SET_PATH: <absolute path of the sidecar>
 
 PARENT: <PARENT, or none>
 - t<N>: <sibling title> - files_hint: <paths>
@@ -248,11 +243,11 @@ PROFILE:
 <key lines of the cached UI profile; only for ui-surface, only when the profile is fresh>
 ```
 
-Inline each card's `purpose` / `constraints` / `risks` verbatim (not `why` / `tradeoffs`), each item of `constraints` and `risks` as its `text`; for an empty card write `purpose: (no rationale recorded)`, `constraints: []`, `risks: []`. Never inline a source's body: the researcher reads it. When `PARENT` is not `none`, list every other child of that `tasks.json` under it, with its `files_hint`. Researchers may fetch cards for symbols outside the working set.
+`WORKING_SET_PATH` names the sidecar head that you wrote before **2a**. Never inline a source's body: the researcher reads it. When `PARENT` is not `none`, list every other child of that `tasks.json` under it, with its `files_hint`. Researchers may fetch cards for symbols outside the working set.
 
 Give the `PROFILE:` block only to the `ui-surface` researcher, and only when **1f** found the cached profile fresh. Copy the profile's key lines into it, without its frontmatter and without its `capture:` line. Omit the block for every other researcher.
 
-**External sources.** A kept source whose `requires` or `tools` names a tool other than `read`, a `whygraph_*` tool or a `codegraph_*` tool goes to `whygraph-researcher-external`, not `whygraph-researcher`. Its prompt is `TASK` and the `SOURCE:` block with its `TERMS`, and nothing else: no `WORKING SET`, `PARENT` or `PROFILE`. If that agent is not available, do not run the source on `whygraph-researcher`: its report is `(unavailable: no external researcher in this editor)`. A source that uses only `read` and WhyGraph or CodeGraph tools stays on `whygraph-researcher`, even when it needed consent.
+**External sources.** A kept source whose `requires` or `tools` names a tool other than `read`, a `whygraph_*` tool or a `codegraph_*` tool goes to `whygraph-researcher-external`, not `whygraph-researcher`. Its prompt is `TASK` and the `SOURCE:` block with its `TERMS`, and nothing else: no `WORKING_SET_PATH`, `PARENT` or `PROFILE`. If that agent is not available, do not run the source on `whygraph-researcher`: its report is `(unavailable: no external researcher in this editor)`. A source that uses only `read` and WhyGraph or CodeGraph tools stays on `whygraph-researcher`, even when it needed consent.
 
 If the Agent tool is unavailable, switch to single-pass and prepend the plan with this notice: *Deep mode was unavailable (no subagent tool); this plan was written in single-pass mode.*
 
@@ -283,7 +278,7 @@ Run `<PLAN_TOOL> smoke <OUT_PATH> <the smoke path>` once, with a 600 s timeout.
 On `smoke: not available`, set `E2E` to `no`. Add `e2e: off - <reason>` to the Confidence reason.
 On any other line, change nothing here: the dry run reports it.
 
-**2d. Write the research sidecar.** Write `.whygraph/plans/<stem>.research.md` before the synthesizer runs: the working set and every report, verbatim, in this shape. It always goes under `.whygraph/plans/`, whatever `OUT_PATH` says. The synthesizer reads it, and a revise pass re-synthesizes from it without running the researchers again.
+**2d. Write the research sidecar.** The sidecar is `.whygraph/plans/<stem>.research.md`. It always goes under `.whygraph/plans/`, whatever `OUT_PATH` says. You write it in two parts: the head before **2a**, the report blocks after **2b**. The researchers read the head. The synthesizer reads the whole file, and a revise pass re-synthesizes from it without running the researchers again. Its shape:
 
 ```text
 TASK: <user's task verbatim>
@@ -293,6 +288,9 @@ WORKING SET SUMMARY: <N cards, M truncated>
 WORKING SET:
 - qualified_name: <qn>
   file: <path>:<lines>
+  purpose: <one line>
+  constraints: [<verbatim>, ...]
+  risks: [<verbatim>, ...]
   evidence: <N commits, M PRs>
 - ...
 
@@ -303,7 +301,10 @@ WORKING SET:
 <verbatim report>
 ```
 
-Write one `=== <source name> ===` block per kept source, in the kept-list order. For a source that **External sources** sends to `whygraph-researcher-external`, write the header as `=== <source name> (external) ===`. If you cannot write the sidecar, stop and reply `The research sidecar could not be written: <reason>`.
+1. **Head.** Before **2a**, write `TASK`, `WORKING SET SUMMARY` and the `WORKING SET:` block with `Write`. Give each record in full. Copy each card's `purpose`, `constraints` and `risks` verbatim, not `why` or `tradeoffs`. Write each item of `constraints` and `risks` as its `text`. For an empty card, write `purpose: (no rationale recorded)`, `constraints: []` and `risks: []`. Write the head only in deep mode, and only when the Agent tool is available. A sidecar makes a later revise take the deep branch, so the single-pass fallback must leave none.
+2. **Reports.** After **2b**, append the report blocks with `Edit`. Write one `=== <source name> ===` block per kept source, in the kept-list order. For a source that **External sources** sends to `whygraph-researcher-external`, write the header as `=== <source name> (external) ===`.
+
+If you cannot write the sidecar, stop and reply `The research sidecar could not be written: <reason>`.
 
 **2e. Spawn the synthesizer.** Single Agent tool call to `whygraph-synthesizer` with this prompt:
 

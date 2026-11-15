@@ -26,7 +26,7 @@ consent: false
    - `e2e_start` and `e2e_base_url`: the start command and the base URL the browser tests need, when they differ from `start` and `base_url`. Else `none`.
    - `wait_for`: a root selector when it is obvious, else `none`.
    - `ignore_console` and `ignore_requests`: known dev noise for the framework found, such as Vite's HMR socket.
-   - `derived_from`: the files you read.
+   - `derived_from`: the repo-relative paths of the files you read, separated by `; `. Write paths only. Leave out a path that has a character other than letters, digits, `.`, `_`, `/` and `-`.
 3. Look for a `## UI conventions` heading in the always-on files. Report the file path. Never copy the text.
 4. Find the routes the working set's components render. Read route tables and imports.
    - Report each route as a backticked path relative to the base URL, such as `/projects/42`.

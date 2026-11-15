@@ -1604,6 +1604,22 @@ def test_end_a_plan_tool_change_exits_65(
     assert run.stdout.startswith(f"end: {t0} ")
 
 
+@pytest.mark.parametrize(
+    "folder",
+    [".claude/skills/whygraph-ui-check", ".cursor/skills/whygraph-ui-check"],
+)
+def test_end_a_capture_script_change_exits_65(
+    repo: Path, posix: str, folder: str
+) -> None:
+    verify = f"`mkdir -p {folder} && echo x > {folder}/capture.mjs && true`"
+    _write_plan(repo, _steps_plan((f"{folder}/capture.mjs", verify)))
+    t0 = _begin(repo, posix)
+    run = _end(repo, posix, t0)
+    assert run.returncode == 65, run.stdout + run.stderr
+    assert "plan tool" in run.stderr
+    assert run.stdout.startswith(f"end: {t0} ")
+
+
 def test_end_timeout_exits_124(repo: Path, posix: str, marker: str) -> None:
     _write_plan(repo, _steps_plan(("a.txt", f"`sleep {marker}`")))
     t0 = _begin(repo, posix)
@@ -4509,6 +4525,45 @@ def test_verify_keeps_the_full_environment(repo: Path, posix: str) -> None:
     assert run.returncode == 0, run.stdout + run.stderr
     seen = _env_names(repo / "env.out")
     assert seen["OPENAI_API_KEY"] == "s1" and seen["WHYGRAPH_PROBE_X"] == "s5"
+    assert seen["npm_config_yes"] == "false"
+
+
+_LOGIN = {"WHYGRAPH_UI_USER": "dev-user", "WHYGRAPH_UI_PASSWORD": "pw-secret"}
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_verify_never_sees_the_login_variables(
+    repo: Path, posix: str, keep: bool
+) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`sh -c 'env > env.out; env'`", None)))
+    env = {
+        **_SECRETS,
+        **_LOGIN,
+        "WHYGRAPH_OTHER": "o1",
+        **({"WHYGRAPH_KEEP_SECRETS": "1"} if keep else {}),
+    }
+    run = _run(repo, posix, "verify", "plans/p.md", "1", env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    record = (repo / _STEPS / "1.verify").read_text()
+    printed = (repo / "env.out").read_text()
+    for text in (run.stdout, run.stderr, record, printed):
+        assert "WHYGRAPH_UI_USER" not in text and "WHYGRAPH_UI_PASSWORD" not in text
+        assert "pw-secret" not in text
+    seen = _env_names(repo / "env.out")
+    assert seen["WHYGRAPH_OTHER"] == "o1" and seen["OPENAI_API_KEY"] == "s1"
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_setup_never_sees_the_login_variables(
+    repo: Path, posix: str, keep: bool
+) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("`mkdir -p gen`", "`sh -c 'env > gen/env'`")))
+    env = {**_LOGIN, **({"WHYGRAPH_KEEP_SECRETS": "1"} if keep else {})}
+    run = _run(repo, posix, "setup", "plans/p.md", env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    seen = _env_names(repo / "gen/env")
+    assert "WHYGRAPH_UI_USER" not in seen and "WHYGRAPH_UI_PASSWORD" not in seen
     assert seen["npm_config_yes"] == "false"
 
 

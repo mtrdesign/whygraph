@@ -185,7 +185,14 @@ export function parseProfile(text) {
     const line = raw.replace(/\r$/, '');
     const m = /^([a-z][a-z0-9_]*):(?:\s(.*))?$/.exec(line);
     if (!m) continue;
-    const value = (m[2] || '').trim();
+    // A researcher may add a note: "`npm run dev` (runs vite)" or "`none` as a
+    // command. Fixtures are ...". A value that starts with a backticked span
+    // is that span; otherwise a trailing note in parentheses is dropped.
+    let value = (m[2] || '').trim();
+    if (!LIST_KEYS.has(m[1])) {
+      const tick = /^`([^`]*)`/.exec(value);
+      value = tick ? tick[1].trim() : value.replace(/\s+\([^()]*\)$/, '').trim();
+    }
     profile[m[1]] = LIST_KEYS.has(m[1])
       ? value
           .split('; ')

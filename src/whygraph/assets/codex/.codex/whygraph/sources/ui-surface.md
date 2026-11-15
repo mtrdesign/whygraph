@@ -12,7 +12,7 @@ consent: false
 *Question:* what does this project's UI look like, how do you start it, and which routes and states does this task touch?
 
 1. If the prompt carries a `PROFILE:` block, use it as the profile. Skip to step 4.
-2. Derive the profile with at most twelve reads. Report each item as a `key: value` line.
+2. Derive the profile with at most twelve reads. Report each item as a `key: value` line. Write the value alone, with no note and no backticks: the capture script reads it as written.
    - `frontend_paths`: the directories holding a `package.json` whose dependencies include react, vue, svelte, angular, solid-js, preact, next, nuxt or astro. Separate several with `; `.
    - `stack`: the framework and the component library.
    - `theme`: one of `prefers-color-scheme`, `attribute <name>=<value>`, `class <name>` or `none`.

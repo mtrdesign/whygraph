@@ -384,3 +384,16 @@ test('--e2e refuses a quoted e2e_run, a file outside e2e_dir and a remote base',
   remote.server.close();
   assert.equal((await runE2e(remote.root)).code, 3);
 });
+
+test('parseProfile drops a trailing note and backticks from a value', () => {
+  const p = parseProfile(
+    'base_url: http://127.0.0.1:5195 (`vite.config.js` sets port 5195)\n' +
+      'start: `npm run dev` (runs `vite`)\n' +
+      'e2e_run: npx cypress run --spec\n' +
+      'fixture: `none` as a command. Fixtures are the flags in `src/flags.js`.\n',
+  );
+  assert.equal(p.fixture, 'none');
+  assert.equal(p.base_url, 'http://127.0.0.1:5195');
+  assert.equal(p.start, 'npm run dev');
+  assert.equal(p.e2e_run, 'npx cypress run --spec');
+});

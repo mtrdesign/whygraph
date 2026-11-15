@@ -364,6 +364,7 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--model sonnet\|opus\|haiku\|fable` | Use this model for every step instead of each step's own. |
 | `--no-review` | Skip the review gate after each step. It is not the plan command's `--no-review`. |
 | `--no-eval` | Skip the [evaluator](#evaluation). |
+| `--no-polish` | Skip the [polish run](#the-polish-run). `--no-eval` skips it too. |
 | `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
 | `--no-e2e` | Run no [browser test](#end-to-end-tests), in a step or in Acceptance. |
 | `--eval-fix-attempts N` | How many times a failed spec evaluation sends the step back to the implementor, 0 to 2. Default 1. |
@@ -396,6 +397,12 @@ it stops only when no rung of its ladder can help.
   tracked file or an unignored one that changed stops the run with `setup failed`. A command has no
   shell syntax and never adds or upgrades a package. `plan-tool.sh setup <plan>` runs the commands and
   writes `steps/setup`.
+- **A Format bullet is not a Setup command.** When the repo's CI or README names a command that
+  rewrites files, such as a formatter, the planner adds it as the last bullet of `## Setup`:
+  ``- Format: `<command>` ``. A plan has at most one. `setup` never runs it. It is not one of the
+  five commands. `plan-tool.sh format <plan> <t0>` runs it once with the changed files as
+  arguments. It prints `format: <k> files, exit <code>` and leaves out the plan, `.whygraph/`,
+  symlinks and unsafe paths. It exits 6 when the plan has no Format bullet.
 - **Setup and the dry run run commands you have not read.** The plan command runs them before you see
   the plan (see the warning above), and `--no-questions` does not turn that off. Only `--no-dry-run`
   does. A Setup command runs the install scripts of every package it installs, and it may write
@@ -773,6 +780,22 @@ or Cursor to get it.
     screen that shows data you may not send there. Use a fixture or a demo account, and `mask` in the
     profile for values that change on every load.
 
+### The polish run
+
+After the quality stage, Claude Code and Cursor run one more pass, the polish run. It needs the
+quality evaluation, so `--no-eval` and `--no-polish` both skip it.
+
+1. When the quality stage has findings, one implementor run applies them. It touches a file only when
+   a step lists it under **Files** and no step lists it under **Boundaries**. It never edits a Test
+   first file or a browser test file. It runs no Verify.
+2. The plan's Format command runs on every changed file, so the polish edits are formatted too.
+3. Each Acceptance item runs again. **Acceptance decides.** A failed item stops the run with
+   `acceptance failed after the polish run`, and the findings do not matter.
+4. The run summary prints `Polish: applied <k> of <n> quality findings`, then each skipped finding
+   with its reason.
+
+VS Code and Codex have no evaluator, so they have no polish run.
+
 ## UI evidence
 
 A plan that changes a screen can capture the affected routes before and after each step, so you
@@ -787,6 +810,11 @@ When a task touches a UI, the planner derives a profile of your front end and ca
 in, the base URL, the routes and the theme mechanism, a login requirement (carried into the plan's `## UI profile` as `**Auth:**`), your browser tests, and
 patterns for console and request noise. A second plan in the same project reuses it. The profile is
 derived again when one of the files it came from changes, and `--refresh-profile` forces it.
+
+The planner lists the files it read as `derived_from`. It leaves out a path with a character other
+than letters, digits, `.`, `_`, `/` and `-`, such as `[teamId]/page.tsx`. A path left out of
+`derived_from` is left out of the fingerprint too. A change to it never marks the cached profile
+stale. Run `--refresh-profile` to rebuild the profile after such a change.
 
 The profile is read from an untracked file on purpose. It carries the start command the script runs,
 so the planner and the script both refuse it when git tracks it. Keep it out of version control, and
@@ -963,6 +991,7 @@ record. Step N's own record is left out, so a step can still change what it wrot
 | A note proposed for a change on purpose, after a passing Acceptance | Yes | Yes | No, one printed line per step | No, one printed line per step |
 | Review gate after each step | Yes | Skipped | Skipped | Skipped |
 | Evaluator (spec, quality, UI) | Yes | Yes, without a review gate | No | No |
+| Polish run (`--no-polish` turns it off) | Yes | Yes | No | No |
 | UI evidence capture | Yes | Yes | Yes | Yes |
 | Browser test step in a plan (`--no-e2e` turns it off) | Yes | Yes | Yes | Yes |
 | Plan-time smoke of an existing browser test | Yes | Yes | No: the planner has no terminal | Yes |

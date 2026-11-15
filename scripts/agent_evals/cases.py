@@ -573,6 +573,14 @@ class GreetTest(unittest.TestCase):
     def test_greet(self) -> None:
         self.assertEqual(greet("Ada"), "Hello, Ada!")
 """
+FORMAT_SCRIPT = """import sys
+
+for name in sys.argv[1:]:
+    with open(name, encoding="utf-8") as handle:
+        lines = [line.rstrip() + "\\n" for line in handle]
+    with open(name, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+"""
 DIRTY_LINE = "Local note, not committed.\n"
 UNTRACKED = {"notes.txt": "a scratch note\n", "scratch/draft.md": "# Draft\n"}
 # The implementor sub-steps U7 deletes: the start tree, Verify and the end tree.
@@ -601,6 +609,14 @@ def setup_greet_test(ws: Workspace) -> None:
     """Commit U2's existing test, which ``fixtures/mini`` must not hold."""
     (ws.dir / "tests" / "test_greet.py").write_text(GREET_TEST, encoding="utf-8")
     _commit(ws, "eval: the greeting test")
+
+
+def setup_format_script(ws: Workspace) -> None:
+    """Commit U2's test and a tiny formatter that U14's Format bullet runs."""
+    setup_greet_test(ws)
+    (ws.dir / "tools").mkdir(exist_ok=True)
+    (ws.dir / "tools" / "format.py").write_text(FORMAT_SCRIPT, encoding="utf-8")
+    _commit(ws, "eval: the format script")
 
 
 def setup_dirty_tree(ws: Workspace) -> None:
@@ -1197,7 +1213,7 @@ CASES: tuple[Case, ...] = (
         id="U13",
         name="capture behind a login",
         prompts=(implement(U13_STEM, "--no-eval"),),
-        budget=2.0,
+        budget=1.5,
         estimate=1.5,
         setup=setup_login,
         env={"WHYGRAPH_UI_USER": U13_USER, "WHYGRAPH_UI_PASSWORD": U13_PASSWORD},
@@ -1234,6 +1250,21 @@ CASES: tuple[Case, ...] = (
             reaches_acceptance(),
             file_contains(".whygraph/plans/u19/steps/1.red", "result: red\n"),
             printed("- Proof: 1 of 2 steps proven, 1 unproven"),
+        ),
+    ),
+    Case(
+        id="U14",
+        name="polish run formats the changed file",
+        prompts=(implement("u14"),),
+        budget=2.0,
+        estimate=1.5,
+        plans=("u14.md",),
+        setup=setup_format_script,
+        checks=(
+            reaches_acceptance(),
+            printed("Polish: applied"),
+            file_contains("mini/greet.py", "def greet"),
+            file_lacks("mini/greet.py", " \n"),
         ),
     ),
     Case(
@@ -1635,7 +1666,7 @@ CASES: tuple[Case, ...] = (
             f"/whygraph-plan {EMPTY_STATE_TASK} --deep --no-questions --no-review "
             f"--out {PLAN_P16}",
         ),
-        budget=3.5,
+        budget=3.0,
         estimate=2.5,
         setup=setup_e2e_profile,
         checks=(

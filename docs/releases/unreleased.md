@@ -5,6 +5,12 @@
 
 ## Changes
 
+- **A polish run applies the small quality findings.** After the quality evaluation, Claude Code and
+  Cursor apply its findings to files the plan lists. They run the plan's new `- Format:` Setup command
+  on the changed files, then run Acceptance again, which decides. The planner now reads the working
+  set from a file, which makes a deep plan faster. Pass `--no-polish` to skip the run. Run
+  **Settings > Update agent files** to pick it up, and see
+  [The polish run](../guide/planning.md#the-polish-run).
 - **UI capture works behind a login.** Set `WHYGRAPH_UI_USER` and `WHYGRAPH_UI_PASSWORD`, or run
   `node capture.mjs --login` once to save a session in `.whygraph/profiles/ui-auth.json`. The profile
   gets `login_route` and `login_fields`, and the planner no longer skips a project with a login. Both

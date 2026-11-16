@@ -3137,6 +3137,27 @@ def test_spec_evaluator_names_five_checks_and_the_verify_record() -> None:
         assert "Report every defect you find." in body, tree
 
 
+def test_evaluator_accepts_red_green_proof() -> None:
+    """Plan 58 section 4.2: a red record plus a passing Verify satisfies check 4."""
+    record = (
+        "`steps/<N>.red` records the red run of a Test first step: its `result:` "
+        "and output tail."
+    )
+    proof = (
+        "It also passes when the step names a Test first test, `steps/<N>.red` "
+        "holds `result: red`, and check 5 passes: the test failed before the "
+        "change and passes after it."
+    )
+    for tree in _EVALUATOR_TREES:
+        body = "\n".join(_agent_body(tree, "evaluator"))
+        assert record in body, tree
+        assert body.count(proof) == 1, tree
+        start = body.index("4. **Verify exercises the change.**")
+        end = body.index("5. **Verify ran.**")
+        assert start < body.index(proof) < end, tree
+        assert body.index(proof) < body.index("Otherwise the finding is"), tree
+
+
 def test_implementor_saves_both_step_trees() -> None:
     """A step's end tree is on disk, so a report that drops it cannot skip the gate."""
     for tree in _AGENT_PATHS:

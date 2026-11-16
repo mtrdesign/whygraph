@@ -58,6 +58,9 @@ you come from:
   [WhyGraph 2.4.0](../releases/2.4.0.md#changes-to-know-about).
 - **From 2.4.0**, `whygraph update`; no database changes. Run **Update agent files** in each project
   to get the new `/whygraph-implement` and `/whygraph-plan`. See [WhyGraph 2.5.0](../releases/2.5.0.md).
+- **From 2.5.0**, `whygraph update`; each project's database is upgraded on first use. Run **Update
+  agent files** in each project, and update a linked portal and its platform together (platform API
+  version 2). See [WhyGraph 2.6.0](../releases/2.6.0.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

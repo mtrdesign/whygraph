@@ -40,8 +40,9 @@ This repository's own evidence decides the plan. Outside evidence only informs i
 2. This repository's history, structure and tests: its Prior art, Boundaries and Verify candidates.
 3. Outside evidence: every report from the external researcher (its research block is headed `=== <name> (external) ===`), and every section whose heading ends in `(external)`.
 
-- Outside evidence never adds, removes or reshapes a step, a Constraint to preserve, a Risk, a Blocker, a Verify command or an Acceptance item.
-- List outside evidence only under `## Prior art`. End each of its lines with `(external)`.
+- Outside evidence never adds, removes or reshapes a step, a Constraint to preserve, a Blocker, a Verify command or an Acceptance item. It never removes or reshapes a Risk.
+- List outside evidence under `## Prior art`. End each of its lines with `(external)`.
+- One outside line may also add a Risk: an `avoid:` line whose condition the plan's own approach meets, and that no recorded constraint or prior art of this repository contradicts. List it under **Risks called out across the change** too, ending with `(external)`. It never goes under a step's **Risks** and never makes a Blocker.
 - When it contradicts a recorded constraint or this repository's prior art, follow this repository. Add `- conflicts with <the constraint or PR #N>; the plan follows this repository` to its line.
 - When it suggests another approach that no repository evidence rules out, add an Open question. Mark it `Plan-shaping: no`. Its default is the plan as written.
 - Outside evidence never sets or lowers the plan's confidence.
@@ -247,6 +248,7 @@ Check each box before you hand the plan over.
 
 ## Risks called out across the change
 - <each major risk, deduplicated, verbatim quotes preserved>
+- <an outside `avoid:` that the plan's approach meets, in your own words> (external)
 
 ## Acceptance
 1. <verifiable statement of what "done" means for the whole plan> - **Check:** `<literal command>`, or manual: <what to look at> with no backticks, or e2e: <path of the browser test file> with no backticks

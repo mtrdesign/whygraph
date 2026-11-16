@@ -5,6 +5,12 @@
 
 ## Changes
 
+- **A web pitfall that the plan walks into is now a risk.** The best-practices source reports each
+  finding as `do:` or `avoid:`, and an `avoid:` item must name when it fails and what goes wrong.
+  When the plan's own approach meets that condition, and nothing in your repository contradicts it,
+  the plan lists it under `## Risks called out across the change`, tagged `(external)`. It still never
+  changes a step or becomes a Blocker. Run **Settings > Update agent files** to pick it up, and see
+  [Best practices from the web](../guide/planning.md#best-practices-from-the-web).
 - **A polish run applies the small quality findings.** After the quality evaluation, Claude Code and
   Cursor apply its findings to files the plan lists. They run the plan's new `- Format:` Setup command
   on the changed files, then run Acceptance again, which decides. The planner now reads the working

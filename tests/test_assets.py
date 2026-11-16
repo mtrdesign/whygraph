@@ -2908,16 +2908,29 @@ def test_outside_evidence_ranks_below_the_repo() -> None:
         assert "## Evidence order" in spine, tree
         assert (
             "Outside evidence never adds, removes or reshapes a step, a Constraint "
-            "to preserve, a Risk, a Blocker, a Verify command or an Acceptance item."
+            "to preserve, a Blocker, a Verify command or an Acceptance item. It "
+            "never removes or reshapes a Risk."
         ) in spine, tree
+        # The one Risk it may add: an `avoid:` line the plan's approach meets.
+        assert "One outside line may also add a Risk: an `avoid:` line" in spine
+        assert "never goes under a step's **Risks** and never makes a Blocker" in spine
         assert "Outside evidence never sets or lowers the plan's confidence." in spine
         lens = _text(f"{folder}/sources/best-practices.md")
-        for phrase in ("`not applicable`", "`(one source)`", "never open a page"):
+        for phrase in (
+            "`not applicable`",
+            "`(one source)`",
+            "never open a page",
+            "- do: <title>",
+            "- avoid: <title> (<url>, <year>) - avoid <what> when <the condition",
+            "Drop an `avoid:` item whose source names no such condition.",
+        ):
             assert phrase in lens, (tree, phrase)
     for tree in _AGENT_PATHS:
         synthesizer = "\n".join(_agent_body(tree, "synthesizer"))
         assert "Outside evidence never sets the floor." in synthesizer, tree
         assert "**Don't let outside evidence change a step.**" in synthesizer, tree
+        assert "Step 4 may also list an `avoid:` entry as a Risk." in synthesizer
+        assert "Never fold it into a bullet from this repository." in synthesizer
         planner = "\n".join(_agent_body(tree, "planner"))
         assert "`=== <source name> (external) ===`" in planner, tree
 

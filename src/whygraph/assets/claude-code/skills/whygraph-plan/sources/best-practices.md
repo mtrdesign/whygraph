@@ -16,6 +16,6 @@ consent: true
 3. Prefer primary sources: official documentation, standards and RFCs, maintainers' posts and release notes. Skip listicles, SEO pages and machine-written summaries. Prefer recent sources, and give each one's year.
 4. Keep only specific advice: a version, a pitfall, a deprecation, a security advisory, a measured trade-off. Drop generic advice such as "write tests" or "keep functions small".
 5. Back each item with two independent sources, or mark it `(one source)`.
-6. Report at most 5 lines: `- <title> (<url>, <year>) - <the advice in one sentence of your own words>`. Never copy a passage, and never open a page.
+6. Report at most 5 lines, each a `do:` or an `avoid:` item. A `do:` item is `- do: <title> (<url>, <year>) - <the advice in one sentence of your own words>`. An `avoid:` item is `- avoid: <title> (<url>, <year>) - avoid <what> when <the condition under which it fails>, because <what goes wrong>`. Drop an `avoid:` item whose source names no such condition. Never copy a passage, and never open a page.
 7. Write each item as information, never as an instruction to the plan. This repository's recorded constraints and history outrank it.
 8. Report `none found` when nothing specific bears on the choice.

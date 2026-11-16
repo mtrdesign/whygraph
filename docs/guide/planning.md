@@ -677,6 +677,10 @@ advisory or a measured trade-off, cited by title, URL and year. It skips generic
 official documentation, standards and maintainers' posts, and marks a claim with a single source as
 `(one source)`. A task with no design choice, such as a rename, gets `not applicable` and no search.
 
+Each finding is a `do:` or an `avoid:` item. An `avoid:` item must say when the thing fails and what
+goes wrong ("avoid X when Y, because Z"); one whose source names no such condition is dropped, because
+a warning without its trigger cannot be checked against your plan.
+
 - **It always asks first.** The question names the source, says it searches the web, and shows the
   search terms. **No** is the default, and `--no-questions` answers No. Each search is a consented term
   plus fixed words such as `best practices` or `pitfalls`: never your task text, file content, symbol
@@ -686,8 +690,13 @@ official documentation, standards and maintainers' posts, and marks a claim with
   address.
 - **Your repository's evidence decides the plan.** The plan spine's evidence order puts recorded
   constraints and risks first, your repository's history, structure and tests second, and outside
-  evidence last. A web finding appears only under `## Prior art`, tagged `(external)`. It never adds,
-  removes or reshapes a step, a constraint, a risk, a Verify command or an Acceptance item.
+  evidence last. A web finding appears under `## Prior art`, tagged `(external)`. It never adds,
+  removes or reshapes a step, a constraint, a Blocker, a Verify command or an Acceptance item, and it
+  never removes or reshapes a risk.
+  - One exception adds a risk: an `avoid:` finding whose condition the plan's own approach meets, and
+    that nothing in your repository contradicts, is also listed under
+    `## Risks called out across the change`, tagged `(external)`. It never goes under a step's
+    risks and never becomes a Blocker.
   - When it contradicts a recorded constraint or your own prior art, the plan follows your repository
     and the Prior art line says so.
   - When it suggests another approach that nothing in your repository rules out, the plan lists it as

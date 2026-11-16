@@ -2351,3 +2351,139 @@ def secret_absent(secret: str, stem: str) -> Check:
         )
 
     return Check("the password is in no plan file or transcript", fn)
+
+
+# Plan 58: the three implement stops that need no person.
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+_TEST_FILE_RE = re.compile(r"[\w./-]*test[\w./-]*\.[A-Za-z]+")
+
+
+def log_line_count(stem: str, text: str, count: int) -> Check:
+    """Pass when exactly ``count`` lines of the plan's log hold ``text``.
+
+    Reads the ``## Implementation log`` as the run left it on disk.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        log = _section(_text(_plan_path(ctx, stem)), "Implementation log")
+        lines = [line.strip() for line in log.splitlines() if text in line]
+        return len(lines) == count, f"{len(lines)} line(s) with {text!r}: {lines}"
+
+    return Check(f"{stem}: {count} log line(s) with {text}", fn)
+
+
+def bash_call_count(pattern: str, count: int, label: str) -> Check:
+    """Pass when exactly ``count`` ``Bash`` commands of any session match ``pattern``."""
+
+    def fn(ctx: Context) -> Outcome:
+        calls = [
+            c for c in _bash_commands(ctx.all_transcripts()) if re.search(pattern, c)
+        ]
+        return len(calls) == count, f"{len(calls)} call(s): {calls[:3]}"
+
+    return Check(label, fn)
+
+
+def reply_lacks(text: str) -> Check:
+    """Pass when no run's reply holds ``text``."""
+
+    def fn(ctx: Context) -> Outcome:
+        found = [i for i, run in enumerate(ctx.runs) if text in run.reply]
+        return (
+            not found,
+            f"runs {found} name {text!r}" if found else "no reply names it",
+        )
+
+    return Check(f"no reply names {text}", fn)
+
+
+def _acceptance_items(text: str) -> dict[int, str]:
+    """Return the plan's ``## Acceptance`` items by number, each its first line."""
+    items = {}
+    for line in _section(text, "Acceptance").splitlines():
+        match = re.match(r"^(\d+)\. (.*)$", line)
+        if match:
+            items[int(match.group(1))] = match.group(2)
+    return items
+
+
+def _check_of(item: str) -> str:
+    """Return the text after ``**Check:**`` in an Acceptance item, or ``""``."""
+    _head, sep, tail = item.partition("**Check:**")
+    return tail.strip() if sep else ""
+
+
+def acceptance_item1_scoped(rel_path: str, full_commands: tuple[str, ...]) -> Check:
+    """Pass when Acceptance item 1 runs the steps' test files, not the full command.
+
+    Item 1's Check must be literal, no span of it may be one of
+    ``full_commands``, and a span must name a test file that a step's
+    **Verify** names.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(ctx.workdir / rel_path)
+        if not text:
+            return False, f"{rel_path} is missing"
+        check = _check_of(_acceptance_items(text).get(1, ""))
+        spans = [s.strip() for s in _BACKTICK_RE.findall(check)]
+        verify_files = {
+            name
+            for line in _section(text, "Steps").splitlines()
+            if "**Verify:**" in line
+            for name in _TEST_FILE_RE.findall(line)
+        }
+        named = sorted({n for s in spans for n in _TEST_FILE_RE.findall(s)})
+        bare = [s for s in spans if s in full_commands]
+        ok = bool(spans) and not bare and bool(verify_files & set(named))
+        return ok, (
+            f"item 1 Check {check!r}; full command spans {bare}; "
+            f"test files {named}; the steps' Verify files {sorted(verify_files)}"
+        )
+
+    return Check("Acceptance item 1 runs the steps' test files", fn)
+
+
+def acceptance_manual_full(rel_path: str, full_commands: tuple[str, ...]) -> Check:
+    """Pass when an Acceptance item's Check is ``manual:`` and names a full command."""
+
+    def fn(ctx: Context) -> Outcome:
+        items = _acceptance_items(_text(ctx.workdir / rel_path))
+        found = [
+            number
+            for number, item in items.items()
+            if re.match(r"`?manual:", _check_of(item))
+            and any(command in _check_of(item) for command in full_commands)
+        ]
+        return bool(found), f"manual full-suite items {found} of {len(items)}"
+
+    return Check("a manual: item names the full test command", fn)
+
+
+def section_lacks(rel_path: str, heading: str, pattern: str, label: str) -> Check:
+    """Pass when a plan file exists and its ``## <heading>`` does not match ``pattern``.
+
+    A plan without the section passes.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        path = ctx.workdir / rel_path
+        if not path.exists():
+            return False, f"{rel_path} is missing"
+        body = _section(_text(path), heading)
+        found = re.findall(rf"^.*{pattern}.*$", body, re.IGNORECASE | re.MULTILINE)
+        return not found, f"## {heading} lines: {found}" if found else f"no {label}"
+
+    return Check(f"no {label}", fn)
+
+
+def dryrun_record(stem: str, text: str) -> Check:
+    """Record whether the plan's dry-run record holds ``text``. Never fails."""
+
+    def fn(ctx: Context) -> Outcome:
+        record = _text(_steps_dir(ctx, stem) / "dryrun")
+        if not record:
+            return True, "no dry-run record"
+        return True, f"dry-run record {'holds' if text in record else 'lacks'} {text!r}"
+
+    return Check(f"dry-run record has {text}", fn, record=True)

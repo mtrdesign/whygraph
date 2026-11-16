@@ -1,0 +1,9 @@
+command: python3 -m unittest tests.test_routes
+exit: 0
+tree: 110818fe498bb8da6dab8eea632ba31c2ee089dc
+--- last 40 lines of output
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+OK

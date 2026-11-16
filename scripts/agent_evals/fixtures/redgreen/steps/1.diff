@@ -1,0 +1,29 @@
+diff --git a/mini/routes.py b/mini/routes.py
+index 4127f38..5c169de 100644
+--- a/mini/routes.py
++++ b/mini/routes.py
+@@ -8,9 +8,10 @@ NOTES = [
+ ]
+ 
+ 
+-def list_notes(limit: int = 100) -> list[dict]:
++def list_notes(limit: int = 100, kind: str | None = None) -> list[dict]:
+     """Return the notes, newest first."""
+-    return sorted(NOTES, key=lambda note: note["id"], reverse=True)[:limit]
++    notes = [note for note in NOTES if kind is None or note["kind"] == kind]
++    return sorted(notes, key=lambda note: note["id"], reverse=True)[:limit]
+ 
+ 
+ ROUTES = {("GET", "/notes"): list_notes}
+diff --git a/tests/test_routes.py b/tests/test_routes.py
+index 11e4809..81848c3 100644
+--- a/tests/test_routes.py
++++ b/tests/test_routes.py
+@@ -7,3 +7,7 @@ class RoutesTest(unittest.TestCase):
+     def test_list_newest_first(self) -> None:
+         ids = [note["id"] for note in handle("GET", "/notes")]
+         self.assertEqual(ids, [2, 1])
++
++    def test_list_filters_by_kind(self) -> None:
++        by_kind = handle("GET", "/notes", {"kind": "gotcha"})
++        self.assertEqual([note["id"] for note in by_kind], [2])

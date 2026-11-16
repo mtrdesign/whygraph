@@ -1,0 +1,17 @@
+
+ RUN  v5.0.2 /work
+
+ ❯ empty.test.mjs (0 test)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  empty.test.mjs [ empty.test.mjs ]
+Error: No test suite found in file /work/empty.test.mjs
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  no tests
+   Start at  21:26:26
+   Duration  131ms (transform 53%, import 30%, worker 17%, environment 1%)
+

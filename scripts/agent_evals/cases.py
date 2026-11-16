@@ -14,6 +14,7 @@ skipped, so a baseline never tests what is not built yet.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -35,11 +36,13 @@ from checks import (
     at_stage,
     attempt_count,
     begin_end_around_implementors,
+    capture_after_holds,
     children_in_order,
     constraint_quotes_tagged,
     file_contains,
     file_exists,
     either,
+    end_exit,
     file_lacks,
     implementor_model,
     listener_got_no_bytes,
@@ -49,6 +52,7 @@ from checks import (
     no_edit,
     no_implementor,
     no_plan_tool_call,
+    no_stop_block,
     no_process,
     note_revision_proposed,
     plan_log_contains,
@@ -59,6 +63,7 @@ from checks import (
     hidden_test,
     plan_tool_check,
     plan_tool_check_or_confidence,
+    printed,
     reaches_acceptance,
     record_card_read,
     record_comparison,
@@ -68,6 +73,8 @@ from checks import (
     record_rationale_before_edit,
     record_review_cost,
     reply_contains,
+    reply_matches,
+    secret_absent,
     reply_starts_with,
     researchers_reached_mcp,
     resolved_decisions_has,
@@ -81,6 +88,7 @@ from checks import (
     sidecar_blocks_match_researchers,
     step_diff_paths,
     stop_block,
+    stop_cause_lacks,
     tasks_done,
     tool_called,
     transcript_exists,
@@ -452,7 +460,46 @@ P9_SEEDS = (
         ),
     ),
 )
-REVIEW_FIXTURES = ("p9.md", "p10.md", "p12.md", "p13.md")
+REVIEW_FIXTURES = ("p9.md", "p10.md", "p12.md", "p13.md", "p15.md")
+
+# P15's seeded lines, as (step, field, text the line must hold). Each is the
+# defect of one rule that plan 56 adds or widens.
+P15_SEEDED = {
+    "whole-repo verify": (1, "Verify", "npx vite build"),
+    "no path": (3, "Change", "Add a test file for `featureFlags`"),
+    "contradicts card": (4, "Change", "at run time"),
+}
+P15_PLAN = "eval-p15.md"
+
+
+def _p15(*keys: str) -> tuple[int, ...]:
+    """Return the p15.md lines of ``P15_SEEDED`` entries."""
+    return tuple(
+        line for key in keys for line in step_field_line("p15.md", *P15_SEEDED[key][:2])
+    )
+
+
+P15_SEEDS = (
+    Seeded(
+        "step 1's Verify is a whole-repo build that step 2 repairs",
+        (1,),
+        # The reviewer cites code it read: the import that step 2 removes.
+        ((P15_PLAN, _p15("whole-repo verify")), ("src/main.jsx", (3, 6, 9, 10))),
+    ),
+    Seeded(
+        "step 3 adds a test file and names no path",
+        (3,),
+        (
+            (P15_PLAN, _p15("no path") + step_field_line("p15.md", 3, "Files")),
+            ("src/flags.js", (1,)),
+        ),
+    ),
+    Seeded(
+        "step 4 adds a runtime setter that the cached card of src/flags.js rules out",
+        (4,),
+        ((P15_PLAN, _p15("contradicts card")), ("src/flags.js", (1,))),
+    ),
+)
 
 # Plan 52's journey fixture: ``fixtures/journey`` overlays ui-demo, and p12.md
 # seeds three defects in the journey of p13.md's task.
@@ -526,6 +573,14 @@ class GreetTest(unittest.TestCase):
     def test_greet(self) -> None:
         self.assertEqual(greet("Ada"), "Hello, Ada!")
 """
+FORMAT_SCRIPT = """import sys
+
+for name in sys.argv[1:]:
+    with open(name, encoding="utf-8") as handle:
+        lines = [line.rstrip() + "\\n" for line in handle]
+    with open(name, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+"""
 DIRTY_LINE = "Local note, not committed.\n"
 UNTRACKED = {"notes.txt": "a scratch note\n", "scratch/draft.md": "# Draft\n"}
 # The implementor sub-steps U7 deletes: the start tree, Verify and the end tree.
@@ -556,6 +611,14 @@ def setup_greet_test(ws: Workspace) -> None:
     _commit(ws, "eval: the greeting test")
 
 
+def setup_format_script(ws: Workspace) -> None:
+    """Commit U2's test and a tiny formatter that U14's Format bullet runs."""
+    setup_greet_test(ws)
+    (ws.dir / "tools").mkdir(exist_ok=True)
+    (ws.dir / "tools" / "format.py").write_text(FORMAT_SCRIPT, encoding="utf-8")
+    _commit(ws, "eval: the format script")
+
+
 def setup_dirty_tree(ws: Workspace) -> None:
     """Leave a tracked edit and untracked files that no step touches."""
     with (ws.dir / "README.md").open("a", encoding="utf-8") as handle:
@@ -564,6 +627,215 @@ def setup_dirty_tree(ws: Workspace) -> None:
         path = ws.dir / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
+
+
+def setup_ready_ignore(ws: Workspace) -> None:
+    """Commit a ``.gitignore`` line for ``.ready``, the file U9's Setup creates."""
+    with (ws.dir / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write(".ready\n")
+    _commit(ws, "eval: ignore .ready")
+
+
+P14_TASK = "add an empty state to the list page that shows the empty label from src/labels.generated.js"
+P14_GENERATOR = """import { writeFileSync } from 'node:fs'
+writeFileSync(
+  new URL('../src/labels.generated.js', import.meta.url),
+  "export const labels = { items: 'items', empty: 'No items yet' }\\n",
+)
+"""
+P14_TEST = """import test from 'node:test'
+import assert from 'node:assert/strict'
+import { labels } from './labels.generated.js'
+
+test('the empty label is set', () => {
+  assert.equal(labels.empty, 'No items yet')
+})
+"""
+P14_README = (
+    "# ui-demo\n\nRun `node scripts/gen-labels.mjs` before `node --test`. "
+    "It writes `src/labels.generated.js`, which git ignores.\n"
+)
+
+
+def setup_generated_file(ws: Workspace) -> None:
+    """Add a test that imports a gitignored generated file, and what writes it.
+
+    The hook writes the generator script, the test, a README line that names
+    the command and a ``.gitignore`` line, and removes the generated file, so a
+    plan that does not run the command has a failing test. The edits are
+    working-tree changes that the portal workspace restores afterwards.
+    """
+    root = ws.dir
+    (root / "scripts").mkdir(exist_ok=True)
+    (root / "scripts" / "gen-labels.mjs").write_text(P14_GENERATOR, encoding="utf-8")
+    (root / "src" / "labels.test.js").write_text(P14_TEST, encoding="utf-8")
+    (root / "README.md").write_text(P14_README, encoding="utf-8")
+    with (root / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write("src/labels.generated.js\n")
+    (root / "src" / "labels.generated.js").unlink(missing_ok=True)
+
+
+# Plan 56 Phase 4 (U12): a tiny app that the profile's ``start`` command runs, and
+# an ``e2e_run: node --test`` profile. The browser test fetches the page over HTTP,
+# so no browser is needed. The setup hook commits the app and writes the profile,
+# which the mini repo's ``.gitignore`` keeps out of the tree.
+U12_PORT = 18913
+U12_SERVER = f"""import {{ createServer }} from 'node:http'
+import {{ readFileSync }} from 'node:fs'
+
+createServer((req, res) => {{
+  res.setHeader('content-type', 'text/html')
+  res.end(readFileSync(new URL('./index.html', import.meta.url)))
+}}).listen({U12_PORT}, '127.0.0.1')
+"""
+U12_PAGE = "<!doctype html>\n<html><body><h1>Welcome</h1></body></html>\n"
+U12_PROFILE = f"""---
+fingerprint: none
+generated: 2026-11-15
+---
+frontend_paths: .
+stack: a static page
+theme: none
+base_url: http://127.0.0.1:{U12_PORT}/
+start: node app/server.mjs
+start_dir: .
+fixture: none
+auth: none
+tests: node built-in runner (`node --test`, e2e/)
+e2e_run: node --test
+e2e_dir: e2e
+e2e_shots: none
+"""
+
+
+def setup_e2e_app(ws: Workspace) -> None:
+    """Commit U12's greeting test, the tiny app and write its UI profile."""
+    setup_greet_test(ws)
+    app = ws.dir / "app"
+    app.mkdir(exist_ok=True)
+    (app / "server.mjs").write_text(U12_SERVER, encoding="utf-8")
+    (app / "index.html").write_text(U12_PAGE, encoding="utf-8")
+    (ws.dir / "e2e").mkdir(exist_ok=True)
+    (ws.dir / "e2e" / ".gitkeep").write_text("", encoding="utf-8")
+    _commit(ws, "eval: the page and its server")
+    profiles = ws.dir / ".whygraph" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / "ui.md").write_text(U12_PROFILE, encoding="utf-8")
+
+
+# P16: ui-demo with a text source file, an existing browser test and the e2e keys
+# of its profile. The hook edits ``.whygraph/profiles/ui.md`` in place (the file is
+# ignored, so ``git clean`` leaves it): it keeps a copy at ``ui.md.eval-backup``.
+P16_TEXT = (
+    "export const text = {\n"
+    "  title: 'Items',\n"
+    "  loading: 'Loading',\n"
+    "  add: 'Add item',\n"
+    "}\n"
+)
+P16_TEST = """import test from 'node:test'
+import assert from 'node:assert/strict'
+
+test('the list page loads', async () => {
+  const res = await fetch('http://127.0.0.1:5195/')
+  assert.equal(res.status, 200)
+})
+"""
+P16_KEYS = {
+    "e2e_run": "node --test",
+    "e2e_dir": "e2e",
+    "e2e_shots": "none",
+    "e2e_start": "none",
+    "e2e_base_url": "none",
+}
+P16_REPLACEMENTS = (
+    ("<h1>Items</h1>", "<h1>{text.title}</h1>"),
+    ("'Loading'", "text.loading"),
+    ("<button>Add item</button>", "<button>{text.add}</button>"),
+    (
+        "import { flags } from './flags.js'\n",
+        "import { flags } from './flags.js'\nimport { text } from './text.js'\n",
+    ),
+)
+
+
+def setup_e2e_profile(ws: Workspace) -> None:
+    """Add ui-demo's text file, an existing browser test and the profile's e2e keys.
+
+    Raises
+    ------
+    ValueError
+        When ``src/main.jsx`` does not hold a string the hook replaces.
+    """
+    root = ws.dir
+    main = root / "src" / "main.jsx"
+    source = main.read_text(encoding="utf-8")
+    for old, new in P16_REPLACEMENTS:
+        if old not in source:
+            raise ValueError(f"P16: src/main.jsx has no {old!r}")
+        source = source.replace(old, new, 1)
+    main.write_text(source, encoding="utf-8")
+    (root / "src" / "text.js").write_text(P16_TEXT, encoding="utf-8")
+    (root / "e2e").mkdir(exist_ok=True)
+    (root / "e2e" / "list.test.mjs").write_text(P16_TEST, encoding="utf-8")
+    profiles = root / ".whygraph" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    path = profiles / "ui.md"
+    if path.is_file():
+        backup = profiles / "ui.md.eval-backup"
+        if not backup.exists():
+            shutil.copy(path, backup)
+        lines = path.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = ["base_url: http://127.0.0.1:5195", "start: npm run dev", "auth: none"]
+    lines = [ln for ln in lines if ln.split(":", 1)[0] not in P16_KEYS]
+    lines += [f"{key}: {value}" for key, value in P16_KEYS.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# U13 (plan 56 Phase 5): ui-demo behind a login. The overlay in ``fixtures/login``
+# gates ``/`` on a cookie that a good post to ``/login`` sets, and keeps only the
+# hash of the password. The password is made up and lives in ``Case.env`` only.
+U13_STEM = "eval-u13"
+U13_USER = "ada"
+U13_PASSWORD = "eval-pw-7Q3x9-no-real-account"
+U13_KEYS = {
+    "base_url": "http://127.0.0.1:5195",
+    "start": "npm run dev",
+    "start_dir": ".",
+    "auth": "required",
+    "login_route": "/login",
+    "login_fields": "input[name=user]; input[name=password]; button[type=submit]",
+    "wait_for": "#root",
+    "capture": "available",
+}
+
+
+def setup_login(ws: Workspace) -> None:
+    """Add the login overlay, the profile keys and the U13 plan to ui-demo.
+
+    The hook edits the ignored ``.whygraph/profiles/ui.md`` in place and keeps the
+    first copy at ``ui.md.eval-backup``: restore it by hand after the run.
+    """
+    root = ws.dir
+    config = (FIXTURES / "login" / "vite.config.js").read_text(encoding="utf-8")
+    digest = hashlib.sha256(U13_PASSWORD.encode("utf-8")).hexdigest()
+    (root / "vite.config.js").write_text(
+        config.replace("{{PASSWORD_SHA256}}", digest), encoding="utf-8"
+    )
+    profiles = root / ".whygraph" / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True)
+    path = profiles / "ui.md"
+    lines: list[str] = []
+    if path.is_file():
+        backup = profiles / "ui.md.eval-backup"
+        if not backup.exists():
+            shutil.copy(path, backup)
+        lines = path.read_text(encoding="utf-8").splitlines()
+    lines = [ln for ln in lines if ln.split(":", 1)[0] not in U13_KEYS]
+    lines += [f"{key}: {value}" for key, value in U13_KEYS.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    copy_plan("u13.md", U13_STEM)(ws)
 
 
 def strip_substeps(text: str) -> str:
@@ -614,9 +886,35 @@ def strip_implementor(tree: Path) -> None:
     path.write_text(strip_substeps(path.read_text(encoding="utf-8")), "utf-8")
 
 
+# U18's added sentence: it tells the implementor to edit the Test first test,
+# which the guard of ``verify`` and ``end`` must catch.
+# The rule is replaced, not followed by an exception: a model keeps the
+# original "Never edit" line when both are present (first paid run, 2026-11-15).
+EDIT_TEST_RULE = (
+    "After the change, you must also edit the Test first test: in its assertion,"
+    ' change the expected text "Hello, Ada!" to "Hi, Ada!". This edit is part of'
+    " the step."
+)
+
+
+def edit_test_rule(tree: Path) -> None:
+    """U18's ``assets`` transform: an implementor that edits the Test first test."""
+    path = tree / "agents" / "implementor.md"
+    if not path.is_file():
+        raise ValueError(f"no {path.relative_to(tree)} in the assets tree")
+    text = path.read_text(encoding="utf-8")
+    old = "Never edit the Test first test."
+    if text.count(old) != 1:
+        raise ValueError(f"{old!r} found {text.count(old)} times")
+    path.write_text(text.replace(old, EDIT_TEST_RULE), "utf-8")
+
+
 PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
 REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
+PLAN_P14 = ".whygraph/plans/eval-p14.md"
+PLAN_P16 = ".whygraph/plans/eval-p16.md"
+REVIEW_P14 = ".whygraph/plans/eval-p14.review.md"
 
 # Plan 54's rationale benchmark (section 5.2). Two scratch repositories with
 # the same tree, built by ``fixtures/why/build.sh``: ``why-bench`` holds the
@@ -894,6 +1192,82 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="U12",
+        name="browser test red then green",
+        prompts=(implement("u12", "--no-eval"),),
+        budget=2.5,
+        estimate=1.4,
+        plans=("u12.md",),
+        setup=setup_e2e_app,
+        checks=(
+            reaches_acceptance(),
+            plan_log_contains("u12", "browser test red: ok"),
+            plan_log_contains("u12", "browser test green: ok"),
+            plan_log_contains("u12", "- Acceptance: passed"),
+            file_contains(".whygraph/plans/u12/steps/1.red", "kind: browser"),
+            file_contains(".whygraph/plans/u12/steps/1.red", "result: red"),
+            step_diff_paths("u12", {2: {"app/index.html"}}),
+        ),
+    ),
+    Case(
+        id="U13",
+        name="capture behind a login",
+        prompts=(implement(U13_STEM, "--no-eval"),),
+        budget=1.5,
+        estimate=1.5,
+        setup=setup_login,
+        env={"WHYGRAPH_UI_USER": U13_USER, "WHYGRAPH_UI_PASSWORD": U13_PASSWORD},
+        repo="ui-demo",
+        checks=(
+            reaches_acceptance(),
+            capture_after_holds(U13_STEM, 1, "Your items"),
+            secret_absent(U13_PASSWORD, U13_STEM),
+        ),
+    ),
+    Case(
+        id="U18",
+        name="Test first test edited",
+        prompts=(implement("u18"),),
+        budget=1.5,
+        estimate=0.8,
+        plans=("u18.md",),
+        setup=setup_greet_test,
+        assets=edit_test_rule,
+        checks=(
+            stop_block(1, (r"the Test first test was edited",), once=True),
+            end_exit(1, 5),
+        ),
+    ),
+    Case(
+        id="U19",
+        name="proof of two steps",
+        prompts=(implement("u19"),),
+        budget=2.5,
+        estimate=1.4,
+        plans=("u19.md",),
+        setup=setup_greet_test,
+        checks=(
+            reaches_acceptance(),
+            file_contains(".whygraph/plans/u19/steps/1.red", "result: red\n"),
+            printed("- Proof: 1 of 2 steps proven, 1 unproven"),
+        ),
+    ),
+    Case(
+        id="U14",
+        name="polish run formats the changed file",
+        prompts=(implement("u14"),),
+        budget=2.0,
+        estimate=1.5,
+        plans=("u14.md",),
+        setup=setup_format_script,
+        checks=(
+            reaches_acceptance(),
+            printed("Polish: applied"),
+            file_contains("mini/greet.py", "def greet"),
+            file_lacks("mini/greet.py", " \n"),
+        ),
+    ),
+    Case(
         id="U3",
         name="Files amendment",
         prompts=(implement("c15"),),
@@ -968,6 +1342,53 @@ CASES: tuple[Case, ...] = (
             no_plan_tool_call("baseline"),
             no_implementor(0),
             no_edit(),
+        ),
+    ),
+    Case(
+        id="U9",
+        name="Setup repairs the baseline",
+        prompts=(implement("u9"),),
+        budget=0.9,
+        estimate=0.5,
+        plans=("u9.md",),
+        setup=setup_ready_ignore,
+        checks=(
+            no_stop_block(),
+            reaches_acceptance(),
+            file_exists(".whygraph/plans/u9/steps/setup"),
+        ),
+    ),
+    Case(
+        id="U10",
+        name="Verify fails before any change",
+        prompts=(implement("u10"),),
+        budget=0.9,
+        estimate=0.5,
+        plans=("u10.md",),
+        checks=(
+            stop_block(1, (r"Verify fails before any change: step 1",), once=True),
+            stop_cause_lacks("step 2"),
+            no_implementor(0),
+            no_edit(),
+        ),
+    ),
+    Case(
+        id="U15",
+        name="dry-run Blocker whose cause is gone",
+        prompts=(implement("u15"),),
+        budget=2.5,
+        estimate=1.4,
+        plans=("u15.md",),
+        setup=setup_greet_test,
+        checks=(
+            printed("The dry-run Blockers no longer hold."),
+            reaches_acceptance(),
+            file_contains("mini/greet.py", "def greet"),
+            plan_note(
+                ".whygraph/plans/u15.md",
+                r"(?m)^- \*\*Dry run F1:\*\*",
+                "dry-run Blocker bullet kept",
+            ),
         ),
     ),
     Case(
@@ -1211,6 +1632,65 @@ CASES: tuple[Case, ...] = (
         ),
     ),
     Case(
+        id="P14",
+        name="dry run repairs the environment",
+        prompts=(f"/whygraph-plan {P14_TASK} --deep --no-questions --out {PLAN_P14}",),
+        budget=6.5,
+        estimate=3.5,
+        setup=setup_generated_file,
+        checks=(
+            plan_note(PLAN_P14, r"(?m)^## Setup[ \t]*$", "Setup section"),
+            plan_note(
+                REVIEW_P14, r"(?m)^=== dry-run ===[ \t]*$", "dry-run sidecar block"
+            ),
+            reply_matches(r"- ran: \d+ commands? in", "reply has the ran line"),
+            plan_tool_check("eval-p14"),
+        ),
+    ),
+    Case(
+        id="P15",
+        name="plan review: three new rules",
+        prompts=(plan_reviewer_prompt("eval-p15", "logic", "opus"),),
+        budget=2.0,
+        estimate=1.0,
+        setup=copy_plan("p15.md", "eval-p15"),
+        checks=(
+            review_findings(P15_SEEDS),
+            agent_model("whygraph-plan-reviewer", "opus"),
+        ),
+    ),
+    Case(
+        id="P16",
+        name="plan with a browser test",
+        prompts=(
+            f"/whygraph-plan {EMPTY_STATE_TASK} --deep --no-questions --no-review "
+            f"--out {PLAN_P16}",
+        ),
+        budget=3.0,
+        estimate=2.5,
+        setup=setup_e2e_profile,
+        checks=(
+            plan_note(
+                PLAN_P16,
+                r"(?m)^ +- \*\*Browser test:\*\* \S+ - red[ \t]*$",
+                "one red Browser test line",
+            ),
+            plan_note(
+                PLAN_P16,
+                r"(?m)^ +- \*\*Browser test:\*\* \S+ - green[ \t]*$",
+                "one green Browser test line",
+            ),
+            plan_note(PLAN_P16, r"\*\*Check:\*\* e2e: \S+", "an e2e: Check"),
+            plan_note(
+                PLAN_P16,
+                r"(?m)^   - \*\*Change:\*\*[^\n]*src/text\.js[^\n]*\n"
+                r"(?:   - [^\n]*\n)*?   - \*\*Browser test:\*\* \S+ - red",
+                "the red step's Change names src/text.js",
+            ),
+            plan_tool_check("eval-p16"),
+        ),
+    ),
+    Case(
         id="P20",
         name="journey in a deep plan",
         prompts=(
@@ -1382,6 +1862,57 @@ def validate() -> list[str]:
     problems.extend(_probe_problems())
     problems.extend(_review_fixture_problems())
     problems.extend(_u17_fixture_problems())
+    problems.extend(_u12_fixture_problems())
+    problems.extend(_u13_fixture_problems())
+    return problems
+
+
+def _u12_fixture_problems() -> list[str]:
+    """Check U12's plan: ``plan-tool.sh check`` exits 0 on it.
+
+    Returns
+    -------
+    list of str
+        One line per problem.
+    """
+    path = FIXTURES / "plans" / "u12.md"
+    if not path.is_file():
+        return ["U12: missing fixtures/plans/u12.md"]
+    out = subprocess.run(
+        ["sh", str(PLAN_TOOL), "check", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        return [f"u12.md: plan-tool.sh check exit {out.returncode}"]
+    return []
+
+
+def _u13_fixture_problems() -> list[str]:
+    """Check U13's plan and overlay: ``plan-tool.sh check`` exits 0, no password in a file.
+
+    Returns
+    -------
+    list of str
+        One line per problem.
+    """
+    path = FIXTURES / "plans" / "u13.md"
+    config = FIXTURES / "login" / "vite.config.js"
+    if not path.is_file() or not config.is_file():
+        return ["U13: missing fixtures/plans/u13.md or fixtures/login/vite.config.js"]
+    problems = []
+    for fixture in (path, config):
+        if U13_PASSWORD in fixture.read_text(encoding="utf-8"):
+            problems.append(f"U13: {fixture.name} holds the password")
+    out = subprocess.run(
+        ["sh", str(PLAN_TOOL), "check", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        problems.append(f"u13.md: plan-tool.sh check exit {out.returncode}")
     return problems
 
 
@@ -1441,6 +1972,12 @@ def _review_fixture_problems() -> list[str]:
         found = _p9(key)
         if not found or text not in lines[found[0] - 1]:
             problems.append(f"P9: step {step} {field_name} does not hold {text!r}")
+    p15 = FIXTURES / "plans" / "p15.md"
+    lines = p15.read_text(encoding="utf-8").splitlines() if p15.is_file() else []
+    for key, (step, field_name, text) in P15_SEEDED.items():
+        found = _p15(key)
+        if not found or text not in lines[found[0] - 1]:
+            problems.append(f"P15: step {step} {field_name} does not hold {text!r}")
     problems.extend(_journey_fixture_problems())
     return problems
 

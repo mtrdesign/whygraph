@@ -28,6 +28,8 @@ _GUARD = _SCRIPT.parent / "guard.sh"
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _EM = "\u2014"
 _EN = "\u2013"
+# The bidi controls and separators of AWK_CONSTRAINT's SEPARATOR list.
+_BIDI = "\u200e\u200f\u2028\u2029\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 # `sh missing.sh` exits 127 under bash's sh (macOS) and 2 under dash (Linux CI).
 _SH_MISSING = str(
     subprocess.run(["sh", "./no-such-script.sh"], capture_output=True).returncode
@@ -256,6 +258,27 @@ def repo(tmp_path: Path) -> Path:
         ("constraints", "plan.md", "1", "a" * 40),
         ("constraints", "plan.md", "a" * 40, "1", "extra"),
         ("constraints", "plan.md", "a" * 40, "x"),
+        ("proof",),
+        ("proof", "does-not-exist.md"),
+        ("proof", "plan.md", "x"),
+        ("setup",),
+        ("setup", "does-not-exist.md"),
+        ("setup", "plan.md", "x"),
+        ("ready",),
+        ("ready", "plan.md", "x"),
+        ("dryrun",),
+        ("format",),
+        ("format", "plan.md"),
+        ("format", "plan.md", "x"),
+        ("format", "plan.md", "a" * 40),
+        ("format", "does-not-exist.md", "a" * 40),
+        ("format", "plan.md", "a" * 40, "blob"),
+        ("format", "plan.md", "a" * 40, "b" * 40, "extra"),
+        ("dryrun", "plan.md", "x"),
+        ("red",),
+        ("red", "plan.md"),
+        ("red", "plan.md", "x"),
+        ("red", "plan.md", "1", "again", "x"),
     ],
 )
 def test_usage_errors_exit_64(repo: Path, args: tuple[str, ...]) -> None:
@@ -1385,7 +1408,10 @@ def _run(
 def _begin(repo: Path, posix: str, step: str = "1") -> str:
     run = _run(repo, posix, "begin", "plans/p.md", step)
     assert run.returncode == 0, run.stderr
-    return run.stdout.strip()
+    # The first line is the start tree; the second is the trust hash.
+    lines = run.stdout.splitlines()
+    assert len(lines) == 2 and lines[1].startswith("trust: "), run.stdout
+    return lines[0]
 
 
 def _end(
@@ -1578,6 +1604,22 @@ def test_end_a_plan_tool_change_exits_65(
 ) -> None:
     verify = f"`mkdir -p {folder} && echo x > {folder}/plan-tool.sh && {tail}`"
     _write_plan(repo, _steps_plan((f"{folder}/plan-tool.sh", verify)))
+    t0 = _begin(repo, posix)
+    run = _end(repo, posix, t0)
+    assert run.returncode == 65, run.stdout + run.stderr
+    assert "plan tool" in run.stderr
+    assert run.stdout.startswith(f"end: {t0} ")
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [".claude/skills/whygraph-ui-check", ".cursor/skills/whygraph-ui-check"],
+)
+def test_end_a_capture_script_change_exits_65(
+    repo: Path, posix: str, folder: str
+) -> None:
+    verify = f"`mkdir -p {folder} && echo x > {folder}/capture.mjs && true`"
+    _write_plan(repo, _steps_plan((f"{folder}/capture.mjs", verify)))
     t0 = _begin(repo, posix)
     run = _end(repo, posix, t0)
     assert run.returncode == 65, run.stdout + run.stderr
@@ -1957,6 +1999,16 @@ def test_probe_skips_the_paths_a_step_creates(
         ]
 
 
+def test_probe_a_backticked_manual_span_is_no_command(repo: Path, posix: str) -> None:
+    text = _full_plan(
+        ("a.txt", "`manual: look at the page`", "none"),
+        checks=("`manual: open the page`",),
+    )
+    run = _probe(repo, posix, text)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "manual" not in run.stdout
+
+
 def test_probe_runs_no_command(repo: Path, posix: str) -> None:
     text = _full_plan(
         ("a.txt", "`touch marker`", "none"),
@@ -1988,6 +2040,21 @@ def _result(line: str) -> str:
     assert kind == "step"
     assert _HEX40.match(key)
     return result
+
+
+def test_baseline_a_backticked_manual_span_is_not_literal(
+    repo: Path, posix: str
+) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`manual: look at the page`", "none")))
+    run = _baseline(repo, posix, "1")
+    assert run.returncode == 0, run.stderr
+    assert _result(_baseline_lines(repo)[0]) == "not literal"
+
+
+def test_verify_a_backticked_manual_span_is_not_literal(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`manual: look at the page`", "none")))
+    run = _run(repo, posix, "verify", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (0, "verify: not literal\n")
 
 
 def test_baseline_first_starts_a_pass(repo: Path, posix: str) -> None:
@@ -2232,7 +2299,10 @@ def test_accept_a_failing_check_exits_1(
     assert "timed out" not in record
 
 
-@pytest.mark.parametrize("check", ["manual: open the page", "the page `looks` right"])
+@pytest.mark.parametrize(
+    "check",
+    ["manual: open the page", "the page `looks` right", "`manual: open the page`"],
+)
 def test_accept_a_manual_check_is_not_literal(
     repo: Path, posix: str, check: str
 ) -> None:
@@ -3386,7 +3456,16 @@ def test_check_refuses_a_bad_constraint_check(
     text = _with_checks('- note #1 - absent: "fine" in a', line)
     # Not splitlines(): it also splits on U+0085 and U+2028, which awk does not.
     at = text.split("\n").index(line) + 1
-    _assert_one_finding(tmp_path, text, at, message)
+    if not any(c in line for c in _BIDI):
+        _assert_one_finding(tmp_path, text, at, message)
+        return
+    # A bidi control or a separator is also hidden text (plan 56 V31).
+    run = _check(tmp_path, text)
+    assert run.returncode == 1, run.stdout + run.stderr
+    assert run.stdout.splitlines() == [
+        f"line {at}: plan has hidden text: bidi control",
+        f"line {at}: {message}",
+    ]
 
 
 def test_check_reads_constraint_checks_only_in_their_section(tmp_path: Path) -> None:
@@ -3745,6 +3824,1546 @@ def test_brief_usage_errors_exit_64(tmp_path: Path, args: tuple[str, ...]) -> No
     assert _tool(tmp_path, *args).returncode == 64
 
 
+# ---- the browser test (plan 56 sections 5.11, 5.13, 5.24, 5.25) -----------------
+
+_STUB_CAPTURE = """const out = process.env.STUB_OUT || '';
+if (out) process.stdout.write(out + '\\n');
+if (process.env.STUB_LOG) require('fs').writeFileSync(process.env.STUB_LOG, process.argv.slice(2).join(' '));
+process.exit(Number(process.env.STUB_EXIT || '0'));
+"""
+
+
+def _tool_beside_capture(tmp_path: Path, layout: str) -> Path:
+    """A copy of the plan tool with a stub capture script, in a tree layout."""
+    if layout == "skills":
+        tool = tmp_path / "t" / "skills" / "whygraph-plan" / "plan-tool.sh"
+        capture = tmp_path / "t" / "skills" / "whygraph-ui-check" / "capture.mjs"
+    else:
+        tool = tmp_path / "t" / "whygraph" / "plan-tool.sh"
+        capture = tmp_path / "t" / "whygraph" / "capture.mjs"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    capture.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(_SCRIPT, tool)
+    capture.write_text(
+        _STUB_CAPTURE.replace("require('fs')", "(await import('node:fs'))")
+    )
+    return tool
+
+
+def _btool(repo: Path, tool: Path, *args: str, env: dict[str, str] | None = None):
+    return subprocess.run(
+        ["sh", str(tool), *args],
+        cwd=repo,
+        env={**_env(), **(env or {})},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        start_new_session=True,
+    )
+
+
+def _browser_plan(
+    *,
+    test_first: str = "none",
+    verify: str = "manual: the Browser test line runs this test",
+) -> str:
+    return f"""# Plan: B
+
+**Status:** x
+**Objective:** x
+**Non-goals:** x
+
+## Steps
+
+1. **Write the browser test**
+   - **Files:** e2e/a.cy.js, e2e/support/seed.js
+   - **Change:** Write the test.
+   - **Boundaries:** none
+   - **Constraints to preserve:** none
+   - **Risks:** none
+   - **Test first:** {test_first}
+   - **Model:** sonnet - x
+   - **Browser test:** e2e/a.cy.js - red
+   - **Verify:** {verify}
+2. **Build it**
+   - **Files:** src/a.js
+   - **Change:** Build it.
+   - **Boundaries:** e2e/a.cy.js
+   - **Constraints to preserve:** none
+   - **Risks:** none
+   - **Test first:** none
+   - **Model:** sonnet - x
+   - **Browser test:** e2e/a.cy.js - green
+   - **Verify:** `true`
+
+## Acceptance
+1. It works - **Check:** e2e: e2e/a.cy.js
+
+## Confidence: high
+x
+"""
+
+
+def test_check_a_browser_test_plan(tmp_path: Path) -> None:
+    text = _browser_plan()
+    assert _check(tmp_path, text).returncode == 0
+    _assert_one_finding(
+        tmp_path,
+        _browser_plan(test_first="tests/a_test.py::test_a"),
+        _line_of(text, "1. **Write"),
+        "Browser test red and Test first on one step",
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            "e2e/a.cy.js - red",
+            "e2e/a.cy.js red",
+            'Browser test is not "<path> - red" or "<path> - green"',
+        ),
+        (
+            "e2e/a.cy.js - red",
+            "../a.cy.js - red",
+            "Browser test path is not a plain relative path",
+        ),
+        (
+            "e2e/a.cy.js - green",
+            "e2e/b.cy.js - green",
+            "Browser test green has no red step before it",
+        ),
+        (
+            "e2e: e2e/a.cy.js",
+            "e2e: e2e/c.cy.js",
+            "Check e2e: names a path no step's Browser test line holds",
+        ),
+    ],
+)
+def test_check_browser_test_findings(
+    tmp_path: Path, old: str, new: str, message: str
+) -> None:
+    text = _browser_plan().replace(old, new, 1)
+    run = _check(tmp_path, text)
+    assert run.returncode == 1 and message in run.stdout, run.stdout
+
+
+def test_check_an_e2e_check_counts_as_the_journey_walk(tmp_path: Path) -> None:
+    text = (
+        _browser_plan()
+        .replace(
+            "## Steps\n",
+            "## User journey\n- **Actor:** signed out\n"
+            '- **Entry:** `/` - button "Add" - exists src/a.js:1\n'
+            '- **Hops:**\n  - H1: `/` - select button "Add" - `/new` - step 2\n'
+            "- **Outcome:** the new name on `/new` - step 2\n"
+            "- **Leaves early:** Refresh: x. Back: x. Cancel: nothing. Direct link: x.\n"
+            "- **Waits:** none\n\n## Steps\n",
+            1,
+        )
+        .replace(
+            "   - **Files:** src/a.js\n",
+            "   - **Files:** src/a.js\n   - **Routes:** `/new`\n",
+            1,
+        )
+    )
+    run = _check(tmp_path, text)
+    assert "Acceptance has no walk" not in run.stdout, run.stdout
+
+
+def test_accept_an_e2e_check(repo: Path) -> None:
+    _write_plan(repo, _browser_plan())
+    run = _tool(repo, "accept", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (0, "accept: e2e e2e/a.cy.js\n")
+    assert (repo / _STEPS / "acceptance.1").read_text() == "exit: e2e\n"
+
+
+def test_ready_a_browser_red_step(repo: Path) -> None:
+    _write_plan(repo, _browser_plan(verify="`npx cypress run --spec e2e/a.cy.js`"))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: fail 1: no spec\n")
+    run = _tool(repo, "ready", "plans/p.md")
+    assert run.stdout == "ready: step 1 writes its browser test\nready: ok\n"
+
+
+def _browser_repo(repo: Path) -> None:
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "a.cy.js").write_text("it('adds', () => {});\n")
+    _write_plan(repo, _browser_plan())
+
+
+@pytest.mark.parametrize("layout", ["skills", "flat"])
+@pytest.mark.parametrize(
+    ("exit_code", "out", "result", "red_exit"),
+    [
+        ("0", "ok", "passed", 1),
+        ("2", "1 failing", "red", 0),
+        ("2", "Error: No spec files were found", "red (did not run)", 0),
+        ("5", "slow", "not run: timed out", 0),
+        ("3", "capture: no usable e2e_run", "not run: capture: no usable e2e_run", 0),
+    ],
+)
+def test_red_a_browser_test(
+    repo: Path,
+    tmp_path: Path,
+    layout: str,
+    exit_code: str,
+    out: str,
+    result: str,
+    red_exit: int,
+) -> None:
+    tool = _tool_beside_capture(tmp_path, layout)
+    _browser_repo(repo)
+    log = tmp_path / "argv.txt"
+    run = _btool(
+        repo,
+        tool,
+        "red",
+        "plans/p.md",
+        "1",
+        env={"STUB_EXIT": exit_code, "STUB_OUT": out, "STUB_LOG": str(log)},
+    )
+    assert (run.returncode, run.stdout) == (red_exit, f"red: {result}\n"), run.stderr
+    record = (repo / _STEPS / "1.red").read_text()
+    assert record.startswith("test: e2e/a.cy.js\nkind: browser\n")
+    assert log.read_text() == "--e2e e2e/a.cy.js --out .whygraph/plans/p/e2e/1"
+
+
+def test_red_a_browser_test_without_a_capture_script(
+    repo: Path, tmp_path: Path
+) -> None:
+    tool = tmp_path / "lone" / "plan-tool.sh"
+    tool.parent.mkdir()
+    shutil.copy(_SCRIPT, tool)
+    _browser_repo(repo)
+    run = _btool(repo, tool, "red", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (0, "red: not run: no capture script\n")
+
+
+def test_browser_guard_and_proof(repo: Path, tmp_path: Path) -> None:
+    tool = _tool_beside_capture(tmp_path, "skills")
+    _browser_repo(repo)
+    assert (
+        _btool(repo, tool, "red", "plans/p.md", "1", env={"STUB_EXIT": "2"}).stdout
+        == "red: red\n"
+    )
+    _steps_file(repo, "1.verify", _record("0", "ok\n"))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: not literal\n")
+    proof = _btool(repo, tool, "proof", "plans/p.md").stdout.splitlines()
+    assert proof[0] == "proof: step 1 proven (browser test, red)"
+    (repo / "e2e" / "a.cy.js").write_text("it.skip('adds', () => {});\n")
+    run = _btool(repo, tool, "verify", "plans/p.md", "2")
+    assert (run.returncode, run.stdout) == (5, "verify: test first edited\n")
+    assert "the browser test was edited: e2e/a.cy.js" in run.stderr
+    proof = _btool(repo, tool, "proof", "plans/p.md").stdout.splitlines()
+    assert proof[0] == "proof: step 1 edited (the browser test was edited)"
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "line"),
+    [
+        ("0", "smoke: pass"),
+        ("2", "smoke: fail: 1 failing"),
+        ("5", "smoke: timeout"),
+        ("3", "smoke: not available: 1 failing"),
+    ],
+)
+def test_smoke(repo: Path, tmp_path: Path, exit_code: str, line: str) -> None:
+    tool = _tool_beside_capture(tmp_path, "flat")
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "old.cy.js").write_text("it('x', () => {});\n")
+    run = _btool(
+        repo,
+        tool,
+        "smoke",
+        ".whygraph/plans/p.md",
+        "e2e/old.cy.js",
+        env={"STUB_EXIT": exit_code, "STUB_OUT": "1 failing"},
+    )
+    assert (run.returncode, run.stdout) == (0, line + "\n"), run.stderr
+    record = (repo / _STEPS / "smoke").read_text()
+    assert record.startswith(
+        f"test: e2e/old.cy.js\nexit: {exit_code}\nresult: {line[7:]}\n"
+    )
+
+
+@pytest.mark.parametrize(("exit_code", "found"), [("2", True), ("0", False)])
+def test_dryrun_runs_a_failing_smoke_again(
+    repo: Path, tmp_path: Path, exit_code: str, found: bool
+) -> None:
+    tool = _tool_beside_capture(tmp_path, "flat")
+    (repo / "e2e").mkdir()
+    (repo / "e2e" / "old.cy.js").write_text("it('x', () => {});\n")
+    _write_plan(repo, _full_plan(("a.txt", "`true`", None)))
+    _steps_file(
+        repo, "smoke", "test: e2e/old.cy.js\nexit: 2\nresult: fail: 1 failing\n"
+    )
+    env = {"STUB_EXIT": exit_code, "STUB_OUT": "1 failing"}
+    for _ in range(6):
+        run = _btool(repo, tool, "dryrun", "plans/p.md", env=env)
+        if run.returncode == 0:
+            break
+    findings = _findings(run.stdout)
+    assert (
+        any(
+            "An existing browser test fails before the change: e2e/old.cy.js" in f
+            for f in findings
+        )
+        == found
+    ), run.stdout
+
+
+def test_trust_root(repo: Path, posix: str) -> None:
+    _write_plan(repo, _steps_plan(("a.txt", "`true`"), ("a.txt", "`true`")))
+    (repo / ".whygraph" / "profiles").mkdir(parents=True)
+    (repo / ".whygraph" / "profiles" / "ui.md").write_text(
+        "base_url: http://127.0.0.1:1/\n"
+    )
+    _steps_file(repo, "1.red", "result: red\n")
+    run = _run(repo, posix, "begin", "plans/p.md", "2")
+    t0, trust = run.stdout.splitlines()
+    trust = trust.removeprefix("trust: ")
+    assert (repo / _STEPS / "2.trust").exists()
+    # Step 2's own red record does not count.
+    _steps_file(repo, "2.red", "result: red\n")
+    assert _end(repo, posix, t0, "--trust", trust, step="2").returncode == 0
+    (repo / ".whygraph" / "profiles" / "ui.md").write_text(
+        "base_url: http://127.0.0.1:2/\n"
+    )
+    run = _end(repo, posix, t0, "--trust", trust, step="2")
+    assert run.returncode == 65, run.stdout + run.stderr
+    assert "trust: changed: profile" in run.stdout
+    (repo / _STEPS / "1.red").unlink()
+    run = _end(repo, posix, t0, "--trust", trust, step="2")
+    assert "trust: changed: red 1" in run.stdout
+    # A changed list names no path.
+    _steps_file(repo, "2.trust", "forged\n")
+    run = _end(repo, posix, t0, "--trust", trust, step="2")
+    assert run.returncode == 65 and run.stdout.splitlines()[-1] == "trust: changed"
+
+
+# ---- red and the Test first guard (plan 56 sections 5.34, 5.35) -------------------
+
+_RED = Path(__file__).resolve().parent / "fixtures" / "red"
+
+
+def _red_index() -> list[tuple[str, int, str, str]]:
+    """``(file, exit, test name, result)`` of each recorded runner output."""
+    rows = []
+    for line in (_RED / "index.txt").read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, code, test, result = line.split(" ", 3)
+        rows.append((name, int(code), test, result))
+    return rows
+
+
+_PY_TEST = """import unittest
+
+
+class LimitTest(unittest.TestCase):
+    def test_other(self):
+        self.assertTrue(True)
+
+    def test_limit(self):
+        self.assertEqual(1 + 1, 3)
+"""
+
+
+def _red_repo(
+    repo: Path, verify: str, test: str = "tests/test_limit.py::test_limit"
+) -> None:
+    """A plan whose step 1 has the Test first ``test`` and the Verify ``verify``."""
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests" / "test_limit.py").write_text(_PY_TEST)
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "the test")
+    _write_plan(repo, _full_plan(("src/limit.py", verify, test)))
+
+
+def _red(
+    repo: Path, *extra: str, posix: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    if posix is None:
+        return _tool(repo, "red", "plans/p.md", "1", *extra)
+    return _run(repo, posix, "red", "plans/p.md", "1", *extra)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "code", "name", "result"), _red_index(), ids=lambda v: str(v)
+)
+def test_red_classifies_recorded_runner_output(
+    repo: Path, fixture: str, code: int, name: str, result: str
+) -> None:
+    (repo / "out.txt").write_text((_RED / fixture).read_text())
+    (repo / "tests").mkdir()
+    (repo / "tests" / "t_test.py").write_text(f"# {name}\n")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "fixture")
+    _write_plan(
+        repo,
+        _full_plan(
+            (
+                "src/x.py",
+                f"`sh -c 'cat out.txt; exit {code}'`",
+                f"tests/t_test.py::{name}",
+            )
+        ),
+    )
+    run = _red(repo)
+    assert run.stdout.splitlines()[-1] == f"red: {result}", run.stdout + run.stderr
+    assert run.returncode == (1 if result == "passed" else 0)
+    record = (repo / _STEPS / "1.red").read_text()
+    assert f"result: {result}\n" in record
+    assert record.startswith(f"test: tests/t_test.py::{name}\n")
+    assert not (repo / _STEPS / "1.verify").exists()
+
+
+def test_red_a_failing_test_is_red(repo: Path, posix: str) -> None:
+    _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_limit`")
+    run = _red(repo, posix=posix)
+    assert (run.returncode, run.stdout) == (0, "red: red\n"), run.stderr
+    snap = repo / ".whygraph/plans/p/testfirst/1/test_limit.py"
+    assert snap.read_text() == _PY_TEST
+
+
+def test_red_a_passing_test_exits_1(repo: Path) -> None:
+    _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_other`")
+    run = _red(repo)
+    assert (run.returncode, run.stdout) == (1, "red: passed\n"), run.stderr
+
+
+@pytest.mark.parametrize(
+    ("verify", "test", "line", "code"),
+    [
+        ("`true`", "none", "red: step 1 has no Test first", 6),
+        (
+            "manual: look",
+            "tests/test_limit.py::test_limit",
+            "red: Verify is not literal",
+            6,
+        ),
+        (
+            "`true`",
+            "tests/test_limit.py",
+            "red: Test first is not <test file>::<test name>",
+            5,
+        ),
+        (
+            "`true`",
+            "../x.py::test_limit",
+            "red: the test file is not a plain relative path: ../x.py",
+            5,
+        ),
+        (
+            "`true`",
+            "tests/missing.py::test_limit",
+            "red: the test file does not exist: tests/missing.py",
+            5,
+        ),
+        (
+            "`true`",
+            "tests/test_limit.py::test_lim",
+            "red: tests/test_limit.py does not hold test_lim",
+            5,
+        ),
+    ],
+)
+def test_red_refusals(repo: Path, verify: str, test: str, line: str, code: int) -> None:
+    _red_repo(repo, verify, test)
+    run = _red(repo)
+    assert (run.returncode, run.stdout) == (code, line + "\n"), run.stderr
+
+
+def test_red_skip_rule_and_again(repo: Path) -> None:
+    _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_limit`")
+    assert _red(repo).stdout == "red: red\n"
+    assert _red(repo).stdout == "red: recorded\n"
+    assert _red(repo, "again").stdout == "red: red\n"
+    (repo / _STEPS / "1.red").unlink()
+    assert _red(repo).stdout == "red: recorded (snapshot only)\n"
+
+
+def test_red_after_a_code_change(repo: Path) -> None:
+    _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_limit`")
+    t0 = _snapshot(repo)
+    _steps_file(repo, "1.t0", t0 + "\n")
+    # A helper beside the test is a test file and does not count.
+    (repo / "tests" / "conftest_helper_test.py").write_text("x = 1\n")
+    assert _red(repo, "again").stdout == "red: red\n"
+    (repo / "src").mkdir()
+    (repo / "src" / "limit.py").write_text("LIMIT = 3\n")
+    run = _red(repo, "again")
+    assert (run.returncode, run.stdout) == (
+        5,
+        "red: the code changed since the step began\n",
+    )
+    (repo / _STEPS / "1.red").unlink()
+    (repo / ".whygraph/plans/p/testfirst/1/test_limit.py").unlink()
+    run = _red(repo)
+    assert (run.returncode, run.stdout) == (
+        0,
+        "red: not run: the code changed before the red run\n",
+    )
+    assert (repo / ".whygraph/plans/p/testfirst/1/test_limit.py").exists()
+
+
+def test_red_timeout_and_cannot_run(repo: Path, marker: str) -> None:
+    _red_repo(repo, f"`sleep {marker}`")
+    run = _tool(repo, "red", "plans/p.md", "1", env={"WHYGRAPH_VERIFY_TIMEOUT": "1"})
+    assert (run.returncode, run.stdout) == (124, "red: timeout\n")
+    _write_plan(
+        repo,
+        _full_plan(
+            ("src/limit.py", "`nosuchtool-56`", "tests/test_limit.py::test_limit")
+        ),
+    )
+    run = _red(repo, "again")
+    assert (run.returncode, run.stdout) == (4, "red: cannot run\n")
+
+
+def _guarded(repo: Path) -> None:
+    _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_other`")
+    _red(repo)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "edited"),
+    [
+        ("self.assertEqual(1 + 1, 3)", "self.assertEqual(1 + 1, 2)", True),
+        (
+            "    def test_limit(self):",
+            "    @unittest.skip('x')\n    def test_limit(self):",
+            True,
+        ),
+        (
+            "import unittest\n",
+            "import unittest\nimport pytest\npytestmark = pytest.mark.skip\n",
+            True,
+        ),
+        ("self.assertTrue(True)", "self.assertTrue(1)", False),
+    ],
+)
+def test_verify_guard(repo: Path, posix: str, old: str, new: str, edited: bool) -> None:
+    _guarded(repo)
+    path = repo / "tests" / "test_limit.py"
+    path.write_text(path.read_text().replace(old, new, 1))
+    run = _run(repo, posix, "verify", "plans/p.md", "1")
+    if edited:
+        assert (run.returncode, run.stdout) == (5, "verify: test first edited\n")
+        assert "the Test first test was edited: tests/test_limit.py" in run.stderr
+        assert not (repo / _STEPS / "1.verify").exists()
+    else:
+        assert run.stdout.startswith("verify: literal\n"), run.stdout + run.stderr
+
+
+def test_verify_guard_a_deleted_test_file(repo: Path) -> None:
+    _guarded(repo)
+    (repo / "tests" / "test_limit.py").unlink()
+    run = _tool(repo, "verify", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (5, "verify: test first edited\n")
+
+
+def test_end_guard_exits_5(repo: Path, posix: str) -> None:
+    _guarded(repo)
+    t0 = _begin(repo, posix)
+    path = repo / "tests" / "test_limit.py"
+    path.write_text(path.read_text().replace("1 + 1, 3", "1 + 1, 2"))
+    run = _end(repo, posix, t0)
+    assert run.returncode == 5, run.stdout + run.stderr
+    assert run.stdout.splitlines()[-1] == "verify: test first edited"
+    assert "exit: 0" in (repo / _STEPS / "1.verify").read_text()
+
+
+def test_verify_without_a_snapshot_runs(repo: Path) -> None:
+    _red_repo(repo, "`true`")
+    run = _tool(repo, "verify", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (0, "verify: literal\n")
+
+
+# ---- setup, ready, dryrun (plan 56 section 5.2) ----------------------------------
+
+
+def _setup_plan(
+    setup: tuple[str, ...],
+    steps: tuple[tuple[str, str, str | None], ...] = (("a.txt", "`true`", None),),
+    checks: tuple[str, ...] = ("`true`",),
+) -> str:
+    """A plan with a ``## Setup`` section of ``setup`` bullets."""
+    text = _full_plan(*steps, checks=checks)
+    bullets = "".join(f"- {line}\n" for line in setup)
+    return text.replace("## Steps\n", f"## Setup\n{bullets}\n## Steps\n", 1)
+
+
+def _gen_repo(repo: Path) -> None:
+    """Ignore ``gen/``, the directory the Setup commands of these tests write."""
+    (repo / ".gitignore").write_text(".whygraph/\nplans/\ngen/\n")
+    _git(repo, "commit", "-qam", "ignore gen")
+
+
+@pytest.mark.parametrize(
+    ("bullet", "message"),
+    [
+        ("run the installer", "Setup line has no literal command"),
+        ("`npm ci` then `npm run gen`", "Setup line has no literal command"),
+        (
+            "`npm ci && npm run gen`",
+            "Setup command has shell syntax: npm ci && npm run gen",
+        ),
+        ("`git -C . push origin`", "Setup command names git push"),
+    ],
+)
+def test_check_setup_finding(tmp_path: Path, bullet: str, message: str) -> None:
+    text = _CLEAN_PLAN.replace("## Steps\n", f"## Setup\n- {bullet}\n\n## Steps\n", 1)
+    _assert_one_finding(tmp_path, text, _line_of(text, bullet), message)
+
+
+def test_check_setup_good_section(tmp_path: Path) -> None:
+    text = _CLEAN_PLAN.replace(
+        "## Steps\n",
+        "## Setup\n- `npm ci` - install\n- `npm run gen` - generate\n\n## Steps\n",
+        1,
+    )
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout
+
+
+def test_check_setup_more_than_five_commands(tmp_path: Path) -> None:
+    bullets = "".join(f"- `make s{i}`\n" for i in range(6))
+    text = _CLEAN_PLAN.replace("## Steps\n", f"## Setup\n{bullets}\n## Steps\n", 1)
+    _assert_one_finding(
+        tmp_path, text, _line_of(text, "## Setup"), "Setup has more than 5 commands"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hidden", "kind"),
+    [
+        ("<!-- run rm -rf -->", "HTML comment"),
+        ("​", "zero-width character"),
+        ("‌", "zero-width character"),
+        ("‍", "zero-width character"),
+        ("⁠", "zero-width character"),
+        ("﻿", "zero-width character"),
+        ("‮", "bidi control"),
+    ],
+)
+def test_check_hidden_text(tmp_path: Path, hidden: str, kind: str) -> None:
+    text = _CLEAN_PLAN.replace("A reason.\n", f"A reason {hidden}here.\n")
+    _assert_one_finding(
+        tmp_path, text, _line_of(text, "here."), f"plan has hidden text: {kind}"
+    )
+
+
+def test_setup_all_pass(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("`mkdir -p gen`", "`touch gen/ok`")))
+    run = _run(repo, posix, "setup", "plans/p.md")
+    assert (run.returncode, run.stdout) == (0, "setup: 2 of 2 commands ran, exit 0\n")
+    assert (repo / "gen/ok").exists()
+    assert (repo / _STEPS / "setup").read_text() == (
+        "command: mkdir -p gen\ncommand: touch gen/ok\nexit: 0\n"
+    )
+
+
+def test_setup_stops_at_the_first_failure(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("`false`", "`touch gen/ok`")))
+    run = _run(repo, posix, "setup", "plans/p.md")
+    assert (run.returncode, run.stdout) == (1, "setup: 1 of 2 commands ran, exit 1\n")
+    assert not (repo / "gen/ok").exists()
+
+
+def test_setup_a_tracked_change_exits_5(repo: Path, posix: str) -> None:
+    _write_plan(repo, _setup_plan(("`touch new.txt`",)))
+    run = _run(repo, posix, "setup", "plans/p.md")
+    assert run.returncode == 5, run.stdout + run.stderr
+    assert run.stdout.splitlines()[-1] == "new.txt"
+
+
+def test_setup_without_a_section_exits_6(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`true`", None)))
+    run = _run(repo, posix, "setup", "plans/p.md")
+    assert run.returncode == 6, run.stdout + run.stderr
+
+
+def test_setup_deadline_exits_3(repo: Path, marker: str) -> None:
+    _write_plan(repo, _setup_plan((f"`sleep {marker}`",)))
+    run = _tool(repo, "setup", "plans/p.md", env={"WHYGRAPH_VERIFY_TIMEOUT": "1"})
+    assert run.returncode == 3, run.stdout + run.stderr
+    assert _sleeps(marker) == []
+
+
+_SECRETS = {
+    "OPENAI_API_KEY": "s1",
+    "AWS_SECRET_ACCESS_KEY": "s2",
+    "AWS_SESSION_TOKEN": "s3",
+    "CLAUDE_CODE_OAUTH_TOKEN": "s4",
+    "WHYGRAPH_PROBE_X": "s5",
+    "GITHUB_TOKEN": "kept1",
+    "NPM_TOKEN": "kept2",
+}
+
+
+def _env_names(path: Path) -> dict[str, str]:
+    return dict(
+        line.split("=", 1) for line in path.read_text().splitlines() if "=" in line
+    )
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_setup_strips_secrets(repo: Path, posix: str, keep: bool) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("`mkdir -p gen`", "`sh -c 'env > gen/env'`")))
+    env = {**_SECRETS, **({"WHYGRAPH_KEEP_SECRETS": "1"} if keep else {})}
+    run = _run(repo, posix, "setup", "plans/p.md", env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    seen = _env_names(repo / "gen/env")
+    assert seen["npm_config_yes"] == "false"
+    assert seen["GITHUB_TOKEN"] == "kept1" and seen["NPM_TOKEN"] == "kept2"
+    for name in ("OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        assert (name in seen) == keep, name
+    assert ("CLAUDE_CODE_OAUTH_TOKEN" in seen) == keep
+    assert ("WHYGRAPH_PROBE_X" in seen) == keep
+
+
+def test_verify_keeps_the_full_environment(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`sh -c 'env > env.out'`", None)))
+    run = _run(repo, posix, "verify", "plans/p.md", "1", env=_SECRETS)
+    assert run.returncode == 0, run.stdout + run.stderr
+    seen = _env_names(repo / "env.out")
+    assert seen["OPENAI_API_KEY"] == "s1" and seen["WHYGRAPH_PROBE_X"] == "s5"
+    assert seen["npm_config_yes"] == "false"
+
+
+_LOGIN = {"WHYGRAPH_UI_USER": "dev-user", "WHYGRAPH_UI_PASSWORD": "pw-secret"}
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_verify_never_sees_the_login_variables(
+    repo: Path, posix: str, keep: bool
+) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`sh -c 'env > env.out; env'`", None)))
+    env = {
+        **_SECRETS,
+        **_LOGIN,
+        "WHYGRAPH_OTHER": "o1",
+        **({"WHYGRAPH_KEEP_SECRETS": "1"} if keep else {}),
+    }
+    run = _run(repo, posix, "verify", "plans/p.md", "1", env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    record = (repo / _STEPS / "1.verify").read_text()
+    printed = (repo / "env.out").read_text()
+    for text in (run.stdout, run.stderr, record, printed):
+        assert "WHYGRAPH_UI_USER" not in text and "WHYGRAPH_UI_PASSWORD" not in text
+        assert "pw-secret" not in text
+    seen = _env_names(repo / "env.out")
+    assert seen["WHYGRAPH_OTHER"] == "o1" and seen["OPENAI_API_KEY"] == "s1"
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_setup_never_sees_the_login_variables(
+    repo: Path, posix: str, keep: bool
+) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("`mkdir -p gen`", "`sh -c 'env > gen/env'`")))
+    env = {**_LOGIN, **({"WHYGRAPH_KEEP_SECRETS": "1"} if keep else {})}
+    run = _run(repo, posix, "setup", "plans/p.md", env=env)
+    assert run.returncode == 0, run.stdout + run.stderr
+    seen = _env_names(repo / "gen/env")
+    assert "WHYGRAPH_UI_USER" not in seen and "WHYGRAPH_UI_PASSWORD" not in seen
+    assert seen["npm_config_yes"] == "false"
+
+
+# ---- format (plan 56 section 5.20) ------------------------------------------------
+
+_FMT_SCRIPT = "printf '%s\\n' \"$@\" > gen/args\n"
+
+
+def _format_repo(repo: Path) -> None:
+    """Ignore ``gen/`` and put the Format script there: it records its arguments."""
+    _gen_repo(repo)
+    (repo / "gen").mkdir()
+    (repo / "gen" / "fmt.sh").write_text(_FMT_SCRIPT)
+
+
+def _format(
+    repo: Path, posix: str, t0: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return _run(repo, posix, "format", "plans/p.md", t0, env=env)
+
+
+def test_check_setup_two_format_bullets(tmp_path: Path) -> None:
+    bullets = "- `npm ci`\n- Format: `npx prettier --write`\n- Format: `ruff format`\n"
+    text = _CLEAN_PLAN.replace("## Steps\n", f"## Setup\n{bullets}\n## Steps\n", 1)
+    _assert_one_finding(
+        tmp_path,
+        text,
+        _line_of(text, "- Format: `ruff format`"),
+        "Setup has more than one Format bullet",
+    )
+
+
+def test_check_setup_format_is_not_counted(tmp_path: Path) -> None:
+    bullets = "".join(f"- `make s{i}`\n" for i in range(5))
+    bullets += "- Format: `uv run ruff format`\n"
+    text = _CLEAN_PLAN.replace("## Steps\n", f"## Setup\n{bullets}\n## Steps\n", 1)
+    run = _check(tmp_path, text)
+    assert run.returncode == 0, run.stdout
+
+
+def test_check_setup_format_has_the_setup_rules(tmp_path: Path) -> None:
+    text = _CLEAN_PLAN.replace(
+        "## Steps\n", "## Setup\n- Format: `ruff format && make`\n\n## Steps\n", 1
+    )
+    _assert_one_finding(
+        tmp_path,
+        text,
+        _line_of(text, "- Format:"),
+        "Setup command has shell syntax: ruff format && make",
+    )
+
+
+def test_setup_never_runs_the_format_bullet(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    plan = _setup_plan(("`mkdir -p gen`", "`touch gen/ok`", "Format: `touch gen/fmt`"))
+    _write_plan(repo, plan)
+    run = _run(repo, posix, "setup", "plans/p.md")
+    assert (run.returncode, run.stdout) == (0, "setup: 2 of 2 commands ran, exit 0\n")
+    assert (repo / "gen/ok").exists() and not (repo / "gen/fmt").exists()
+
+
+def test_format_passes_the_changed_files_that_exist(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    for name in ("d.txt", "e.txt"):
+        (repo / name).write_text(f"{name}\n")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "more files")
+    _write_plan(repo, _setup_plan(("`true`", "Format: `sh gen/fmt.sh`")))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    (repo / "b.txt").write_text("new\n")
+    (repo / "d.txt").unlink()
+    (repo / "link.txt").symlink_to("e.txt")
+    run = _format(repo, posix, t0)
+    assert (run.returncode, run.stdout) == (0, "format: 2 files, exit 0\n"), run.stderr
+    assert (repo / "gen/args").read_text() == "a.txt\nb.txt\n"
+
+
+def test_format_leaves_out_an_unsafe_path(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    _write_plan(repo, _setup_plan(("Format: `sh gen/fmt.sh`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    (repo / "has space.txt").write_text("new\n")
+    (repo / "-n.txt").write_text("new\n")
+    run = _format(repo, posix, t0)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert run.stdout == "format: unsafe paths left out: 2\nformat: 1 files, exit 0\n"
+    assert (repo / "gen/args").read_text() == "a.txt\n"
+
+
+def test_format_never_passes_the_plan(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "p.md").write_text(_setup_plan(("Format: `sh gen/fmt.sh`",)))
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "tracked plan")
+    t0 = _snapshot(repo)
+    with (repo / "docs" / "p.md").open("a") as plan:
+        plan.write("\n## Implementation log\n\n- Polish: applied 0 of 0\n")
+    (repo / "a.txt").write_text("changed\n")
+    run = _run(repo, posix, "format", "docs/p.md", t0)
+    assert (run.returncode, run.stdout) == (0, "format: 1 files, exit 0\n"), run.stderr
+    assert (repo / "gen/args").read_text() == "a.txt\n"
+
+
+def test_format_with_no_changed_file_runs_nothing(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    _write_plan(repo, _setup_plan(("Format: `sh gen/fmt.sh`",)))
+    run = _format(repo, posix, _snapshot(repo))
+    assert (run.returncode, run.stdout) == (0, "format: 0 files, exit 0\n")
+    assert not (repo / "gen/args").exists()
+
+
+def test_format_a_failing_command_exits_1(repo: Path, posix: str) -> None:
+    _write_plan(repo, _setup_plan(("Format: `false`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _format(repo, posix, t0)
+    assert (run.returncode, run.stdout) == (1, "format: 1 files, exit 1\n")
+
+
+def test_format_without_a_bullet_exits_6(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    _write_plan(repo, _setup_plan(("`true`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _format(repo, posix, t0)
+    assert (run.returncode, run.stdout) == (6, "format: no Format command\n")
+    assert not (repo / "gen/args").exists()
+
+
+def test_format_strips_secrets(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    _write_plan(repo, _setup_plan(("Format: `sh -c 'env > gen/env' fmt`",)))
+    (repo / "gen").mkdir()
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _format(repo, posix, t0, env={**_SECRETS, **_LOGIN})
+    assert run.returncode == 0, run.stdout + run.stderr
+    seen = _env_names(repo / "gen/env")
+    assert "OPENAI_API_KEY" not in seen and "WHYGRAPH_PROBE_X" not in seen
+    assert "WHYGRAPH_UI_PASSWORD" not in seen
+    assert seen["GITHUB_TOKEN"] == "kept1"
+
+
+def test_format_deadline_exits_3(repo: Path, marker: str) -> None:
+    _write_plan(repo, _setup_plan((f"Format: `sh -c 'sleep {marker}' fmt`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    run = _tool(repo, "format", "plans/p.md", t0, env={"WHYGRAPH_VERIFY_TIMEOUT": "1"})
+    assert run.returncode == 3, run.stdout + run.stderr
+    assert run.stdout == "format: 1 files, exit 124\n"
+    assert _sleeps(marker) == []
+
+
+def test_verify_leaves_no_background_process(repo: Path, marker: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", f"`sh -c 'sleep {marker} &'`", None)))
+    run = _tool(repo, "verify", "plans/p.md", "1")
+    assert run.returncode == 0, run.stdout + run.stderr
+    time.sleep(0.5)
+    assert _sleeps(marker) == []
+
+
+def _ready(repo: Path, posix: str) -> subprocess.CompletedProcess[str]:
+    return _run(repo, posix, "ready", "plans/p.md")
+
+
+def test_ready_without_a_failure(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`true`", None)))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: pass\n")
+    run = _ready(repo, posix)
+    assert (run.returncode, run.stdout) == (0, "ready: ok\n")
+
+
+def test_ready_a_done_marker_is_a_resume(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`false`", None)))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: fail 1: boom\n")
+    _steps_file(repo, "1.done", "")
+    assert _ready(repo, posix).stdout == "ready: resumed\n"
+
+
+def test_ready_a_logged_step_with_a_passing_record_is_a_resume(
+    repo: Path, posix: str
+) -> None:
+    text = _full_plan(("a.txt", "`false`", None), ("b.txt", "`false`", None))
+    text += "\n## Implementation log\n\n- [x] Step 1: done (12:00)\n"
+    _write_plan(repo, text)
+    _steps_file(repo, "baseline", f"step 2 {_KEY}: fail 1: boom\n")
+    _steps_file(repo, "1.verify", _record("0", "ok\n"))
+    assert _ready(repo, posix).stdout == "ready: resumed\n"
+
+
+@pytest.mark.parametrize(
+    ("first_files", "verify", "waits"),
+    [
+        ("tests/new_test.py", "`pytest tests/new_test.py::test_x`", True),
+        ("pkg/foo/new_test.go", "`go test ./pkg/foo`", True),
+        ("src/other.py", "`pytest tests/new_test.py`", False),
+    ],
+)
+def test_ready_a_failure_and_an_earlier_step(
+    repo: Path, posix: str, first_files: str, verify: str, waits: bool
+) -> None:
+    _write_plan(
+        repo, _full_plan((first_files, "`true`", None), ("src/b.py", verify, None))
+    )
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: pass\nstep 2 {_KEY}: fail 1: boom\n")
+    run = _ready(repo, posix)
+    if waits:
+        assert (run.returncode, run.stdout) == (
+            0,
+            "ready: step 2 waits for an earlier step\nready: ok\n",
+        )
+    else:
+        assert (run.returncode, run.stdout) == (1, "not ready: step 2: boom\n")
+
+
+def test_ready_its_own_files_do_not_exempt(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("tests/a_test.py", "`pytest tests/a_test.py`", None)))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: fail 2: no tests\n")
+    run = _ready(repo, posix)
+    assert (run.returncode, run.stdout) == (1, "not ready: step 1: no tests\n")
+
+
+def _dryrun(
+    repo: Path, posix: str | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    if posix is None:
+        return _tool(repo, "dryrun", "plans/p.md", env=env)
+    return _run(repo, posix, "dryrun", "plans/p.md", env=env)
+
+
+def _dry_record(repo: Path) -> list[str]:
+    return (repo / _STEPS / "dryrun").read_text().splitlines()
+
+
+def _finish(
+    repo: Path, posix: str | None = None, env: dict[str, str] | None = None
+) -> str:
+    """Call ``dryrun`` until it exits 0; return the block."""
+    for _ in range(6):
+        run = _dryrun(repo, posix, env)
+        if run.returncode == 0:
+            return run.stdout
+        assert run.returncode == 2, run.stdout + run.stderr
+        assert run.stdout.startswith("dryrun: more, ")
+    raise AssertionError("dryrun did not finish in six calls")
+
+
+def _findings(block: str) -> list[str]:
+    return [line for line in block.splitlines() if line.startswith("- F")]
+
+
+def test_dryrun_clean_plan(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`true`", None)))
+    block = _finish(repo, posix)
+    lines = block.splitlines()
+    assert lines[0] == "REVIEW: dry-run none"
+    assert re.fullmatch(
+        r"- ran: 2 commands in \d+ s; setup: none in plan; "
+        r"record: \.whygraph/plans/p/steps/dryrun",
+        lines[1],
+    ), lines
+    assert len(lines) == 2
+
+
+def test_dryrun_a_missing_program(repo: Path) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`nosuchtool-56 run`", None)))
+    finding = _findings(_finish(repo))[0]
+    assert (
+        "| blocker | step 1 | Verify cannot run: nosuchtool-56 is missing |" in finding
+    )
+
+
+def test_dryrun_a_failing_verify_cites_its_result_line(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`sh -c 'echo boom; exit 3'`", None)))
+    findings = _findings(_finish(repo, posix))
+    assert len(findings) == 1
+    match = re.fullmatch(
+        r"- F1 \| blocker \| step 1 \| Verify fails before the change: boom \| "
+        r"evidence: (\.whygraph/plans/p/steps/dryrun):(\d+) \| fix: .+",
+        findings[0],
+    )
+    assert match, findings
+    cited = _dry_record(repo)[int(match.group(2)) - 1]
+    assert cited.startswith("step 1 ") and cited.endswith(": fail 3: boom")
+    # The line before a result is its command line.
+    assert (
+        _dry_record(repo)[int(match.group(2)) - 2]
+        == "command: sh -c 'echo boom; exit 3'"
+    )
+
+
+def test_dryrun_setup_repairs_a_verify(repo: Path, posix: str) -> None:
+    _gen_repo(repo)
+    _write_plan(
+        repo,
+        _setup_plan(
+            ("`mkdir -p gen`", "`touch gen/ok`"),
+            steps=(("a.txt", "`test -f gen/ok`", None),),
+        ),
+    )
+    block = _finish(repo, posix)
+    assert block.startswith("REVIEW: dry-run none\n"), block
+    assert "; setup: ran; " in block
+    assert (repo / _STEPS / "setup").exists()
+
+
+def test_dryrun_a_test_first_step_and_an_earlier_step(repo: Path) -> None:
+    _write_plan(
+        repo,
+        _full_plan(
+            ("tests/new_test.py", "`false`", "tests/new_test.py::test_limit"),
+            ("src/b.py", "`ls tests/new_test.py`", None),
+        ),
+    )
+    block = _finish(repo)
+    assert block.startswith("REVIEW: dry-run none\n"), block
+
+
+def test_dryrun_a_failing_full_test_command(repo: Path) -> None:
+    _write_plan(
+        repo,
+        _full_plan(("a.txt", "`true`", None), checks=("`sh -c 'echo red; exit 1'`",)),
+    )
+    findings = _findings(_finish(repo))
+    assert len(findings) == 1
+    assert (
+        "| acceptance | The full test command fails before the change: red |"
+        in findings[0]
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_files", "found"), [("src/x.py", True), ("tests/x_test.py", False)]
+)
+def test_dryrun_a_pass_that_ran_no_test(
+    repo: Path, first_files: str, found: bool
+) -> None:
+    _write_plan(
+        repo,
+        _full_plan(
+            (first_files, "`true`", None),
+            ("src/b.py", "`echo no tests ran tests/x_test.py`", None),
+        ),
+    )
+    findings = _findings(_finish(repo))
+    assert bool(findings) == found, findings
+    if found:
+        assert (
+            "| step 2 | Verify ran no test: echo no tests ran tests/x_test.py |"
+            in findings[0]
+        )
+
+
+def test_dryrun_an_unstable_verify(repo: Path) -> None:
+    _gen_repo(repo)
+    flaky = "`sh -c 'test -f gen/f && exit 0; mkdir -p gen; touch gen/f; echo flake; exit 1'`"
+    _write_plan(repo, _full_plan(("a.txt", flaky, None)))
+    findings = _findings(_finish(repo))
+    assert len(findings) == 1
+    assert "| Verify is unstable: failed, then passed: flake |" in findings[0]
+
+
+def test_dryrun_resumes_and_a_changed_plan_starts_again(
+    repo: Path, marker: str
+) -> None:
+    slow = "`sleep 2`"
+    _write_plan(repo, _full_plan(*(("a.txt", slow, None) for _ in range(4))))
+    env = {"WHYGRAPH_VERIFY_TIMEOUT": "7"}
+    first = _dryrun(repo, env=env)
+    assert first.returncode == 2, first.stdout + first.stderr
+    assert first.stdout.startswith("dryrun: more, ")
+    done_before = [x for x in _dry_record(repo) if x.startswith("done: step")]
+    second = _dryrun(repo, env=env)
+    assert second.returncode in (0, 2)
+    record = _dry_record(repo)
+    assert "call 2" in record
+    assert [x for x in record if x.startswith("done: step")][
+        : len(done_before)
+    ] == done_before
+    # A changed plan starts the record again.
+    _write_plan(repo, _full_plan(*(("a.txt", slow, None) for _ in range(3))))
+    _dryrun(repo, env=env)
+    assert _dry_record(repo)[2] == "call 1"
+
+
+def test_dryrun_a_short_deadline_takes_two_calls(repo: Path) -> None:
+    """Plan 56 criterion 3: the first call exits 2, the second prints the block."""
+    # Criterion 3 names a 2 s deadline and 1.5 s commands; the same rule with
+    # more headroom keeps the test stable under a loaded parallel run.
+    text = _full_plan(("a.txt", "`sleep 3`", None), ("a.txt", "`sleep 3`", None))
+    _write_plan(repo, text.split("\n## Acceptance")[0] + "\n")
+    env = {"WHYGRAPH_VERIFY_TIMEOUT": "5"}
+    assert _dryrun(repo, env=env).returncode == 2
+    last = _dryrun(repo, env=env)
+    assert last.returncode == 0, last.stdout + last.stderr
+    assert last.stdout.startswith("REVIEW: dry-run none\n")
+
+
+def test_dryrun_a_finished_record_runs_the_commands_again(repo: Path) -> None:
+    """Plan 56 criterion 55."""
+    (repo / ".whygraph").mkdir()
+    _write_plan(
+        repo, _full_plan(("a.txt", "`sh -c 'echo x >> .whygraph/count'`", None))
+    )
+    _finish(repo)
+    _finish(repo)
+    assert (repo / ".whygraph/count").read_text() == "x\nx\n"
+
+
+def test_dryrun_a_quoted_no_tests_phrase(repo: Path) -> None:
+    """Plan 56 criterion 57: ``sh -c 'echo "no tests ran"'`` checks nothing."""
+    _write_plan(repo, _full_plan(("a.txt", """`sh -c 'echo "no tests ran"'`""", None)))
+    findings = _findings(_finish(repo))
+    assert len(findings) == 1 and "| Verify ran no test: " in findings[0], findings
+
+
+def test_dryrun_an_existing_test_first_test_may_fail_the_full_command(
+    repo: Path,
+) -> None:
+    """A Test first test already in its file makes the suite red by design."""
+    (repo / "tests").mkdir()
+    (repo / "tests" / "t_test.py").write_text("def test_x():\n    assert False\n")
+    _git(repo, "add", "--all")
+    _git(repo, "commit", "-qm", "the test")
+    text = _full_plan(
+        ("src/x.py", "`true`", "tests/t_test.py::test_x"),
+        checks=("`sh -c 'echo red; exit 1'`",),
+    )
+    _write_plan(repo, text)
+    assert _finish(repo).startswith("REVIEW: dry-run none\n")
+    # Without the test in the file, the failure is a finding.
+    (repo / "tests" / "t_test.py").write_text("def test_y():\n    pass\n")
+    findings = _findings(_finish(repo))
+    assert any("The full test command fails before the change" in f for f in findings)
+
+
+def test_dryrun_a_finished_record_starts_again(repo: Path) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`true`", None)))
+    _finish(repo)
+    _finish(repo)
+    record = _dry_record(repo)
+    # Each finish takes two calls: Acceptance item 1 runs in a call of its own.
+    assert record.count("call 1") == 1 and "call 3" not in record
+
+
+def test_dryrun_the_sixth_call_ends_it(repo: Path) -> None:
+    _write_plan(repo, _full_plan(*(("a.txt", "`sleep 2`", None) for _ in range(12))))
+    env = {"WHYGRAPH_VERIFY_TIMEOUT": "6"}
+    for _ in range(5):
+        assert _dryrun(repo, env=env).returncode == 2
+    last = _dryrun(repo, env=env)
+    assert last.returncode == 0, last.stdout + last.stderr
+    assert re.search(
+        r"^- not checked: steps [0-9, ]+, acceptance \(dry-run budget\)$",
+        last.stdout,
+        re.M,
+    ), last.stdout
+
+
+def test_dryrun_ignores_done_markers_and_leaves_the_run_files(
+    repo: Path, posix: str
+) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`false`", None)))
+    _steps_file(repo, "1.done", "")
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: pass\n")
+    state = _state(repo, posix).stdout.strip()
+    block = _finish(repo, posix)
+    assert "| step 1 | Verify fails before the change:" in block
+    assert (repo / _STEPS / "baseline").read_text() == f"step 1 {_KEY}: pass\n"
+    assert _state(repo, posix, state).returncode == 0
+
+
+def test_dryrun_a_verify_that_changes_the_tree(repo: Path) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`touch new.txt`", None)))
+    findings = _findings(_finish(repo))
+    assert any(
+        "| plan | A Verify changed the working tree: new.txt |" in f for f in findings
+    ), findings
+
+
+def test_dryrun_strips_secrets(repo: Path) -> None:
+    _write_plan(repo, _full_plan(("a.txt", "`sh -c 'env > .whygraph/env'`", None)))
+    _finish(repo, env=_SECRETS)
+    seen = _env_names(repo / ".whygraph/env")
+    assert "OPENAI_API_KEY" not in seen and "WHYGRAPH_PROBE_X" not in seen
+    assert seen["GITHUB_TOKEN"] == "kept1"
+
+
+# ---- proof (plan 56 section 5.31) -------------------------------------------------
+
+_KEY = "a" * 40
+
+
+def _record(code: str, output: str = "") -> str:
+    """A ``<N>.verify`` or ``acceptance.<i>`` record in the shape the tool writes."""
+    return (
+        f"command: x\nexit: {code}\ntree: {'b' * 40}\n"
+        f"--- last 40 lines of output\n{output}"
+    )
+
+
+def _proof_setup(
+    repo: Path,
+    steps: list[tuple[str, str]],
+    baseline: list[tuple[int, str]],
+    records: dict[str, str],
+    checks: tuple[str, ...] = ("`true`",),
+) -> list[str]:
+    """Write a plan of ``(Files, Verify)`` steps and its records; run ``proof``."""
+    _write_plan(repo, _full_plan(*((f, v, None) for f, v in steps), checks=checks))
+    if baseline:
+        _steps_file(
+            repo,
+            "baseline",
+            "".join(f"step {n} {_KEY}: {r}\n" for n, r in baseline),
+        )
+    for name, text in records.items():
+        _steps_file(repo, name, text)
+    run = _tool(repo, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    return run.stdout.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("base", "record", "line"),
+    [
+        (
+            "pass",
+            _record("0", "collected 0 items\n"),
+            "no test (the Verify ran no test)",
+        ),
+        ("fail 1: x", _record("0", "0 passing\n"), "no test (the Verify ran no test)"),
+        (
+            "test first",
+            _record("0", "1 passed\n"),
+            "not proven (test first, no red record)",
+        ),
+        (
+            "fail 1: boom",
+            _record("0", "1 passed\n"),
+            "proven (failed before the change)",
+        ),
+        ("pass", _record("0", "1 passed\n"), "unproven (passed before the change)"),
+        ("pass (no test ran)", _record("0"), "no test (the Verify ran no test)"),
+        ("not literal", _record("not literal"), "no test (the Verify is not literal)"),
+        ("pass", _record("1", "1 failed\n"), "failed"),
+        ("fail 1: boom", None, "not run"),
+        (None, _record("0", "1 passed\n"), "unknown (no baseline in this run)"),
+        (
+            "timeout 540: x",
+            _record("0", "1 passed\n"),
+            "unknown (no baseline in this run)",
+        ),
+        (
+            "cannot run 127: x",
+            _record("0", "1 passed\n"),
+            "unknown (no baseline in this run)",
+        ),
+    ],
+)
+def test_proof_classes(
+    repo: Path, base: str | None, record: str | None, line: str
+) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`pytest tests/a_test.py`")],
+        [(1, base)] if base else [],
+        {"1.verify": record} if record else {},
+    )
+    assert lines[0] == f"proof: step 1 {line}"
+
+
+@pytest.mark.parametrize(
+    ("red", "line"),
+    [
+        ("red", "proven (test first, red)"),
+        ("red (unnamed)", "proven (test first, red unnamed)"),
+        ("red (did not run)", "proven (test first, red did not run, then passed)"),
+        ("passed", "not proven (test first, passed before the change)"),
+        ("timeout", "not proven (test first, red timed out)"),
+        ("cannot run", "not proven (test first, red cannot run)"),
+        (
+            "not run: the code changed before the red run",
+            "not proven (test first, red not run: the code changed before the red run)",
+        ),
+        (None, "not proven (test first, no red record)"),
+    ],
+)
+def test_proof_reads_the_red_record(repo: Path, red: str | None, line: str) -> None:
+    records = {"1.verify": _record("0", "1 passed\n")}
+    if red:
+        records["1.red"] = f"test: tests/t_test.py::test_x\nexit: 1\nresult: {red}\n"
+    _write_plan(
+        repo,
+        _full_plan(("src/a.py", "`pytest tests/t_test.py`", "tests/t_test.py::test_x")),
+    )
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: test first\n")
+    for name, text in records.items():
+        _steps_file(repo, name, text)
+    run = _tool(repo, "proof", "plans/p.md")
+    assert run.stdout.splitlines()[0] == f"proof: step 1 {line}", (
+        run.stdout + run.stderr
+    )
+
+
+def test_proof_an_edited_test_first_test(repo: Path) -> None:
+    (repo / "tests").mkdir()
+    (repo / "tests" / "t_test.py").write_text("def test_x():\n    assert 1 == 2\n")
+    snap = repo / ".whygraph/plans/p/testfirst/1/t_test.py"
+    snap.parent.mkdir(parents=True)
+    snap.write_text("def test_x():\n    assert 1 == 3\n")
+    _write_plan(
+        repo,
+        _full_plan(("src/a.py", "`pytest tests/t_test.py`", "tests/t_test.py::test_x")),
+    )
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: test first\n")
+    _steps_file(repo, "1.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "1.red", "test: tests/t_test.py::test_x\nresult: red\n")
+    run = _tool(repo, "proof", "plans/p.md")
+    assert (
+        run.stdout.splitlines()[0]
+        == "proof: step 1 edited (the Test first test was edited)"
+    )
+    assert "other" in run.stdout.splitlines()[-2]
+
+
+_DIFF = """diff --git a/tests/test_a.py b/tests/test_a.py
+--- a/tests/test_a.py
++++ b/tests/test_a.py
+@@ -1,4 +1,4 @@
++@pytest.mark.skip(reason="later")
+ def test_a():
+-    assert f() == 1
+-    assert g() == 2
++    pass
+diff --git a/src/app.js b/src/app.js
+--- a/src/app.js
++++ b/src/app.js
+@@ -1 +1 @@
+-expect(x)
++it.skip("not a test file", () => {})
+diff --git a/src/__snapshots__/app.test.js.snap b/src/__snapshots__/app.test.js.snap
+--- a/src/__snapshots__/app.test.js.snap
++++ b/src/__snapshots__/app.test.js.snap
+@@ -1 +1 @@
+-old
++new
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1 +1 @@
+-{}
++{"jest": {}}
+diff --git a/web/login.spec.ts b/web/login.spec.ts
+--- a/web/login.spec.ts
++++ b/web/login.spec.ts
+@@ -1 +1 @@
+-  cy.get("h1").should("exist")
++  it.only("x", () => {})
+"""
+
+
+def test_proof_prints_test_change_pointers(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`true`")],
+        [(1, "pass")],
+        {"1.verify": _record("0", "ok\n"), "1.diff": _DIFF},
+    )
+    tests = [line for line in lines if line.startswith("tests: ")]
+    assert tests == [
+        "tests: step 1 tests/test_a.py: skip marker added: pytest.mark.skip",
+        "tests: step 1 tests/test_a.py: 2 assertion lines removed or changed",
+        "tests: step 1 src/__snapshots__/app.test.js.snap: snapshot or golden file changed",
+        "tests: step 1 package.json: test runner config changed",
+        "tests: step 1 web/login.spec.ts: skip marker added: .only(",
+        "tests: step 1 web/login.spec.ts: 1 assertion lines removed or changed",
+    ]
+    # The totals stay the last two lines.
+    assert lines[-2].startswith("proof: 0 of 1 steps proven")
+
+
+def test_proof_takes_the_last_baseline_line(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`pytest tests/a_test.py`")],
+        [(1, "pass"), (1, "fail 1: boom")],
+        {"1.verify": _record("0", "1 passed\n")},
+    )
+    assert lines[0] == "proof: step 1 proven (failed before the change)"
+
+
+@pytest.mark.parametrize(
+    ("files", "verify"),
+    [
+        ("tests/new_test.py (new)", "`pytest tests/new_test.py::test_limit -q`"),
+        ("`pkg/foo/new_test.go`", "`go test ./pkg/foo`"),
+        ("tests/", "`pytest tests/new_test.py`"),
+    ],
+)
+def test_proof_carried_by_an_earlier_step(
+    repo: Path, posix: str, files: str, verify: str
+) -> None:
+    _write_plan(repo, _full_plan((files, "`true`", None), ("src/b.py", verify, None)))
+    _steps_file(
+        repo, "baseline", f"step 1 {_KEY}: pass\nstep 2 {_KEY}: fail 1: no module\n"
+    )
+    _steps_file(repo, "2.verify", _record("0", "1 passed\n"))
+    run = _run(repo, posix, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert "proof: step 2 carried (failed before an earlier step)" in run.stdout
+
+
+def test_proof_own_files_do_not_carry(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("tests/a_test.py", "`pytest tests/a_test.py`")],
+        [(1, "fail 1: boom")],
+        {"1.verify": _record("0", "1 passed\n")},
+    )
+    assert lines[0] == "proof: step 1 proven (failed before the change)"
+
+
+def test_proof_a_later_step_does_not_carry(repo: Path) -> None:
+    lines = _proof_setup(
+        repo,
+        [("src/a.py", "`pytest tests/b_test.py`"), ("tests/b_test.py", "`true`")],
+        [(1, "fail 1: boom"), (2, "pass")],
+        {"1.verify": _record("0", "1 passed\n"), "2.verify": _record("0", "ok\n")},
+    )
+    assert lines[0] == "proof: step 1 proven (failed before the change)"
+
+
+def test_proof_totals(repo: Path, posix: str) -> None:
+    _write_plan(
+        repo,
+        _full_plan(
+            *(("src/a.py", "`pytest tests/a_test.py`", None) for _ in range(5)),
+            checks=("`pytest`", "manual: open the page", "`pytest -k none`"),
+        ),
+    )
+    _steps_file(
+        repo,
+        "baseline",
+        "".join(
+            f"step {n} {_KEY}: {r}\n"
+            for n, r in [(1, "fail 1: x"), (2, "pass"), (3, "test first"), (4, "pass")]
+        ),
+    )
+    _steps_file(repo, "1.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "2.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "3.verify", _record("0", "1 passed\n"))
+    _steps_file(repo, "4.verify", _record("0", "no tests ran\n"))
+    _steps_file(repo, "acceptance.1", _record("0", "9 passed\n"))
+    _steps_file(repo, "acceptance.2", "exit: not literal\n")
+    _steps_file(repo, "acceptance.3", _record("0", "no tests ran\n"))
+    run = _run(repo, posix, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines()[-2:] == [
+        "proof: 1 of 5 steps proven, 1 unproven, 1 no test, 2 other",
+        "proof: 2 of 3 Acceptance checks are literal, 1 passed, 1 ran no test",
+    ]
+
+
+def test_proof_without_acceptance(repo: Path) -> None:
+    _write_plan(
+        repo, "# Plan: Test\n\n## Steps\n\n1. **Step 1**\n   - **Verify:** `true`\n"
+    )
+    run = _tool(repo, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.splitlines() == [
+        "proof: step 1 not run",
+        "proof: 0 of 1 steps proven, 0 unproven, 0 no test, 1 other",
+        "proof: no Acceptance items",
+    ]
+
+
+def test_proof_runs_nothing_and_writes_nothing(repo: Path, posix: str) -> None:
+    _write_plan(repo, _full_plan(("ran", "`touch ran`", None), checks=("`touch ran`",)))
+    _steps_file(repo, "baseline", f"step 1 {_KEY}: fail 1: x\n")
+    _steps_file(repo, "1.verify", _record("0", "1 passed\n"))
+    before = sorted(p.name for p in (repo / _STEPS).iterdir())
+    tree = _snapshot(repo)
+    run = _run(repo, posix, "proof", "plans/p.md")
+    assert run.returncode == 0, run.stderr
+    assert not (repo / "ran").exists()
+    assert sorted(p.name for p in (repo / _STEPS).iterdir()) == before
+    assert _snapshot(repo) == tree
+
+
 # ---- refusals -------------------------------------------------------------------
 
 _T0_ARG = "<t0>"
@@ -3767,6 +5386,13 @@ _PLAN_COMMANDS = [
     ("log-check", "plans/p.md", _BLOB_ARG),
     ("state", "plans/p.md"),
     ("amend-check", "plans/p.md", _BLOB_ARG, "1"),
+    ("proof", "plans/p.md"),
+    ("setup", "plans/p.md"),
+    ("format", "plans/p.md", _T0_ARG),
+    ("ready", "plans/p.md"),
+    ("dryrun", "plans/p.md"),
+    ("red", "plans/p.md", "1"),
+    ("smoke", "plans/p.md", "e2e/x.cy.js"),
 ]
 
 

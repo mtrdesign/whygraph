@@ -2,7 +2,7 @@
 
 Read this file once before you write a plan. It says what a good plan holds. The plan format is the `## Plan format` section of this file.
 
-Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Acceptance, User journey, Self-review checklist, Plan format.
+Contents: Why a plan is a contract, Grounded beats plausible, Objective and Non-goals, Boundaries per step, Problems before solutions, Evidence order, Questions, Writing rules, Model per step, Test first, Verify is a literal command, Setup, Acceptance, User journey, End-to-end test, Self-review checklist, Plan format.
 
 ## Why a plan is a contract
 
@@ -23,6 +23,8 @@ A plan is a contract for work that has not started. State what changes and what 
 ## Boundaries per step
 
 Name the files or behaviours that a step must not touch. Take them from the `Boundaries` report: external contracts, and the work of another child.
+
+- Name each file a Change adds or edits by its exact path, in the Change and in Files.
 
 ## Problems before solutions
 
@@ -87,6 +89,18 @@ Write each Verify as a command in backticks, taken from the `Verify candidates` 
 
 A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
 
+A Verify must pass when its own step is done. A later step must not be needed. Run a check of the whole repo, such as a type check or a lint, only where every user of the change is updated. Otherwise put it in Acceptance.
+
+## Setup
+
+Write this section only when a source reported setup commands. A format command alone gets the section too.
+
+- List the commands that make a fresh checkout ready for the tests: install, then generate.
+- Write one literal command in each bullet. Use no shell syntax.
+- A setup command may change only files that git ignores.
+- The harness runs these commands itself when a Verify fails before any change.
+- Write a reported format command as the last bullet: `Format:`, then the command in backticks. It is not a setup command. The harness runs it on the changed files after the last step.
+
 ## Acceptance
 
 - Make item 1 the full test command of the project, as the `Verify candidates` report gives it.
@@ -116,6 +130,22 @@ Write this section only when a source reported a `### Journey` block. Write one 
 - State what holds after a refresh, a back action, a cancel and a direct link to a middle hop.
 - State what the user sees while slow work runs.
 
+## End-to-end test
+
+Write these lines only when a source reported an `### E2E` block with a test file.
+
+- One step writes the browser test. Its **Browser test** line ends in `red`: the test must fail before the feature exists.
+- The step that completes the user journey carries the same path. Its **Browser test** line ends in `green`.
+- Put the test file in **Boundaries** of every step after the one that writes it.
+- Assert what the user sees and can do. Never assert a class name or an internal id.
+- Find an element by its role or its label. Take visible text from the app's text source.
+- Reuse the login and data helpers the project has.
+- Use the real app. Never stub the app's own requests, unless the project's tests already do.
+- Keep the test to one journey.
+- The test must pass when it runs again. Give each record it creates a unique name.
+- Take a screenshot after each hop, when the runner can.
+- A browser test run may start the app and may add data. It is never a Verify.
+
 ## Self-review checklist
 
 Check each box before you hand the plan over.
@@ -125,6 +155,8 @@ Check each box before you hand the plan over.
 - [ ] Non-goals are present.
 - [ ] Blockers and Risks are not mixed.
 - [ ] Each step has a Verify and a Model.
+- [ ] Each Verify can pass when its own step is done.
+- [ ] Each file a Change names is in Files.
 - [ ] Acceptance item 1 is the full test command.
 - [ ] Each question has options and a default.
 - [ ] No em dash or en dash appears. Use a plain hyphen.
@@ -139,6 +171,7 @@ Check each box before you hand the plan over.
 **Status:** PROPOSAL - nothing implemented yet; review the steps, then run the implement command on this file.
 **Objective:** <one sentence: what changes for the user or the system>
 **Non-goals:** <what this plan deliberately leaves alone, or "none">
+**Read first:** <at most three places the person should read before a run, or omit this line>
 
 ## Resolved decisions
 *(only after the user answered questions - otherwise omit this section entirely)*
@@ -176,6 +209,11 @@ Check each box before you hand the plan over.
 - **Leaves early:** Refresh: <what holds>. Back: <what holds>. Cancel: <what remains, or "nothing">. Direct link: <what holds>.
 - **Waits:** <what the user sees while slow work runs, and how the user learns it finished, or "none">
 
+## Setup
+*(only when a source reported setup commands or a format command - otherwise omit this section entirely)*
+- `<literal command>` - <what it prepares>
+- Format: `<command>`
+
 ## Blockers
 *(only include if a constraint is at risk - otherwise omit this section entirely)*
 
@@ -183,6 +221,7 @@ Check each box before you hand the plan over.
 - **Why it's a blocker:** <one-line>
 - **Resolution needed:** <what the user has to confirm before proceeding>
 - **Review finding F<n> (<lens>):** <defect> - **Resolution needed:** <fix>
+- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>
 - **Journey hop H<n>:** <defect> - **Resolution needed:** <fix>
 
 ## Constraint checks
@@ -202,6 +241,7 @@ Check each box before you hand the plan over.
    - **Model:** <haiku | sonnet | opus> - <one-line why>
    - **Routes:** <backticked paths relative to the app's base URL, space-separated, e.g. `/settings` - UI steps only, omit otherwise>
    - **Expected UI:** <what the user sees, per state: empty, loading, error, phone width, dark - UI steps only, omit otherwise>
+   - **Browser test:** <path of the browser test file> - <red | green> - UI steps only, omit otherwise
    - **Verify:** <specific test, assertion, or manual check>
 2. ...
 
@@ -209,7 +249,7 @@ Check each box before you hand the plan over.
 - <each major risk, deduplicated, verbatim quotes preserved>
 
 ## Acceptance
-1. <verifiable statement of what "done" means for the whole plan> - **Check:** `<literal command>` or `manual: <what to look at>`
+1. <verifiable statement of what "done" means for the whole plan> - **Check:** `<literal command>`, or manual: <what to look at> with no backticks, or e2e: <path of the browser test file> with no backticks
 2. ...
 
 ## Open questions

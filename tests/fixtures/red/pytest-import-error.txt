@@ -1,0 +1,17 @@
+ERROR: found no collectors for /work/tests/test_import.py::test_parse
+
+
+==================================== ERRORS ====================================
+____________________ ERROR collecting tests/test_import.py _____________________
+ImportError while importing test module '/work/tests/test_import.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+/usr/lib/python3.12/importlib/__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tests/test_import.py:1: in <module>
+    from limits import parse_limit
+E   ModuleNotFoundError: No module named 'limits'
+=========================== short test summary info ============================
+ERROR tests/test_import.py
+1 error in 0.04s

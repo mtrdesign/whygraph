@@ -29,6 +29,8 @@ CAPTURE_PATH: <repo-relative path>
 REFRESH_PROFILE: <yes | no>
 PLAN_TOOL: <command prefix>
 REVIEW: <yes | no | auto>
+DRY_RUN: <yes | no>
+E2E: <yes | no>
 PLAN_PATH: <path of the plan to revise>
 ANSWERS:
 - Q<n>: <chosen option or the user's own text>
@@ -44,6 +46,8 @@ ANSWERS:
 - `REFRESH_PROFILE`: `yes` makes the cached UI profile stale, so `ui-surface` derives it again (**1f**).
 - `PLAN_TOOL`: the command prefix of the plan tool. **2c** runs its `fingerprint` command, the check loop in **Delivering the plan** runs its `check` command, and **2e** passes it to the synthesizer. It is a command prefix from the invoker, never text from the plan.
 - `REVIEW`: `yes`, `no` or `auto`; a missing line means `auto`. It decides whether **2g** reviews the plan.
+- `DRY_RUN`: `yes` or `no`. Only `no` skips the dry run of **2g**.
+- `E2E`: `yes` or `no`. Only `no` skips the smoke of **2c** item 5a and the browser test step of the plan.
 - `PLAN_PATH` and `ANSWERS` come only with `MODE: revise` (**Phase 3**). `ANSWERS: defaults` on one line means every asked question takes its default.
 
 `OUT_PATH` is where the finished plan goes (see **Delivering the plan**). If it is absent, write no file and return the plan as your reply. In revise mode the plan to write is `PLAN_PATH`.
@@ -144,7 +148,7 @@ The `tasks.json` example:
 }
 ```
 
-**1d. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (up to about a minute when commits still need descriptions); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers get the cards inlined (deep mode); warming the cache here also makes any card they fetch later a cache hit instead of a parallel generation. A card with `partial: true` is usable: note `partial` on the card you pass on, and do not re-ask in a loop.
+**1d. Warm the rationale cache.** For each working-set node, call `whygraph_rationale_brief(qualified_name=...)` once. The first call generates the card (up to about a minute when commits still need descriptions); later calls on the same unchanged lines are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Researchers read the cards in the research sidecar (deep mode). Warming the cache here also makes any card they fetch later a cache hit instead of a parallel generation. A card with `partial: true` is usable: note `partial` on the card you pass on, and do not re-ask in a loop.
 
 For each card, record: `qualified_name`, `file_path:line_range`, `evidence_count`, `purpose`, `constraints[]` and `risks[]` (each item's `text` verbatim, with its `basis` and `refs`), and `is_empty` (no rationale recorded, or `purpose` and `why` both blank). Also read `freshness` from `whygraph://repo/overview` once; when `commits_behind` is greater than 0, start the plan with *Note: history is N commits behind HEAD.* (N = `commits_behind`).
 
@@ -178,7 +182,7 @@ In single-pass:
 2. Read the body of the bundled `repo-tests.md` when it is kept, and apply it yourself within its `tools` and `budget`: it gives each step's Verify command, the Test first test for an uncovered symbol, and Acceptance item 1. Apply the bundled `ui-surface.md` the same way when it is kept (**1f** keeps it only for a UI task). Use the fresh profile's key lines as its `PROFILE:` block, as **2a** describes. Then run **2c** before you write the plan. Read no other source body.
 3. Never read the body of a kept source that needed consent. Delegate to one `whygraph-researcher` for each such source, all in one message, with the prompt of **2a**, and use its report as deep mode would (a `Prior art` report fills `## Prior art`). A source that **External sources** in **2a** sends to `whygraph-researcher-external` goes there, with that prompt and that fallback. If delegation is unavailable, drop the source and add `<name>: skipped - single-pass mode has no researcher to run it` to the Confidence reason.
 4. Synthesise the plan yourself, in the plan format in `SPINE_PATH`. Sequence changes in the 1e dependency order. Quote constraints and risks **verbatim** from rationale cards - never paraphrase. The quote is the item's `text`. End each quote with the tag of its item's `basis`: `(quoted: <ref>)`, `(cited: <ref>)`, `(inferred)`, or nothing for `unknown`. `<ref>` names the item's first ref: the first 8 characters of its commit id, `PR #<n>` or `Issue #<n>`. A quote of a note body ends with `(note #<id>)`, on a **Changes on purpose** line too. Apply the spine's `## Evidence order`: an outside report stays in `## Prior art` and never changes a step or the confidence. Flag any step that appears to violate a constraint as a *Blocker*. A constraint the task itself asks to change goes to **Changes on purpose** of its step, not to `## Blockers`. A constraint tagged `(inferred)` alone never makes a Blocker. It goes to **Risks called out across the change** with its tag. Give each step a Verify, a Model and, from the 1e external-contract marks, Boundaries. Copy the `check` of each note in a card's `notes` into `## Constraint checks`, as `- note #<id> - <absent | present>: "<text>" in <glob>`. Change no character of the text or the glob. Omit the section when there is none. List what the code cannot settle under `## Open questions`, each with 2 or 3 options and a default; at most 3 are `Plan-shaping: yes`. Report honest confidence.
-5. When the `ui-surface` result has key lines under `## UI profile`, do these five things, with `CAPTURE_STATUS` from **2c**:
+5. When the `ui-surface` result has key lines under `## UI profile`, do these six things, with `CAPTURE_STATUS` from **2c**:
    - Fill `## UI profile` from the key lines: `Start` is `start` and `base_url`, `Fixture mode` is `fixture`, `Browser tests` is `tests`, `Auth` is `auth`, else `none`, `Stack` is `stack` and `theme`, `Conventions` is the `conventions` line or the `### Conventions` path, else `none`.
    - Give `**Routes:**` and `**Expected UI:**` to each step whose Files render a route under `### Routes`. Copy those backticked paths into Routes. Write Expected UI from the `### Proposed states` of those routes.
    - Add one Open question with `Plan-shaping: yes`: "Which states should <routes> have?" Its options are `As proposed: <short list>` / `Fewer: <the list without the least essential state>` / `More: <the list plus one state>`, the default first. It counts toward the cap of 3.
@@ -195,7 +199,16 @@ In single-pass:
      - For another part, ask "What should <part> show?" Offer the default first and one alternative.
      - Mark the first journey question `Plan-shaping: yes` when the cap of 3 still has room. Mark every other journey question `Plan-shaping: no`. The steps assume its default.
      - Add the Acceptance item `manual: walk the journey of ## User journey from Entry to Outcome`. It does not count toward the six-item cap.
-6. With `REVIEW: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
+   - When `E2E` is `yes` and the result has an `### E2E` block with a `spec:` line, write the end-to-end test step. Otherwise write no **Browser test** line and no `e2e:` Check. Write the step this way:
+     - Add one step that writes the test file of `spec:`. Place it before the first step that has **Routes**. Renumber the steps after it. Change each `step <N>` in `## User journey` and in **Read first** to match. Its **Files** hold the test file and each helper `needs:` names. Its **Browser test** line is `<spec> - red`.
+     - Write its Change from `## User journey` when the plan has one. Write one assertion per hop, on its control as the section names it: `<role> "<visible text>"`. Write one assertion for the Outcome's data on its route. For an `assumed <default> (Q<n>)` part, assert the default. Add each **Expected UI** state the helpers can reach. Name each state it asserts. Name the `text:` file as the source of each visible text.
+     - Its Verify is the `after_add:` command, in backticks. With none, write `manual: the Browser test line runs this test`.
+     - Give `**Browser test:** <spec> - green` to the Outcome's step. Without `## User journey`, give it to the last step that has **Routes**.
+     - Add the test file to **Boundaries** of every step after the one that writes it.
+     - Add the Acceptance item `<the Outcome, or the Objective> - **Check:** e2e: <spec>`. Then omit the journey item of step 3h.
+     - Add the step that writes the test to **Read first**, within its limit of three.
+     - In step 3g, write a `manual:` item only for a state that the test step's Change does not name.
+6. With `REVIEW: yes` or `DRY_RUN: yes`, run **2g** after you write the plan and run the **Check loop** (**Delivering the plan**). Then reply as **2f** says.
 
 If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the plan with the matching notice:
 - *"Note: Auto-mode chose single-pass (impact set is small - fan-out would be ceremony)."*
@@ -206,6 +219,8 @@ If `MODE: auto` fell back to single-pass for a heuristic reason, prepend the pla
 ### Deep mode (`MODE: deep`, OR `MODE: auto` and the heuristic chooses fan-out)
 
 You are an orchestrator. Do **not** synthesise yourself.
+
+**Sidecar head.** Before **2a**, check that delegation is available. Without it, write no sidecar and take the single-pass fallback of **2a**. With it, write the sidecar head as **2d** item 1 says.
 
 **2a. Delegate to one researcher per kept source, in parallel.** In a single message, delegate to one `whygraph-researcher` subagent per source on the kept list, except a source that **External sources** below sends to `whygraph-researcher-external`. Each gets a prompt of the form:
 
@@ -222,14 +237,7 @@ SOURCE:
 --- lens ---
 (read the file at path: - its body is your lens)
 
-WORKING SET:
-- qualified_name: <qn>
-  file: <path>:<lines>
-  purpose: <one line>
-  constraints: [<verbatim>, ...]
-  risks: [<verbatim>, ...]
-  evidence: <N commits, M PRs>
-- ...
+WORKING_SET_PATH: <absolute path of the sidecar>
 
 PARENT: <PARENT, or none>
 - t<N>: <sibling title> - files_hint: <paths>
@@ -238,11 +246,11 @@ PROFILE:
 <key lines of the cached UI profile; only for ui-surface, only when the profile is fresh>
 ```
 
-Inline each card's `purpose` / `constraints` / `risks` verbatim (not `why` / `tradeoffs`), each item of `constraints` and `risks` as its `text`; for an empty card write `purpose: (no rationale recorded)`, `constraints: []`, `risks: []`. Never inline a source's body: the researcher reads it. When `PARENT` is not `none`, list every other child of that `tasks.json` under it, with its `files_hint`. Researchers may fetch cards for symbols outside the working set.
+`WORKING_SET_PATH` names the sidecar head that you wrote before **2a**. Never inline a source's body: the researcher reads it. When `PARENT` is not `none`, list every other child of that `tasks.json` under it, with its `files_hint`. Researchers may fetch cards for symbols outside the working set.
 
 Give the `PROFILE:` block only to the `ui-surface` researcher, and only when **1f** found the cached profile fresh. Copy the profile's key lines into it, without its frontmatter and without its `capture:` line. Omit the block for every other researcher.
 
-**External sources.** A kept source whose `requires` or `tools` names a tool other than `read`, a `whygraph_*` tool or a `codegraph_*` tool goes to `whygraph-researcher-external`, not `whygraph-researcher`. Its prompt is `TASK` and the `SOURCE:` block with its `TERMS`, and nothing else: no `WORKING SET`, `PARENT` or `PROFILE`. If that agent is not available, do not run the source on `whygraph-researcher`: its report is `(unavailable: no external researcher in this editor)`. A source that uses only `read` and WhyGraph or CodeGraph tools stays on `whygraph-researcher`, even when it needed consent.
+**External sources.** A kept source whose `requires` or `tools` names a tool other than `read`, a `whygraph_*` tool or a `codegraph_*` tool goes to `whygraph-researcher-external`, not `whygraph-researcher`. Its prompt is `TASK` and the `SOURCE:` block with its `TERMS`, and nothing else: no `WORKING_SET_PATH`, `PARENT` or `PROFILE`. If that agent is not available, do not run the source on `whygraph-researcher`: its report is `(unavailable: no external researcher in this editor)`. A source that uses only `read` and WhyGraph or CodeGraph tools stays on `whygraph-researcher`, even when it needed consent.
 
 If delegation is unavailable, switch to single-pass and prepend the plan with this notice: *Deep mode was unavailable (no subagent tool); this plan was written in single-pass mode.*
 
@@ -264,12 +272,15 @@ capture: <the probe result>
 ```
 
 4. Probe capture, then write the `capture:` line last.
-   - When the key lines say `auth: required`, do not probe. Write `capture: unavailable: auth required`.
    - When `CAPTURE_PATH` is absent, do not probe. Write `capture: unknown`.
    - Otherwise run `node <CAPTURE_PATH> --probe`. On exit 0 or 3, write the `capture:` line the script printed. On exit 127, or a "command not found" error, write `capture: unavailable: node not found`. On any other exit, or with no `capture:` line printed, write `capture: unavailable: probe failed (<code>)`.
 5. `CAPTURE_STATUS` is the text after `capture: ` on that line.
+5a. Run this only when `DRY_RUN` and `E2E` are `yes` and the `### E2E` block has a `smoke:` path.
+Run `<PLAN_TOOL> smoke <OUT_PATH> <the smoke path>` once, with a 600 s timeout.
+On `smoke: not available`, set `E2E` to `no`. Add `e2e: off - <reason>` to the Confidence reason.
+On any other line, change nothing here: the dry run reports it.
 
-**2d. Write the research sidecar.** Write `.whygraph/plans/<stem>.research.md` before the synthesizer runs: the working set and every report, verbatim, in this shape. It always goes under `.whygraph/plans/`, whatever `OUT_PATH` says. The synthesizer reads it, and a revise pass re-synthesizes from it without running the researchers again.
+**2d. Write the research sidecar.** The sidecar is `.whygraph/plans/<stem>.research.md`. It always goes under `.whygraph/plans/`, whatever `OUT_PATH` says. You write it in two parts: the head before **2a**, the report blocks after **2b**. The researchers read the head. The synthesizer reads the whole file, and a revise pass re-synthesizes from it without running the researchers again. Its shape:
 
 ```text
 TASK: <user's task verbatim>
@@ -279,6 +290,9 @@ WORKING SET SUMMARY: <N cards, M truncated>
 WORKING SET:
 - qualified_name: <qn>
   file: <path>:<lines>
+  purpose: <one line>
+  constraints: [<verbatim>, ...]
+  risks: [<verbatim>, ...]
   evidence: <N commits, M PRs>
 - ...
 
@@ -289,7 +303,10 @@ WORKING SET:
 <verbatim report>
 ```
 
-Write one `=== <source name> ===` block per kept source, in the kept-list order. For a source that **External sources** sends to `whygraph-researcher-external`, write the header as `=== <source name> (external) ===`. If you cannot write the sidecar, stop and reply `The research sidecar could not be written: <reason>`.
+1. **Head.** Before **2a**, write `TASK`, `WORKING SET SUMMARY` and the `WORKING SET:` block with `Write`. Give each record in full. Copy each card's `purpose`, `constraints` and `risks` verbatim, not `why` or `tradeoffs`. Write each item of `constraints` and `risks` as its `text`. For an empty card, write `purpose: (no rationale recorded)`, `constraints: []` and `risks: []`. Write the head only in deep mode, and only when delegation is available. A sidecar makes a later revise take the deep branch, so the single-pass fallback must leave none.
+2. **Reports.** After **2b**, append the report blocks with `Edit`. Write one `=== <source name> ===` block per kept source, in the kept-list order. For a source that **External sources** sends to `whygraph-researcher-external`, write the header as `=== <source name> (external) ===`.
+
+If you cannot write the sidecar, stop and reply `The research sidecar could not be written: <reason>`.
 
 **2e. Delegate to the synthesizer.** Single handoff to `whygraph-synthesizer` with this prompt:
 
@@ -302,18 +319,25 @@ OUT_PATH: <OUT_PATH>
 RESEARCH_PATH: <absolute path of the sidecar>
 PLAN_TOOL: <PLAN_TOOL, or none>
 CAPTURE_STATUS: <none | available | unknown | unavailable: <reason>>
+E2E: <yes | no>
 NOTICE: <one notice for the top of the plan>
 ANSWERS: <the ANSWERS lines, or none>
 ```
 
-Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pass one `NOTICE:` line per notice that **1c** or **1d** puts at the top of the plan, or the one line `NOTICE: none`.
+Pass the `CAPTURE_STATUS` that **2c** set, or `none` when **2c** did not run. Pass the `E2E` of your prompt, or `no` when **2c** item 5a set it to `no`. Pass one `NOTICE:` line per notice that **1c** or **1d** puts at the top of the plan, or the one line `NOTICE: none`.
 
-**2g. Review the plan.** Run this step only when a plan is at `OUT_PATH`. Either the **2e** reply has a `Saved plan to` line, or you wrote the plan yourself. `REVIEW` decides:
-- `no`: skip **2g**.
-- `yes`: run it, in deep and in single-pass mode.
-- `auto`, or no `REVIEW` line: run it in deep mode only.
+**2g. Review the plan.** Run this step only when a plan is at `OUT_PATH`. Either the **2e** reply has a `Saved plan to` line, or you wrote the plan yourself. Run it when `REVIEW` asks for a review or `DRY_RUN` is `yes`. `REVIEW` decides on the reviewers:
+- `no`: no reviewer.
+- `yes`: the reviewers, in deep and in single-pass mode.
+- `auto`, or no `REVIEW` line: the reviewers in deep mode only.
 
-Revise mode never runs **2g**: one review round per plan. Without delegation, or without `OUT_PATH`, there is no review. When `REVIEW` asks for one then, add `review: skipped - <reason>` to the Confidence reason of the plan and of your reply.
+`DRY_RUN` decides on the dry run of item 1a. Only `DRY_RUN: no` skips it.
+
+Revise mode never runs the reviewers: one review round per plan. With `DRY_RUN: yes`, revise mode runs `<PLAN_TOOL> dryrun <PLAN_PATH>` on the plan it wrote, as item 1a runs it. It starts no reviewer and no fixer.
+Replace the dry-run bullets of `## Blockers` with one bullet per finding, in the form of item 3.
+Copy the `- ran:` line into the Confidence reason of the plan and of the reply.
+
+Without delegation, or without `OUT_PATH`, no reviewer runs. When `REVIEW` asks for one then, add `review: skipped - <reason>` to the Confidence reason of the plan and of your reply.
 
 1. **Reviewers.** In one message, delegate to one `whygraph-plan-reviewer` with `LENS: logic`. When the plan has a `## UI profile` section, delegate to a second one with `LENS: ui`. When the plan has a `## User journey` section, delegate to a third one with `LENS: journey`. Each gets this prompt:
 
@@ -328,7 +352,14 @@ BUDGET: 20
 
 Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROFILE` is the plan's `## UI profile` section copied verbatim, or `none`.
 
-2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, in the order `logic`, `ui`, `journey`:
+1a. **Dry run.** In the same message as the reviewers, run `<PLAN_TOOL> dryrun <OUT_PATH>`. Give the call a 600 s timeout where the shell tool takes one.
+   - Exit 2: run the same call again. Repeat until it exits 0. The tool ends the loop itself at its sixth call.
+   - Exit 0: its output is the dry-run block.
+   - Any other exit: the block is `(unavailable: dryrun exited <code>)`.
+   - With no reviewer, run only the dry run.
+   - With `PLAN_TOOL: none`, skip it. Add `dry run: skipped - no plan tool` to the Confidence reason.
+
+2. **Review sidecar.** Wait for every reviewer. Never re-run one. Write `.whygraph/plans/<stem>.review.md`, with one `=== <lens> ===` block per reviewer, in the order `logic`, `ui`, `journey`, `dry-run`:
 
 ```text
 === logic ===
@@ -339,13 +370,20 @@ Pass `OUT_PATH` as `PLAN_PATH`, and your own `SPINE_PATH` and `PARENT`. `UI_PROF
 
 === journey ===
 <the reply verbatim, or (unavailable: <reason>)>
+
+=== dry-run ===
+<the dry-run block verbatim, or (unavailable: <reason>)>
 ```
 
-Write the `ui` block only when a `ui` reviewer ran. Write the `journey` block only when a `journey` reviewer ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
+Write the `ui` block only when a `ui` reviewer ran. Write the `journey` block only when a `journey` reviewer ran. Write the `dry-run` block only when item 1a ran. A reviewer that failed gets `(unavailable: <one-line reason>)`. A reply whose first line is not `REVIEW: <its lens>` gets `(unavailable: no REVIEW line)`. If you cannot write the sidecar, stop **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of your reply.
 
-3. **Fixer.** Delegate to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
+3. **Fixer.** Run this item when a reviewer ran, or when the dry-run block's first line is `REVIEW: dry-run` with nothing after it. An `(unavailable: ...)` dry-run block alone starts no fixer: name it in the Confidence reason. Delegate to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
+
+Without a fixer, you wrote the plan yourself. Then write each dry-run finding to `## Blockers` as `- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`, and run the **Check loop**.
 
 4. **Its reply.** **Delivering the plan** treats the fixer's reply as it treats the **2e** reply, a refused write included. A fixer reply with no `Saved plan to` line and no plan is a failed review. Then keep the plan as it is, and relay the reply you had before **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of that reply.
+
+5. **The ran line.** Copy the dry run's `- ran:` line into the Confidence reason of the plan and of your reply. It names the record that lists every command.
 
 **2f. Relay the synthesizer's reply verbatim** (see **Delivering the plan**): the fixer's reply when **2g** ran, else the **2e** reply. It wrote the plan to `OUT_PATH`. Do not edit, summarise, or annotate the plan or the reply. The synthesizer is the source of truth in deep mode.
 
@@ -359,7 +397,7 @@ The user answered the questions of an earlier reply. Fold the answers into the p
 4. When every answer equals its default, the steps already assume them: write the plan, run the **Check loop** from **Delivering the plan** on it, and reply.
 5. Otherwise rebuild the plan:
    - **Deep** (the sidecar exists): delegate to the synthesizer with the **2e** prompt. Pass the sidecar's absolute path as `RESEARCH_PATH`. Pass each answered question as the line `- Q<n>: <question> => <answer>`, with the question text copied from the plan, so the synthesizer matches it by text, not by number. Pass `PLAN_PATH` as `OUT_PATH`. Pass `NOTICE: none`. Pass `CAPTURE_STATUS: none` when the plan has no `## UI profile`. Otherwise take it from the `capture:` line of `.whygraph/profiles/ui.md`: `unknown` when the file or the line is missing, and `unavailable: profile is tracked by git` when `git ls-files --error-unmatch` exits 0 for it. When the review sidecar `.whygraph/plans/<stem>.review.md` exists, also pass `REVIEW_PATH: <its absolute path>`. The synthesizer then applies the review again to the rebuilt plan. Relay its reply verbatim.
-   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Rewrite each assumed part of `## User journey` whose answer is not its default. A journey answer may add a step or change one. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim.
+   - **Single-pass** (no sidecar): re-derive the steps from the plan's `## Working set` table and the answers. Rewrite each assumed part of `## User journey` whose answer is not its default. A journey answer may add a step or change one. Read `SPINE_PATH` and follow its `## Writing rules` and write the plan in its `## Plan format`. Re-fetch a card with `whygraph_rationale_brief` only when a changed step needs it. Keep `## Plan review`, the review finding bullets of `## Blockers` and every line a review applied, verbatim. With `DRY_RUN: no`, also keep the dry-run bullets of `## Blockers`.
 6. Revise never adds a `Plan-shaping: yes` question and never runs a new review. Its reply always ends `QUESTIONS: none`.
 
 ## Output format
@@ -396,7 +434,7 @@ If the write fails, return the whole plan as your reply, say why, and end with t
 
 - **Don't write code.** You produce a plan; the user (or a future worker agent) executes.
 - **Don't write any file but the five above.**
-- **Don't run interactive or destructive commands.** Use file reads for grounding only. The commands **1c**, **1f**, **2c** and **Phase 3** name are the exception.
+- **Don't run interactive or destructive commands.** Use file reads for grounding only. The commands **1c**, **1f**, **2c**, **2g** and **Phase 3** name are the exception.
 - **Don't read the body of a source that needed consent,** and read no source body in deep mode. Researchers read them.
 - **Don't ask the user.** Reply `CLARIFY:` or `QUESTIONS:` and let the slash command ask.
 - **Don't paraphrase rationale.** Quote constraints and risks verbatim.

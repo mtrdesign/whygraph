@@ -1,0 +1,33 @@
+
+ RUN  v5.0.2 /work
+
+ ❯ limit.test.mjs (1 test | 1 failed) 4ms
+   × limit 4ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  limit.test.mjs > limit
+AssertionError: expected 2 to be 3 // Object.is equality
+
+- Expected
++ Received
+
+- 3
++ 2
+
+ ❯ limit.test.mjs:4:17
+      2|
+      3| test("limit", () => {
+      4|   expect(1 + 1).toBe(3);
+       |                 ^
+      5| });
+      6|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  21:26:25
+   Duration  153ms (transform 40%, import 28%, tests 19%, worker 13%)
+

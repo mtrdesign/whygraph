@@ -5,6 +5,41 @@
 
 ## Changes
 
+- **A polish run applies the small quality findings.** After the quality evaluation, Claude Code and
+  Cursor apply its findings to files the plan lists. They run the plan's new `- Format:` Setup command
+  on the changed files, then run Acceptance again, which decides. The planner now reads the working
+  set from a file, which makes a deep plan faster. Pass `--no-polish` to skip the run. Run
+  **Settings > Update agent files** to pick it up, and see
+  [The polish run](../guide/planning.md#the-polish-run).
+- **UI capture works behind a login.** Set `WHYGRAPH_UI_USER` and `WHYGRAPH_UI_PASSWORD`, or run
+  `node capture.mjs --login` once to save a session in `.whygraph/profiles/ui-auth.json`. The profile
+  gets `login_route` and `login_fields`, and the planner no longer skips a project with a login. Both
+  ways work only on a loopback host. A saved login that expired ends a step as `not run`, not a halt.
+  The variables are visible to commands the agent runs itself: use a throwaway dev account. Run
+  **Settings > Update agent files** to pick it up, and see
+  [Capturing behind a login](../guide/planning.md#capturing-behind-a-login).
+- **A UI plan can carry a browser test, seen red before the feature exists.** When the project has
+  browser tests (profile key `e2e_run`), one step writes a test for the user's path and runs it red,
+  and the step that completes the path runs it green. Acceptance gets an `e2e:` item. The planner
+  first runs one existing browser test once, so a missing database, seed or login is a Blocker at plan
+  time. In Claude Code and Cursor, `begin` prints a `trust:` hash and `end --trust` stops a later step
+  that changed an earlier step's record. VS Code and Codex have no such check. Pass `--no-e2e` to
+  either command to skip it. Run **Settings > Update agent files** to pick it up, and see
+  [End-to-end tests](../guide/planning.md#end-to-end-tests).
+- **A Test first test is seen red, and cannot be edited to pass.** `plan-tool.sh red` runs the
+  test before the change and writes `steps/<N>.red`. `verify` and `end` compare the test with a copy
+  and stop on an edit, with the first line `verify: test first edited`. `proof` takes the class of
+  a Test first step from that record (`proven`, `not proven` or `edited`), and each step's diff adds
+  `tests:` lines for a skip marker, removed assertions, a changed snapshot or runner config. The
+  dry run no longer reports an existing Test first test that fails by design. Run **Settings >
+  Update agent files** to pick it up, and see
+  [Verify evidence](../guide/planning.md#verify-evidence).
+- **The run summary says how many steps are proven.** `plan-tool.sh proof <plan>` prints one line for
+  each step (proven, unproven, carried, not proven, no test, failed, not run or unknown) and two total
+  lines. The run summary of `/whygraph-implement` in Claude Code and Cursor shows the totals as
+  `- Proof:`, and the implementor logs them under `- Acceptance:` in VS Code and Codex. An `unproven`
+  step asks a person to read its diff first. Run **Settings > Update agent files** to pick it up, and
+  see [Verify evidence](../guide/planning.md#verify-evidence).
 - **A plan checks the user's path through the screens.** When a task moves the user between
   screens, the plan gets a `## User journey` section (the actor, the entry control, one line per hop
   tied to a step or to existing code, the outcome, what holds on refresh, back, cancel and a direct
@@ -25,6 +60,15 @@
   constraint, the step gets a **Changes on purpose** line with the quote and the reason, in place of
   a Blocker. The implementor does not guard it, and in Claude Code the review gate reports it as
   **Changed on purpose** and goes on. Run **Settings > Update agent files** to pick it up.
+- **A plan runs before you read it, so it can be trusted to run.** The planner now runs each `Verify`
+  once and hands over the result (the dry run), and a plan can carry a `## Setup` section of install and
+  generate commands. A run that finds a `Verify` failing before any change runs the Setup, tries again,
+  and stops with `Verify fails before any change` or `setup failed` instead of failing late. A `manual:`
+  span in backticks is no longer run as a command. The dry run executes commands from your repository
+  before you read the plan, with a smaller set of secrets and no package download. Pass `--no-dry-run`
+  to skip it. Run **Settings > Update agent files** to pick it up, and see
+  [The dry run](../guide/planning.md#the-dry-run) and
+  [Running unattended](../guide/planning.md#running-unattended).
 - **A run proposes the note it made stale.** After a `/whygraph-implement` run whose Acceptance
   passed, Claude Code and Cursor propose a note for each step with a **Changes on purpose** line, at
   most three per run: a revision of the note the step changed (its `(note #<id>)` tag stays on the

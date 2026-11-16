@@ -649,6 +649,40 @@ def stop_block(
     return Check(f"stop block at step {step}", fn)
 
 
+def no_stop_block() -> Check:
+    """Pass when the main session printed no ``Run stopped at step`` block."""
+
+    def fn(ctx: Context) -> Outcome:
+        blocks = stop_blocks(_main_texts(ctx))
+        return not blocks, f"{len(blocks)} stop block(s)"
+
+    return Check("no stop block", fn)
+
+
+def stop_cause_lacks(text: str) -> Check:
+    """Pass when the last stop block's Cause does not hold ``text``."""
+
+    def fn(ctx: Context) -> Outcome:
+        blocks = stop_blocks(_main_texts(ctx))
+        if not blocks:
+            return False, "no 'Run stopped at step' block"
+        cause = blocks[-1].fields.get("Cause", "")
+        found = text in cause
+        return not found, f"cause {'holds' if found else 'lacks'} {text!r}"
+
+    return Check(f"cause lacks {text}", fn)
+
+
+def printed(text: str) -> Check:
+    """Pass when any text block of the main session holds ``text``."""
+
+    def fn(ctx: Context) -> Outcome:
+        ok = any(text in t for t in _main_texts(ctx))
+        return ok, f"session {'printed' if ok else 'did not print'} {text!r}"
+
+    return Check(f"session prints {text}", fn)
+
+
 def verdicts_per_run(expected: list[str]) -> Check:
     """Pass when each run's reply holds one verdict, in the expected order."""
 
@@ -1443,6 +1477,54 @@ def step_diff_paths(stem: str, expected: dict[int, set[str]]) -> Check:
     return Check("each step diff holds only its paths", fn)
 
 
+def end_exit(step: int, code: int) -> Check:
+    """Pass when the main session's ``plan-tool.sh end`` of ``step`` exited ``code``.
+
+    The exit code is read from the ``Bash`` result: an ``Exit code N`` first
+    line, or 0 when the result has none.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        wanted: dict[str, int] = {}
+        for transcript in ctx.of_type("main"):
+            for record in transcript.assistant_records():
+                for block in (record.get("message") or {}).get("content") or []:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    command = str((block.get("input") or {}).get("command", ""))
+                    if _tool_matches(str(block.get("name", "")), r"^Bash$") and any(
+                        kind == "end" and number == str(step)
+                        for kind, _plan, number in _PLAN_TOOL_RE.findall(command)
+                    ):
+                        wanted[str(block.get("id"))] = 0
+            for record in transcript.records:
+                content = (record.get("message") or {}).get("content")
+                if record.get("type") != "user" or not isinstance(content, list):
+                    continue
+                for block in content:
+                    if (
+                        not isinstance(block, dict)
+                        or block.get("type") != "tool_result"
+                    ):
+                        continue
+                    ident = str(block.get("tool_use_id"))
+                    if ident not in wanted:
+                        continue
+                    result = block.get("content")
+                    if isinstance(result, list):
+                        result = "".join(
+                            str(b.get("text", ""))
+                            for b in result
+                            if isinstance(b, dict)
+                        )
+                    match = re.match(r"Exit code (\d+)", str(result or ""))
+                    wanted[ident] = int(match.group(1)) if match else 0
+        codes = list(wanted.values())
+        return code in codes, f"end of step {step} exited {codes}"
+
+    return Check(f"end of step {step} exits {code}", fn)
+
+
 def begin_end_around_implementors() -> Check:
     """Pass when the main session runs ``begin`` before and ``end`` after each step run.
 
@@ -2215,3 +2297,57 @@ def record_review_cost() -> Check:
         )
 
     return Check("review cost share", fn, record=True)
+
+
+def capture_after_holds(stem: str, step: int, text: str) -> Check:
+    """Pass when an after capture of the step has ``text`` in an ARIA snapshot.
+
+    The step's ``ui/index.html`` must exist too. Used for a route behind a login.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        ui = ctx.workdir / ".whygraph" / "plans" / stem / "ui"
+        if not (ui / "index.html").is_file():
+            return False, "ui/index.html is missing"
+        shots = sorted((ui / str(step) / "after").glob("*.aria.txt"))
+        ok = any(text in _text(path) for path in shots)
+        return (
+            ok,
+            f"{len(shots)} after snapshots, {'one holds' if ok else 'none holds'} {text!r}",
+        )
+
+    return Check(f"after capture of step {step} shows {text}", fn)
+
+
+def secret_absent(secret: str, stem: str) -> Check:
+    """Pass when no plan file of ``stem`` and no session transcript holds ``secret``.
+
+    The detail names the files only, never the secret.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        plans = ctx.workdir / ".whygraph" / "plans"
+        found = []
+        for root in (plans / f"{stem}.md", plans / stem, plans / f"{stem}.research.md"):
+            files = (
+                [root]
+                if root.is_file()
+                else sorted(root.rglob("*"))
+                if root.is_dir()
+                else []
+            )
+            for path in files:
+                if path.is_file() and secret in _text(path):
+                    found.append(str(path.relative_to(ctx.workdir)))
+        transcripts = ctx.all_transcripts()
+        for transcript in transcripts:
+            if secret in _text(transcript.path):
+                found.append(f"{transcript.agent_type} transcript")
+        if found:
+            return False, "the password is in " + ", ".join(found)
+        return (
+            True,
+            f"the password is in no plan file and none of {len(transcripts)} transcripts",
+        )
+
+    return Check("the password is in no plan file or transcript", fn)

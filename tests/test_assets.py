@@ -5892,6 +5892,7 @@ def test_implementor_red_again_after_a_wrong_red() -> None:
             "the test fails for the wrong reason",
             "Then fix only the test, once, and run "
             "`<PLAN_TOOL> red <PLAN_PATH> <N> again`.",
+            "Keep the word `again`: without it, red prints `red: recorded` and runs nothing.",
             "Log `  - red again: <the error line> - <what you fixed>`.",
             "Handle its exit as above.",
             "A second wrong red halts with `the Test first test fails for a reason "

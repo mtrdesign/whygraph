@@ -4283,6 +4283,30 @@ def test_red_skip_rule_and_again(repo: Path) -> None:
     assert _red(repo).stdout == "red: recorded (snapshot only)\n"
 
 
+def test_red_again_after_a_test_fix(repo: Path) -> None:
+    """Plan 58 section 4.1: a wrong red fixed in the test, then red again."""
+    _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_limit`")
+    path = repo / "tests" / "test_limit.py"
+    # The test's own setup raises: red, but for the wrong reason.
+    setup = "        open('missing.txt')\n        self.assertEqual(1 + 1, 3)"
+    path.write_text(_PY_TEST.replace("        self.assertEqual(1 + 1, 3)", setup))
+    assert _red(repo).stdout == "red: red\n"
+    assert "FileNotFoundError" in (repo / _STEPS / "1.red").read_text()
+    # Fix only the test: the setup is gone, the test still fails.
+    path.write_text(_PY_TEST)
+    run = _tool(repo, "verify", "plans/p.md", "1")
+    assert (run.returncode, run.stdout) == (5, "verify: test first edited\n")
+    run = _red(repo, "again")
+    assert (run.returncode, run.stdout) == (0, "red: red\n"), run.stderr
+    record = (repo / _STEPS / "1.red").read_text()
+    assert "result: red\n" in record and "FileNotFoundError" not in record
+    snap = repo / ".whygraph/plans/p/testfirst/1/test_limit.py"
+    assert snap.read_text() == _PY_TEST
+    run = _tool(repo, "verify", "plans/p.md", "1")
+    assert run.stdout.startswith("verify: literal\n"), run.stdout + run.stderr
+    assert "test first edited" not in run.stdout
+
+
 def test_red_after_a_code_change(repo: Path) -> None:
     _red_repo(repo, "`python3 -m unittest tests.test_limit.LimitTest.test_limit`")
     t0 = _snapshot(repo)

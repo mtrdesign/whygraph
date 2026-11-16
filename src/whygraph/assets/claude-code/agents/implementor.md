@@ -135,6 +135,7 @@ Then run these sub-steps in this order:
 3. **Test first.** Skip this with `FINDINGS:`. Otherwise:
    - Add the named test to `<test file>` only when the file does not hold it yet. Create the file when it does not exist.
    - Run `<PLAN_TOOL> red <PLAN_PATH> <N>`. Exit 0: continue. Exit 1 halts with `the Test first test passed before the change; the step's test does not cover it`. Exit 4 halts with `the Test first test cannot run: <command> not found`. Exit 124 halts with `Verify timed out after <T> s`. Exit 5 or 6 halts with the line it printed.
+   - Before you continue, read the output in `steps/<N>.red`. The test should fail because the step's **Change** is missing: a missing name, argument, field or behaviour. When the error is raised in the test's own setup, or in code that **Change** does not touch, the test fails for the wrong reason. Then fix only the test, once, and run `<PLAN_TOOL> red <PLAN_PATH> <N> again`. Log `  - red again: <the error line> - <what you fixed>`. Handle its exit as above. A second wrong red halts with `the Test first test fails for a reason the step does not change: <the error line>`.
 4. **Change.** Edit the listed `**Files:**`:
    - Use `Read` then `Edit` for in-place edits.
    - Use `Write` only when the change is "create file X" and the file doesn't exist yet.

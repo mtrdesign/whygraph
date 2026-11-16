@@ -2129,6 +2129,8 @@ def test_implement_stop_block_and_causes(tree: str) -> None:
         "the browser test was edited",
         # Plan 56 section 5.20: the polish run.
         "acceptance failed after the polish run: <items>",
+        # Plan 58 section 4.1: the second wrong red.
+        "the Test first test fails for a reason the step does not change",
     ):
         assert any(c.fullmatch(wanted) for _, c in causes), wanted
     # The Next of a baseline change says how to keep the Verify a pure check.
@@ -2152,6 +2154,9 @@ def test_implement_stop_block_and_causes(tree: str) -> None:
         "the step's test does not cover it",
         "the Test first test cannot run: uv not found",
         "the Test first test was edited",
+        # Plan 58 section 4.1: the second wrong red.
+        "the Test first test fails for a reason the step does not change: "
+        "FileNotFoundError: missing.txt",
         "permission denied: uv run pytest",
         # Plan 56 section 5.25: the browser test halt and the end exit 5 line.
         "the browser test passed before the change",
@@ -5803,6 +5808,8 @@ _IMPLEMENTOR_LINES_PHASE_4 = 10
 _IMPLEMENTOR_LINES_PHASE_5 = 1
 # Plan 56 section 5.20 (V17): the polish mode, Phase 2p and its report lines.
 _IMPLEMENTOR_LINES_POLISH = 18
+# Plan 58 section 4.1: the wrong red bullet in item 3 (Test first).
+_IMPLEMENTOR_LINES_PLAN_58 = 1
 
 
 def test_proven_steps_contract() -> None:
@@ -5814,6 +5821,7 @@ def test_proven_steps_contract() -> None:
             + _IMPLEMENTOR_LINES_PHASE_4
             + _IMPLEMENTOR_LINES_PHASE_5
             + _IMPLEMENTOR_LINES_POLISH
+            + _IMPLEMENTOR_LINES_PLAN_58
         )
         assert len(body) <= limit, (tree, len(body))
         text = "\n".join(body)
@@ -5839,6 +5847,26 @@ def test_proven_steps_contract() -> None:
             "- `end` exit 5: stop with the line that `end` printed on stderr. It is "
             "`the Test first test was edited` or `the browser test was edited`"
         ) in skill, tree
+
+
+def test_implementor_red_again_after_a_wrong_red() -> None:
+    """Plan 58 section 4.1: a wrong red is fixed in the test once, then red again."""
+    for tree in _AGENT_PATHS:
+        text = "\n".join(_agent_body(tree, "implementor"))
+        item = text.split("3. **Test first.**", 1)[1].split("4. **Change.**", 1)[0]
+        red = item.index("Exit 0: continue.")
+        for phrase in (
+            "read the output in `steps/<N>.red`",
+            "the test fails for the wrong reason",
+            "Then fix only the test, once, and run "
+            "`<PLAN_TOOL> red <PLAN_PATH> <N> again`.",
+            "Log `  - red again: <the error line> - <what you fixed>`.",
+            "Handle its exit as above.",
+            "A second wrong red halts with `the Test first test fails for a reason "
+            "the step does not change: <the error line>`.",
+        ):
+            assert phrase in item, (tree, phrase)
+            assert item.index(phrase) > red, (tree, phrase)
 
 
 def test_e2e_spine_and_source() -> None:

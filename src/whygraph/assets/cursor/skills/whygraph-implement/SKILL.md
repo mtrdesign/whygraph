@@ -461,6 +461,7 @@ When a `restore` fails, stop with its own cause, as Step 2a says. The plan was n
 | `Verify still fails: <excerpt>` | Read `.whygraph/plans/<stem>/steps/<N>.verify`. Fix the code or the step. |
 | `the Test first test cannot run: <command> not found` | Make the Verify a plain command; a shell function such as `nvm` does not exist under `sh -c`. |
 | `the Test first test passed before the change` | The step's test does not cover the change. Fix the test or the step. |
+| `the Test first test fails for a reason the step does not change` | The test still fails in its own setup after one fix. Fix the test's setup, or change the step's Test first. |
 | `the Test first test was edited` | Restore the test from `.whygraph/plans/<stem>/testfirst/<N>/`. |
 | `the browser test passed before the change` | The test does not cover the change. Fix the test or the step. |
 | `the browser test was edited` | A step changed the browser test after its red run. Read that step's diff. |

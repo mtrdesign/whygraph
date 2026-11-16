@@ -21,12 +21,19 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from checks import (
     LADDER_CAUSES,
     Check,
+    acceptance_item1_scoped,
+    acceptance_manual_full,
+    bash_call_count,
+    dryrun_record,
+    log_line_count,
+    reply_lacks,
+    section_lacks,
     Context,
     RunResult,
     Seeded,
@@ -909,6 +916,125 @@ def edit_test_rule(tree: Path) -> None:
     path.write_text(text.replace(old, EDIT_TEST_RULE), "utf-8")
 
 
+# Plan 58 (U24): two Test first tests that the setup commits. The report test
+# fails in its own setUp (a mistyped key), the factor test fails because
+# ``high_bound`` lacks the new argument. Only the first is a wrong red.
+U24_REPORT_TEST = """import unittest
+
+from mini.report import render
+
+
+class ReportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        titles = {"things": "Things"}
+        self.title = titles["thing"]
+
+    def test_render_title(self) -> None:
+        self.assertEqual(render(3, title=self.title), "Things: 3")
+"""
+U24_FACTOR_TEST = """import unittest
+
+from mini import pricing
+
+
+class FactorTest(unittest.TestCase):
+    def test_high_bound_factor(self) -> None:
+        self.assertEqual(pricing.high_bound(100.0, factor=1.5), 150.0)
+"""
+U24_TESTS = {
+    "tests/test_report.py": (U24_REPORT_TEST, "KeyError: 'thing'"),
+    "tests/test_factor.py": (
+        U24_FACTOR_TEST,
+        "TypeError: high_bound() got an unexpected keyword argument 'factor'",
+    ),
+}
+
+
+def red_again(stem: str) -> str:
+    """Return the pattern of a ``plan-tool.sh red <plan> 1 again`` call on a plan."""
+    return rf"\bred\s+\S*{re.escape(stem)}\.md['\"]?\s+1\s+again\b"
+
+
+def setup_u24(ws: Workspace) -> None:
+    """Commit U24's two Test first tests, which ``fixtures/mini`` must not hold."""
+    for rel, (body, _error) in U24_TESTS.items():
+        (ws.dir / rel).write_text(body, encoding="utf-8")
+    _commit(ws, "eval: the report and factor tests")
+
+
+# Plan 58 (U25): run 1's step 2 rebuilt in mini. The route handler
+# ``list_notes`` is reached through ``handle``, so the test never spells its
+# name; ``steps/1.red`` is red and ``steps/1.verify`` passes on the end tree.
+REDGREEN = FIXTURES / "redgreen"
+U25_STEM = "u25"
+U25_SYMBOL = "list_notes"
+
+
+def setup_redgreen(ws: Workspace) -> None:
+    """Commit U25's router and its test, then install the plan, records and diff."""
+    shutil.copytree(REDGREEN / "base", ws.dir, dirs_exist_ok=True)
+    _commit(ws, "eval: the notes router")
+    plans = ws.dir / ".whygraph" / "plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    shutil.copy(REDGREEN / "plan.md", plans / f"{U25_STEM}.md")
+    steps = plans / U25_STEM / "steps"
+    shutil.copytree(REDGREEN / "steps", steps, dirs_exist_ok=True)
+    subprocess.run(["git", "apply", str(steps / "1.diff")], cwd=ws.dir, check=True)
+
+
+# Plan 58 (P23): ui-demo gets a test script, a fast test of ``src/flags.js``
+# and a slow test, so ``npm test`` takes about 8 s and the dry run, with
+# ``WHYGRAPH_VERIFY_TIMEOUT=5``, cuts item 1 off.
+P23_TASK = (
+    "add an isOn(name) function to src/flags.js that returns whether the named "
+    "flag is on"
+)
+PLAN_P23 = ".whygraph/plans/eval-p23.md"
+P23_SCRIPTS = (
+    '"scripts":{"dev":"vite"}',
+    '"scripts":{"dev":"vite","test":"node --test"}',
+)
+P23_FULL_COMMANDS = ("npm test", "npm run test", "node --test")
+P23_FAST_TEST = """import test from 'node:test'
+import assert from 'node:assert/strict'
+import { flags } from './flags.js'
+
+test('every flag is off by default', () => {
+  for (const value of Object.values(flags)) assert.equal(value, false)
+})
+"""
+P23_SLOW_TEST = """import test from 'node:test'
+import assert from 'node:assert/strict'
+
+test('the warm-up window ends after 8 seconds', async () => {
+  const started = Date.now()
+  await new Promise((resolve) => setTimeout(resolve, 8000))
+  assert.ok(Date.now() - started >= 8000)
+})
+"""
+
+
+def setup_slow_suite(ws: Workspace) -> None:
+    """Add ui-demo's ``test`` script, a fast flags test and an 8 s test.
+
+    The edits are working-tree changes that the portal workspace restores
+    afterwards.
+
+    Raises
+    ------
+    ValueError
+        When ``package.json`` does not hold the ``scripts`` entry the hook edits.
+    """
+    package = ws.dir / "package.json"
+    text = package.read_text(encoding="utf-8")
+    old, new = P23_SCRIPTS
+    if old not in text:
+        raise ValueError(f"P23: package.json has no {old!r}")
+    package.write_text(text.replace(old, new, 1), encoding="utf-8")
+    (ws.dir / "src" / "flags.test.js").write_text(P23_FAST_TEST, encoding="utf-8")
+    (ws.dir / "src" / "warmup.test.js").write_text(P23_SLOW_TEST, encoding="utf-8")
+
+
 PLAN_P1 = ".whygraph/plans/eval-p1.md"
 PLAN_P2 = ".whygraph/plans/eval-p2.md"
 REVIEW_P2 = ".whygraph/plans/eval-p2.review.md"
@@ -1250,6 +1376,47 @@ CASES: tuple[Case, ...] = (
             reaches_acceptance(),
             file_contains(".whygraph/plans/u19/steps/1.red", "result: red\n"),
             printed("- Proof: 1 of 2 steps proven, 1 unproven"),
+        ),
+    ),
+    # Plan 58 section 7, criteria 1 and 2: a Test first test that fails in its
+    # own setUp is fixed once and its red run taken again (u24a); a test that
+    # fails on the missing argument is left alone (u24b).
+    Case(
+        id="U24",
+        name="wrong red fixed once, right red kept",
+        prompts=(implement("u24a", "--no-eval"), implement("u24b", "--no-eval")),
+        budget=2.0,
+        estimate=1.2,
+        plans=("u24a.md", "u24b.md"),
+        setup=setup_u24,
+        checks=(
+            file_exists(".whygraph/plans/u24a/steps/1.done"),
+            replace(verify_record("u24a", 1), name="u24a: step 1 verify record"),
+            log_line_count("u24a", "red again:", 1),
+            bash_call_count(red_again("u24a"), 1, "u24a: one red again call"),
+            file_contains(".whygraph/plans/u24a/steps/1.red", "result: red\n"),
+            file_lacks(".whygraph/plans/u24a/steps/1.red", "KeyError"),
+            file_contains("tests/test_report.py", "def test_render_title("),
+            file_exists(".whygraph/plans/u24b/steps/1.done"),
+            replace(verify_record("u24b", 1), name="u24b: step 1 verify record"),
+            log_line_count("u24b", "red again:", 0),
+            bash_call_count(red_again("u24b"), 0, "u24b: no red again call"),
+            file_contains("tests/test_factor.py", "def test_high_bound_factor("),
+        ),
+    ),
+    # Plan 58 section 7, criterion 3: the evaluator only, as O7, on run 1's
+    # step 2 rebuilt in mini: red before, Verify passes after, and the test
+    # file never spells the handler's name.
+    Case(
+        id="U25",
+        name="red then green proves a route",
+        prompts=(evaluator_prompt(U25_STEM),),
+        budget=0.9,
+        estimate=0.5,
+        setup=setup_redgreen,
+        checks=(
+            verdicts_per_run(["pass"]),
+            reply_lacks("Verify does not exercise"),
         ),
     ),
     Case(
@@ -1710,6 +1877,32 @@ CASES: tuple[Case, ...] = (
             plan_tool_check("eval-p20"),
         ),
     ),
+    # Plan 58 section 7, criterion 4: a single-pass plan whose full test
+    # command outlasts WHYGRAPH_VERIFY_TIMEOUT. The dry run stays on.
+    Case(
+        id="P23",
+        name="slow suite scopes Acceptance item 1",
+        prompts=(
+            f"/whygraph-plan {P23_TASK} --shallow --no-questions --out {PLAN_P23}",
+        ),
+        budget=2.0,
+        estimate=1.1,
+        setup=setup_slow_suite,
+        env={"WHYGRAPH_VERIFY_TIMEOUT": "5"},
+        checks=(
+            file_exists(PLAN_P23),
+            acceptance_item1_scoped(PLAN_P23, P23_FULL_COMMANDS),
+            acceptance_manual_full(PLAN_P23, P23_FULL_COMMANDS),
+            section_lacks(
+                PLAN_P23,
+                "Blockers",
+                r"Verify did not finish",
+                "Verify did not finish Blocker",
+            ),
+            plan_tool_check("eval-p23"),
+            dryrun_record("eval-p23", "acceptance 1: timeout"),
+        ),
+    ),
     Case(
         id="P11",
         name="plan review in a deep plan",
@@ -1864,6 +2057,98 @@ def validate() -> list[str]:
     problems.extend(_u17_fixture_problems())
     problems.extend(_u12_fixture_problems())
     problems.extend(_u13_fixture_problems())
+    problems.extend(_u24_fixture_problems())
+    problems.extend(_u25_fixture_problems())
+    return problems
+
+
+def _u24_fixture_problems() -> list[str]:
+    """Check U24's tests in a scratch clone of mini: each fails with its error.
+
+    Returns
+    -------
+    list of str
+        One line per test whose run does not print its expected error.
+    """
+    problems = []
+    for rel in U24_TESTS:
+        if (FIXTURES / "mini" / rel).exists():
+            problems.append(f"U24: fixtures/mini/{rel} exists; U24's setup adds it")
+    with tempfile.TemporaryDirectory(prefix="agent-eval-u24-") as tmp:
+        repo = Path(tmp) / "repo"
+        shutil.copytree(
+            FIXTURES / "mini", repo, ignore=shutil.ignore_patterns("__pycache__")
+        )
+        for rel, (body, error) in U24_TESTS.items():
+            (repo / rel).write_text(body, encoding="utf-8")
+            module = rel.removesuffix(".py").replace("/", ".")
+            out = subprocess.run(
+                ["python3", "-B", "-m", "unittest", module],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if out.returncode == 0 or error not in out.stderr:
+                problems.append(f"U24: {rel} exits {out.returncode} without {error!r}")
+    return problems
+
+
+def _u25_fixture_problems() -> list[str]:
+    """Check U25's records: red, then a Verify on the end tree, and no symbol name.
+
+    Returns
+    -------
+    list of str
+        One line per missing file, record that does not hold its result, test
+        file that names ``list_notes``, or diff that does not apply to the base.
+    """
+    rels = (
+        "plan.md",
+        "base/mini/routes.py",
+        "base/tests/test_routes.py",
+        "steps/1.diff",
+        "steps/1.t0",
+        "steps/1.t1",
+        "steps/1.red",
+        "steps/1.verify",
+    )
+    missing = [rel for rel in rels if not (REDGREEN / rel).is_file()]
+    if missing:
+        return [f"U25: missing fixtures/redgreen/{rel}" for rel in missing]
+    problems = []
+    steps = REDGREEN / "steps"
+    t1 = (steps / "1.t1").read_text(encoding="utf-8").strip()
+    verify = (steps / "1.verify").read_text(encoding="utf-8")
+    if "exit: 0\n" not in verify or f"tree: {t1}\n" not in verify:
+        problems.append("U25: steps/1.verify does not pass on steps/1.t1")
+    red = (steps / "1.red").read_text(encoding="utf-8")
+    if "exit: 1\n" not in red or "result: red\n" not in red:
+        problems.append("U25: steps/1.red is not a red run")
+    with tempfile.TemporaryDirectory(prefix="agent-eval-u25-") as tmp:
+        repo = Path(tmp) / "repo"
+        shutil.copytree(REDGREEN / "base", repo)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        applied = subprocess.run(
+            ["git", "apply", str(steps / "1.diff")],
+            cwd=repo,
+            capture_output=True,
+            check=False,
+        )
+        if applied.returncode != 0:
+            problems.append(
+                "U25: steps/1.diff does not apply to fixtures/redgreen/base"
+            )
+        elif U25_SYMBOL in (repo / "tests" / "test_routes.py").read_text("utf-8"):
+            problems.append(f"U25: the test file names {U25_SYMBOL}")
+    out = subprocess.run(
+        ["sh", str(PLAN_TOOL), "check", str(REDGREEN / "plan.md")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if out.returncode != 0:
+        problems.append(f"U25: plan-tool.sh check exit {out.returncode}")
     return problems
 
 

@@ -276,6 +276,10 @@ code and the end of the output. Its `result:` line is one of these:
 The script also copies the test to `.whygraph/plans/<stem>/testfirst/<N>/`. The copy is the reference
 for the guard. The script never runs a command that the plan does not name.
 
+A red run that fails in the test's own setup, or in code the step does not touch, is a wrong red. The
+implementor fixes the test once and runs `plan-tool.sh red <plan> <N> again` before any code changes.
+If that second red is wrong too, the run stops.
+
 #### The Test first guard
 
 The implementor must not edit the test to make it pass. So `verify` and `end` compare the test's block
@@ -436,9 +440,10 @@ it stops only when no rung of its ladder can help.
 - **A Verify must only check.** A `Verify` that migrates a database, writes a file, or waits for input
   fails this pre-flight or the run. Give such a step a command that only checks.
 - **`WHYGRAPH_VERIFY_TIMEOUT`** sets the deadline of one `Verify` or Check, in seconds. The default is
-  540 and the largest accepted value is 580. Export it before you start your editor.
+  540 and the ceiling is 580, the largest accepted value. Export it before you start your editor.
   A Check that exceeds it, for example a full suite that takes more than 9 minutes, is recorded as
   exit 124 and the run stops with `acceptance failed`. Give that item a faster Check, or make it `manual:`.
+  A full test command that needs longer is scoped by the dry run (see the stop table below).
 
 The **recovery ladder** is counted by the plan tool, never by a model. For one step it allows:
 
@@ -476,11 +481,12 @@ Every stop prints one block that names the cause, and the next action:
 |---|---|
 | `Verify fails before any change: <lines>` | The named `Verify` fails on your machine before any edit. Fix the environment, or change the `Verify`. Then run the command again. |
 | `setup failed: <line>` | A `## Setup` command of the plan failed, hit its deadline or changed a tracked file. Run it by hand to see why. Then run the command again. |
-| `Verify did not finish in <T> s` (also `at baseline`) | Narrow the step's `Verify`, or export a larger `WHYGRAPH_VERIFY_TIMEOUT` (at most 580). |
+| `Verify did not finish in <T> s` (also `at baseline`) | Narrow the step's `Verify`. For Acceptance item 1, the dry run makes item 1 the steps' test files and moves the full command to a `manual:` item, for CI. |
 | `Verify cannot run: <misses>`, `Check cannot run: <misses>` | Make the command plain. A shell function such as `nvm` does not exist under `sh -c`. |
 | `a Verify changed the working tree at baseline: <paths>` | Add a cache or build output to `.gitignore`, or give the step a `Verify` that only checks. |
 | `Verify still fails: <excerpt>` | Read `steps/<N>.verify`. Fix the code or the step. |
 | `the Test first test passed before the change`, `... was edited`, `... cannot run` | The step's test does not cover the change, or was changed, or is not a plain command. Fix the test or the step. `was edited` comes from the guard: `verify` printed `verify: test first edited`, or `end` exited 5. |
+| `the Test first test fails for a reason the step does not change` | The test still fails in its own setup after one fix. Fix the test's setup, or change the step's Test first. |
 | `permission denied: <command>` | Allow the command, or change the step. An unattended run needs a permission mode that does not prompt. |
 | `spec findings remain`, `escalate after amendment` | Read the evaluation above, then fix the code or edit the step. |
 | `a recorded constraint is at risk` | Read the review above. Change the step or the code, or record that the constraint no longer holds with `/whygraph-note`. |

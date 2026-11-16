@@ -97,3 +97,13 @@
 - **The platform API is version 2.** A rationale card's `constraints` and `risks` are lists of
   items with their sources, so a linked portal and its platform must both run this release. An older
   linked portal shows **Update required** until it is updated.
+- **`/whygraph-implement` handles a slow suite and a wrong red run.** A Test first test that fails in
+  its own setup gets one fix and a second `red` run before any code changes. A second wrong red stops
+  the run with `the Test first test fails for a reason the step does not change`. The spec evaluator's
+  "Verify exercises the change" check also passes when the Test first test was red before the change
+  and the `Verify` passes after it. A `Verify` or Check is capped at 580 s. When the dry run finds that
+  Acceptance item 1 (the full test command) does not finish, the single-pass planner now makes item 1
+  the steps' test files and adds a `manual:` item with the full command, for CI, instead of writing a
+  Blocker. Run **Settings > Update agent files** to pick it up, and see
+  [The red run of a Test first step](../guide/planning.md#the-red-run-of-a-test-first-step) and
+  [Running unattended](../guide/planning.md#running-unattended).

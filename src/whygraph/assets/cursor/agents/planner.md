@@ -379,7 +379,7 @@ Write the `ui` block only when a `ui` reviewer ran. Write the `journey` block on
 
 3. **Fixer.** Run this item when a reviewer ran, or when the dry-run block's first line is `REVIEW: dry-run` with nothing after it. An `(unavailable: ...)` dry-run block alone starts no fixer: name it in the Confidence reason. Delegate to a fresh `whygraph-synthesizer` with the **2e** prompt, `ANSWERS: none`, `NOTICE: none` and one more line above `ANSWERS`: `REVIEW_PATH: <absolute path of the review sidecar>`. In single-pass mode, pass `RESEARCH_PATH: none`. The fixer checks each finding against the code, applies or refutes it, and runs the check.
 
-Without a fixer, you wrote the plan yourself. Then write each dry-run finding to `## Blockers` as `- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`, and run the **Check loop**.
+Without a fixer, you wrote the plan yourself. Then write each dry-run finding to `## Blockers` as `- **Dry run F<n>:** <defect> - **Resolution needed:** <fix>`, and run the **Check loop**. A dry-run finding on `acceptance` that starts `Verify did not finish` is no Blocker: apply its fix to `## Acceptance` yourself, and name it in the Confidence reason.
 
 4. **Its reply.** **Delivering the plan** treats the fixer's reply as it treats the **2e** reply, a refused write included. A fixer reply with no `Saved plan to` line and no plan is a failed review. Then keep the plan as it is, and relay the reply you had before **2g**. Add `review: failed - <reason>` to the Confidence reason of the plan and of that reply.
 

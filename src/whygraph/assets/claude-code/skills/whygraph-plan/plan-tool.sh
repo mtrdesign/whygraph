@@ -4456,8 +4456,10 @@ dry_finish() {
             ;;
         'timeout '*)
             seconds=${at#*acceptance 1: timeout }
-            printf 'acceptance\t%s\tVerify did not finish in %s s\tUse a faster full test command, or raise WHYGRAPH_VERIFY_TIMEOUT.\n' \
-                "${at%%:*}" "${seconds%%:*}" >>"$work/lines"
+            full=$(dry_excerpt "$(plan_field "$work/plan" 1 Check | head -n 1)")
+            [ "$full" != "no output" ] || full="the full test command"
+            printf 'acceptance\t%s\tVerify did not finish in %s s\tMake item 1 run the test files of the steps'"'"' Verify commands, and add an item whose Check is manual: %s.\n' \
+                "${at%%:*}" "${seconds%%:*}" "$full" >>"$work/lines"
             ;;
     esac
     at=$(grep -n '^smoke: ' "$record" | tail -n 1)

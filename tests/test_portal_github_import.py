@@ -1017,7 +1017,14 @@ def test_concurrent_imports_of_one_repo_keep_one_clone(
     assert refused.json()["code"] == "duplicate"
     (accepted,) = [r for r in results if r.status_code == 201]
     assert wait_import(w, accepted)["status"] == "ok"
-    assert clone_dirs(w) == ["api"]
+    # The winner takes "api", or "api-2" when it read the loser's history
+    # directory between its mkdir and its sidecar link (a directory with no
+    # sidecar is foreign). Either way one clone, named after the winner.
+    slug = accepted.json()["project"]["slug"]
+    assert slug in ("api", "api-2")
+    assert clone_dirs(w) == [slug]
+    history = w.env.data / "projects" / "acme"
+    assert sorted(p.name for p in history.iterdir()) == [slug]  # loser released
     with portal_db.get_session() as session:
         assert len(session.exec(select(Project.id)).all()) == 1
 

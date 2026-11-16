@@ -1220,6 +1220,17 @@ def test_spine_unattended_verify_rule_and_new_sections() -> None:
         assert spine.index("## Plan review") < spine.index("## Confidence:"), tree
         assert "- **Review finding F<n> (<lens>):**" in spine, tree
         assert "A Check must finish within 9 minutes." in spine, tree
+        assert (
+            "A Check must finish within 9 minutes. When the dry run reports "
+            "that item 1 did not finish, item 1 runs the test files that the "
+            "steps' Verify commands run, in one command. The last item's "
+            "Check is then `manual:` with the full command, for CI."
+        ) in spine, tree
+        assert (
+            "- [ ] Acceptance item 1 is the full test command, or the steps' "
+            "test files when the full command is too slow." in spine
+        ), tree
+        assert "fastest full command" not in spine, tree
 
 
 _SOURCE_KEYS = {
@@ -6041,3 +6052,16 @@ def test_login_contract() -> None:
         assert impl.index(expired) > impl.index(
             "`3`: halt with `capture unavailable: <first stderr line>`."
         ), tree
+
+
+_DRYRUN_TIMEOUT_SENTENCE = (
+    "A dry-run finding on `acceptance` that starts `Verify did not finish` "
+    "is no Blocker: apply its fix to `## Acceptance` yourself, and name it "
+    "in the Confidence reason."
+)
+
+
+@pytest.mark.parametrize("tree", ("claude-code", "cursor", "vscode", "codex"))
+def test_planner_applies_the_acceptance_timeout_fix(tree: str) -> None:
+    """Plan 58: a slow item 1 is the planner's to fix, not a Blocker."""
+    assert _DRYRUN_TIMEOUT_SENTENCE in "\n".join(_agent_body(tree, "planner")), tree

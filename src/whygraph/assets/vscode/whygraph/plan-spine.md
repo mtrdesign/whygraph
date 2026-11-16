@@ -108,7 +108,7 @@ Write this section only when a source reported setup commands. A format command 
 - Add the user-visible outcomes of the task as the next items. Add at most six items in all.
 - Give each item a **Check**: a literal command, or `manual: <what to look at>`.
 - A Verify and a Check run under `sh -c`, with no shell profile, no terminal and closed input. A Verify runs before the change and after it. So never use a shell function or alias, such as `nvm use` or `conda activate`, and never use `source`. Never use a command that asks a question or opens an editor or a browser. Never start a server, or change shared state such as a development database. Prefer the command that checks, not the one that applies.
-- A Check must finish within 9 minutes. For a longer suite, item 1 names the fastest full command, such as a parallel run. Item 1 may instead be `manual:` with the command to run.
+- A Check must finish within 9 minutes. When the dry run reports that item 1 did not finish, item 1 runs the test files that the steps' Verify commands run, in one command. The last item's Check is then `manual:` with the full command, for CI.
 
 ## User journey
 
@@ -158,7 +158,7 @@ Check each box before you hand the plan over.
 - [ ] Each step has a Verify and a Model.
 - [ ] Each Verify can pass when its own step is done.
 - [ ] Each file a Change names is in Files.
-- [ ] Acceptance item 1 is the full test command.
+- [ ] Acceptance item 1 is the full test command, or the steps' test files when the full command is too slow.
 - [ ] Each question has options and a default.
 - [ ] No em dash or en dash appears. Use a plain hyphen.
 - [ ] The writing rules hold in each `Change` line.

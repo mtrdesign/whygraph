@@ -4996,6 +4996,22 @@ def test_dryrun_a_short_deadline_takes_two_calls(repo: Path) -> None:
     assert last.stdout.startswith("REVIEW: dry-run none\n")
 
 
+def test_dryrun_a_slow_item_1_names_the_steps_test_files(repo: Path) -> None:
+    """Plan 58 criterion 4: the timeout finding carries the new fix text."""
+    _write_plan(
+        repo,
+        _full_plan(("a.txt", "`true`", None), checks=("`sleep 8`",)),
+    )
+    block = _finish(repo, env={"WHYGRAPH_VERIFY_TIMEOUT": "5"})
+    findings = [f for f in _findings(block) if "Verify did not finish in" in f]
+    assert len(findings) == 1, block
+    assert (
+        "fix: Make item 1 run the test files of the steps' Verify commands, "
+        "and add an item whose Check is manual: sleep 8." in findings[0]
+    ), findings[0]
+    assert "raise WHYGRAPH_VERIFY_TIMEOUT" not in findings[0]
+
+
 def test_dryrun_a_finished_record_runs_the_commands_again(repo: Path) -> None:
     """Plan 56 criterion 55."""
     (repo / ".whygraph").mkdir()

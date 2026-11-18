@@ -38,6 +38,7 @@ from whygraph.core.config import Config
 from whygraph.core.usage import UsageRecord, UsageScope
 
 from .models import COUNTED_CALL_SOURCES
+from .people import user_label
 from .prices import PriceOverrides, cost, has_custom_endpoint, price_for
 from .usage_store import PriceBook, SpendBook, UsageRow, UsageWriter
 
@@ -105,7 +106,7 @@ def actor_label(principal: Principal | None, *, production: bool) -> str:
     Parameters
     ----------
     principal : Principal or None
-        The request's principal.
+        The request's principal, or a ``users`` row (the same attributes).
     production : bool
         Whether the portal runs in production mode.
 
@@ -113,13 +114,18 @@ def actor_label(principal: Principal | None, *, production: bool) -> str:
     -------
     str
         ``"Name (@login)"`` in production for a GitHub account, else
-        ``"Name"``; ``"Member"`` when there is no principal.
+        ``"Name"``; ``"Member"`` when there is no principal; ``"[Deleted
+        User]"`` for a soft-deleted user's row (plan 59 section 4.3.1).
     """
     if principal is None:
         return "Member"
-    name = principal.display_name
-    if production and principal.github_login:
-        return f"{name} (@{principal.github_login})"
+    name, login = user_label(
+        principal.display_name,
+        principal.github_login,
+        getattr(principal, "deleted_at", None),
+    )
+    if production and login:
+        return f"{name} (@{login})"
     return name
 
 

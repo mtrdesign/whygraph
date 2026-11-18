@@ -52,6 +52,7 @@ from .config_layers import ConfigPolicyError, find_secret_paths, load_layer
 from .context import resolve_root
 from .db import get_session as portal_session
 from .models import Project, User
+from .people import user_label
 
 _log = logging.getLogger(__name__)
 
@@ -129,15 +130,21 @@ def _strip(uid: str | None) -> str | None:
 
 
 def _user_names(uids: set[str]) -> dict[str, str]:
-    """Display names of plain uids from the portal's ``users`` table."""
+    """Display names of plain uids from the portal's ``users`` table.
+
+    A soft-deleted user is ``[Deleted User]`` (plan 59 section 4.3.1).
+    """
     if not uids:
         return {}
     with portal_session() as db:
-        return dict(
-            db.exec(
-                select(User.uid, User.display_name).where(col(User.uid).in_(uids))
+        return {
+            uid: user_label(name, None, deleted_at)[0]
+            for uid, name, deleted_at in db.exec(
+                select(User.uid, User.display_name, User.deleted_at).where(
+                    col(User.uid).in_(uids)
+                )
             ).all()
-        )
+        }
 
 
 def _project_layer(project: Project, mode: str | None) -> dict[str, Any]:

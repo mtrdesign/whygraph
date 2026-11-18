@@ -59,6 +59,7 @@ from .models import (
     User,
 )
 from .orgs import add_member
+from .people import user_label
 from .security import Principal
 from .usage_routes import member_month_spend, member_spend_fields
 
@@ -293,7 +294,15 @@ def _invitation_row(
     grants: list[tuple[str, str]],
     now: str,
 ) -> dict:
-    """One invitation as the API shows it (never an email)."""
+    """One invitation as the API shows it (never an email).
+
+    A soft-deleted inviter is ``[Deleted User]`` (plan 59 section 4.3.1).
+    """
+    name, login = (
+        (None, None)
+        if inviter is None
+        else user_label(inviter.display_name, inviter.github_login, inviter.deleted_at)
+    )
     return {
         "uid": invitation.uid,
         "github_login": invitation.github_login,
@@ -303,8 +312,8 @@ def _invitation_row(
         if inviter is None
         else {
             "uid": inviter.uid,
-            "display_name": inviter.display_name,
-            "github_login": inviter.github_login,
+            "display_name": name,
+            "github_login": login,
         },
         "created_at": invitation.created_at,
         "expires_at": invitation.expires_at,
@@ -403,8 +412,9 @@ def post_member(
     hour, ``404 no_such_github_user`` (GitHub has no such user, or it is an
     organization), ``502 github_unavailable``, ``503 github_rate_limited``
     (with ``Retry-After``), ``404 no_such_project`` (a grant's project is
-    not in the org), ``409 user_disabled``, ``409 already_member``, ``409
-    already_invited``. Every refusal is audited with the tried login.
+    not in the org), ``409 user_disabled``, ``409 user_deleted`` (a
+    soft-deleted account, plan 59 section 4.3.1), ``409 already_member``,
+    ``409 already_invited``. Every refusal is audited with the tried login.
 
     Returns
     -------
@@ -484,6 +494,21 @@ def post_member(
     invitation_uid: str | None = None
     try:
         with get_session() as db:
+            # The account's row first, FOR SHARE (plan 59 section 4.3.1): it
+            # waits for a running soft delete of that account, then refuses.
+            user = db.exec(
+                select(User)
+                .where(User.github_id == found.id)
+                .with_for_update(read=True)
+            ).first()
+            if user is not None and user.deleted_at is not None:
+                refused("user_deleted", login)
+                raise ApiError(
+                    409,
+                    "this account was deleted: a platform administrator must "
+                    "restore it first",
+                    code="user_deleted",
+                )
             # Held FOR SHARE (as the import does), so a concurrent org
             # deletion either finished first or waits for this transaction.
             if (
@@ -500,7 +525,6 @@ def post_member(
             except ApiError:
                 refused("no_such_project", login)
                 raise
-            user = db.exec(select(User).where(User.github_id == found.id)).first()
             now = _now()
             if user is not None:
                 assert user.id is not None

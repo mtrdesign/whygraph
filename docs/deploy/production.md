@@ -681,20 +681,21 @@ plus these GitHub, member, project and organization events:
 | Event | When |
 |---|---|
 | `github_signin` | A GitHub sign-in succeeded (and whether the account is new). |
-| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required` or `disabled`. A refusal on the admin sign-in page also carries `surface` `admin`. |
+| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required`, `disabled` or `deleted` (a deleted account). A refusal on the admin sign-in page also carries `surface` `admin`. |
 | `admin_signin` | Someone signed in to [platform administration](administration.md) (with the `method`, `password` or `github`). |
-| `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin` or `disabled`. It writes nothing else: no account, no session. |
+| `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin`, `disabled` or `deleted`. It writes nothing else: no account, no session. |
 | `admin_signout` | An admin session ended by sign-out, from the admin panel or (with `reason` `signout`) because the everyday session it was started beside signed out. |
-| `reader_grant_created`, `reader_grant_revoked` | A platform administrator opened an organization read-only for 60 minutes ("Open as reader"), or that access ended early: revoked by the administrator, or (with the `reason` `demoted` or `disabled`) because they stopped being an administrator or were disabled. Both are in the organization's own log. |
+| `reader_grant_created`, `reader_grant_revoked` | A platform administrator opened an organization read-only for 60 minutes ("Open as reader"), or that access ended early: revoked by the administrator, or (with the `reason` `demoted`, `disabled` or `user_deleted`) because they stopped being an administrator, were disabled or were deleted. Both are in the organization's own log. |
 | `github_token_revoke_failed` | GitHub's one-time token could not be revoked. |
 | `github_login_released` | A username moved to another account and was taken from the older one. |
-| `member_added`, `member_add_refused` | A member was added, or the attempt was refused (with the reason and the username tried). |
-| `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed or left. |
+| `member_added`, `member_add_refused` | A member was added (with the `reason` `user_restored` when a platform administrator restored their account), or the attempt was refused (with the reason and the username tried). |
+| `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed (with the `reason` `user_deleted` when a platform administrator deleted their account) or left. |
 | `invitation_created`, `invitation_revoked`, `member_joined_by_invite` | An invitation was made or revoked, or redeemed at sign-in. |
 | `project_grant_added`, `project_grant_changed`, `project_grant_removed` | A project grant changed. |
 | `project_restricted_changed` | A project was marked or unmarked Restricted. |
 | `org_renamed`, `org_default_role_changed`, `org_ownership_transferred` | An owner renamed the organization, changed its default project role or transferred ownership. |
 | `user_disabled`, `user_enabled` | An instance admin disabled or enabled an account. |
+| `user_deleted`, `user_restored`, `user_erased` | A platform administrator deleted an account (it is hidden as `[Deleted User]`, its memberships, sessions and connection tokens end, and it can be restored), restored one (its memberships come back), or erased a deleted one's personal data for good (the event carries only the account's id). |
 | `sessions_revoked` | A platform administrator ended a user's sessions: all of them or one kind (`kind` is `all`, `user` or `admin`), or a single session, with how many (`count`). Ending everyday sessions also ends the admin sessions started beside them. |
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |

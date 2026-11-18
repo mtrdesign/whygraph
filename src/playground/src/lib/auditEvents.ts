@@ -29,6 +29,9 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   invitation_revoked: { label: "Invitation revoked", group: "Members" },
   user_disabled: { label: "Account disabled", group: "Members" },
   user_enabled: { label: "Account enabled", group: "Members" },
+  user_deleted: { label: "Account deleted", group: "Members" },
+  user_restored: { label: "Account restored", group: "Members" },
+  user_erased: { label: "Account erased", group: "Members" },
   // Projects
   project_imported: { label: "Project imported", group: "Projects" },
   project_removed: { label: "Project removed", group: "Projects" },
@@ -157,9 +160,13 @@ const REASONS: Record<string, string> = {
   // Admin panel sign-in and sign-out
   unknown_user: "No account for this GitHub user",
   not_admin: "Not a platform administrator",
+  deleted: "The account was deleted",
   signout: "Signed out of the portal",
   // Reader grants
   demoted: "No longer a platform administrator",
+  // Deleting and restoring an account
+  user_deleted: "The account was deleted",
+  user_restored: "The account was restored",
   // Adding a member
   bad_login: "Not a valid GitHub username",
   owner_required: "Only an owner can add an owner",

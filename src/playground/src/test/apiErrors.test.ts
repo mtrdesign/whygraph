@@ -105,6 +105,35 @@ describe("extras", () => {
     );
   });
 
+  it("names every org a user delete is the last owner of", () => {
+    expect(
+      errorMessage(
+        new ApiError(409, "x", "last_owner", {
+          orgs: [
+            { slug: "acme", deleted: false },
+            { slug: "bravo", deleted: true },
+          ],
+        }),
+      ),
+    ).toBe(
+      "They are the last owner of acme, bravo (deleted). Make someone else an owner of each first. A deleted organization needs Restore and a second owner, or Delete permanently.",
+    );
+    expect(errorMessage(new ApiError(409, "x", "last_owner"))).toBe(
+      "This is the organization's last owner. Make someone else an owner first.",
+    );
+  });
+
+  it("names the projects an Erase could not open", () => {
+    const one = errorInfo(new ApiError(409, "x", "erase_blocked", { projects: ["acme/api"] }));
+    expect(one.title).toBe("Erase stopped");
+    expect(one.message).toBe(
+      "Nothing was erased: WhyGraph couldn't open the chat history of acme/api. Fix or permanently delete that project, then erase again.",
+    );
+    expect(errorMessage(new ApiError(409, "x", "erase_blocked", { projects: ["acme/api", "bravo/lib"] }))).toContain(
+      "acme/api, bravo/lib. Fix or permanently delete those projects",
+    );
+  });
+
   it("turns Retry-After into minutes", () => {
     expect(errorMessage(new ApiError(429, "x", "throttled", { retry_after: 600 }))).toBe(
       "Too many attempts. Try again in 10 minutes.",

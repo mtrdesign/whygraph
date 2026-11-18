@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Integer, Text, bindparam, delete, func, or_
+from sqlalchemy import JSON, Integer, Text, and_, bindparam, delete, func, or_
 from sqlalchemy import insert as sa_insert
 from sqlmodel import Session, col, select
 
@@ -47,6 +47,7 @@ from .csv_export import csv_cell
 from .csv_export import csv_line as _csv_line
 from .db import get_session
 from .models import AuditEvent, Organization, Project, User
+from .people import DELETED_USER, user_label
 
 _log = logging.getLogger(__name__)
 
@@ -89,6 +90,9 @@ CSV_COLUMNS = (
     "fields",
 )
 """The CSV export's header row."""
+
+MASKED_FIELDS = ("github_login", "email")
+"""The ``fields`` keys an org page masks for a soft-deleted user (plan 59 D37)."""
 
 _STOP = object()
 
@@ -544,7 +548,7 @@ def make_filter(
     )
 
 
-def _conditions(f: AuditFilter) -> list:
+def _conditions(f: AuditFilter, *, mask_deleted: bool = False) -> list:
     conditions: list = []
     if f.orgless:
         conditions.append(col(AuditEvent.org_id).is_(None))
@@ -557,13 +561,15 @@ def _conditions(f: AuditFilter) -> list:
     if f.actor:
         actor = f.actor.strip()
         label = "@" + actor.removeprefix("@").lower()
-        conditions.append(
-            or_(
-                col(User.uid) == actor,
-                func.lower(col(AuditEvent.actor_label)) == actor.lower(),
-                func.lower(col(AuditEvent.actor_label)) == label,
-            )
+        by_label = or_(
+            func.lower(col(AuditEvent.actor_label)) == actor.lower(),
+            func.lower(col(AuditEvent.actor_label)) == label,
         )
+        if mask_deleted:
+            # A soft-deleted user is not found by their login (plan 59
+            # section 4.3.1); the outer-joined actor is NULL for a gone one.
+            by_label = and_(by_label, col(User.deleted_at).is_(None))
+        conditions.append(or_(col(User.uid) == actor, by_label))
     if f.subject:
         subject = f.subject.strip()
         conditions.append(
@@ -580,21 +586,30 @@ def _conditions(f: AuditFilter) -> list:
     return conditions
 
 
-def _target_labels(db: Session, events: list[AuditEvent], org_id: int | None) -> dict:
+def _target_labels(
+    db: Session,
+    events: list[AuditEvent],
+    org_id: int | None,
+    *,
+    mask_deleted: bool = False,
+) -> dict:
     """``target`` -> label for the users and projects the events name.
 
     A user ``uid`` becomes ``Name (@login)`` (``Name`` without a login),
-    a project slug of the event's org its name; anything else is absent.
+    or ``[Deleted User]`` for a soft-deleted one with ``mask_deleted``; a
+    project slug of the event's org its name; anything else is absent.
     """
     targets = {e.target for e in events if e.target}
     if not targets:
         return {}
     labels: dict[str, str] = {}
-    for uid, name, login in db.exec(
-        select(User.uid, User.display_name, User.github_login).where(
+    for uid, name, login, deleted_at in db.exec(
+        select(User.uid, User.display_name, User.github_login, User.deleted_at).where(
             col(User.uid).in_(targets)
         )
     ).all():
+        if mask_deleted:
+            name, login = user_label(name, login, deleted_at)
         labels[uid] = f"{name} (@{login})" if login else name
     wanted = targets - labels.keys()
     if wanted and org_id is not None:
@@ -608,8 +623,20 @@ def _target_labels(db: Session, events: list[AuditEvent], org_id: int | None) ->
 
 
 def _row(
-    event: AuditEvent, actor_uid: str | None, labels: dict | None = None
+    event: AuditEvent,
+    actor_uid: str | None,
+    labels: dict | None = None,
+    *,
+    masked: bool = False,
+    actor_deleted: bool = False,
 ) -> dict[str, Any]:
+    actor_label = DELETED_USER if actor_deleted else event.actor_label
+    fields = event.fields
+    if masked and isinstance(fields, dict):
+        fields = {
+            key: DELETED_USER if key in MASKED_FIELDS else value
+            for key, value in fields.items()
+        }
     return {
         "id": event.id,
         "created_at": event.created_at,
@@ -617,18 +644,85 @@ def _row(
         "actor": (
             None
             if event.actor_label is None and actor_uid is None
-            else {"uid": actor_uid, "label": event.actor_label}
+            else {"uid": actor_uid, "label": actor_label}
         ),
         "event": event.event,
         "target": event.target,
         "target_label": (labels or {}).get(event.target) if event.target else None,
         "ip": event.ip,
-        "fields": event.fields,
+        "fields": fields,
     }
 
 
+def _field_ids(events: list[AuditEvent]) -> tuple[set[str], set[int]]:
+    """The lower-cased ``github_login`` and the ``github_id`` values in ``fields``."""
+    logins: set[str] = set()
+    ids: set[int] = set()
+    for event in events:
+        fields = event.fields if isinstance(event.fields, dict) else {}
+        login = fields.get("github_login")
+        if isinstance(login, str) and login:
+            logins.add(login.lower())
+        github_id = fields.get("github_id")
+        if isinstance(github_id, (int, str)) and str(github_id).isdigit():
+            ids.add(int(github_id))
+    return logins, ids
+
+
+def _deleted_people(
+    db: Session, events: list[AuditEvent]
+) -> tuple[set[str], set[str], set[int]]:
+    """The soft-deleted users a page of events names: uids, logins, GitHub ids.
+
+    A target uid counts, and so does a ``fields.github_login`` (any case) or
+    ``fields.github_id`` that a soft-deleted user holds (plan 59 D37).
+    """
+    targets = {e.target for e in events if e.target}
+    logins, ids = _field_ids(events)
+    if not (targets or logins or ids):
+        return set(), set(), set()
+    matches = []
+    if targets:
+        matches.append(col(User.uid).in_(targets))
+    if logins:
+        matches.append(func.lower(col(User.github_login)).in_(logins))
+    if ids:
+        matches.append(col(User.github_id).in_(ids))
+    uids: set[str] = set()
+    deleted_logins: set[str] = set()
+    deleted_ids: set[int] = set()
+    for uid, login, github_id in db.exec(
+        select(User.uid, User.github_login, User.github_id).where(
+            col(User.deleted_at).is_not(None), or_(*matches)
+        )
+    ).all():
+        uids.add(uid)
+        if login:
+            deleted_logins.add(login.lower())
+        if github_id is not None:
+            deleted_ids.add(github_id)
+    return uids, deleted_logins, deleted_ids
+
+
+def _names_deleted(
+    event: AuditEvent,
+    actor_deleted: bool,
+    people: tuple[set[str], set[str], set[int]],
+) -> bool:
+    """Whether ``event`` names a soft-deleted user (actor, target or ``fields``)."""
+    uids, logins, ids = people
+    if actor_deleted or (event.target is not None and event.target in uids):
+        return True
+    one_event_logins, one_event_ids = _field_ids([event])
+    return bool(one_event_logins & logins or one_event_ids & ids)
+
+
 def query_events(
-    f: AuditFilter, *, before: int | None = None, limit: int = PAGE_SIZE
+    f: AuditFilter,
+    *,
+    before: int | None = None,
+    limit: int = PAGE_SIZE,
+    mask_deleted: bool = True,
 ) -> tuple[list[dict[str, Any]], int | None]:
     """One page of events, newest first (keyset on ``id``).
 
@@ -640,6 +734,15 @@ def query_events(
         Only rows with an ``id`` below this (the previous page's ``next``).
     limit : int, optional
         Page size.
+    mask_deleted : bool, optional
+        Hide soft-deleted users, as org pages must (plan 59 section 4.3.1,
+        D37): the actor and target labels become ``[Deleted User]``, the
+        ``github_login`` and ``email`` fields of an event that names one
+        (as actor, target, or by ``fields.github_login`` /
+        ``fields.github_id``) are replaced by the same label, and the
+        ``actor`` filter no longer finds one by login (the default, the
+        safe side). The admin panel passes ``False`` and sees the real
+        values until Erase.
 
     Returns
     -------
@@ -647,26 +750,46 @@ def query_events(
         The rows, and the ``before`` value of the next page (``None`` on
         the last page).
     """
-    conditions = _conditions(f)
+    conditions = _conditions(f, mask_deleted=mask_deleted)
     if before is not None:
         conditions.append(col(AuditEvent.id) < before)
     with get_session() as db:
         rows = db.exec(
-            select(AuditEvent, User.uid)
+            select(AuditEvent, User.uid, User.deleted_at)
             .outerjoin(User, col(User.id) == col(AuditEvent.actor_id))
             .where(*conditions)
             .order_by(col(AuditEvent.id).desc())
             .limit(limit + 1)
         ).all()
         page = rows[:limit]
-        labels = _target_labels(db, [e for e, _ in page], f.org_id)
-        events = [_row(event, uid, labels) for event, uid in page]
+        page_events = [e for e, _, _ in page]
+        labels = _target_labels(db, page_events, f.org_id, mask_deleted=mask_deleted)
+        if not mask_deleted:
+            events = [_row(event, uid, labels) for event, uid, _ in page]
+        else:
+            people = _deleted_people(db, page_events)
+            events = []
+            for event, uid, deleted_at in page:
+                actor_deleted = deleted_at is not None
+                events.append(
+                    _row(
+                        event,
+                        uid,
+                        labels,
+                        masked=_names_deleted(event, actor_deleted, people),
+                        actor_deleted=actor_deleted,
+                    )
+                )
     more = len(rows) > limit
     return events, (events[-1]["id"] if more and events else None)
 
 
 def iter_csv(
-    f: AuditFilter, *, max_rows: int = CSV_MAX_ROWS, chunk: int = 1000
+    f: AuditFilter,
+    *,
+    max_rows: int = CSV_MAX_ROWS,
+    chunk: int = 1000,
+    mask_deleted: bool = True,
 ) -> Iterator[str]:
     """Stream the filtered events as CSV lines, newest first.
 
@@ -678,6 +801,8 @@ def iter_csv(
         The cap on data rows.
     chunk : int, optional
         Rows read per query.
+    mask_deleted : bool, optional
+        As for :func:`query_events` (org exports mask, D37).
 
     Yields
     ------
@@ -689,7 +814,10 @@ def iter_csv(
     sent = 0
     while sent < max_rows:
         events, before = query_events(
-            f, before=before, limit=min(chunk, max_rows - sent)
+            f,
+            before=before,
+            limit=min(chunk, max_rows - sent),
+            mask_deleted=mask_deleted,
         )
         for e in events:
             actor = e["actor"] or {}

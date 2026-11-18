@@ -640,7 +640,9 @@ def get_org_audit(
         ``{"events": [...], "next": <id or null>}``.
     """
     f = org_audit_filter(access, event, actor, since, until)
-    events, next_before = audit_store.query_events(f, before=before, limit=limit)
+    events, next_before = audit_store.query_events(
+        f, before=before, limit=limit, mask_deleted=True
+    )
     return {"events": events, "next": next_before}
 
 
@@ -659,7 +661,7 @@ def get_org_audit_csv(
     """
     f = org_audit_filter(access, event, actor, since, until)
     return StreamingResponse(
-        audit_store.iter_csv(f),
+        audit_store.iter_csv(f, mask_deleted=True),
         media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": (

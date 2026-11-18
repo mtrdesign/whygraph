@@ -45,6 +45,7 @@ from sqlmodel import Session, col, select
 
 from .authz import ProjectRole, Role, effective_project_role
 from .db import get_session
+from .people import user_label
 from .models import (
     ConnectionToken,
     Membership,
@@ -966,6 +967,7 @@ def _infos(db: Session, *conditions) -> list[TokenInfo]:  # noqa: ANN002
             ConnectionToken,
             User.github_login,
             User.display_name,
+            User.deleted_at,
             Project.slug,
             Project.name,
         )
@@ -976,6 +978,11 @@ def _infos(db: Session, *conditions) -> list[TokenInfo]:  # noqa: ANN002
             col(ConnectionToken.created_at).desc(), col(ConnectionToken.id).desc()
         )
     ).all()
+    # A soft-deleted user is [Deleted User] (plan 59 section 4.3.1).
+    labelled = [
+        (token, *user_label(name, login, deleted_at), slug, project_name)
+        for token, login, name, deleted_at, slug, project_name in rows
+    ]
     return [
         TokenInfo(
             uid=token.uid,
@@ -992,7 +999,7 @@ def _infos(db: Session, *conditions) -> list[TokenInfo]:  # noqa: ANN002
             revoked_at=token.revoked_at,
             revoked_reason=token.revoked_reason,
         )
-        for token, login, user_name, slug, project_name in rows
+        for token, user_name, login, slug, project_name in labelled
     ]
 
 

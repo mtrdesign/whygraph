@@ -28,29 +28,39 @@ security event of plan section 0.2 goes through
 
 from __future__ import annotations
 
+import enum
 import hmac
 import json
 import secrets
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Literal
 
 import anyio.to_thread
+from alembic.util import CommandError as AlembicCommandError
 from fastapi import APIRouter, Body, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, literal_column, update
+from sqlalchemy import delete, literal_column, or_, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, func, select
 
 from whygraph.core.config import ConfigError
+from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.releases import format_version, running_version
+from whygraph.core.safe_paths import UnsafePathError
+from whygraph.db import get_session as project_db_session
+from whygraph.db.models import ChatSession
 from whygraph.mcp.evidence import stop_describes
+from whygraph.serve.chat import delete_session_rows
 
 from . import audit_store, connections, updates
 from .audit import audit, truncate_email
+from .audit import current_writer as current_audit_writer
 from .authz import Action, ProjectRole, Role
 from .budgets import reload_org_budgets
 from .context import ProjectNotFound
@@ -74,15 +84,18 @@ from .github_auth import (
     PendingLogin,
 )
 from .hosts import BaseUrl, safe_admin_redirect, safe_redirect
-from .member_routes import Redeemed, redeem_invitations
+from .member_routes import Redeemed, _lock_owners, redeem_invitations
 from .models import (
+    AuditEvent,
     ConnectionToken,
+    Invitation,
     Membership,
     Organization,
     PasswordReset,
     Project,
     ReaderGrant,
     RetiredOrgSlug,
+    UsageEvent,
     User,
     UserSession,
 )
@@ -101,6 +114,7 @@ from .org_routes import (
     soft_delete_org,
 )
 from .paths import project_db_path
+from .people import DELETED_USER
 from .passwords import (
     hash_password,
     normalize_email,
@@ -354,6 +368,21 @@ def _account_disabled() -> ApiError:
     return ApiError(403, "this account is disabled", code="account_disabled")
 
 
+def user_deleted_error() -> ApiError:
+    """``409 user_deleted``: the account was soft-deleted (plan 59 section 4.3.1)."""
+    return ApiError(
+        409, "this account was deleted: restore it first", code="user_deleted"
+    )
+
+
+def _erased_error() -> ApiError:
+    return ApiError(409, "this account was erased", code="erased")
+
+
+def _account_deleted() -> ApiError:
+    return ApiError(403, "this account was deleted", code="account_deleted")
+
+
 def _no_password() -> ApiError:
     return ApiError(
         409,
@@ -532,6 +561,13 @@ _UPSERT_ATTEMPTS = 3
 """Tries of the sign-in transaction when a concurrent one wins a unique index."""
 
 
+class Refused(enum.Enum):
+    """Why :func:`_sign_in_github_user` signed nobody in (nothing was written)."""
+
+    DISABLED = "disabled"
+    DELETED = "deleted"
+
+
 def _github(state: PortalState) -> GitHubOAuth:
     assert state.github is not None  # production startup built it
     return state.github
@@ -632,7 +668,8 @@ def post_github_callback(
     included - or granted a scope other than ``read:user``), ``502
     github_unavailable`` (network error, timeout, 5xx), ``403
     github_2fa_required`` (with ``fix_url``; no user row is written) and
-    ``403 account_disabled``. The ``whygraph_oauth`` cookie is cleared on
+    ``403 account_disabled`` and ``403 account_deleted`` (a soft-deleted
+    account; nothing is written). The ``whygraph_oauth`` cookie is cleared on
     every one of these outcomes and on success. On success the account is
     created or refreshed by its GitHub id, any session the request carried
     ends, a new one starts, and ``redirect`` is the pending ``next`` or
@@ -753,9 +790,12 @@ def _github_callback(
             request.headers.getlist("cookie"), name=admin_cookie_name(base)
         ),
     )
-    if signed_in is None:
+    if signed_in is Refused.DISABLED:
         refused("disabled", user.login)
         raise ApiError(403, "this account is disabled", code="account_disabled")
+    if signed_in is Refused.DELETED:
+        refused("deleted", user.login)
+        raise _account_deleted()
     token, uid, new_user, released, redeemed, clear_admin = signed_in
     if principal is not None and principal.session_id is not None:
         end_user_tokens(state, session_id=principal.session_id)  # it was revoked
@@ -793,7 +833,7 @@ def _admin_github_sign_in(
     no account is created, no login released, no invitation redeemed, no
     everyday session revoked and no profile field refreshed (so this never
     calls :func:`_sign_in_github_user`). An unknown GitHub id, a user who is
-    not an instance admin and a disabled one all get the same ``403
+    not an instance admin, a disabled and a soft-deleted one all get the same ``403
     not_an_admin``, audited as ``admin_signin_refused`` with the reason.
     Otherwise rules 1 and 3: the admin cookie's sessions end and a new admin
     session starts, paired with this browser's everyday session of the same
@@ -801,15 +841,21 @@ def _admin_github_sign_in(
     """
     with get_session() as db:
         row = db.exec(
-            select(User.id, User.uid, User.is_instance_admin, User.disabled_at).where(
-                User.github_id == user.id
-            )
+            select(
+                User.id,
+                User.uid,
+                User.is_instance_admin,
+                User.disabled_at,
+                User.deleted_at,
+            ).where(User.github_id == user.id)
         ).first()
         reason = None
         if row is None:
             reason = "unknown_user"
         elif row[3] is not None:
             reason = "disabled"
+        elif row[4] is not None:
+            reason = "deleted"
         elif not row[2]:
             reason = "not_admin"
         if reason is None:
@@ -837,7 +883,7 @@ def _sign_in_github_user(
     user_agent: str | None,
     replaces_user_id: int | None = None,
     admin_tokens: list[str] | None = None,
-) -> tuple[str, str, bool, list[str], list[Redeemed], bool] | None:
+) -> tuple[str, str, bool, list[str], list[Redeemed], bool] | Refused:
     """Upsert the account by GitHub id and start its session, in one transaction.
 
     Any other row holding the incoming login (case-insensitively) has it
@@ -846,7 +892,8 @@ def _sign_in_github_user(
     only - never the user-editable ``display_name`` - so two concurrent
     first sign-ins converge on one row; a race that still trips a unique
     index (a login claimed by two ids at once) retries the transaction.
-    After the disabled check, the open invitations for the GitHub id are
+    A disabled or a soft-deleted account is refused with every write rolled
+    back. After those checks, the open invitations for the GitHub id are
     redeemed (:func:`~whygraph.portal.member_routes.redeem_invitations`,
     M2f-1 plan section 4.8), each in its own savepoint, so a failed one
     never fails the sign-in.
@@ -875,10 +922,10 @@ def _sign_in_github_user(
 
     Returns
     -------
-    tuple or None
+    tuple or Refused
         ``(session token, uid, new_user, released uids, redeemed,
-        clear_admin_cookie)``, or ``None`` when the account is disabled
-        (then nothing is written).
+        clear_admin_cookie)``, or :class:`Refused` when the account is
+        disabled or soft-deleted (then nothing is written).
     """
     users = User.__table__
     for attempt in range(_UPSERT_ATTEMPTS):
@@ -915,13 +962,17 @@ def _sign_in_github_user(
                         users.c.id,
                         users.c.uid,
                         users.c.disabled_at,
+                        users.c.deleted_at,
                         literal_column("xmax = 0"),  # inserted, not updated
                     )
                 ).one()
-                user_id, uid, disabled_at, inserted = row
+                user_id, uid, disabled_at, deleted_at, inserted = row
                 if disabled_at is not None:
                     db.rollback()  # the refresh and any release are undone
-                    return None
+                    return Refused.DISABLED
+                if deleted_at is not None:
+                    db.rollback()  # the same: a deleted account is not touched
+                    return Refused.DELETED
                 redeemed = redeem_invitations(db, github_id=user.id, user_id=user_id)
                 # Read before step 1 ends any of them, so the caller still
                 # learns that the cookie names another user's session.
@@ -1026,7 +1077,8 @@ def post_admin_login(body: LoginBody, request: Request, response: Response) -> d
     in the same time (a dummy verify). Failures count per ``(email,
     ip_key)``, per email and per ``ip_key``; all three are checked first
     (``429``). Only after a correct password: ``403 account_disabled``,
-    then ``403 not_an_admin``, so the route tells nothing to a guesser.
+    ``403 account_deleted``, then ``403 not_an_admin``, so the route tells
+    nothing to a guesser.
     Every refusal carries ``surface: "admin"`` and is audited as
     ``login_failure`` with the same field. An outdated hash is upgraded.
     The admin cookie's earlier admin sessions end in the same transaction
@@ -1057,6 +1109,7 @@ def _admin_login(body: LoginBody, request: Request, response: Response) -> dict:
                 User.password_hash,
                 User.disabled_at,
                 User.is_instance_admin,
+                User.deleted_at,
             ).where(User.email == email)
         ).first()
     ok, needs_rehash = verify_password(None if row is None else row[2], body.password)
@@ -1071,7 +1124,7 @@ def _admin_login(body: LoginBody, request: Request, response: Response) -> dict:
             surface="admin",
         )
         raise ApiError(401, "wrong email or password", code="bad_credentials")
-    user_id, uid, _, disabled_at, is_admin = row
+    user_id, uid, _, disabled_at, is_admin, deleted_at = row
     if disabled_at is not None:
         audit(
             "login_failure",
@@ -1082,6 +1135,16 @@ def _admin_login(body: LoginBody, request: Request, response: Response) -> dict:
             surface="admin",
         )
         raise _account_disabled()
+    if deleted_at is not None:
+        audit(
+            "login_failure",
+            request,
+            uid=uid,
+            email=truncate_email(email),
+            reason="deleted",
+            surface="admin",
+        )
+        raise _account_deleted()
     if not is_admin:
         audit(
             "login_failure",
@@ -1157,8 +1220,8 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
     ``429`` past 10 attempts per ``ip_key`` in 15 minutes; ``400 bad_token``
     for an unknown, used, superseded or expired link; ``403
     account_disabled`` for a disabled account; ``409 not_an_admin`` for an
-    account that is not an instance admin (plan 59 D28: nothing changes and
-    the link stays unused); the password rules (``422``). Marks the link
+    account that is not an instance admin or is soft-deleted (plan 59 D28:
+    nothing changes and the link stays unused); the password rules (``422``). Marks the link
     used, ends **every** session of the user and the admin cookie's, then
     starts an **admin** session and lands on ``<base>/admin``.
     """
@@ -1185,7 +1248,7 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
             raise bad_token
         if user.disabled_at is not None:
             raise _account_disabled()
-        if not user.is_instance_admin:
+        if not user.is_instance_admin or user.deleted_at is not None:
             raise _reset_not_an_admin()
         email = user.email or ""
     validate_password(body.password, email)
@@ -1198,7 +1261,7 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
             raise bad_token
         if user.disabled_at is not None:
             raise _account_disabled()
-        if not user.is_instance_admin:
+        if not user.is_instance_admin or user.deleted_at is not None:
             raise _reset_not_an_admin()
         assert user.id is not None
         user.password_hash = password_hash
@@ -1370,7 +1433,8 @@ def post_org(
 
     ``422 bad_slug`` (with the rule) for a malformed, reserved or ``xn--``
     style slug, ``409 slug_taken`` when it exists or a deleted org retired
-    it (one answer, so a deletion is not disclosed).
+    it (one answer, so a deletion is not disclosed), ``409 user_deleted``
+    when the caller's account was soft-deleted meanwhile.
     """
     base = _base(portal_state(request))
     slug = body.slug
@@ -1385,6 +1449,15 @@ def post_org(
         409, f"the organization {slug!r} already exists", code="slug_taken"
     )
     with get_session() as db:
+        # The caller's own row, FOR SHARE and first (plan 59 section 4.3.1):
+        # it waits for a running soft delete of the caller, then refuses.
+        caller = db.exec(
+            select(User.id, User.deleted_at)
+            .where(User.id == principal.user_id)
+            .with_for_update(read=True)
+        ).first()
+        if caller is not None and caller[1] is not None:
+            raise user_deleted_error()
         if (
             db.exec(select(Organization.id).where(Organization.slug == slug)).first()
             is not None
@@ -1502,7 +1575,9 @@ def get_admin_audit(
         raise ApiError(
             422, "from and to must be ISO-8601 dates or date-times", code="bad_date"
         ) from exc
-    events, next_before = audit_store.query_events(f, before=before, limit=limit)
+    events, next_before = audit_store.query_events(
+        f, before=before, limit=limit, mask_deleted=False
+    )
     return {"events": events, "next": next_before}
 
 
@@ -1583,11 +1658,9 @@ def get_admin_users(_: Principal = Depends(instance_access())) -> list[dict]:
 def _refuse_gone_user(user: User) -> None:
     """``409 erased`` / ``409 user_deleted`` for a soft-deleted or erased account."""
     if user.erased_at is not None:
-        raise ApiError(409, "this account was erased", code="erased")
+        raise _erased_error()
     if user.deleted_at is not None:
-        raise ApiError(
-            409, "this account was deleted: restore it first", code="user_deleted"
-        )
+        raise user_deleted_error()
 
 
 def _snapshot_memberships(user: User) -> list[dict]:
@@ -1711,7 +1784,7 @@ def get_admin_user(
         result["tokens"] = tokens
         result["spend"] = spend
     events, _next = audit_store.query_events(
-        audit_store.make_filter(subject=uid), limit=20
+        audit_store.make_filter(subject=uid), limit=20, mask_deleted=False
     )
     result["events"] = events
     return result
@@ -1755,6 +1828,7 @@ def patch_admin_user(
             .where(
                 col(User.is_instance_admin).is_(True),
                 col(User.disabled_at).is_(None),
+                col(User.deleted_at).is_(None),
             )
             .with_for_update()
         ).all()
@@ -2066,6 +2140,576 @@ def delete_admin_user_token(
         via="instance_admin",
     )
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Soft delete, restore and erase of a user (plan 59 section 4.3.1)
+# ---------------------------------------------------------------------------
+
+
+class ConfirmUserBody(_Strict):
+    """``DELETE /api/admin/users/{uid}`` and ``.../erase``: the account, typed."""
+
+    confirm: str = Field(default="", max_length=1024)
+
+
+def _confirmed_user(user: User, typed: str, doing: str) -> None:
+    """``409 confirm_user`` unless ``typed`` names the account.
+
+    The account is named by its GitHub login, else its email, else its uid
+    (a soft-deleted user's login can have been released, and a GitHub
+    account has no email: there is always something to type).
+    """
+    if user.github_login:
+        what, expected = "GitHub login", user.github_login
+    elif user.email:
+        what, expected = "email", user.email
+    else:
+        what, expected = "ID", user.uid
+    if typed.strip() != expected:
+        raise ApiError(
+            409,
+            f"type the account's {what} ({expected}) to {doing}",
+            code="confirm_user",
+        )
+
+
+def _lock_user(db: Session, uid: str) -> User:
+    """The user row ``FOR NO KEY UPDATE`` (a foreign-key check still passes); else ``404``."""
+    user = db.exec(
+        select(User).where(User.uid == uid).with_for_update(key_share=True)
+    ).first()
+    if user is None:
+        raise ApiError(404, "user not found")
+    return user
+
+
+@dataclass(frozen=True)
+class _Removed:
+    """One membership a soft delete removed."""
+
+    org_id: int
+    org_slug: str
+    org_deleted: bool
+    role: str
+
+
+@auth_router.delete("/api/admin/users/{uid}")
+def delete_admin_user(
+    uid: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+    body: ConfirmUserBody | None = Body(default=None),
+) -> dict:
+    """Soft-delete a user (plan 59 section 4.3.1, D12, D49).
+
+    One transaction, in this order (it keeps a role change, which locks
+    owners before its target, from deadlocking with it, and leaves no
+    membership on a deleted user): the enabled admins and then the user row
+    ``FOR NO KEY UPDATE``; the refusals; ``deleted_at`` / ``deleted_by``;
+    the user's org rows ``FOR SHARE`` in id order (so a purge cannot
+    interleave); each org's owner rows in ascending org id; the last-owner
+    check over every org that still exists, soft-deleted ones included;
+    then the memberships are deleted and what the delete returned is kept
+    as the snapshot Restore uses. Project grants and member budgets go with
+    them (not restored). The admin flag is cleared, every session ends,
+    connection tokens are revoked (``user_deleted``), reset links and
+    reader grants end.
+
+    ``404`` for an unknown user, ``409 user_deleted`` / ``409 erased``,
+    ``409 self_delete``, ``409 confirm_user`` unless ``confirm`` is the
+    GitHub login (else the email, else the uid), ``409 last_admin`` and
+    ``409 last_owner`` with ``orgs: [{slug, deleted}]``.
+
+    Returns
+    -------
+    dict
+        ``{"deleted": <uid>, "orgs": [<slug>, ...]}``, audited as
+        ``user_deleted``, one ``member_removed`` per former org
+        (``via="instance_admin"``, ``reason="user_deleted"``) and one
+        ``reader_grant_revoked`` per grant.
+    """
+    state = portal_state(request)
+    body = body or ConfirmUserBody()
+    with get_session() as db:
+        # (1) and (2): FOR NO KEY UPDATE, never a plain FOR UPDATE.
+        admins = db.exec(
+            select(User.id)
+            .where(
+                col(User.is_instance_admin).is_(True),
+                col(User.disabled_at).is_(None),
+                col(User.deleted_at).is_(None),
+            )
+            .with_for_update(key_share=True)
+        ).all()
+        user = _lock_user(db, uid)
+        assert user.id is not None
+        _refuse_gone_user(user)
+        if user.id == principal.user_id:
+            raise ApiError(
+                409,
+                "you cannot delete your own account: another administrator can",
+                code="self_delete",
+            )
+        _confirmed_user(user, body.confirm, "delete it")
+        if user.is_instance_admin and user.disabled_at is None and len(admins) <= 1:
+            raise ApiError(
+                409,
+                "this is the last enabled instance admin: make someone else an "
+                "admin first",
+                code="last_admin",
+            )
+        user.deleted_at = _iso(_now())
+        user.deleted_by = principal.user_id
+        db.add(user)
+        db.flush()
+        # (3) The user's orgs, no lock; (3a) their rows FOR SHARE, in id order.
+        org_ids = sorted(
+            set(
+                db.exec(
+                    select(Membership.org_id).where(Membership.user_id == user.id)
+                ).all()
+            )
+        )
+        orgs = {
+            org_id: (slug, deleted_at is not None)
+            for org_id, slug, deleted_at in db.exec(
+                select(Organization.id, Organization.slug, Organization.deleted_at)
+                .where(col(Organization.id).in_(org_ids))
+                .order_by(col(Organization.id))
+                .with_for_update(read=True)
+            ).all()
+        }
+        # (4) Owner rows, ascending org id; (5) the last-owner check (D49).
+        last_owned = []
+        for org_id in org_ids:
+            if org_id not in orgs:
+                continue  # purged meanwhile: its memberships went with it
+            owners = _lock_owners(db, org_id)
+            if owners == [user.id]:
+                slug, deleted = orgs[org_id]
+                last_owned.append({"slug": slug, "deleted": deleted})
+        if last_owned:
+            raise ApiError(
+                409,
+                "this is the last owner of "
+                + ", ".join(o["slug"] for o in last_owned)
+                + ": make someone else an owner of each first",
+                code="last_owner",
+                orgs=last_owned,
+            )
+        # (6) The snapshot is what the delete returns.
+        returned = db.exec(
+            delete(Membership)
+            .where(col(Membership.user_id) == user.id)
+            .returning(
+                col(Membership.org_id),
+                col(Membership.role),
+                col(Membership.created_at),
+                col(Membership.welcome_pending),
+            )
+        ).all()
+        snapshot = sorted(
+            (
+                {
+                    "org_id": org_id,
+                    "role": role,
+                    "created_at": created_at,
+                    "welcome_pending": bool(welcome_pending),
+                }
+                for org_id, role, created_at, welcome_pending in returned
+            ),
+            key=lambda entry: entry["org_id"],
+        )
+        user.deleted_memberships = json.dumps(snapshot)
+        user.is_instance_admin = False  # Restore does not grant it again
+        db.add(user)
+        db.flush()
+        revoke_user(user.id, db=db)
+        connections.revoke_for_user(db, user.id, "user_deleted")
+        _invalidate_reset_links(db, user.id)
+        revoked_grants = _revoke_reader_grants(db, user.id)
+        removed = [
+            _Removed(e["org_id"], *orgs[e["org_id"]], e["role"])
+            for e in snapshot
+            if e["org_id"] in orgs
+        ]
+        target, target_id = user.uid, user.id
+    end_user_tokens(state, user_id=target_id)
+    for entry in removed:
+        if not entry.org_deleted:  # a deleted org's budgets stay unloaded
+            reload_org_budgets(state.budgets, entry.org_id)
+    audit("user_deleted", request, uid=principal.uid, target=target)
+    for entry in removed:
+        audit(
+            "member_removed",
+            request,
+            uid=principal.uid,
+            target=target,
+            org_id=entry.org_id,
+            org=entry.org_slug,
+            role=entry.role,
+            via="instance_admin",
+            reason="user_deleted",
+        )
+    for org_id, org_slug in revoked_grants:
+        audit(
+            "reader_grant_revoked",
+            request,
+            uid=principal.uid,
+            target=target,
+            org_id=org_id,
+            org=org_slug,
+            reason="user_deleted",
+        )
+    return {"deleted": target, "orgs": [entry.org_slug for entry in removed]}
+
+
+@auth_router.post("/api/admin/users/{uid}/restore")
+def post_restore_user(
+    uid: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Bring a soft-deleted user back (plan 59 section 4.3.1, D24, D49).
+
+    The user row is locked ``FOR NO KEY UPDATE`` first; ``409 erased`` for
+    an erased account, ``409 not_deleted`` for a live one. Then
+    ``deleted_at`` / ``deleted_by`` are cleared, the snapshot's org rows
+    are locked ``FOR SHARE`` in id order, and every snapshot membership
+    (role, join time, welcome banner) whose org still exists comes back -
+    a soft-deleted org's too; only a purged org is skipped. Not restored:
+    the admin flag, project grants, member budgets, sessions, tokens.
+
+    Returns
+    -------
+    dict
+        ``{"restored": [{org, role, deleted}], "skipped": [<org id>, ...]}``
+        (``skipped``: the purged orgs), audited as ``user_restored`` and
+        one ``member_added`` per org (``via="instance_admin"``,
+        ``reason="user_restored"``).
+    """
+    state = portal_state(request)
+    with get_session() as db:
+        user = _lock_user(db, uid)
+        assert user.id is not None
+        if user.erased_at is not None:
+            raise _erased_error()
+        if user.deleted_at is None:
+            raise not_deleted_error()
+        snapshot = sorted(_snapshot_memberships(user), key=lambda e: e["org_id"])
+        user.deleted_at = None
+        user.deleted_by = None
+        db.add(user)
+        db.flush()
+        orgs = {
+            org_id: (slug, deleted_at is not None)
+            for org_id, slug, deleted_at in db.exec(
+                select(Organization.id, Organization.slug, Organization.deleted_at)
+                .where(col(Organization.id).in_([e["org_id"] for e in snapshot]))
+                .order_by(col(Organization.id))
+                .with_for_update(read=True)
+            ).all()
+        }
+        restored: list[_Removed] = []
+        skipped: list[int] = []
+        for entry in snapshot:
+            org_id = entry["org_id"]
+            if org_id not in orgs:
+                skipped.append(org_id)
+                continue
+            db.add(
+                Membership(
+                    org_id=org_id,
+                    user_id=user.id,
+                    role=entry["role"],
+                    created_at=entry.get("created_at") or _iso(_now()),
+                    welcome_pending=bool(entry.get("welcome_pending")),
+                )
+            )
+            restored.append(_Removed(org_id, *orgs[org_id], entry["role"]))
+        user.deleted_memberships = None
+        db.add(user)
+        target = user.uid
+    for entry in restored:
+        if not entry.org_deleted:
+            reload_org_budgets(state.budgets, entry.org_id)
+    audit("user_restored", request, uid=principal.uid, target=target)
+    for entry in restored:
+        audit(
+            "member_added",
+            request,
+            uid=principal.uid,
+            target=target,
+            org_id=entry.org_id,
+            org=entry.org_slug,
+            role=entry.role,
+            via="instance_admin",
+            reason="user_restored",
+        )
+    return {
+        "restored": [
+            {"org": e.org_slug, "role": e.role, "deleted": e.org_deleted}
+            for e in restored
+        ],
+        "skipped": skipped,
+    }
+
+
+def _erase_blocked(projects: list[str]) -> ApiError:
+    return ApiError(
+        409,
+        "nothing was erased: the chat history of "
+        + ", ".join(projects)
+        + " could not be opened; fix or permanently delete it, then erase again",
+        code="erase_blocked",
+        projects=projects,
+    )
+
+
+_PROJECT_DB_ERRORS = (
+    ConfigError,
+    UnsafePathError,
+    SQLAlchemyError,
+    sqlite3.Error,
+    AlembicCommandError,
+)
+"""What makes a project database unopenable for Erase (D54)."""
+
+
+def _erase_probe(state: PortalState) -> list[tuple[str, ProjectContext]]:
+    """Erase step 1: open every project database that still exists (D54).
+
+    Every project counts, soft-deleted ones and those of soft-deleted orgs
+    included (the user may have left an org earlier). One without
+    Initialize or without its ``whygraph.db`` file is skipped before
+    anything opens it, so no empty file is ever created; a linked project
+    has no database. The rest are opened the way the request path does:
+    the context, the migration to head (with its path checks), then a read
+    under :func:`~whygraph.core.context.use_project`.
+
+    Returns
+    -------
+    list of (str, ProjectContext)
+        ``("org/slug", context)`` of each database to clean.
+
+    Raises
+    ------
+    ApiError
+        ``409 erase_blocked`` with ``projects`` when one cannot be opened;
+        nothing has changed then.
+    """
+    with get_session() as db:
+        rows = db.exec(
+            select(
+                Project.id,
+                Project.slug,
+                Project.source,
+                Project.initialized_at,
+                Organization.slug,
+            )
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .order_by(col(Project.id))
+        ).all()
+    ready: list[tuple[str, ProjectContext]] = []
+    blocked: list[str] = []
+    for project_id, slug, source, initialized_at, org_slug in rows:
+        label = f"{org_slug}/{slug}"
+        if source == "platform" or initialized_at is None:
+            continue
+        if not project_db_path(state.data_dir, org_slug, slug).is_file():
+            continue
+        try:
+            ctx = state.contexts.get(project_id)
+            state.migrations.ensure(ctx)
+            with use_project(ctx), project_db_session() as session:
+                session.exec(select(ChatSession.id).limit(1)).all()
+        except ProjectNotFound:
+            continue  # purged meanwhile
+        except _PROJECT_DB_ERRORS:
+            blocked.append(label)
+            continue
+        ready.append((label, ctx))
+    if blocked:
+        raise _erase_blocked(blocked)
+    return ready
+
+
+def _erase_chats(projects: list[tuple[str, ProjectContext]], uid: str) -> None:
+    """Erase step 3: delete ``uid``'s chat sessions, one project at a time (D38).
+
+    The file is checked again right before each open: a project purged
+    since the probe would otherwise get an empty database created in its
+    old directory. One short session per project.
+    """
+    for label, ctx in projects:
+        db_file = ctx.config.whygraph_db
+        if db_file is None or not Path(db_file).is_file():
+            continue
+        try:
+            with use_project(ctx), project_db_session() as session:
+                ids = list(
+                    session.exec(
+                        select(ChatSession.id).where(ChatSession.owner_uid == uid)
+                    ).all()
+                )
+                delete_session_rows(session, ids)  # type: ignore[arg-type]
+        except _PROJECT_DB_ERRORS as exc:
+            raise _erase_blocked([label]) from exc
+
+
+def _released_logins(db: Session, uid: str) -> list[tuple[str, int]]:
+    """``(login, event id)`` of each ``github_login_released`` event of ``uid``.
+
+    A login taken from such an event matches only events up to that one:
+    from then on it belongs to another person.
+    """
+    found = []
+    for event_id, fields in db.exec(
+        select(AuditEvent.id, AuditEvent.fields).where(
+            AuditEvent.event == "github_login_released", AuditEvent.target == uid
+        )
+    ).all():
+        login = fields.get("github_login") if isinstance(fields, dict) else None
+        if isinstance(login, str) and login:
+            found.append((login.lower(), event_id))
+    return found
+
+
+def _erase_portal_rows(uid: str) -> None:
+    """Erase step 4: the portal's own stores, in one transaction (D54).
+
+    The user row is locked ``FOR NO KEY UPDATE`` and checked again (a
+    Restore may have committed since the route's first look); its login,
+    email and GitHub id are read **before** they are nulled, because the
+    audit matches below need them.
+
+    Raises
+    ------
+    ApiError
+        ``404``, ``409 erased`` or ``409 not_deleted``; nothing changed.
+    """
+    with get_session() as db:
+        user = _lock_user(db, uid)
+        assert user.id is not None
+        if user.erased_at is not None:
+            raise _erased_error()
+        if user.deleted_at is None:
+            raise not_deleted_error()
+        user_id, login, github_id = user.id, user.github_login, user.github_id
+        # The fields-only match: the current login, each released login up
+        # to its release event (by id: created_at has second resolution and
+        # the taker's own sign-in lands in the same second), the GitHub id.
+        params: dict = {"id": user_id, "uid": uid, "label": DELETED_USER}
+        by_fields = []
+        if login:
+            params["login"] = login.lower()
+            by_fields.append("lower(fields->>'github_login') = :login")
+        for i, (released, event_id) in enumerate(_released_logins(db, uid)):
+            params[f"rl{i}"], params[f"rid{i}"] = released, event_id
+            by_fields.append(
+                f"(lower(fields->>'github_login') = :rl{i} AND id <= :rid{i})"
+            )
+        if github_id is not None:
+            params["github_id"] = str(github_id)  # ->> yields text
+            by_fields.append("fields->>'github_id' = :github_id")
+        fields_match = " OR ".join(by_fields) if by_fields else "false"
+        db.exec(  # type: ignore[call-overload]
+            text(
+                "UPDATE audit_events SET actor_label = :label, ip = NULL "
+                "WHERE actor_id = :id"
+            ),
+            params=params,
+        )
+        # An actorless event that names the person in fields carries their
+        # own address (a refused sign-in) - except the release of their
+        # login, which carries the address of the person who took it.
+        db.exec(  # type: ignore[call-overload]
+            text(
+                "UPDATE audit_events SET ip = NULL WHERE actor_id IS NULL "
+                "AND NOT (event = 'github_login_released' AND target = :uid) "
+                f"AND ({fields_match})"
+            ),
+            params=params,
+        )
+        db.exec(  # type: ignore[call-overload]
+            text(
+                "UPDATE audit_events SET fields = (fields::jsonb - "
+                "ARRAY['email','github_login','github_id','client_name'])::json "
+                f"WHERE actor_id = :id OR target = :uid OR {fields_match}"
+            ),
+            params=params,
+        )
+        db.exec(
+            update(UsageEvent)
+            .where(col(UsageEvent.user_id) == user_id)
+            .values(actor_label=DELETED_USER, client_name=None)
+        )
+        invited = col(Invitation.redeemed_by) == user_id
+        if github_id is not None:
+            invited = or_(invited, col(Invitation.github_id) == github_id)
+        db.exec(delete(Invitation).where(invited))
+        db.exec(delete(ConnectionToken).where(col(ConnectionToken.user_id) == user_id))
+        db.exec(delete(ReaderGrant).where(col(ReaderGrant.user_id) == user_id))
+        user.display_name = DELETED_USER
+        user.email = None
+        user.github_id = None
+        user.github_login = None
+        user.avatar_url = None
+        user.password_hash = None
+        user.deleted_memberships = None
+        user.erased_at = _iso(_now())
+        db.add(user)
+
+
+@auth_router.post("/api/admin/users/{uid}/erase")
+def post_erase_user(
+    uid: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+    body: ConfirmUserBody | None = Body(default=None),
+) -> dict:
+    """Erase a soft-deleted user's personal data, irreversibly (D13, D38, D54).
+
+    Only a soft-deleted user (``409 not_deleted``; ``409 erased`` again),
+    with ``confirm`` as for the soft delete (``409 confirm_user``). All or
+    nothing, in this order: (1) every project database that still exists
+    is opened, and one that cannot be stops it with ``409 erase_blocked``
+    and ``projects``; (2) the audit and usage writers are flushed, so no
+    queued row brings the identity back (``503 busy`` when one cannot be);
+    (3) the user's chat sessions are deleted project by project; (4) the
+    portal's stores are rewritten in one transaction: the user row becomes
+    ``[Deleted User]`` (its GitHub id is freed, so the person can sign up
+    again as a new account), the audit actor label, IP and identifying
+    fields, usage labels and machine names, invitations, connection tokens
+    and reader grants. A stopped run leaves the user deleted, not erased.
+
+    Returns
+    -------
+    dict
+        ``{"erased": <uid>}``, audited as ``user_erased`` with the uid only.
+    """
+    state = portal_state(request)
+    body = body or ConfirmUserBody()
+    with get_session() as db:
+        user = _user_by_uid(db, uid)
+        if user.erased_at is not None:
+            raise _erased_error()
+        if user.deleted_at is None:
+            raise not_deleted_error()
+        _confirmed_user(user, body.confirm, "erase it")
+    projects = _erase_probe(state)
+    writer = current_audit_writer()
+    if (writer is not None and not writer.flush()) or not state.usage_writer.flush():
+        raise ApiError(
+            503,
+            "recent events are still being written: try again in a minute",
+            code="busy",
+        )
+    _erase_chats(projects, uid)
+    _erase_portal_rows(uid)
+    audit("user_erased", request, uid=principal.uid, target=uid)
+    return {"erased": uid}
 
 
 # ---------------------------------------------------------------------------

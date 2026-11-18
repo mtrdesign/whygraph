@@ -40,6 +40,7 @@ from .authz import Action, OrgAccess
 from .db import get_session
 from .deps import bound_project, current_org
 from .models import User
+from .people import user_label
 
 notes_read_router = APIRouter()
 """Note reads; mounted under ``project_db_access(PROJECT_READ)``."""
@@ -92,7 +93,8 @@ IMPORTED_PREFIX = "imported:"
 def _names(uids: set[str]) -> dict[str, str]:
     """``uid`` -> display name.
 
-    A plain uid is resolved in the portal's ``users`` table; an ``imported:``
+    A plain uid is resolved in the portal's ``users`` table (a soft-deleted
+    user is ``[Deleted User]``, plan 59 section 4.3.1); an ``imported:``
     uid only in the project's ``imported_actor`` table, never in ``users``
     (plan 42 D12: a bundle cannot borrow a real member's name).
     """
@@ -104,8 +106,11 @@ def _names(uids: set[str]) -> dict[str, str]:
     if plain:
         with get_session() as db:
             names.update(
-                db.exec(
-                    select(User.uid, User.display_name).where(col(User.uid).in_(plain))
+                (uid, user_label(name, None, deleted_at)[0])
+                for uid, name, deleted_at in db.exec(
+                    select(User.uid, User.display_name, User.deleted_at).where(
+                        col(User.uid).in_(plain)
+                    )
                 ).all()
             )
     if imported:

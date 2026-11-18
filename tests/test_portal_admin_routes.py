@@ -8,8 +8,10 @@ audit filter. Later steps add ``test_orgs_*``, ``test_audit_*`` and
 
 The world is :func:`~test_portal_connect.cn`: Ada (a password instance
 admin, admin-only), Ben (owner of ``acme``), Cy, Fay, Dee, Eve and Ivy (a
-GitHub instance admin in no org). No soft-deleted user can exist before
-step 12, so the tests set ``deleted_at`` / ``erased_at`` on the row.
+GitHub instance admin in no org). The gone-state cases set ``deleted_at``
+/ ``erased_at`` on the row; step 12 adds the soft delete, restore and
+erase routes' own state checks and the admin side of ``[Deleted User]``
+(the real identity until Erase).
 """
 
 # ruff: noqa: F811 -- pytest fixtures are imported from other test modules
@@ -309,6 +311,7 @@ def _writes(n: SimpleNamespace, uid: str):  # noqa: ANN202
         ("DELETE", f"/api/admin/users/{uid}/sessions", None),
         ("DELETE", f"/api/admin/users/{uid}/sessions/1", None),
         ("DELETE", f"/api/admin/users/{uid}/tokens/sometoken", None),
+        ("DELETE", f"/api/admin/users/{uid}", {"confirm": "cy"}),
     ]
 
 
@@ -515,3 +518,68 @@ def test_users_routes_need_an_admin_session(cn: SimpleNamespace) -> None:
         response = cn.client.request(method, url(path), json=body)
         assert response.status_code == 401, (method, path)
         assert response.json()["code"] == ADMIN_LOGIN_REQUIRED
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/admin/users/{uid}, .../restore, .../erase (plan 59 section 4.3.1)
+# ---------------------------------------------------------------------------
+
+
+def test_users_restore_and_erase_answer_by_the_deleted_state(
+    cn: SimpleNamespace,
+) -> None:
+    be_ada(cn)
+    cy = cn.uids["cy"]
+    for path, body in (
+        ("/api/admin/users/nobody", {"confirm": "x"}),
+        ("/api/admin/users/nobody/restore", None),
+        ("/api/admin/users/nobody/erase", {"confirm": "x"}),
+    ):
+        method = "DELETE" if path.endswith("nobody") else "POST"
+        assert cn.client.request(method, url(path), json=body).status_code == 404
+    # A live account: neither restored nor erased.
+    for path, body in (
+        (f"/api/admin/users/{cy}/restore", None),
+        (f"/api/admin/users/{cy}/erase", {"confirm": "cy"}),
+    ):
+        response = cn.client.post(url(path), json=body)
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "not_deleted"
+    # An erased one: nothing at all.
+    mark(cn.ids["cy"], deleted_at="2026-11-01T10:00:00+00:00", erased_at="2026-11-02")
+    for path, body in (
+        (f"/api/admin/users/{cy}/restore", None),
+        (f"/api/admin/users/{cy}/erase", {"confirm": "cy"}),
+    ):
+        response = cn.client.post(url(path), json=body)
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "erased"
+
+
+def test_users_admin_reads_show_a_deleted_users_real_identity(
+    cn: SimpleNamespace,
+) -> None:
+    audit_event(
+        event="login_success",
+        actor_id=cn.ids["cy"],
+        actor_label="@cy",
+        fields={"github_login": "cy", "email": "cy@example.com"},
+    )
+    be_ada(cn)
+    deleted = cn.client.request(
+        "DELETE", url(f"/api/admin/users/{cn.uids['cy']}"), json={"confirm": "cy"}
+    )
+    assert deleted.status_code == 200, deleted.text
+    rows = {r["uid"]: r for r in cn.client.get(url("/api/admin/users")).json()}
+    row = rows[cn.uids["cy"]]
+    assert (row["display_name"], row["github_login"]) == ("Cy", "cy")
+    assert row["deleted_at"] is not None and row["deleted_by"] == cn.uids["ada"]
+    detail = cn.client.get(url(f"/api/admin/users/{cn.uids['cy']}")).json()
+    assert detail["memberships"] == [
+        {"org": "acme", "name": "Acme", "role": "member", "owner": False}
+    ]
+    (login,) = [e for e in detail["events"] if e["event"] == "login_success"]
+    assert login["actor"]["label"] == "@cy"
+    assert login["fields"]["email"] == "cy@example.com"
+    audit = cn.client.get(url("/api/admin/audit"), params={"actor": "@cy"}).json()
+    assert [e["actor"]["label"] for e in audit["events"]] == ["@cy"]

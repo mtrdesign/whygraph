@@ -667,20 +667,41 @@ def delete_session(session_id: int, request: Request) -> Response:
     _acquire(key, holder)
     try:
         with get_session() as session:
-            row = _require_session(session, session_id)
-            session.execute(
-                delete(ChatMessageRow).where(
-                    col(ChatMessageRow.session_id) == session_id
-                )
-            )
-            session.execute(
-                delete(ImportedChat).where(col(ImportedChat.session_id) == session_id)
-            )
-            session.delete(row)
+            _require_session(session, session_id)
+            delete_session_rows(session, [session_id])
             session.commit()
     finally:
         _release(key, holder)
     return Response(status_code=204)
+
+
+def delete_session_rows(session, session_ids: list[int]) -> None:
+    """Delete chat sessions with their messages and ``imported_chat`` rows.
+
+    In foreign-key order (project databases run with ``foreign_keys=ON``):
+    the messages, then the ``imported_chat`` rows (an imported session is
+    owned by its importer), then the sessions. Used by
+    :func:`delete_session` and by the portal's Erase of a user (plan 59
+    section 4.3.1). The caller commits.
+
+    Parameters
+    ----------
+    session : Session
+        An open session on the project database.
+    session_ids : list of int
+        The ``chat_session`` ids.
+    """
+    if not session_ids:
+        return
+    session.execute(
+        delete(ChatMessageRow).where(col(ChatMessageRow.session_id).in_(session_ids))
+    )
+    session.execute(
+        delete(ImportedChat).where(col(ImportedChat.session_id).in_(session_ids))
+    )
+    session.execute(
+        delete(ChatSessionRow).where(col(ChatSessionRow.id).in_(session_ids))
+    )
 
 
 # ---------------------------------------------------------------------------

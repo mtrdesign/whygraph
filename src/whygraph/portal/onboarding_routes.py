@@ -110,7 +110,14 @@ def get_onboarding(
     production = state.mode == "production"
     org_id = access.org_id
     with get_session() as db:
-        sources = list(db.exec(select(Project.source).where(Project.org_id == org_id)))
+        sources = list(
+            db.exec(
+                select(Project.source).where(
+                    Project.org_id == org_id,
+                    col(Project.deleted_at).is_(None),  # plan 59 section 4.3.3
+                )
+            )
+        )
         has_key = (
             db.exec(
                 select(Secret.id).where(

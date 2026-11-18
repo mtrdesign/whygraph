@@ -32,6 +32,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   // Projects
   project_imported: { label: "Project imported", group: "Projects" },
   project_removed: { label: "Project removed", group: "Projects" },
+  project_restored: { label: "Project restored", group: "Projects" },
+  project_purged: { label: "Project deleted permanently", group: "Projects" },
   project_grant_added: { label: "Project access given", group: "Projects" },
   project_grant_changed: { label: "Project access changed", group: "Projects" },
   project_grant_removed: { label: "Project access removed", group: "Projects" },
@@ -88,6 +90,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   org_default_role_changed: { label: "Default project role changed", group: "Organization" },
   org_ownership_transferred: { label: "Ownership transferred", group: "Organization" },
   org_deleted: { label: "Organization deleted", group: "Organization" },
+  org_restored: { label: "Organization restored", group: "Organization" },
+  org_purged: { label: "Organization deleted permanently", group: "Organization" },
   org_suspended: { label: "Organization suspended", group: "Organization" },
   org_unsuspended: { label: "Suspension lifted", group: "Organization" },
 };

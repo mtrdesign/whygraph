@@ -428,7 +428,9 @@ def build_filter(
     elif params.project is not None:
         found = db.exec(
             select(Project.id).where(
-                Project.org_id == org_id, Project.slug == params.project
+                Project.org_id == org_id,
+                Project.slug == params.project,
+                col(Project.deleted_at).is_(None),  # plan 59 section 4.3.3
             )
         ).first()
         if found is not None:
@@ -1273,6 +1275,7 @@ def _projects_over(
                 select(Project).where(
                     Project.org_id == org_id,
                     col(Project.id).in_([pid for _, pid in over]),
+                    col(Project.deleted_at).is_(None),  # plan 59 section 4.3.3
                 )
             )
         }

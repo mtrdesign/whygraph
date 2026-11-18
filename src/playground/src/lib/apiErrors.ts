@@ -182,6 +182,11 @@ export const MESSAGES: Record<string, Resolver> = {
   github_account_required:
     "This needs a GitHub account. Sign in to the admin panel with GitHub to use Open as reader; an organization's owner must be a GitHub account.",
   org_deleted: "This organization is deleted. Restore it before changing it.",
+  not_deleted: { message: "This isn't deleted any more. Reload the page to see its current state.", action: RETRY },
+  project_deleted: (_err, ctx) =>
+    ctx === "github" || ctx === "add-project"
+      ? "This repository's project was removed. Ask a platform administrator to restore it."
+      : "This project is deleted. Restore it before changing it.",
   self_session: "That would end the admin session you are using. Use Sign out instead.",
   user_deleted: "This account was deleted. A platform administrator must restore it first.",
   erased: "This account was erased. Nothing about it can be changed any more.",

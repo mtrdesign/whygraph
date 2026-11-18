@@ -516,13 +516,15 @@ def get_installation_repos(
     keeps the repositories whose ``full_name`` contains it (case-insensitive)
     and the pages run over that filtered list. ``imported`` marks a
     repository that is already a project **in this org** (by GitHub's
-    repository id), computed for every request. ``404 no_access`` when the
+    repository id), computed for every request; ``deleted`` marks one whose
+    project is soft-deleted (plan 59 D47: it cannot be imported again until
+    a platform administrator restores or purges it). ``404 no_access`` when the
     user cannot see the installation; otherwise as :func:`get_installations`.
 
     Returns
     -------
     dict
-        ``{"repos": [{id, full_name, private, default_branch, imported}],
+        ``{"repos": [{id, full_name, private, default_branch, imported, deleted}],
         "total_count": n (filtered), "page": page, "per_page": 100,
         "truncated": bool, "imports_left": n}`` - ``imports_left`` is what
         the org's import throttle allows now.
@@ -551,18 +553,18 @@ def get_installation_repos(
     shown = matched[(page - 1) * REPOS_PER_PAGE : page * REPOS_PER_PAGE]
     ids = [r.id for r in shown]
     with get_session() as db:
-        imported = (
-            set(
-                db.exec(
-                    select(Project.github_repo_id).where(
-                        Project.org_id == access.org_id,
-                        col(Project.github_repo_id).in_(ids),
-                    )
-                ).all()
-            )
+        rows = (
+            db.exec(
+                select(Project.github_repo_id, Project.deleted_at).where(
+                    Project.org_id == access.org_id,
+                    col(Project.github_repo_id).in_(ids),
+                )
+            ).all()
             if ids
-            else set()
+            else []
         )
+    imported = {repo_id for repo_id, _ in rows}
+    deleted = {repo_id for repo_id, deleted_at in rows if deleted_at is not None}
     return {
         "repos": [
             {
@@ -571,6 +573,7 @@ def get_installation_repos(
                 "private": r.private,
                 "default_branch": r.default_branch,
                 "imported": r.id in imported,
+                "deleted": r.id in deleted,
             }
             for r in shown
         ],

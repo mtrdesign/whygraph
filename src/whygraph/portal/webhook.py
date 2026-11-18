@@ -62,6 +62,7 @@ from .runner import (
     OrgSuspended,
     ProjectAccessLost,
     ProjectBusy,
+    ProjectGone,
     RunnerUnavailable,
     SourceNotAllowed,
     _clear_access_lost,
@@ -397,8 +398,11 @@ async def _queue(state: PortalState, repo_id: int, trigger: str) -> None:
             ProjectAccessLost,
             SourceNotAllowed,
             OrgSuspended,
+            ProjectGone,
         ):
-            continue  # removed or its org deleted, stopping, access lost, suspended
+            # removed or its org deleted, stopping, access lost, suspended,
+            # soft-deleted
+            continue
 
 
 def _push_targets(repo_id: int) -> list[int]:
@@ -407,7 +411,8 @@ def _push_targets(repo_id: int) -> list[int]:
     Initialized, already scanned (a never-scanned project is left to its
     first, explicit scan), and not access-lost - a project marked only for
     tracking WhyGraph's state is synced, since the push may be the fix.
-    Not a suspended org's (plan 59 section 4.5). A project being removed,
+    Not a suspended org's (plan 59 section 4.5), not a soft-deleted
+    project or a soft-deleted org's (section 4.3.2). A project being removed,
     or one of an org being deleted, is refused by the runner itself
     (:class:`~whygraph.portal.runner.ProjectBusy`).
     """
@@ -416,6 +421,8 @@ def _push_targets(repo_id: int) -> list[int]:
             select(Project.id, Project.access_lost_at, Project.access_lost_reason)
             .join(Organization, col(Organization.id) == col(Project.org_id))
             .where(col(Organization.suspended_at).is_(None))
+            .where(col(Organization.deleted_at).is_(None))
+            .where(col(Project.deleted_at).is_(None))
             .where(Project.github_repo_id == repo_id)
             .where(Project.source == "github")
             .where(col(Project.initialized_at).is_not(None))

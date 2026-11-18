@@ -5,15 +5,20 @@ App talks to :class:`~github_fake.FakeGitHub`, git over dumb HTTP on a real
 socket) and the runner's fake scan child. Ben owns ``acme``, Cy is its admin
 and Dee its member; Ada is the password instance admin, an owner nowhere.
 
+Since plan 59 (section 4.3.2, D12) the owner's delete is a soft delete and
+the hard delete is the platform administrator's purge
+(``POST /api/admin/orgs/{slug}/purge``), so the tests that check what is
+removed delete and then purge.
+
 Covered: owner only (admin, member and a non-owner instance admin ``403``);
 the typed slug (``409 confirm_slug``); local mode ``404``; a running scan
 cancelled; ``409 busy`` while a sync is still fetching, released cleanly so
-the org keeps working; projects, clones, ``repos/<org>/``, run files, org
-config and secrets, memberships gone; the slug retired (``409 slug_taken``,
-the same answer as a live slug); members keep their accounts and sessions
-while the org's host answers ``404``; another org untouched; a scan request
-during the deletion refused; an import racing the deletion leaves no row and
-no clone; removing a project deletes its run files.
+the org keeps working; once purged, projects, clones, ``repos/<org>/``, run
+files, org config and secrets, memberships gone; the slug retired (``409
+slug_taken``, the same answer as a live slug); members keep their accounts
+and sessions while the org's host answers ``404``; another org untouched; a
+scan request during the deletion refused; an import racing the deletion
+leaves no row and no clone; purging a removed project deletes its run files.
 """
 
 # ruff: noqa: F811 -- pytest fixtures imported from other test modules
@@ -29,6 +34,7 @@ import pytest
 from sqlmodel import col, select
 
 from test_portal_app import (  # noqa: F401
+    admin_request,
     at,
     github_admin,
     github_sign_in,
@@ -89,6 +95,25 @@ def delete_org(
         at(org) + "/api/org",
         json={"confirm_slug": org if confirm is None else confirm},
     )
+
+
+def purge(w: World, org: str = "acme") -> httpx.Response:
+    """The platform administrator's ``POST /api/admin/orgs/{org}/purge``."""
+    return admin_request(
+        w.client, "POST", f"/api/admin/orgs/{org}/purge", {"confirm_slug": org}
+    )
+
+
+def deleted_at(slug: str) -> str | None:
+    """The org's ``deleted_at`` (asserting the row is still there)."""
+    with portal_db.get_session() as session:
+        row = session.exec(
+            select(Organization.deleted_at, Organization.id).where(
+                Organization.slug == slug
+            )
+        ).first()
+    assert row is not None, f"{slug} was deleted for good"
+    return row[0]
 
 
 def sign_in(w: World, login: str) -> None:
@@ -293,6 +318,13 @@ def test_deleting_an_org_removes_everything_it_owns_and_nothing_else(
 
     assert response.status_code == 200, response.text
     assert response.json() == {"deleted": "acme", "projects": 1}
+    # A soft delete (plan 59 D12): hidden, nothing removed yet.
+    assert deleted_at("acme") is not None and rows_of(acme) == before
+    assert (w.repos / "acme" / "api").is_dir()
+    assert w.client.get(at("acme") + "/api/projects").status_code == 404
+    purged = purge(w)
+    assert purged.status_code == 200, purged.text
+    assert purged.json() == {"purged": "acme", "projects": 1}
     assert org_id("acme") is None
     assert rows_of(acme) == dict.fromkeys(before, 0)
     assert not (w.repos / "acme").exists()
@@ -326,14 +358,20 @@ def test_deleting_an_org_removes_everything_it_owns_and_nothing_else(
     assert "bravo-model" in defaults.text
     assert wait_run(w, scan(w, "bravo"), "bravo")["status"] == "ok"
     (event,) = [e for e in events(audit_log) if e["event"] == "org_deleted"]
-    assert (event["org"], event["projects"]) == ("acme", 1)
+    assert (event["org"], event["projects"], event["soft"]) == ("acme", 1, True)
     assert event["uid"]
+    (event,) = [e for e in events(audit_log) if e["event"] == "org_purged"]
+    assert (event["org"], event["projects"]) == ("acme", 1)
     assert runner_released(w)
 
 
 def test_a_deleted_slug_is_retired(world: World) -> None:
     w = world
     assert delete_org(w).status_code == 200
+    # Soft-deleted, the slug is still the org's own: the same answer.
+    kept = create_org(w.client, "acme", "Acme again")
+    assert (kept.status_code, kept.json()["code"]) == (409, "slug_taken")
+    assert purge(w).status_code == 200
     again = create_org(w.client, "acme", "Acme again")
     live = create_org(w.client, "bravo", "Bravo")
     assert live.status_code == 201
@@ -362,6 +400,9 @@ def test_a_running_scan_is_cancelled(world: World, scanner: SimpleNamespace) -> 
 
     assert response.status_code == 200, response.text
     assert job.cancelled and job.done.is_set() and not job.alive()
+    assert deleted_at("acme") is not None and (w.repos / "acme").is_dir()
+    assert runner_released(w)
+    assert purge(w).status_code == 200
     assert org_id("acme") is None and not (w.repos / "acme").exists()
     assert runner_released(w)
 
@@ -399,6 +440,7 @@ def test_a_sync_still_fetching_is_busy_and_releases_everything(
     }
     assert runner_released(w)
     assert org_id("acme") is not None and (w.repos / "acme" / "api").is_dir()
+    assert deleted_at("acme") is None
     finish.set()
     # The cancel reached the sync: it stops after the fetch, without a scan.
     assert wait_run(w, run_id)["status"] == "cancelled"
@@ -406,7 +448,7 @@ def test_a_sync_still_fetching_is_busy_and_releases_everything(
     # The org keeps working, and a second attempt goes through.
     assert wait_run(w, scan(w))["status"] == "ok"
     assert delete_org(w).status_code == 200
-    assert org_id("acme") is None
+    assert deleted_at("acme") is not None
 
 
 def test_a_scan_request_during_the_deletion_is_refused(
@@ -416,14 +458,14 @@ def test_a_scan_request_during_the_deletion_is_refused(
     connected(w)
     imported(w)
     entered, release = threading.Event(), threading.Event()
-    real = org_routes._delete_rows
+    real = org_routes._soft_delete_rows
 
     def slow_delete_rows(*args):  # noqa: ANN002, ANN202
         entered.set()
         release.wait(30)
         return real(*args)
 
-    monkeypatch.setattr(org_routes, "_delete_rows", slow_delete_rows)
+    monkeypatch.setattr(org_routes, "_soft_delete_rows", slow_delete_rows)
     deleted: list[httpx.Response] = []
     deleter = threading.Thread(target=lambda: deleted.append(delete_org(w)))
     deleter.start()
@@ -480,6 +522,7 @@ def test_an_import_racing_the_deletion_leaves_no_row_and_no_clone(
 def test_removing_a_production_project_deletes_its_run_files(
     world: World, scanner: SimpleNamespace
 ) -> None:
+    """The org admin's removal is soft (plan 59 D12); the purge deletes them."""
     w = world
     connected(w)
     imported(w)
@@ -492,6 +535,15 @@ def test_removing_a_production_project_deletes_its_run_files(
         "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
     )
 
+    assert response.status_code == 200, response.text
+    assert response.json()["checkout_deleted"] is False
+    assert all(p.is_file() for p in files)
+    response = admin_request(
+        w.client,
+        "POST",
+        "/api/admin/projects/acme/api/purge",
+        {"confirm_name": "api"},
+    )
     assert response.status_code == 200, response.text
     assert response.json()["checkout_deleted"] is True
     assert not any(p.exists() for p in files)

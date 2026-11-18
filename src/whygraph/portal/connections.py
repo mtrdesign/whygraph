@@ -539,6 +539,10 @@ def member_access_select(*columns, user_id: int):  # noqa: ANN002, ANN201
     columns - ``memberships.role``, ``organizations.default_project_role``,
     ``projects.restricted`` and ``project_grants.role`` - in the order
     :func:`member_project_role` takes them. The caller adds its ``WHERE``.
+    A soft-deleted org or project is never selected (plan 59 section
+    4.3.2): this is the gate for the connect routes, :func:`lookup` and
+    the ``/api/v1`` status. A suspended org is (its tokens stay valid,
+    section 4.5).
 
     Parameters
     ----------
@@ -566,12 +570,17 @@ def member_access_select(*columns, user_id: int):  # noqa: ANN002, ANN201
             (col(Membership.org_id) == col(Project.org_id))
             & (col(Membership.user_id) == user_id),
         )
-        .join(Organization, col(Organization.id) == col(Project.org_id))
+        .join(
+            Organization,
+            (col(Organization.id) == col(Project.org_id))
+            & col(Organization.deleted_at).is_(None),
+        )
         .outerjoin(
             ProjectGrant,
             (col(ProjectGrant.project_id) == col(Project.id))
             & (col(ProjectGrant.user_id) == user_id),
         )
+        .where(col(Project.deleted_at).is_(None))
     )
 
 

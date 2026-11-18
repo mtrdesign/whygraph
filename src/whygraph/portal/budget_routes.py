@@ -380,7 +380,10 @@ def get_budgets(
             p.id: p
             for p in db.exec(
                 select(Project).where(
-                    col(Project.id).in_([r.project_id for r in rows if r.project_id])
+                    col(Project.id).in_([r.project_id for r in rows if r.project_id]),
+                    # A hidden project's budget row would answer 404 to its
+                    # PUT / DELETE (plan 59 section 4.3.3).
+                    col(Project.deleted_at).is_(None),
                 )
             ).all()
         }

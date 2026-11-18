@@ -45,6 +45,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     PORT,
     PROD_BASE,
     PROD_CLIENT,
+    admin_request,
     admin_signed_in,
     at,
     claim_instance,
@@ -422,6 +423,17 @@ def test_token_bound_to_project_id(net: SimpleNamespace) -> None:
     assert call(net, token, "nope").status_code == 404
 
 
+def _purge_api(net: SimpleNamespace) -> None:
+    """Purge the soft-deleted ``acme/api`` (production removal is soft, plan 59 D12)."""
+    purged = admin_request(
+        net.client,
+        "POST",
+        "/api/admin/projects/acme/api/purge",
+        {"confirm_name": "api"},
+    )
+    assert purged.status_code == 200, purged.text
+
+
 def test_recreated_project_same_slug_unreachable(net: SimpleNamespace) -> None:
     token = issue(net, "ben", "api")
     assert call(net, token).status_code == 200
@@ -430,6 +442,7 @@ def test_recreated_project_same_slug_unreachable(net: SimpleNamespace) -> None:
         "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
     )
     assert deleted.status_code == 200, deleted.text
+    _purge_api(net)
     root = net.tmp / "roots" / "api-again"
     root.mkdir()
     again = _insert_project(net.orgs["acme"], "api", "api", root, net.ids["ben"])
@@ -587,6 +600,7 @@ def test_project_delete_revokes_with_reason(net: SimpleNamespace) -> None:
         "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
     )
     assert deleted.status_code == 200, deleted.text
+    _purge_api(net)
 
     for token in (ben, cy):
         stored = row(token)
@@ -610,6 +624,14 @@ def test_org_delete_revokes_with_reason(net: SimpleNamespace) -> None:
         "DELETE", at("acme") + "/api/org", json={"confirm_slug": "acme"}
     )
     assert deleted.status_code == 200, deleted.text
+    # A soft delete (plan 59 D12) revokes and keeps the rows; the purge
+    # deletes them, which unlinks the tokens.
+    assert all(row(token).revoked_reason == "org_deleted" for token in acme)
+    assert all(row(token).org_id is not None for token in acme)
+    purged = admin_request(
+        net.client, "POST", "/api/admin/orgs/acme/purge", {"confirm_slug": "acme"}
+    )
+    assert purged.status_code == 200, purged.text
 
     for token in acme:
         stored = row(token)

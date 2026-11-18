@@ -26,6 +26,7 @@ import pytest
 from sqlmodel import select
 
 from test_portal_app import (  # noqa: F401 -- fixtures
+    admin_request,
     at,
     env,
     github_fake,
@@ -461,6 +462,11 @@ def test_the_admin_log_shows_orgless_and_deleted_orgs_events(
         "DELETE", at("tmp") + "/api/org", json={"confirm_slug": "tmp"}
     )
     assert deleted.status_code == 200, deleted.text
+    # The owner's delete is soft (plan 59 D12); the purge makes the org gone.
+    purged = admin_request(
+        t.client, "POST", "/api/admin/orgs/tmp/purge", {"confirm_slug": "tmp"}
+    )
+    assert purged.status_code == 200, purged.text
     flush()
     # Ben's everyday session does not open the admin panel (plan 59 section 4.1).
     refused = t.client.get(at() + "/api/admin/audit")

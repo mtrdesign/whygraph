@@ -246,11 +246,15 @@ def _throttled(retry_after: int | None) -> None:
 
 
 def _member_orgs(db: Session, user_id: int) -> list[tuple[int, str, str, str]]:
-    """``(id, slug, name, role)`` of each org ``user_id`` holds a membership in."""
+    """``(id, slug, name, role)`` of each org ``user_id`` holds a membership in.
+
+    A soft-deleted org is left out (plan 59 section 4.3.2).
+    """
     rows = db.exec(
         select(Organization.id, Organization.slug, Organization.name, Membership.role)
         .join(Membership, col(Membership.org_id) == col(Organization.id))
         .where(Membership.user_id == user_id)
+        .where(col(Organization.deleted_at).is_(None))
         .order_by(Organization.name, Organization.slug)
     ).all()
     return [(org_id, slug, name, role) for org_id, slug, name, role in rows]

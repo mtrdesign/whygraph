@@ -46,6 +46,7 @@ import anyio.from_thread
 from fastapi import APIRouter, Body, Depends, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from sqlalchemy import and_, case, cast, false, func, not_, or_
+from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
@@ -211,6 +212,7 @@ from .runner import (
     OrgSuspended,
     ProjectAccessLost,
     ProjectBusy,
+    ProjectGone,
     RunFinished,
     RunNotFound,
     RunnerUnavailable,
@@ -1618,6 +1620,8 @@ def list_projects(
                 & (ProjectGrant.user_id == access.user_id),
             )
             .where(Project.org_id == access.org_id)
+            # A soft-deleted project is hidden (plan 59 section 4.3.3).
+            .where(col(Project.deleted_at).is_(None))
             .order_by(Project.name)
         ).all()
         visible: list[tuple[Project, ProjectRole]] = []
@@ -2263,10 +2267,12 @@ def _insert_import_row(
     Raises
     ------
     ApiError
-        ``404`` when the org was deleted meanwhile; ``403 org_suspended``
-        when it was suspended meanwhile; ``409 duplicate`` when
-        a concurrent import of the repository won
-        (``uq_projects_org_github_repo``); ``409 busy`` when no slug held.
+        ``404`` when the org was deleted (or soft-deleted, plan 59 section
+        4.3.2) meanwhile; ``403 org_suspended`` when it was suspended
+        meanwhile; ``409 duplicate`` when a concurrent import of the
+        repository won (``uq_projects_org_github_repo``), ``409
+        project_deleted`` when the matching row is soft-deleted (D23);
+        ``409 busy`` when no slug held.
     """
     web = require_github_app(state).config.web_url
     org_dir = state.data_dir / "repos" / access.org_slug
@@ -2277,11 +2283,16 @@ def _insert_import_row(
         try:
             with get_session() as session:
                 org = session.exec(
-                    select(Organization.id, Organization.suspended_at)
+                    select(
+                        Organization.id,
+                        Organization.suspended_at,
+                        Organization.deleted_at,
+                    )
                     .where(Organization.id == access.org_id)
                     .with_for_update(read=True)
                 ).first()
-                if org is None:
+                if org is None or org[2] is not None:
+                    # Gone, or soft-deleted since current_org checked.
                     raise ApiError(404, "not found")
                 if org[1] is not None:
                     # Suspended since current_org checked (plan 59 section 4.5).
@@ -2332,9 +2343,7 @@ def _insert_import_row(
             _release_reservation(reservation, access.org_id)
             if _constraint(exc) == "uq_projects_org_slug":
                 continue
-            raise ApiError(
-                409, "this repository is already a project here", code="duplicate"
-            ) from exc
+            raise _repo_conflict(access.org_id, repo.id) from exc
         except UnsafePathError as exc:
             _release_reservation(reservation, access.org_id)
             raise unsafe_path_error(exc) from exc
@@ -2346,12 +2355,36 @@ def _insert_import_row(
     )
 
 
+def _repo_conflict(org_id: int, repo_id: int) -> ApiError:
+    """The ``409`` for a repository that already has a project row in the org.
+
+    Keyed on ``github_repo_id`` only (plan 59 P14, D23): ``project_deleted``
+    when that row is soft-deleted (a platform administrator restores or
+    purges it), ``duplicate`` otherwise.
+    """
+    with get_session() as session:
+        deleted_at = session.exec(
+            select(Project.deleted_at).where(
+                Project.org_id == org_id, Project.github_repo_id == repo_id
+            )
+        ).first()
+    if deleted_at is not None:
+        return ApiError(
+            409,
+            "this repository's project was removed; ask a platform "
+            "administrator to restore it",
+            code="project_deleted",
+        )
+    return ApiError(409, "this repository is already a project here", code="duplicate")
+
+
 SCAN_REFUSAL_CODES: tuple[tuple[type[Exception], str], ...] = (
     (RunnerUnavailable, "runner_unavailable"),
     (ProjectBusy, "busy"),
     (SourceNotAllowed, "source_not_allowed"),
     (ProjectAccessLost, "github_access_lost"),
     (OrgSuspended, "org_suspended"),
+    (ProjectGone, "project_deleted"),
     (ManagedOnPlatform, "managed_on_platform"),
     (ScanForbidden, "forbidden"),
     (ScanBudgetExceeded, "budget_exceeded"),
@@ -2395,7 +2428,8 @@ def _import_github(
     The user must see the installation and read the repository with their
     user token, and the installation must cover it (one ``404 no_access``
     otherwise); ``409 duplicate`` when it is already a project of this
-    org; ``429`` past 30 imports per org per hour. Nothing is cloned here:
+    org (``409 project_deleted`` when that project is soft-deleted, plan 59
+    D23); ``429`` past 30 imports per org per hour. Nothing is cloned here:
     the row is inserted with ``initialized_at`` unset and the runner's
     import run (:meth:`~whygraph.portal.runner.ScanRunner.request_import`)
     clones, refuses a repository that tracks ``.whygraph/`` /
@@ -2416,9 +2450,7 @@ def _import_github(
                 Project.github_repo_id == body.repo_id,
             )
         ).first():
-            raise ApiError(
-                409, "this repository is already a project here", code="duplicate"
-            )
+            raise _repo_conflict(access.org_id, body.repo_id)
     retry_after = state.import_org.hit(access.org_id)
     if retry_after is not None:
         raise ApiError(
@@ -2523,9 +2555,20 @@ def delete_project(
     worked - when it did not, the user can revoke it on the platform's
     account page. The platform project itself is untouched, and the link
     row goes with the project's.
+
+    In **production** the removal is a soft delete (plan 59 section
+    4.3.3, D12): :func:`soft_delete_project` hides the project for
+    everyone and keeps every file and row, so a platform administrator can
+    restore or purge it. ``confirm_name`` is still required (``409
+    confirm_name``); ``delete_history``, ``strip_agent_entries`` and
+    ``confirm_tracked`` are ignored. The answer keeps the shape above with
+    ``hooks: null``, nothing deleted and ``soft: true``; the audit event
+    carries ``soft: true``.
     """
     state = portal_state(request)
     body = body or DeleteProjectBody()
+    if state.mode == "production":
+        return _soft_delete_route(state, request, project, body, principal)
     try:
         with state.runner.reserve_removal(project.id):
             result = _remove_project(state, project, body)
@@ -2545,6 +2588,112 @@ def delete_project(
         history_deleted=result["history_deleted"],
     )
     return result
+
+
+def _soft_delete_route(
+    state: PortalState,
+    request: Request,
+    project: BoundProject,
+    body: DeleteProjectBody,
+    principal: Principal,
+) -> dict:
+    """The production branch of :func:`delete_project`: a soft delete."""
+    if body.confirm_name != project.name:
+        raise ApiError(409, "type the project name to remove it", code="confirm_name")
+    try:
+        soft_delete_project(state, project, principal.user_id)
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc)) from exc
+    except ProjectGone as exc:  # soft-deleted by someone else meanwhile
+        raise ApiError(404, f"project {project.slug!r} not found") from exc
+    audit(
+        "project_removed",
+        request,
+        uid=principal.uid,
+        org_id=project.org_id,
+        org=request.scope.get("state", {}).get("org_slug"),
+        project=project.slug,
+        source=project.source,
+        checkout_deleted=False,
+        history_deleted=False,
+        soft=True,
+    )
+    return soft_delete_result(project)
+
+
+def soft_delete_result(project: BoundProject) -> dict:
+    """What a soft delete answers: the ``DeleteProjectResult`` shape, nothing deleted.
+
+    The removal dialog reads ``removed``, ``hooks``, ``agent_files``,
+    ``checkout_deleted``, ``history_deleted`` and ``warnings``; ``soft``
+    tells it the project can be restored (plan 59 section 4.3.3).
+    """
+    return {
+        "removed": project.slug,
+        "hooks": None,
+        "agent_files": [],
+        "checkout_deleted": False,
+        "history_deleted": False,
+        "warnings": [],
+        "soft": True,
+    }
+
+
+def soft_delete_project(state: PortalState, project: BoundProject, by: int) -> None:
+    """Hide a production project for everyone, keeping its rows and files (plan 59 D12).
+
+    Under the runner's removal reservation
+    (:meth:`~whygraph.portal.runner.ScanRunner.reserve_removal`), one
+    transaction first: the project row is locked, its connection tokens
+    are revoked (``project_deleted``) and ``deleted_at`` / ``deleted_by``
+    are set. After the commit, so a request cannot rebuild the context and
+    reopen the engine before it: describes stopped, the engine disposed,
+    the migration memo and the context dropped. The clone, the history
+    database and the run files stay; a restore brings the project back
+    as it was (its tokens stay revoked).
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal.
+    project : BoundProject
+        The project (its ``id`` and ``db_path`` are used).
+    by : int
+        ``users.id`` of the deleter, stored as ``deleted_by``.
+
+    Raises
+    ------
+    ProjectBusy
+        A scan or sync is queued, running or being requested, or another
+        removal (or its org's deletion) holds the project.
+    ProjectGone
+        The project (``project_deleted``) or its org (``org_deleted``) is
+        already soft-deleted, or the row is gone (``project_deleted``).
+    """
+    with state.runner.reserve_removal(project.id):
+        with get_session() as session:
+            row = session.exec(
+                select(Project.deleted_at, Organization.deleted_at)
+                .join(Organization, col(Organization.id) == col(Project.org_id))
+                .where(Project.id == project.id)
+                .with_for_update(of=Project)
+            ).first()
+            if row is None or row[0] is not None:
+                raise ProjectGone("project_deleted")
+            if row[1] is not None:
+                raise ProjectGone("org_deleted")
+            connections.revoke_for_project(session, project.id, "project_deleted")
+            session.exec(
+                sa_update(Project)
+                .where(col(Project.id) == project.id)
+                .values(deleted_at=_now(), deleted_by=by)
+            )
+        # After the commit: a describe writing after the dispose would
+        # rebuild the engine.
+        stop_describes(project.db_path)
+        dispose_engine(project.db_path)
+        state.migrations.forget(project.db_path)
+        state.contexts.invalidate(project.id)
 
 
 def _remove_project(
@@ -3291,6 +3440,9 @@ async def post_scan(
         ) from exc
     except OrgSuspended as exc:
         raise org_suspended_error() from exc
+    except ProjectGone as exc:
+        # Soft-deleted since the binding: the org never learns it exists.
+        raise ApiError(404, f"project {project.slug!r} not found") from exc
     return {"run_id": run_id}
 
 
@@ -3340,6 +3492,8 @@ async def _retry_import(
         ) from exc
     except OrgSuspended as exc:
         raise org_suspended_error() from exc
+    except ProjectGone as exc:
+        raise ApiError(404, f"project {project.slug!r} not found") from exc
 
 
 def _scan_full_forbidden(project: BoundProject) -> ApiError:

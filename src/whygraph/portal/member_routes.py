@@ -256,7 +256,10 @@ def _checked_grants(role: str, grants: list[GrantBody]) -> list[tuple[str, str]]
 def _granted_projects(
     db: Session, org_id: int, grants: list[tuple[str, str]]
 ) -> list[tuple[int, str, str]]:
-    """``(project id, slug, role)`` per grant, rows locked ``FOR SHARE``; else ``404``."""
+    """``(project id, slug, role)`` per grant, rows locked ``FOR SHARE``; else ``404``.
+
+    A soft-deleted project cannot be granted (plan 59 section 4.3.3).
+    """
     if not grants:
         return []
     slugs = [slug for slug, _ in grants]
@@ -264,6 +267,7 @@ def _granted_projects(
         db.exec(
             select(Project.slug, Project.id)
             .where(Project.org_id == org_id, col(Project.slug).in_(slugs))
+            .where(col(Project.deleted_at).is_(None))
             .with_for_update(read=True)
         ).all()
     )
@@ -360,6 +364,7 @@ def get_members(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> lis
                 )
                 .join(Project, col(Project.id) == col(ProjectGrant.project_id))
                 .where(ProjectGrant.org_id == access.org_id)
+                .where(col(Project.deleted_at).is_(None))  # plan 59 section 4.3.3
                 .order_by(col(Project.name), col(Project.slug))
             ).all():
                 grants.setdefault(user_id, []).append(
@@ -802,6 +807,7 @@ def get_invitations(
                 .where(
                     InvitationGrant.org_id == access.org_id,
                     col(InvitationGrant.invitation_id).in_(ids),
+                    col(Project.deleted_at).is_(None),  # plan 59 section 4.3.3
                 )
                 .order_by(col(Project.slug))
             ).all():
@@ -894,7 +900,9 @@ def redeem_invitations(db: Session, *, github_id: int, user_id: int) -> list[Red
     ``redeemed_by`` are set. A failure rolls back that savepoint only and
     skips that invitation; it never fails the sign-in. A suspended org's
     invitations wait (plan 59 D36): they are skipped and stay open, and
-    the org row lock keeps a suspension from committing in between.
+    the org row lock keeps a suspension from committing in between. So do
+    a soft-deleted org's (section 4.3.2), and no grant is made for a
+    soft-deleted project (section 4.3.3).
 
     Parameters
     ----------
@@ -918,13 +926,18 @@ def redeem_invitations(db: Session, *, github_id: int, user_id: int) -> list[Red
         return []
     orgs = {
         org_id: slug
-        for org_id, slug, suspended_at in db.exec(
-            select(Organization.id, Organization.slug, Organization.suspended_at)
+        for org_id, slug, suspended_at, deleted_at in db.exec(
+            select(
+                Organization.id,
+                Organization.slug,
+                Organization.suspended_at,
+                Organization.deleted_at,
+            )
             .where(col(Organization.id).in_(org_ids))
             .order_by(col(Organization.id))
             .with_for_update(read=True)
         ).all()
-        if suspended_at is None
+        if suspended_at is None and deleted_at is None
     }
     if not orgs:
         return []
@@ -995,7 +1008,10 @@ def _redeem_one(
                         ),
                     ).join(invitations, invitations.c.id == grants.c.invitation_id)
                 )
-                .where(grants.c.invitation_id == invitation_id),
+                .where(
+                    grants.c.invitation_id == invitation_id,
+                    projects.c.deleted_at.is_(None),
+                ),
             )
             .on_conflict_do_nothing()
         )

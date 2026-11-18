@@ -133,6 +133,11 @@ process:
   (reconcile, the webhook's targets, the start-up clone check) skip such
   projects, a queued run of one is cancelled at start and refused when it
   is dispatched.
+* **Soft delete** (plan 59 sections 4.3.2, 4.3.3). A soft-deleted project,
+  or a project of a soft-deleted org, is gone for the runner: every
+  request raises :class:`ProjectGone`, the background selectors skip it,
+  and a queued run of one is cancelled at start and refused when it is
+  dispatched.
 * **Source policy.** Every request - from a route or an internal caller -
   for a project whose source the mode does not accept
   (:func:`~whygraph.portal.policy.allowed_sources`, e.g. a local-mode
@@ -483,7 +488,37 @@ class OrgSuspended(RuntimeError):
         super().__init__(SUSPENDED_MESSAGE)
 
 
-HOLD_REASONS = frozenset({"deleted", "suspended"})
+class ProjectGone(RuntimeError):
+    """The project, or its org, is soft-deleted (plan 59 sections 4.3.2, 4.3.3).
+
+    Routes answer it as ``404`` (the org never learns the project exists);
+    the admin rescan answers ``409`` with :attr:`code` (D34).
+
+    Parameters
+    ----------
+    code : str
+        ``"project_deleted"`` for a deleted project, ``"org_deleted"`` for a
+        project of a deleted org.
+
+    Attributes
+    ----------
+    code : str
+        As passed.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(
+            "this organization is deleted"
+            if code == "org_deleted"
+            else "this project is deleted"
+        )
+        self.code = code
+
+
+GONE_MESSAGE = "the project was deleted"
+"""Why a deleted project's (or deleted org's) queued run is refused."""
+
+HOLD_REASONS = frozenset({"deleted", "suspended", "restored", "purged"})
 """What may hold an org's projects (:meth:`ScanRunner.reserve_projects`)."""
 
 SUSPENDED_MESSAGE = (
@@ -1644,9 +1679,10 @@ class ScanRunner:
             ``organizations.id``.
         reason : str, optional
             What holds the org, for the refusals others get meanwhile:
-            ``"deleted"`` (the default) or ``"suspended"`` (plan 59 section
-            4.5): one of :data:`HOLD_REASONS`, read as "the organization is
-            being <reason>".
+            ``"deleted"`` (the default), ``"suspended"`` (plan 59 section
+            4.5), ``"restored"`` or ``"purged"`` (section 4.3.2): one of
+            :data:`HOLD_REASONS`, read as "the organization is being
+            <reason>".
 
         Yields
         ------
@@ -1836,7 +1872,7 @@ class ScanRunner:
 
         Raises
         ------
-        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost, OrgSuspended
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost, OrgSuspended, ProjectGone
             As for :meth:`request_sync`.
         ManagedOnPlatform
             A linked project was asked to describe commits (explicit
@@ -1921,6 +1957,8 @@ class ScanRunner:
             other than for :data:`REASON_TRACKED_STATE`).
         OrgSuspended
             The project's org is suspended (plan 59 section 4.5).
+        ProjectGone
+            The project, or its org, is soft-deleted (plan 59 section 4.3).
         """
         if trigger not in TRIGGER_PRECEDENCE:
             raise ValueError(f"unknown trigger {trigger!r}")
@@ -1960,7 +1998,7 @@ class ScanRunner:
 
         Raises
         ------
-        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost, OrgSuspended
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost, OrgSuspended, ProjectGone
             As for :meth:`request_sync`.
         """
         return await self._request(
@@ -1995,7 +2033,11 @@ class ScanRunner:
                 if gate is not None:
                     source, lost, reason = gate.source, gate.lost, gate.reason
                     initialized = gate.initialized
-                    # Step 11's ProjectGone checks go here, before this one.
+                    # Deleted wins over suspended (plan 59 section 4.3.2).
+                    if gate.org_deleted:
+                        raise ProjectGone("org_deleted")
+                    if gate.project_deleted:
+                        raise ProjectGone("project_deleted")
                     if gate.org_suspended:
                         raise OrgSuspended()
                     if source not in allowed_sources(self._mode()):
@@ -2289,7 +2331,13 @@ class ScanRunner:
                 await self.request_sync(
                     p["id"], trigger="reconcile", scan_requested=True
                 )
-            except (ProjectBusy, ProjectAccessLost, SourceNotAllowed, OrgSuspended):
+            except (
+                ProjectBusy,
+                ProjectAccessLost,
+                SourceNotAllowed,
+                OrgSuspended,
+                ProjectGone,
+            ):
                 continue
 
     def _mode(self) -> str | None:
@@ -2372,7 +2420,13 @@ class ScanRunner:
                 continue
             try:
                 await self.request_sync(target.id, trigger="reconcile")
-            except (ProjectBusy, ProjectAccessLost, SourceNotAllowed, OrgSuspended):
+            except (
+                ProjectBusy,
+                ProjectAccessLost,
+                SourceNotAllowed,
+                OrgSuspended,
+                ProjectGone,
+            ):
                 continue
 
     def _remote_head(self, target: _ReconcileTarget) -> str | None:
@@ -2601,6 +2655,12 @@ class ScanRunner:
                     redactor([]),
                 )
             org = session.get(Organization, project.org_id)
+            if project.deleted_at is not None or (
+                org is not None and org.deleted_at is not None
+            ):
+                # Queued before the soft delete (plan 59 section 4.3), as
+                # for an access loss below.
+                return "failed", {"error": GONE_MESSAGE}, redactor([])
             if org is not None and org.suspended_at is not None:
                 # Queued before the suspension (plan 59 section 4.5), as for
                 # an access loss below.
@@ -3451,6 +3511,8 @@ class _Gate(NamedTuple):
     org_id: int
     initialized: bool
     org_suspended: bool
+    project_deleted: bool
+    org_deleted: bool
 
 
 def _project_gate(project_id: int) -> _Gate | None:
@@ -3464,13 +3526,24 @@ def _project_gate(project_id: int) -> _Gate | None:
                 Project.org_id,
                 Project.initialized_at,
                 Organization.suspended_at,
+                Project.deleted_at,
+                Organization.deleted_at,
             )
             .join(Organization, col(Organization.id) == col(Project.org_id))
             .where(Project.id == project_id)
         ).first()
     if row is None:
         return None
-    source, lost_at, reason, org_id, initialized_at, suspended_at = row
+    (
+        source,
+        lost_at,
+        reason,
+        org_id,
+        initialized_at,
+        suspended_at,
+        project_deleted_at,
+        org_deleted_at,
+    ) = row
     return _Gate(
         source=source,
         lost=lost_at is not None,
@@ -3478,6 +3551,8 @@ def _project_gate(project_id: int) -> _Gate | None:
         org_id=org_id,
         initialized=initialized_at is not None,
         org_suspended=suspended_at is not None,
+        project_deleted=project_deleted_at is not None,
+        org_deleted=org_deleted_at is not None,
     )
 
 
@@ -3833,7 +3908,9 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
     A row whose project is gone, not initialized or without its root is
     cancelled - except a production import's (a GitHub project not
     initialized yet), whose run makes the clone (M2f-3 plan section 4.8).
-    So is every row of a suspended org's project (plan 59 section 4.5).
+    So is every row of a suspended org's project (plan 59 section 4.5), of
+    a soft-deleted project and of a soft-deleted org's project (section
+    4.3).
     """
     specs: dict[int, _Pending] = {}
     kept: dict[int, ScanRun] = {}
@@ -3855,6 +3932,8 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
                 project is None
                 or org is None
                 or org.suspended_at is not None
+                or org.deleted_at is not None
+                or project.deleted_at is not None
                 or (
                     not importing
                     and (
@@ -3943,13 +4022,15 @@ def _purge_rewritten_links(
 
 
 def _initialized_projects() -> list[dict]:
-    """Every initialized project, but a suspended org's (plan 59 section 4.5)."""
+    """Every initialized project, but a suspended or deleted org's and a deleted one (plan 59)."""
     with get_session() as session:
         rows = session.exec(
             select(Project)
             .join(Organization, col(Organization.id) == col(Project.org_id))
             .where(col(Project.initialized_at).is_not(None))
             .where(col(Organization.suspended_at).is_(None))
+            .where(col(Organization.deleted_at).is_(None))
+            .where(col(Project.deleted_at).is_(None))
         ).all()
         out = []
         for project in rows:
@@ -3970,13 +4051,16 @@ def _reconcile_targets() -> list[_ReconcileTarget]:
     """Every initialized GitHub App project with a default branch, oldest first.
 
     A suspended org's projects are left out, so nothing is minted or probed
-    for them (plan 59 section 4.5).
+    for them (plan 59 section 4.5), and so are soft-deleted projects and a
+    soft-deleted org's (section 4.3.2).
     """
     with get_session() as session:
         rows = session.exec(
             select(Project)
             .join(Organization, col(Organization.id) == col(Project.org_id))
             .where(col(Organization.suspended_at).is_(None))
+            .where(col(Organization.deleted_at).is_(None))
+            .where(col(Project.deleted_at).is_(None))
             .where(Project.source == "github")
             .where(col(Project.initialized_at).is_not(None))
             .where(col(Project.github_repo_id).is_not(None))
@@ -4151,6 +4235,7 @@ __all__ = [
     "TRIGGER_PRECEDENCE",
     "OrgSuspended",
     "ProjectAccessLost",
+    "ProjectGone",
     "ProjectBusy",
     "Redactor",
     "RunNotFound",

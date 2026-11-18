@@ -40,7 +40,7 @@ from fastapi import Depends
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlmodel import select
+from sqlmodel import col, select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
 from github_fake import (
@@ -551,6 +551,38 @@ def admin_signed_in(client: TestClient, user_id: int) -> str:
         token = sessions.create_session(session, user_id, "pytest", kind="admin")
     client.cookies.set(sessions.admin_cookie_name(base), token, domain=base.host)
     return token
+
+
+def admin_request(
+    client: TestClient,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    *,
+    user_id: int | None = None,
+) -> httpx.Response:
+    """Call an ``/api/admin`` route on the base host with a fresh admin session.
+
+    ``user_id`` defaults to the first instance admin (the one who claimed
+    the instance). The admin cookie is dropped afterwards, so whatever
+    everyday session ``client`` held is all that is left.
+    """
+    from whygraph.portal import sessions
+
+    if user_id is None:
+        with portal_db.get_session() as session:
+            user_id = session.exec(
+                select(User.id)
+                .where(col(User.is_instance_admin).is_(True))
+                .order_by(col(User.id))
+            ).first()
+        assert user_id is not None, "no instance admin"
+    base = client.app.state.portal.base_url
+    admin_signed_in(client, user_id)
+    try:
+        return client.request(method, at() + path, json=body)
+    finally:
+        client.cookies.delete(sessions.admin_cookie_name(base), domain=base.host)
 
 
 PROD_PASSWORD = "correct horse battery staple"
@@ -1643,6 +1675,13 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     # Org suspension (plan 59 section 4.5)
     ("/api/admin/orgs/{slug}/suspend", "POST"): "instance.admin",
     ("/api/admin/orgs/{slug}/unsuspend", "POST"): "instance.admin",
+    # Soft delete, restore and purge (plan 59 sections 4.3.2, 4.3.3)
+    ("/api/admin/orgs/{slug}", "DELETE"): "instance.admin",
+    ("/api/admin/orgs/{slug}/restore", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/purge", "POST"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}", "DELETE"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/restore", "POST"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/purge", "POST"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 

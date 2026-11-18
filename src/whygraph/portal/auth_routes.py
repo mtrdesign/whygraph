@@ -37,7 +37,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import anyio.to_thread
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -45,16 +45,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, func, select
 
+from whygraph.core.config import ConfigError
 from whygraph.core.releases import format_version, running_version
 from whygraph.mcp.evidence import stop_describes
 
 from . import audit_store, connections, updates
 from .audit import audit, truncate_email
-from .authz import Action, Role
+from .authz import Action, ProjectRole, Role
+from .budgets import reload_org_budgets
+from .context import ProjectNotFound
 from .db import get_session
 from .deps import (
     ApiError,
+    BoundProject,
     PortalState,
+    bound_from,
     instance_access,
     portal_state,
     require_mode_and_host,
@@ -89,6 +94,12 @@ from .orgs import (
     is_valid_org_slug,
     validate_org_slug,
 )
+from .org_routes import (
+    not_deleted_error,
+    org_deleted_error,
+    purge_org,
+    soft_delete_org,
+)
 from .paths import project_db_path
 from .passwords import (
     hash_password,
@@ -96,7 +107,13 @@ from .passwords import (
     validate_password,
     verify_password,
 )
-from .runner import ProjectBusy
+from .routes import (
+    DeleteProjectBody,
+    _remove_project,
+    soft_delete_project,
+    soft_delete_result,
+)
+from .runner import ProjectBusy, ProjectGone
 from .security import Principal
 from .sessions import (
     admin_cookie_name,
@@ -1249,7 +1266,10 @@ def patch_account(
 def get_account_orgs(
     request: Request, principal: Principal = Depends(user_access())
 ) -> list[dict]:
-    """The orgs the user is a member of (an admin's ``reader`` access excluded)."""
+    """The orgs the user is a member of (an admin's ``reader`` access excluded).
+
+    A soft-deleted org is left out (plan 59 section 4.3.2).
+    """
     base = _base(portal_state(request))
     with get_session() as db:
         rows = db.exec(
@@ -1261,6 +1281,7 @@ def get_account_orgs(
             )
             .join(Membership, col(Membership.org_id) == col(Organization.id))
             .where(Membership.user_id == principal.user_id)
+            .where(col(Organization.deleted_at).is_(None))
             .order_by(Organization.name, Organization.slug)
         ).all()
     return [
@@ -1283,7 +1304,8 @@ def get_account_usage(
 
     Memberships only (an instance admin's ``reader`` access is not one);
     the numbers come from the spend book (M2f-2 plan section 4.11). The SPA
-    links each org to ``url + "/usage/me"``.
+    links each org to ``url + "/usage/me"``. A soft-deleted org is left out
+    (plan 59 section 4.3.2).
     """
     state = portal_state(request)
     base = _base(state)
@@ -1292,6 +1314,7 @@ def get_account_usage(
             select(Organization.id, Organization.slug, Organization.name)
             .join(Membership, col(Membership.org_id) == col(Organization.id))
             .where(Membership.user_id == principal.user_id)
+            .where(col(Organization.deleted_at).is_(None))
             .order_by(Organization.name, Organization.slug)
         ).all()
     orgs = [(org_id, slug, name, base.org_origin(slug)) for org_id, slug, name in rows]
@@ -2405,6 +2428,410 @@ def post_unsuspend_org(
         )
     audit("org_unsuspended", request, uid=principal.uid, org_id=org.id, org=org.slug)
     return {"slug": org.slug, "suspended": None}
+
+
+# ---------------------------------------------------------------------------
+# Soft delete, restore and purge of orgs and projects (plan 59 sections
+# 4.3.2, 4.3.3, D12, D14, D34)
+# ---------------------------------------------------------------------------
+
+
+class ConfirmSlugBody(_Strict):
+    """``DELETE /api/admin/orgs/{slug}`` and ``.../purge``: the slug, typed to confirm."""
+
+    confirm_slug: str = Field(default="", max_length=100)
+
+
+class ConfirmNameBody(_Strict):
+    """``DELETE /api/admin/projects/{org}/{slug}`` and ``.../purge``: the name, typed."""
+
+    confirm_name: str = Field(default="", max_length=1000)
+
+
+def _confirmed_slug(org: _OrgState, typed: str, doing: str) -> None:
+    """``409 confirm_slug`` unless ``typed`` is the org's slug."""
+    if typed != org.slug:
+        raise ApiError(
+            409,
+            f"type the organization's slug ({org.slug}) to {doing}",
+            code="confirm_slug",
+        )
+
+
+def _admin_busy(exc: ProjectBusy) -> ApiError:
+    return ApiError(409, str(exc), code="busy")
+
+
+@auth_router.delete("/api/admin/orgs/{slug}")
+async def delete_admin_org(
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+    body: ConfirmSlugBody | None = Body(default=None),
+) -> dict:
+    """Soft-delete an org (:func:`~whygraph.portal.org_routes.soft_delete_org`).
+
+    The owner's ``DELETE /api/org``, from the admin panel: ``404`` for an
+    unknown org, ``409 org_deleted`` for one already deleted (D34), ``409
+    confirm_slug`` unless ``confirm_slug`` is its slug, ``409 busy`` as
+    the owner's route. Works on a suspended org (D33).
+
+    Returns
+    -------
+    dict
+        ``{"deleted": <slug>, "projects": <count>}``, audited as
+        ``org_deleted`` with ``soft`` and ``via="instance_admin"``.
+    """
+    state = portal_state(request)
+    body = body or ConfirmSlugBody()
+    org = _refuse_deleted(await anyio.to_thread.run_sync(_org_state, slug))
+    _confirmed_slug(org, body.confirm_slug, "delete it")
+    count = await soft_delete_org(state, org.id, org.slug, principal.user_id)
+    audit(
+        "org_deleted",
+        request,
+        uid=principal.uid,
+        org_id=org.id,
+        org=org.slug,
+        projects=count,
+        soft=True,
+        via="instance_admin",
+    )
+    return {"deleted": org.slug, "projects": count}
+
+
+def _restore_org_rows(org_id: int) -> list[int]:
+    """Clear ``deleted_at`` / ``deleted_by`` under the row lock; the org's project ids.
+
+    ``409 not_deleted`` when it is live (a concurrent Restore won); ``404``
+    when it is gone (a purge won).
+    """
+    with get_session() as db:
+        row = db.exec(
+            select(Organization.id, Organization.deleted_at)
+            .where(Organization.id == org_id)
+            .with_for_update()
+        ).first()
+        if row is None:
+            raise ApiError(404, "organization not found")
+        if row[1] is None:
+            raise not_deleted_error()
+        db.exec(
+            update(Organization)
+            .where(col(Organization.id) == org_id)
+            .values(deleted_at=None, deleted_by=None)
+        )
+        return list(db.exec(select(Project.id).where(Project.org_id == org_id)).all())
+
+
+@auth_router.post("/api/admin/orgs/{slug}/restore")
+async def post_restore_org(
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Bring a soft-deleted org back for its members (plan 59 section 4.3.2).
+
+    ``404`` for an unknown org, ``409 not_deleted`` for a live one. Under
+    :meth:`~whygraph.portal.runner.ScanRunner.reserve_projects` (``restored``;
+    ``409 busy`` while it is held), so it cannot interleave with a purge of
+    the org or of one of its projects. Its budgets are reloaded and its
+    projects' contexts dropped. Not restored: connection tokens (revoked),
+    a cancelled import (Retry), a rescan, and projects soft-deleted on
+    their own.
+
+    Returns
+    -------
+    dict
+        ``{"restored": <slug>}``, audited as ``org_restored``.
+    """
+    state = portal_state(request)
+    org = await anyio.to_thread.run_sync(_org_state, slug)
+    if org is None:
+        raise ApiError(404, "organization not found")
+    if org.deleted_at is None:
+        raise not_deleted_error()
+    try:
+        async with state.runner.reserve_projects(org.id, reason="restored"):
+            project_ids = await anyio.to_thread.run_sync(_restore_org_rows, org.id)
+    except ProjectBusy as exc:
+        raise _admin_busy(exc) from exc
+    reload_org_budgets(state.budgets, org.id)
+    for project_id in project_ids:
+        state.contexts.invalidate(project_id)
+    audit("org_restored", request, uid=principal.uid, org_id=org.id, org=org.slug)
+    return {"restored": org.slug}
+
+
+@auth_router.post("/api/admin/orgs/{slug}/purge")
+async def post_purge_org(
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+    body: ConfirmSlugBody | None = Body(default=None),
+) -> dict:
+    """Delete a soft-deleted org permanently (:func:`~whygraph.portal.org_routes.purge_org`).
+
+    ``404`` for an unknown org, ``409 not_deleted`` for a live one (checked
+    again under the purge's row lock, so it cannot race a Restore), ``409
+    confirm_slug`` unless ``confirm_slug`` is its slug, ``409 busy``. Its
+    projects, clones, history, run files, memberships, config and keys are
+    deleted and the slug is retired.
+
+    Returns
+    -------
+    dict
+        ``{"purged": <slug>, "projects": <count>}``, audited as
+        ``org_purged``.
+    """
+    state = portal_state(request)
+    body = body or ConfirmSlugBody()
+    org = await anyio.to_thread.run_sync(_org_state, slug)
+    if org is None:
+        raise ApiError(404, "organization not found")
+    if org.deleted_at is None:
+        raise not_deleted_error()
+    _confirmed_slug(org, body.confirm_slug, "delete it permanently")
+    count = await purge_org(state, org.id, org.slug)
+    audit(
+        "org_purged",
+        request,
+        uid=principal.uid,
+        org_id=org.id,
+        org=org.slug,
+        projects=count,
+    )
+    return {"purged": org.slug, "projects": count}
+
+
+@dataclass(frozen=True)
+class _ProjectState:
+    """An admin route's project: the row and its org's id, slug and deleted state."""
+
+    project: Project
+    org_id: int
+    org_slug: str
+    org_deleted: bool
+
+
+def _project_state(org_slug: str, slug: str) -> _ProjectState:
+    """The project ``slug`` of the org ``org_slug``, soft-deleted or not; else ``404``."""
+    with get_session() as db:
+        row = db.exec(
+            select(Project, Organization.deleted_at)
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .where(Organization.slug == org_slug, Project.slug == slug)
+        ).first()
+        if row is None:
+            raise ApiError(404, "project not found")
+        project, org_deleted_at = row
+        db.expunge(project)
+    return _ProjectState(project, project.org_id, org_slug, org_deleted_at is not None)
+
+
+def _bound(state: PortalState, project: Project) -> BoundProject:
+    """``project`` bound as its admin would be, for the removal code (blocking)."""
+    assert project.id is not None
+    try:
+        ctx = state.contexts.get(project.id)
+    except ProjectNotFound as exc:
+        raise ApiError(404, "project not found") from exc
+    except ConfigError as exc:
+        raise ApiError(400, f"invalid project config: {exc}") from exc
+    return bound_from(project, ctx, ProjectRole.ADMIN)
+
+
+def _project_deleted_error() -> ApiError:
+    return ApiError(
+        409, "this project is deleted: restore it first", code="project_deleted"
+    )
+
+
+@auth_router.delete("/api/admin/projects/{org}/{slug}")
+def delete_admin_project(
+    org: str,
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+    body: ConfirmNameBody | None = Body(default=None),
+) -> dict:
+    """Soft-delete a project (:func:`~whygraph.portal.routes.soft_delete_project`).
+
+    The org admin's production ``DELETE /api/projects/{slug}``, from the
+    admin panel: ``404`` for an unknown org or project, ``409 org_deleted``
+    / ``409 project_deleted`` when either is already deleted (D34), ``409
+    confirm_name`` unless ``confirm_name`` is the project's name, ``409
+    busy`` while a scan or sync is queued, running or being requested.
+
+    Returns
+    -------
+    dict
+        The ``DeleteProjectResult`` shape with ``soft: true``, audited as
+        ``project_removed`` with ``soft`` and ``via="instance_admin"``.
+    """
+    state = portal_state(request)
+    body = body or ConfirmNameBody()
+    found = _project_state(org, slug)
+    if found.org_deleted:
+        raise org_deleted_error()
+    if found.project.deleted_at is not None:
+        raise _project_deleted_error()
+    if body.confirm_name != found.project.name:
+        raise ApiError(409, "type the project name to remove it", code="confirm_name")
+    bound = _bound(state, found.project)
+    try:
+        soft_delete_project(state, bound, principal.user_id)
+    except ProjectBusy as exc:
+        raise _admin_busy(exc) from exc
+    except ProjectGone as exc:  # deleted meanwhile
+        raise ApiError(409, str(exc), code=exc.code) from exc
+    audit(
+        "project_removed",
+        request,
+        uid=principal.uid,
+        org_id=found.org_id,
+        org=found.org_slug,
+        project=bound.slug,
+        source=bound.source,
+        checkout_deleted=False,
+        history_deleted=False,
+        soft=True,
+        via="instance_admin",
+    )
+    return soft_delete_result(bound)
+
+
+@auth_router.post("/api/admin/projects/{org}/{slug}/restore")
+def post_restore_project(
+    org: str,
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Bring a soft-deleted project back (plan 59 section 4.3.3).
+
+    ``404`` for an unknown org or project; ``409 org_deleted`` while its
+    org is deleted (restore the org first); ``409 not_deleted`` for a live
+    project. Under the runner's removal reservation (``409 busy``), the
+    claim a purge takes too, so a purge that passed its check cannot
+    destroy a project that was just restored. Its connection tokens stay
+    revoked.
+
+    Returns
+    -------
+    dict
+        ``{"restored": <slug>}``, audited as ``project_restored``.
+    """
+    state = portal_state(request)
+    found = _project_state(org, slug)
+    if found.org_deleted:
+        raise org_deleted_error()
+    project_id = found.project.id
+    assert project_id is not None
+    try:
+        with state.runner.reserve_removal(project_id):
+            with get_session() as db:
+                org_deleted_at = db.exec(
+                    select(Organization.deleted_at)
+                    .where(Organization.id == found.org_id)
+                    .with_for_update(read=True)
+                ).first()
+                if org_deleted_at is not None:
+                    raise org_deleted_error()
+                restored = db.exec(
+                    update(Project)
+                    .where(
+                        col(Project.id) == project_id,
+                        col(Project.deleted_at).is_not(None),
+                    )
+                    .values(deleted_at=None, deleted_by=None)
+                ).rowcount
+                if not restored:
+                    raise not_deleted_error()
+            state.contexts.invalidate(project_id)
+    except ProjectBusy as exc:
+        raise _admin_busy(exc) from exc
+    audit(
+        "project_restored",
+        request,
+        uid=principal.uid,
+        org_id=found.org_id,
+        org=found.org_slug,
+        project=slug,
+    )
+    return {"restored": slug}
+
+
+@auth_router.post("/api/admin/projects/{org}/{slug}/purge")
+def post_purge_project(
+    org: str,
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+    body: ConfirmNameBody | None = Body(default=None),
+) -> dict:
+    """Delete a soft-deleted project permanently: today's hard removal (plan 59 D14).
+
+    Allowed when the project is soft-deleted **or its org is** (D34);
+    otherwise ``409 not_deleted``, read inside the runner's removal
+    reservation (the claim a Restore takes too). ``409 confirm_name``
+    unless ``confirm_name`` is the project's name; ``409 busy``. The
+    removal is the org admin's pre-plan-59 one
+    (:func:`~whygraph.portal.routes._remove_project`): row, clone, run
+    files and - always - the history are deleted. A sync route, because
+    the removal is.
+
+    Returns
+    -------
+    dict
+        The ``DeleteProjectResult`` shape, audited as ``project_purged``.
+    """
+    state = portal_state(request)
+    body = body or ConfirmNameBody()
+    found = _project_state(org, slug)
+    project = found.project
+    assert project.id is not None
+    if project.deleted_at is None and not found.org_deleted:
+        raise not_deleted_error()  # checked again under the reservation
+    if body.confirm_name != project.name:
+        raise ApiError(
+            409,
+            "type the project name to delete it permanently",
+            code="confirm_name",
+        )
+    bound = _bound(state, project)
+    try:
+        with state.runner.reserve_removal(project.id):
+            with get_session() as db:
+                row = db.exec(
+                    select(Project.deleted_at, Organization.deleted_at)
+                    .join(Organization, col(Organization.id) == col(Project.org_id))
+                    .where(Project.id == project.id)
+                ).first()
+            if row is None:
+                raise ApiError(404, "project not found")
+            if row[0] is None and row[1] is None:
+                raise not_deleted_error()
+            result = _remove_project(
+                state,
+                bound,
+                DeleteProjectBody(confirm_name=body.confirm_name, delete_history=True),
+            )
+    except ProjectBusy as exc:
+        raise _admin_busy(exc) from exc
+    # Its budget went with the row (FK cascade).
+    reload_org_budgets(state.budgets, found.org_id)
+    audit(
+        "project_purged",
+        request,
+        uid=principal.uid,
+        org_id=found.org_id,
+        org=found.org_slug,
+        project=slug,
+        checkout_deleted=result["checkout_deleted"],
+        history_deleted=result["history_deleted"],
+    )
+    return result
 
 
 @auth_router.post("/api/admin/me/logout")

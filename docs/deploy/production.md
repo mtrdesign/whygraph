@@ -698,7 +698,8 @@ plus these GitHub, member, project and organization events:
 | `sessions_revoked` | A platform administrator ended a user's sessions: all of them or one kind (`kind` is `all`, `user` or `admin`), or a single session, with how many (`count`). Ending everyday sessions also ends the admin sessions started beside them. |
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
-| `project_imported`, `project_removed` | A repository was imported, or a project was removed. |
+| `project_imported`, `project_removed` | A repository was imported, or a project was removed (`soft` is true when it was only hidden, as every removal in production is; `via` is `instance_admin` from the admin panel). |
+| `project_restored`, `project_purged` | A platform administrator restored a removed project, or deleted it permanently (its clone, history and run files go). |
 | `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected machine (`pre_approved` is true when the platform's own card started the link and Allow was skipped), its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `note_confirmed`, `note_reconfirmed`, `note_retired` | A member confirmed a project note, marked it still true, or retired it (with the note id, its source and anchor kind, and whether the confirmer was also the proposer; never the note text). |
@@ -707,7 +708,8 @@ plus these GitHub, member, project and organization events:
 | `project_bundle_exported`, `project_bundle_imported` | A project admin exported a project bundle (with whether their chats were included, the file's size and sha256, and the rows per kind), or applied one (with the bundle's sha256, the mode that exported it, whether its settings were applied, the counts of notes, purpose runs, rationale cards, descriptions and chats added, and whether the rationale cards or descriptions were only partly imported; never any text). A dry run is not recorded. |
 | `imported_rationale_removed` | A project admin removed the rationale cards imports had added (with the count). |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
-| `org_deleted` | An owner deleted an organization (with its project count). |
+| `org_deleted` | An owner, or a platform administrator (`via` is `instance_admin`), deleted an organization (with its project count). `soft` is true: it is hidden, not erased, until it is restored or deleted permanently. |
+| `org_restored`, `org_purged` | A platform administrator restored a deleted organization, or deleted it permanently (with its project count): its projects, clones, history and members go, and its name is retired. |
 | `org_suspended`, `org_unsuspended` | A platform administrator suspended an organization (its members can only read; changes, scans, chat and agent calls stop), or lifted the suspension. Both are in the organization's own log. |
 | `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |
 | `budget_hard_stop_engaged` | A budget with the hard stop reached 100% (same fields): LLM spend it covers is off until the month resets or the budget is raised. |

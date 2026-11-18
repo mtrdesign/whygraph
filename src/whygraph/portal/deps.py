@@ -865,7 +865,8 @@ def load_org_access(
     Returns
     -------
     OrgAccess or None
-        ``None`` when the org does not exist (or the slug is malformed) or
+        ``None`` when the org does not exist, is soft-deleted (plan 59
+        section 4.3.2) or the slug is malformed, or
         the user is neither a member of it nor an instance admin with a
         live reader grant on it - callers answer all of these the same
         way. A real membership wins over ``READER``. Carries ``user_id``,
@@ -888,6 +889,8 @@ def load_org_access(
             )
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
+            # A soft-deleted org is an unknown one (plan 59 section 4.3.2).
+            .where(col(Organization.deleted_at).is_(None))
         ).first()
         reader_until = None
         if row is None and instance_admin:
@@ -904,6 +907,7 @@ def load_org_access(
                 .join(ReaderGrant, col(ReaderGrant.org_id) == col(Organization.id))
                 .where(
                     Organization.slug == org_slug,
+                    col(Organization.deleted_at).is_(None),
                     col(ReaderGrant.user_id) == user_id,
                     col(ReaderGrant.revoked_at).is_(None),
                     col(ReaderGrant.expires_at) > now,
@@ -1058,7 +1062,10 @@ def _grant_role(role: str | None) -> ProjectRole | None:
 def _lookup(
     org_id: int, slug: str, user_id: int
 ) -> tuple[Project, ProjectRole | None] | None:
-    """The project ``slug`` in ``org_id`` and ``user_id``'s grant on it (one query)."""
+    """The project ``slug`` in ``org_id`` and ``user_id``'s grant on it (one query).
+
+    A soft-deleted project is not found (plan 59 section 4.3.3).
+    """
     if not is_valid_slug(slug):
         return None
     with get_session() as session:
@@ -1070,6 +1077,7 @@ def _lookup(
                 & (ProjectGrant.user_id == user_id),
             )
             .where(Project.org_id == org_id, Project.slug == slug)
+            .where(col(Project.deleted_at).is_(None))
         ).first()
         if row is None:
             return None
@@ -1100,7 +1108,7 @@ def project_role_for(
     -------
     ProjectRole or None
         The effective role; ``None`` without access or when the project is
-        gone (or belongs to another org).
+        gone, soft-deleted (plan 59 section 4.3.3) or in another org.
     """
     row = db.exec(
         select(Project.restricted, ProjectGrant.role)
@@ -1110,6 +1118,7 @@ def project_role_for(
             & (ProjectGrant.user_id == access.user_id),
         )
         .where(Project.id == project_id, Project.org_id == access.org_id)
+        .where(col(Project.deleted_at).is_(None))
     ).first()
     if row is None:
         return None

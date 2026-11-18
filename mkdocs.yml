@@ -111,6 +111,7 @@ nav:
       - Run with Docker: deploy/docker.md
       - WhyGraph as a service: deploy/service.md
       - Run in production: deploy/production.md
+      - Platform administration: deploy/administration.md
   - Reference:
       - reference/index.md
       - CLI: reference/cli.md
@@ -119,6 +120,7 @@ nav:
       - LLM providers: reference/llm-providers.md
       - Source control providers: reference/providers.md
   - Releases:
+      - Unreleased: releases/unreleased.md
       - WhyGraph 2.6.0: releases/2.6.0.md
       - WhyGraph 2.5.0: releases/2.5.0.md
       - WhyGraph 2.4.0: releases/2.4.0.md

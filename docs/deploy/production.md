@@ -71,7 +71,9 @@ token needs permission to edit DNS records in the zone.
 
 ## GitHub sign-in
 
-Everyone except the [bootstrap admin](#first-start) signs in with GitHub. You create one **OAuth App**
+Everyone except the [bootstrap admin](#first-start) signs in with GitHub, and an instance admin
+who has a GitHub account signs in to [platform administration](administration.md#signing-in) with it
+too, at `/admin/login`. You create one **OAuth App**
 for your instance (one per base URL), under your own account or, so that an organization owns it,
 under a GitHub organization's settings: Settings, Developer settings, OAuth Apps, New OAuth App.
 
@@ -215,11 +217,15 @@ Bootstrap secret: <24 characters>
 ```
 
 The setup page says the same: the secret is in the portal's log, and shows this command. Open `<your base URL>/setup`, enter the secret, an email, a name and a password. That creates the
-first **instance admin** and signs you in; you land on "Create organization". The secret exists only in
+first **instance admin** and signs you in to [platform administration](administration.md); you land
+on `/admin`. The secret exists only in
 the portal's memory, is regenerated on every start until an admin exists, and the route is inert once
 one does. Until it is used, sign-in answers that the instance is not claimed yet, so nobody can grab
-org names first. The bootstrap admin is the one account with an email and a password; everyone else
-signs in with GitHub, and later admins are GitHub users that an admin promotes from the admin page.
+org names first. The bootstrap admin is the one account with an email and a password, and **it is for
+administration only**: it signs in at `/admin/login` and cannot sign in to an organization. To use
+organizations, sign in with GitHub. Later admins are GitHub users that an admin promotes from the
+**Users** module, so promote a GitHub account early (see
+[Platform administration](administration.md#signing-in)).
 
 ## Open sign-up
 
@@ -238,7 +244,8 @@ No email is sent or verified, because nobody signs in with one.
 ## Passwords
 
 Only the bootstrap admin has a password (and any password account carried over from an earlier
-build). It must be **15 to 256 characters**, must not be on a list of common passwords, and must not
+build, which can no longer sign in: see [Upgrading](../portal/upgrading.md#admin-mode) for what to do
+with it). A password signs in to [platform administration](administration.md) only. It must be **15 to 256 characters**, must not be on a list of common passwords, and must not
 be the account's email or its local part. There are no composition rules; a passphrase works well.
 Passwords are hashed with argon2, and repeated failed sign-ins are throttled per account and address.
 A GitHub account has no password: the password form, change and reset link do not apply to it.
@@ -254,8 +261,9 @@ only one; **Create organization** starts a new one. The account menu at the bott
 shows your name, GitHub username and role, and holds **Account**, **Sign out** and the WhyGraph
 version.
 
-The base host's pages (the organization list, your account, administration) share one header:
-**Organizations**, **Administration** for instance admins, and your avatar menu with **Account** and
+The base host's pages (the organization list and your account) share one header:
+**Organizations**, **Administration** for instance admins (it opens [`/admin`](administration.md),
+which has its own sign-in), and your avatar menu with **Account** and
 **Sign out**. Opened from an organization, they also offer **Back to** that organization.
 
 Someone who belongs to no organization yet sees "You're not in an organization yet" after signing in,
@@ -408,7 +416,7 @@ Invitations that closed in the last 30 days (accepted or revoked) are listed too
 - **Removing** a member does not delete what they wrote: their chat sessions are kept but become
   invisible to everyone, and adding the person back restores them. Chat sessions are private to the
   user who started them.
-- **Disabling.** An instance admin can disable a user from the admin page. That ends every session of
+- **Disabling.** An instance admin can disable a user from the [Users module](administration.md#the-modules). That ends every session of
   the user at once and refuses their sign-in and any reset link; memberships are kept, and enabling
   the account restores access. You cannot disable your own account, and the last enabled admin can be
   neither demoted nor disabled. A scan-event stream a person is following ends when their access is
@@ -427,7 +435,7 @@ update through your own deploy:
    with the release you are moving to.
 4. Run `docker compose pull && docker compose up -d`.
 
-The **Updates** card on the [Admin page](#instance-admins) tells instance admins when a newer release is
+The **Updates** card on the admin [Dashboard](administration.md#the-modules) tells instance admins when a newer release is
 out (an hour after it is published), whether it needs manual steps, and links its notes. It is
 shown to instance admins only. The portal checks once a day by asking `api.github.com` for the release
 list; see [The update check](../portal/security.md#update-check). To turn it off, uncomment
@@ -435,29 +443,24 @@ list; see [The update check](../portal/security.md#update-check). To turn it off
 
 ## Instance admins
 
-An instance admin manages the instance from `/admin` on the base host: users, who is an admin, the
-list of organizations, the [self-check](#the-self-check) and the [Updates card](#upgrading).
-
-- **Settings check.** A card at the top shows the base URL and what the self-check found: "no
-  problems", the missing DNS records it names, or "not run yet".
-- **Users.** **Make admin** / **Remove admin** change who administers the instance. **Disable** asks
-  for a confirmation first (it ends the person's sessions at once); **Enable** restores the account.
+An instance admin manages the instance from `/admin` on the base host, in an admin session that is
+separate from everyday sign-in. Everything about it - signing in, the modules (users, who is an
+admin, organizations, the self-check, the Updates card and the audit), reset links and the Account
+page - is on its own page: [Platform administration](administration.md).
 
 - **Keep two admins.** The last admin can't be demoted, and there is no recovery path for a locked-out
   admin in this release.
-- **Reset links.** There is no email, so an admin issues a one-time **reset link** for a password
-  account (valid 24 hours) and hands it over out of band. GitHub accounts have no password, so they
-  get none. The token is in the URL fragment, so it never reaches a
-  proxy log. Using it sets the new password and signs out every session of that user.
 - **Read access to every organization.** An admin who is not a member of an organization can still
   open it, **read-only** (GET requests only), under a "Viewing as instance admin" banner. Each such
   request is written to the security event log. These reads never trigger the lazy description
-  backfill, so an admin's reading spends none of the organization's LLM keys.
-- **There is no admin mode.** Admin powers are always on for the session, so a stolen admin cookie
-  gives up to 30 days of reading every organization and issuing reset links. Protect admin accounts:
-  a long unique passphrase, a trusted device, and the event log below.
+  backfill, so an admin's reading spends none of the organization's LLM keys. This uses the admin's
+  everyday GitHub session, so a password account, which has none, cannot do it.
+- **Admin mode.** Administration itself needs the separate admin session, which lasts 8 hours and is
+  never sent to an organization host. A stolen everyday cookie cannot open an admin page. Protect admin
+  accounts all the same: a long unique passphrase for the password account, a trusted device, and the
+  event log below.
 
-Sessions last 30 days at most and expire after 7 days idle.
+Everyday sessions last 30 days at most and expire after 7 days idle.
 
 ## Projects
 
@@ -671,14 +674,17 @@ and nothing is deleted. An instance admin who is not an owner cannot delete an o
 ## The security event log
 
 The portal writes one structured `INFO` record on the `whygraph.portal.audit` logger for each:
-bootstrap claimed, password sign-in (success and failure), sign-out, password change, reset link
+bootstrap claimed, administrator password sign-in (success and failure; the failure carries `surface` `admin`), sign-out, password change, reset link
 issued and used, admin granted or revoked, organization created, and instance-admin read request,
 plus these GitHub, member, project and organization events:
 
 | Event | When |
 |---|---|
 | `github_signin` | A GitHub sign-in succeeded (and whether the account is new). |
-| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required` or `disabled`. |
+| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required` or `disabled`. A refusal on the admin sign-in page also carries `surface` `admin`. |
+| `admin_signin` | Someone signed in to [platform administration](administration.md) (with the `method`, `password` or `github`). |
+| `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin` or `disabled`. It writes nothing else: no account, no session. |
+| `admin_signout` | An admin session ended by sign-out, from the admin panel or (with `reason` `signout`) because the everyday session it was started beside signed out. |
 | `github_token_revoke_failed` | GitHub's one-time token could not be revoked. |
 | `github_login_released` | A username moved to another account and was taken from the older one. |
 | `member_added`, `member_add_refused` | A member was added, or the attempt was refused (with the reason and the username tried). |
@@ -720,8 +726,8 @@ portal's database**, where they are kept for **400 days** and then deleted.
   "System" where no one acted (a sign-in refusal, a webhook, a budget threshold). The event names in
   the table above are what the log lines and the CSV carry. **Download CSV** exports the same filter (at most 50,000 rows). A cell
   that starts with `=`, `+`, `-` or `@` is prefixed with `'` so a spreadsheet does not run it.
-- **Instance admins** have the same list on `/admin` for events that belong to no organization and for
-  organizations that were deleted.
+- **Instance admins** have the same list in the [Audit module](administration.md#the-modules) of the admin
+  panel for events that belong to no organization and for organizations that were deleted.
 - Rows record **attempts**, so a refused action is there too. A busy portal drops rows rather than
   slowing requests (and logs a warning); the log line is always written.
 - An instance admin's reads are recorded at most once per hour per organization.

@@ -2,13 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { env } from "../env";
-import { base, createOrg, githubSignIn, openAfterFirstScan, orgUrl, signedIn } from "../lib/production";
+import { adminGithubSignIn, base, createOrg, githubSignIn, openAfterFirstScan, orgUrl, signedIn } from "../lib/production";
 import { attempt, expectAnswers, gap, keepShell, shoot, variants, watch, type ShotMeta } from "./lib/shoot";
 import { api, chat, configureAuditLlm, prodControl } from "./lib/seed";
 
 // The production-mode half of the screenshot audit: bootstrap, sign-in, orgs,
 // the GitHub App import, members and invitations, project access, Usage & cost
-// with seeded usage and budgets, the audit log, the instance admin, a reader and
+// with seeded usage and budgets, the audit log, platform administration, a reader and
 // a Viewer. One long test with one browser context per person; each screen is an
 // `attempt` (a failure becomes a gap, not the end of the run).
 
@@ -37,7 +37,7 @@ function bootstrapSecret(): string {
  * limit (Explorer evidence / rationale answer 400, see known-gaps.md).
  */
 const DELIBERATE: RegExp[] = [
-  /^POST \/api\/auth\/(bootstrap|login|github\/callback) (401|403)$/,
+  /^POST \/api\/auth\/(bootstrap|admin\/login|github\/callback) (401|403)$/,
   /^GET \/api\/github\/installations 403$/,
   /^POST \/api\/org\/members 404$/,
   /^GET \/api\/projects\/[a-z-]+\/node\/(rationale|evidence)\?\S* 400$/,
@@ -85,7 +85,7 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await ada.waitForTimeout(1500);
     await snap(ada, "onboarding", "bootstrap", "wrong-secret", "Bootstrap submitted with a wrong secret");
   });
-  if (/\/setup/.test(ada.url()) || !(await ada.getByLabel("Organization name").isVisible().catch(() => false))) {
+  if (/\/setup/.test(ada.url())) {
     await ada.goto("/setup");
     await ada.getByLabel("Bootstrap secret").fill(bootstrapSecret());
     await ada.getByLabel("Your name").fill("Ada Lovelace");
@@ -93,32 +93,45 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await ada.getByLabel("Password").fill(PASSWORD);
     await ada.getByRole("button", { name: "Create administrator" }).click();
   }
-  await expect(ada).toHaveURL(/\/orgs\/new$/);
-  await attempt(ada, at("orgs", "create-org"), async () => {
-    await settle(ada, 600);
-    await snap(ada, "orgs", "create-org", "empty", "Create organization (/orgs/new): the claimed admin has no organization yet");
-    await ada.getByLabel("Organization name").fill("Acme Corp");
-    await ada.getByLabel("URL name").fill("acme");
-    await expect(ada.getByTestId("slug-status")).toContainText("is available");
-    await snap(ada, "orgs", "create-org", "filled", "Create organization with name and URL name typed: the host preview and the slug check's 'is available'");
-    await ada.getByLabel("URL name").fill("beta");
-    await expect(ada.getByTestId("slug-status")).toBeVisible();
-    await snap(ada, "orgs", "create-org", "reserved-slug", "Create organization with a reserved URL name (beta): the slug check says so before submitting");
-    await ada.getByLabel("URL name").fill("a");
-    await ada.waitForTimeout(600);
-    await snap(ada, "orgs", "create-org", "invalid-slug", "Create organization with a URL name that breaks the rules (one character)");
+  await expect(ada).toHaveURL(new RegExp(`^${base.origin}/admin$`));
+  await attempt(ada, at("admin", "dashboard", "bootstrap-landing"), async () => {
+    await settle(ada, 1200);
+    await snap(ada, "admin", "dashboard", "bootstrap-landing", "Where the bootstrap setup lands: the admin Dashboard (/admin)");
   });
-  await ada.goto(`${base.origin}/orgs/new`);
-  await createOrg(ada, "Acme Corp", "acme");
-  await attempt(ada, at("projects", "projects", "empty-password-owner"), async () => {
-    await settle(ada);
-    await snap(ada, "projects", "projects", "empty-password-owner", "acme's empty Projects page, owner signed in with a password");
-    await expect(ada.getByTestId("first-run-checklist")).toBeVisible();
-    await snap(ada, "onboarding", "first-run-checklist", "production-password-owner", "The first-run checklist of a new org for a password account: GitHub is not done and says 'Sign in with GitHub to import repositories'");
-    await ada.goto(`${orgUrl("acme")}/projects/new`);
-    await expect(ada.getByTestId("github-required")).toBeVisible();
-    await settle(ada, 500);
-    await snap(ada, "import", "github-import", "github-required", "Import page for a password account: 'needs an account that signs in with GitHub'");
+
+  // ---- Eve: a GitHub user the bootstrap admin promotes; she owns acme ---------
+  const { c: eveC, page: eve } = await person(browser, "eve");
+  await attempt(ada, at("admin", "users", "promote"), async () => {
+    await ada.goto(`${base.origin}/admin/users`);
+    await settle(ada, 1000);
+    await snap(ada, "admin", "users", "before-promote", "Users module with Eve, a GitHub user who is not an administrator yet");
+    const row = ada.getByTestId(/^admin-user-/).filter({ hasText: "@eve" });
+    await row.getByRole("button", { name: "Make admin" }).click();
+    await expect(row.getByRole("button", { name: "Remove admin" })).toBeVisible();
+  });
+  await adminGithubSignIn(eve, "eve");
+  await attempt(eve, at("orgs", "create-org"), async () => {
+    await eve.goto(`${base.origin}/orgs/new`);
+    await settle(eve, 600);
+    await snap(eve, "orgs", "create-org", "empty", "Create organization (/orgs/new): the signed-in GitHub administrator has no organization yet");
+    await eve.getByLabel("Organization name").fill("Acme Corp");
+    await eve.getByLabel("URL name").fill("acme");
+    await expect(eve.getByTestId("slug-status")).toContainText("is available");
+    await snap(eve, "orgs", "create-org", "filled", "Create organization with name and URL name typed: the host preview and the slug check's 'is available'");
+    await eve.getByLabel("URL name").fill("beta");
+    await expect(eve.getByTestId("slug-status")).toBeVisible();
+    await snap(eve, "orgs", "create-org", "reserved-slug", "Create organization with a reserved URL name (beta): the slug check says so before submitting");
+    await eve.getByLabel("URL name").fill("a");
+    await eve.waitForTimeout(600);
+    await snap(eve, "orgs", "create-org", "invalid-slug", "Create organization with a URL name that breaks the rules (one character)");
+  });
+  await eve.goto(`${base.origin}/orgs/new`);
+  await createOrg(eve, "Acme Corp", "acme");
+  await attempt(eve, at("projects", "projects", "empty-owner"), async () => {
+    await settle(eve);
+    await snap(eve, "projects", "projects", "empty-owner", "acme's empty Projects page, owner signed in with GitHub");
+    await expect(eve.getByTestId("first-run-checklist")).toBeVisible();
+    await snap(eve, "onboarding", "first-run-checklist", "production-owner", "The first-run checklist of a new org for a GitHub owner");
   });
 
   // ---- sign-in (signed out) ---------------------------------------------------
@@ -127,14 +140,19 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await anon.page.goto("/signin");
     await settle(anon.page, 600);
     await snap(anon.page, "auth", "signin", "default", "Sign-in page on the base host (/signin), signed out");
-    await anon.page.getByRole("button", { name: "Administrator sign-in" }).click();
+  });
+  await attempt(anon.page, at("auth", "admin-login"), async () => {
+    await anon.page.goto("/admin/login");
+    await settle(anon.page, 600);
+    await snap(anon.page, "auth", "admin-login", "default", "Platform administration's sign-in (/admin/login), signed out");
+    await anon.page.getByRole("button", { name: "Sign in with a password" }).click();
     await anon.page.waitForTimeout(400);
-    await snap(anon.page, "auth", "signin", "admin-form-open", "Sign-in with the Administrator sign-in disclosure open");
+    await snap(anon.page, "auth", "admin-login", "password-open", "Admin sign-in with the password disclosure open");
     await anon.page.getByLabel("Email").fill("ada@example.com");
     await anon.page.getByLabel("Password").fill("wrong password here");
     await anon.page.getByRole("button", { name: "Sign in", exact: true }).click();
     await anon.page.waitForTimeout(1500);
-    await snap(anon.page, "auth", "signin", "bad-credentials", "Administrator sign-in with a wrong password");
+    await snap(anon.page, "auth", "admin-login", "bad-credentials", "Admin sign-in with a wrong password");
   });
   await attempt(anon.page, at("auth", "signin", "redirect-from-org"), async () => {
     await anon.page.goto(`${ROCKET.replace("rocket", "acme")}/`);
@@ -683,49 +701,61 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
   await variants(ben, `${base.origin}/account`, { mode: M, area: "account", name: "account", what: "Account page (/account)" }, { states: ["loading", "error", "forbidden"] });
 
   // ---- the instance administrator: admin page, reader view --------------
-  await attempt(ada, at("admin", "admin"), async () => {
-    await ada.goto(`${base.origin}/admin`);
-    await settle(ada, 1500);
-    await snap(ada, "admin", "admin", "default", "Instance admin page (/admin): settings check, orgs, users, admin audit");
+  await attempt(eve, at("admin", "admin"), async () => {
+    await eve.goto(`${base.origin}/admin`);
+    await settle(eve, 1500);
+    await snap(eve, "admin", "admin", "default", "Admin Dashboard (/admin): user and organization counts, settings check, updates");
   });
-  await variants(ada, `${base.origin}/admin`, { mode: M, area: "admin", name: "admin", what: "Instance admin page (/admin)" }, { states: ["loading", "error", "forbidden"] });
-  await attempt(ada, at("admin", "account"), async () => {
-    await ada.goto(`${base.origin}/account`);
-    await settle(ada, 1200);
-    await snap(ada, "account", "account", "instance-admin", "Account page of Ada (password account, instance admin)");
+  await variants(eve, `${base.origin}/admin`, { mode: M, area: "admin", name: "admin", what: "Admin Dashboard (/admin)" }, { states: ["loading", "error", "forbidden"] });
+  for (const [name, route, desc] of [
+    ["organizations", "orgs", "Admin Organizations module (/admin/orgs)"],
+    ["users", "users", "Admin Users module (/admin/users)"],
+    ["audit", "audit", "Admin Audit module (/admin/audit)"],
+    ["account", "account", "Admin Account page (/admin/account)"],
+  ] as const) {
+    await attempt(eve, at("admin", name), async () => {
+      await eve.goto(`${base.origin}/admin/${route}`);
+      await settle(eve, 1200);
+      await snap(eve, "admin", name, "default", desc);
+    });
+  }
+  await attempt(eve, at("admin", "account"), async () => {
+    await eve.goto(`${base.origin}/account`);
+    await settle(eve, 1200);
+    await snap(eve, "account", "account", "instance-admin", "Account page of Eve (GitHub account, instance admin)");
   });
-  await attempt(ada, at("reader", "projects"), async () => {
-    await ada.goto(`${ROCKET}/`);
-    await expect(ada.getByTestId("reader-banner")).toBeVisible();
-    await settle(ada, 1200);
-    await snap(ada, "reader", "projects", "reader", "rocket's Projects page read by the instance admin (not a member): the reader banner");
-    await ada.goto(`${ROCKET}/p/demo`);
-    await settle(ada, 1200);
-    await snap(ada, "reader", "overview", "reader", "A project's Overview in reader mode");
-    await ada.goto(`${ROCKET}/p/demo/chat`);
-    await settle(ada, 1200);
-    await snap(ada, "reader", "chat", "reader", "Chat in reader mode");
-    await ada.goto(`${ROCKET}/members`);
-    await settle(ada, 1200);
-    await snap(ada, "reader", "members", "reader", "Members in reader mode");
-    await ada.goto(`${ROCKET}/usage`);
-    await settle(ada, 1500);
-    await snap(ada, "reader", "usage", "reader", "Usage & cost in reader mode");
-    await ada.goto(`${ROCKET}/settings`);
-    await expect(ada.getByTestId("settings-reader")).toBeVisible();
-    await settle(ada, 1200);
-    await snap(ada, "reader", "org-settings", "reader", "Org settings in reader mode: the 'viewing as an instance administrator' notice, read-only");
-    await ada.goto(`${ROCKET}/p/demo/settings`);
-    await expect(ada.getByTestId("settings-reader")).toBeVisible();
-    await settle(ada, 1200);
-    await snap(ada, "reader", "project-settings", "reader", "Project settings in reader mode: read-only for the instance administrator");
+  await attempt(eve, at("reader", "projects"), async () => {
+    await eve.goto(`${ROCKET}/`);
+    await expect(eve.getByTestId("reader-banner")).toBeVisible();
+    await settle(eve, 1200);
+    await snap(eve, "reader", "projects", "reader", "rocket's Projects page read by the instance admin (not a member): the reader banner");
+    await eve.goto(`${ROCKET}/p/demo`);
+    await settle(eve, 1200);
+    await snap(eve, "reader", "overview", "reader", "A project's Overview in reader mode");
+    await eve.goto(`${ROCKET}/p/demo/chat`);
+    await settle(eve, 1200);
+    await snap(eve, "reader", "chat", "reader", "Chat in reader mode");
+    await eve.goto(`${ROCKET}/members`);
+    await settle(eve, 1200);
+    await snap(eve, "reader", "members", "reader", "Members in reader mode");
+    await eve.goto(`${ROCKET}/usage`);
+    await settle(eve, 1500);
+    await snap(eve, "reader", "usage", "reader", "Usage & cost in reader mode");
+    await eve.goto(`${ROCKET}/settings`);
+    await expect(eve.getByTestId("settings-reader")).toBeVisible();
+    await settle(eve, 1200);
+    await snap(eve, "reader", "org-settings", "reader", "Org settings in reader mode: the 'viewing as an instance administrator' notice, read-only");
+    await eve.goto(`${ROCKET}/p/demo/settings`);
+    await expect(eve.getByTestId("settings-reader")).toBeVisible();
+    await settle(eve, 1200);
+    await snap(eve, "reader", "project-settings", "reader", "Project settings in reader mode: read-only for the instance administrator");
   });
-  await attempt(ada, at("orgs", "org-picker", "admin"), async () => {
-    await ada.goto(`${base.origin}/orgs`);
-    await settle(ada, 1500);
-    await snap(ada, "orgs", "org-picker", "instance-admin", "Org picker as the instance admin (member of acme only)");
+  await attempt(eve, at("orgs", "org-picker", "admin"), async () => {
+    await eve.goto(`${base.origin}/orgs`);
+    await settle(eve, 1500);
+    await snap(eve, "orgs", "org-picker", "instance-admin", "Org picker as the instance admin (member of acme only)");
   });
-  await variants(ada, `${base.origin}/orgs`, { mode: M, area: "orgs", name: "org-picker", what: "Org picker (/orgs)" }, { states: ["loading", "error", "forbidden"] });
+  await variants(eve, `${base.origin}/orgs`, { mode: M, area: "orgs", name: "org-picker", what: "Org picker (/orgs)" }, { states: ["loading", "error", "forbidden"] });
   await attempt(ben, at("edge", "not-found"), async () => {
     await ben.goto(`${ROCKET}/no-such-page`);
     await settle(ben, 1000);
@@ -756,4 +786,5 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
   await deeC.close();
   await cyC.close();
   await benC.close();
+  await eveC.close();
 });

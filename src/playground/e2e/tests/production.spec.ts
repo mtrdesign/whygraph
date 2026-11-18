@@ -2,11 +2,26 @@ import fs from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
 import { env } from "../env";
 import { sidebarLink } from "../lib/ui";
-import { base, createOrg, expectNoServerText, githubSignIn, importRepo, orgUrl, signedIn } from "../lib/production";
+import {
+  adminGithubSignIn,
+  base,
+  createOrg,
+  expectNoServerText,
+  githubSignIn,
+  importRepo,
+  orgUrl,
+  signedIn,
+} from "../lib/production";
 
 // Production mode (M2c): the bootstrap secret, organizations on their own hosts,
 // the shared session cookie and the instance admin's read-only access. Runs
 // against its own portal (`env.prodUrl`), independent of the local-mode projects.
+//
+// Who is who (plan 59, D4): Ada is the bootstrap password account. It is for
+// administration only: she signs in at /admin/login and promotes the GitHub user
+// eve to administrator. Eve creates and owns acme, does its member management and,
+// as an administrator who is not a member of bravo, reads it. Ben owns bravo (and
+// rocket in the second test), so he never joins acme for good.
 const PASSWORD = "correct horse battery staple";
 
 /** The one-time secret the portal prints in its log (plan 4.3). */
@@ -30,16 +45,23 @@ async function signOut(page: Page, via: "menu" | "button" = "menu"): Promise<voi
   await expect(page).toHaveURL(/\/signin/);
 }
 
-/** The administrator's password form, behind its disclosure on the sign-in page. */
-async function signIn(page: Page, email: string): Promise<void> {
-  await page.getByRole("button", { name: "Administrator sign-in" }).click();
+/** The bootstrap account's password form, behind its disclosure on the admin sign-in page. */
+async function adminPasswordSignIn(page: Page, email: string): Promise<void> {
+  await page.goto("/admin/login");
+  await page.getByRole("button", { name: "Sign in with a password" }).click();
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/admin$`));
+  await expect(page.getByRole("heading", { name: "Dashboard", level: 1 })).toBeVisible();
 }
 
-test("bootstrap, organizations on their own hosts, sign-in hand-off and reader access", async ({ page, browser }) => {
-  // Bootstrap: the first visitor claims the instance with the logged secret.
+test("bootstrap, admin sign-in, organizations on their own hosts, sign-in hand-off and reader access", async ({
+  page,
+  browser,
+}) => {
+  // Bootstrap: the first visitor claims the instance with the logged secret and lands in
+  // platform administration (not on an organization: a password account has none).
   await page.goto("/");
   await expect(page).toHaveURL(/\/setup$/);
   await page.getByLabel("Bootstrap secret").fill(bootstrapSecret());
@@ -47,22 +69,55 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await page.getByLabel("Email").fill("ada@example.com");
   await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Create administrator" }).click();
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/admin$`));
+  await expect(page.getByRole("heading", { name: "Dashboard", level: 1 })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Users" }).first()).toBeVisible();
 
-  // Ada has no organization yet: she creates acme and lands on its host.
-  await expect(page).toHaveURL(/\/orgs\/new$/);
-  await createOrg(page, "Acme", "acme");
-  await expect(page.getByTestId("reader-banner")).toHaveCount(0);
+  // Signing out ends the admin session; the password form is at /admin/login only,
+  // and the everyday sign-in page has none.
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/admin/login$`));
+  await page.goto("/signin");
+  await expect(page.getByRole("button", { name: "Administrator sign-in" })).toHaveCount(0);
+  await page.goto("/admin");
+  await expect(page).toHaveURL(new RegExp(`^${base.origin}/admin/login\\?next=`));
+  await adminPasswordSignIn(page, "ada@example.com");
+
+  // Eve signs in with GitHub (everyday), has no organization yet, and is not an
+  // administrator: the admin sign-in refuses her and the page links back to /admin/login.
+  const eveContext = await browser.newContext({ baseURL: env.prodUrl });
+  const eve = await eveContext.newPage();
+  await githubSignIn(eve, "eve");
+  await expect(eve.getByRole("heading", { name: "You're not in an organization yet" })).toBeVisible();
+  await eve.goto("/admin/login");
+  await eve.getByRole("button", { name: "Continue with GitHub" }).click();
+  await eve.getByRole("link", { name: "Continue as eve" }).click();
+  await expect(eve.getByTestId("github-callback-error")).toContainText("not a platform administrator");
+  await expect(eve.getByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/admin/login");
+
+  // Ada promotes her on the Users module; Eve then signs in to administration with GitHub.
+  await page.goto("/admin/users");
+  const eveRow = page.getByTestId(/^admin-user-/).filter({ hasText: "@eve" });
+  await eveRow.getByRole("button", { name: "Make admin" }).click();
+  await expect(eveRow.getByRole("button", { name: "Remove admin" })).toBeVisible();
+  await adminGithubSignIn(eve, "eve");
+  await expect(eve.getByRole("heading", { name: "Dashboard", level: 1 })).toBeVisible();
+
+  // Eve creates acme and lands on its host (her everyday session was left alone).
+  await eve.goto(`${base.origin}/orgs/new`);
+  await createOrg(eve, "Acme", "acme");
+  await expect(eve.getByTestId("reader-banner")).toHaveCount(0);
 
   // The org switcher names the org; "All organizations" lists it on the base host
   // even though it is her only one (`?stay=1`), with a way back (NAV-2, NAV-7).
-  await page.getByTestId("org-switcher").click();
-  await expect(page.getByTestId("org-current")).toContainText("Acme");
-  await page.getByRole("menuitem", { name: "All organizations" }).click();
-  await expect(page).toHaveURL(new RegExp(`^${base.origin}/orgs\\?stay=1&from=acme$`));
-  await expect(page.getByTestId("org-list")).toContainText("Acme");
-  await page.getByTestId("back-to-org").click();
-  await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
-  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await eve.getByTestId("org-switcher").click();
+  await expect(eve.getByTestId("org-current")).toContainText("Acme");
+  await eve.getByRole("menuitem", { name: "All organizations" }).click();
+  await expect(eve).toHaveURL(new RegExp(`^${base.origin}/orgs\\?stay=1&from=acme$`));
+  await expect(eve.getByTestId("org-list")).toContainText("Acme");
+  await eve.getByTestId("back-to-org").click();
+  await expect(eve).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
+  await expect(eve.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // Ben (a second browser context, so his cookies are his own) signs in with
   // GitHub and creates bravo (the plan says beta, which is a reserved slug).
@@ -80,25 +135,25 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
   await ben.goto(`${orgUrl("acme")}/`);
   await expect(ben.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
 
-  // Ada adds ben on acme's Members page; Ben reloads and sees Projects.
-  await page.goto(`${orgUrl("acme")}/members`);
-  await expect(page.getByRole("heading", { name: "Members", exact: true, level: 1 })).toBeVisible();
-  await expect(page.getByTestId("members-heading")).toContainText("Members (");
-  await page.getByLabel("GitHub username").fill("ben");
-  await page.getByRole("button", { name: "Invite", exact: true }).click();
-  await expect(page.getByTestId("member-list")).toContainText("@ben");
+  // Eve adds ben on acme's Members page; Ben reloads and sees Projects.
+  await eve.goto(`${orgUrl("acme")}/members`);
+  await expect(eve.getByRole("heading", { name: "Members", exact: true, level: 1 })).toBeVisible();
+  await expect(eve.getByTestId("members-heading")).toContainText("Members (");
+  await eve.getByLabel("GitHub username").fill("ben");
+  await eve.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect(eve.getByTestId("member-list")).toContainText("@ben");
   await ben.reload();
   await expect(ben.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
-  // Promoted to admin, Ben gets the Members page's controls; then Ada removes him.
-  await page.getByLabel("Role for Ben").selectOption("admin");
-  await expect(page.getByLabel("Role for Ben")).toHaveValue("admin");
+  // Promoted to admin, Ben gets the Members page's controls; then Eve removes him.
+  await eve.getByLabel("Role for Ben").selectOption("admin");
+  await expect(eve.getByLabel("Role for Ben")).toHaveValue("admin");
   await ben.goto(`${orgUrl("acme")}/members`);
   await expect(ben.getByLabel("GitHub username")).toBeVisible();
-  await page.getByTestId("member-list").getByRole("listitem").filter({ hasText: "@ben" })
+  await eve.getByTestId("member-list").getByRole("listitem").filter({ hasText: "@ben" })
     .getByRole("button", { name: "Remove" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
-  await expect(page.getByTestId("member-list")).not.toContainText("@ben");
+  await eve.getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
+  await expect(eve.getByTestId("member-list")).not.toContainText("@ben");
   await ben.reload();
   await expect(ben.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
   await signOut(ben, "button");
@@ -113,31 +168,35 @@ test("bootstrap, organizations on their own hosts, sign-in hand-off and reader a
 
   // The account menu shows who and in which role, the version inside it, and no
   // "Switch organization" (the org switcher took that over).
-  await expect(page.getByTestId("account-who")).toContainText("ada@example.com · Owner");
-  await page.getByRole("button", { name: "Account menu" }).click();
-  await expect(page.getByText(/^WhyGraph \d/)).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Switch organization" })).toHaveCount(0);
-  await page.keyboard.press("Escape");
+  await expect(eve.getByTestId("account-who")).toContainText(/eve.*Owner/i);
+  await eve.getByRole("button", { name: "Account menu" }).click();
+  await expect(eve.getByText(/^WhyGraph \d/)).toBeVisible();
+  await expect(eve.getByRole("menuitem", { name: "Switch organization" })).toHaveCount(0);
+  await eve.keyboard.press("Escape");
 
-  await signOut(page);
+  // Signing out of the everyday session also ends the admin session started beside it.
+  await signOut(eve);
+  await eve.goto("/admin");
+  await expect(eve).toHaveURL(new RegExp(`^${base.origin}/admin/login\\?next=`));
 
   // Signed out, acme's host sends the browser to the base host's sign-in.
-  await page.goto(`${orgUrl("acme")}/`);
-  await expect(page).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
-  expect(new URL(page.url()).searchParams.get("next")).toContain(orgUrl("acme"));
-  await expect(page.getByText(`Sign in to continue to ${new URL(orgUrl("acme")).host}.`)).toBeVisible();
+  await eve.goto(`${orgUrl("acme")}/`);
+  await expect(eve).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
+  expect(new URL(eve.url()).searchParams.get("next")).toContain(orgUrl("acme"));
+  await expect(eve.getByText(`Sign in to continue to ${new URL(orgUrl("acme")).host}.`)).toBeVisible();
 
-  // Signing in as Ada hands her back to acme.
-  await signIn(page, "ada@example.com");
-  await expect(page).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
-  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  // Signing in as Eve hands her back to acme.
+  await githubSignIn(eve, "eve");
+  await expect(eve).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
+  await expect(eve.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
   // bravo's host needs no new sign-in (the cookie covers the subdomains); as an
-  // instance admin who is not a member, Ada reads it behind the banner.
-  await page.goto(`${orgUrl("bravo")}/`);
-  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
-  await expect(page.getByTestId("reader-banner")).toBeVisible();
-  await expect(page).not.toHaveURL(/\/signin/);
+  // instance admin who is not a member, Eve reads it behind the banner.
+  await eve.goto(`${orgUrl("bravo")}/`);
+  await expect(eve.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await expect(eve.getByTestId("reader-banner")).toBeVisible();
+  await expect(eve).not.toHaveURL(/\/signin/);
+  await eveContext.close();
 });
 
 /** The scan runs of a project, read in the page (same origin, its own cookies). */
@@ -149,7 +208,7 @@ async function runs(page: Page, slug: string): Promise<{ kind: string; trigger: 
   }, slug);
 }
 
-test("projects from GitHub: connect, import, scan, members, a push, deleting the org", async ({ page, browser }) => {
+test("projects from GitHub: connect, import, scan, members, a push, deleting the org", async ({ browser }) => {
   // Ben (GitHub) creates rocket and imports the fake's fixture repo ben/demo
   // through the GitHub App (the fake installs it on his account at start).
   const benContext = await browser.newContext({ baseURL: env.prodUrl });
@@ -170,21 +229,6 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
     await expect(ben.getByRole("heading").first()).toBeVisible();
     await expectNoServerText(ben);
   }
-
-  // Ada, the instance administrator, signs in with a password: she cannot
-  // import from GitHub, not even into her own organization.
-  // Signed out, acme's import page sends her to sign in and back (no second
-  // navigation that could race the sign-in's own).
-  await page.goto(`${orgUrl("acme")}/projects/new`);
-  await expect(page).toHaveURL(new RegExp(`^${base.origin}/signin\\?next=`));
-  const installationCalls: string[] = [];
-  page.on("request", (r) => {
-    if (r.url().endsWith("/api/github/installations")) installationCalls.push(r.url());
-  });
-  await signIn(page, "ada@example.com");
-  await expect(page).toHaveURL(`${orgUrl("acme")}/projects/new`);
-  await expect(page.getByTestId("github-required")).toContainText("Importing needs a GitHub sign-in");
-  expect(installationCalls).toHaveLength(0);
 
   // cy signs in once, Ben adds him as a member (M2d-1's flow): cy sees the
   // project, without the owners' and admins' New project.

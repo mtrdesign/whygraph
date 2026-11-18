@@ -695,6 +695,7 @@ plus these GitHub, member, project and organization events:
 | `project_restricted_changed` | A project was marked or unmarked Restricted. |
 | `org_renamed`, `org_default_role_changed`, `org_ownership_transferred` | An owner renamed the organization, changed its default project role or transferred ownership. |
 | `user_disabled`, `user_enabled` | An instance admin disabled or enabled an account. |
+| `sessions_revoked` | A platform administrator ended a user's sessions: all of them or one kind (`kind` is `all`, `user` or `admin`), or a single session, with how many (`count`). Ending everyday sessions also ends the admin sessions started beside them. |
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
 | `project_imported`, `project_removed` | A repository was imported, or a project was removed. |

@@ -1627,7 +1627,11 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/update", "GET"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
     ("/api/admin/users", "GET"): "instance.admin",
+    ("/api/admin/users/{uid}", "GET"): "instance.admin",
     ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
+    ("/api/admin/users/{uid}/sessions", "DELETE"): "instance.admin",
+    ("/api/admin/users/{uid}/sessions/{id}", "DELETE"): "instance.admin",
+    ("/api/admin/users/{uid}/tokens/{token_uid}", "DELETE"): "instance.admin",
     ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
     ("/api/admin/audit", "GET"): "instance.admin",
     # The admin panel's own account (plan 59 section 4.2)

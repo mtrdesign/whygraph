@@ -441,6 +441,10 @@ class AuditFilter:
         Only this event name.
     actor : str or None
         Only this actor: a user uid, or a label with or without ``@``.
+    subject : str or None
+        Only events that **involve** this user uid: the user is the actor
+        or the ``target`` (the admin panel's user detail, plan 59 section
+        4.6). Unlike ``actor`` it does not match a label.
     since, until : str or None
         ISO-8601 bounds on ``created_at`` (``since`` inclusive, ``until``
         exclusive).
@@ -451,6 +455,7 @@ class AuditFilter:
     org: str | None = None
     event: str | None = None
     actor: str | None = None
+    subject: str | None = None
     since: str | None = None
     until: str | None = None
 
@@ -504,6 +509,7 @@ def make_filter(
     org: str | None = None,
     event: str | None = None,
     actor: str | None = None,
+    subject: str | None = None,
     since: str | None = None,
     until: str | None = None,
 ) -> AuditFilter:
@@ -511,7 +517,7 @@ def make_filter(
 
     Parameters
     ----------
-    org_id, orgless, org, event, actor
+    org_id, orgless, org, event, actor, subject
         As on :class:`AuditFilter`; blank strings mean no filter.
     since, until : str, optional
         The raw ``from`` / ``to`` values (:func:`parse_bound`).
@@ -532,6 +538,7 @@ def make_filter(
         org=(org or "").strip() or None,
         event=(event or "").strip() or None,
         actor=(actor or "").strip() or None,
+        subject=(subject or "").strip() or None,
         since=parse_bound(since, end=False),
         until=parse_bound(until, end=True),
     )
@@ -555,6 +562,15 @@ def _conditions(f: AuditFilter) -> list:
                 col(User.uid) == actor,
                 func.lower(col(AuditEvent.actor_label)) == actor.lower(),
                 func.lower(col(AuditEvent.actor_label)) == label,
+            )
+        )
+    if f.subject:
+        subject = f.subject.strip()
+        conditions.append(
+            or_(
+                col(AuditEvent.actor_id)
+                == select(User.id).where(User.uid == subject).scalar_subquery(),
+                col(AuditEvent.target) == subject,
             )
         )
     if f.since:

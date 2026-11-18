@@ -53,6 +53,7 @@
   "duplicate_grant",
   "effort_unsupported",
   "email_taken",
+  "erased",
   "feedback_target_invalid",
   "forbidden",
   "generation_disabled",
@@ -131,6 +132,7 @@
   "root_missing",
   "runner_unavailable",
   "self_disable",
+  "self_session",
   "self_transfer",
   "setup_required",
   "slug_taken",
@@ -144,6 +146,7 @@
   "unsafe_path",
   "update_required",
   "usage_timeout",
+  "user_deleted",
   "user_disabled",
   "weak_password"
 ]

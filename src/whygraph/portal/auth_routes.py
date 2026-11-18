@@ -29,10 +29,12 @@ security event of plan section 0.2 goes through
 from __future__ import annotations
 
 import hmac
+import json
 import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 import anyio.to_thread
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -40,6 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 from sqlmodel import Session, col, func, select
 
 from whygraph.core.releases import format_version, running_version
@@ -68,6 +71,7 @@ from .github_auth import (
 from .hosts import BaseUrl, safe_admin_redirect, safe_redirect
 from .member_routes import Redeemed, redeem_invitations
 from .models import (
+    ConnectionToken,
     Membership,
     Organization,
     PasswordReset,
@@ -104,13 +108,14 @@ from .sessions import (
     repair_admin,
     revoke,
     revoke_user,
+    revoke_user_kind,
     rotate,
     session_cookies,
     set_admin_cookie,
     set_cookie,
 )
 from .throttle import ip_key
-from .usage_routes import account_usage
+from .usage_routes import account_usage, usd
 
 RESET_LINK_LIFETIME = timedelta(hours=24)
 """How long an admin-issued reset link works."""
@@ -205,6 +210,12 @@ class AdminUserBody(_Strict):
 
     is_instance_admin: bool | None = None
     disabled: bool | None = None
+
+
+class AdminSessionsBody(_Strict):
+    """``DELETE /api/admin/users/{uid}/sessions``: which kind to end (default both)."""
+
+    kind: Literal["user", "admin"] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1472,30 +1483,215 @@ def get_admin_audit(
     return {"events": events, "next": next_before}
 
 
+def _admin_user_row(
+    user: User,
+    *,
+    org_count: int,
+    owner_of: int,
+    session_last_seen_at: str | None,
+    deleted_by: str | None,
+) -> dict:
+    return {
+        "uid": user.uid,
+        "email": user.email,
+        "display_name": user.display_name,
+        "is_instance_admin": user.is_instance_admin,
+        "github_login": user.github_login,
+        "has_password": user.password_hash is not None,
+        "disabled": user.disabled_at is not None,
+        "created_at": user.created_at,
+        "org_count": org_count,
+        "owner_of": owner_of,
+        "session_last_seen_at": session_last_seen_at,
+        "deleted_at": user.deleted_at,
+        "deleted_by": deleted_by,
+        "erased": user.erased_at is not None,
+    }
+
+
 @auth_router.get("/api/admin/users")
 def get_admin_users(_: Principal = Depends(instance_access())) -> list[dict]:
-    """Every user, with how many orgs they belong to."""
+    """Every user, with how many orgs they belong to and own.
+
+    ``session_last_seen_at`` is the newest ``last_seen_at`` of the user's
+    everyday sessions (``None`` after a sign-out or a sweep, accurate to
+    five minutes); ``deleted_by`` is the uid of the administrator who
+    soft-deleted the account (plan 59 section 4.6).
+    """
+    deleter = aliased(User)
+    last_seen = (
+        select(func.max(UserSession.last_seen_at))
+        .where(
+            col(UserSession.user_id) == col(User.id),
+            col(UserSession.kind) == "user",
+        )
+        .scalar_subquery()
+    )
+    deleted_by = (
+        select(deleter.uid).where(col(deleter.id) == col(User.deleted_by))
+    ).scalar_subquery()
     with get_session() as db:
         rows = db.exec(
-            select(User, func.count(col(Membership.org_id)))
+            select(
+                User,
+                func.count(col(Membership.org_id)),
+                func.count(col(Membership.org_id)).filter(
+                    col(Membership.role) == Role.OWNER
+                ),
+                last_seen,
+                deleted_by,
+            )
             .outerjoin(Membership, col(Membership.user_id) == col(User.id))
             .group_by(col(User.id))
             .order_by(User.created_at, User.id)
         ).all()
         return [
-            {
-                "uid": user.uid,
-                "email": user.email,
-                "display_name": user.display_name,
-                "is_instance_admin": user.is_instance_admin,
-                "github_login": user.github_login,
-                "has_password": user.password_hash is not None,
-                "disabled": user.disabled_at is not None,
-                "created_at": user.created_at,
-                "org_count": count,
-            }
-            for user, count in rows
+            _admin_user_row(
+                user,
+                org_count=count,
+                owner_of=owned,
+                session_last_seen_at=seen,
+                deleted_by=by,
+            )
+            for user, count, owned, seen, by in rows
         ]
+
+
+def _refuse_gone_user(user: User) -> None:
+    """``409 erased`` / ``409 user_deleted`` for a soft-deleted or erased account."""
+    if user.erased_at is not None:
+        raise ApiError(409, "this account was erased", code="erased")
+    if user.deleted_at is not None:
+        raise ApiError(
+            409, "this account was deleted: restore it first", code="user_deleted"
+        )
+
+
+def _snapshot_memberships(user: User) -> list[dict]:
+    """The memberships a soft delete removed (``[{org_id, role, ...}]``)."""
+    if not user.deleted_memberships:
+        return []
+    try:
+        entries = json.loads(user.deleted_memberships)
+    except ValueError:
+        return []
+    return [e for e in entries if isinstance(e, dict) and "org_id" in e]
+
+
+@auth_router.get("/api/admin/users/{uid}")
+def get_admin_user(
+    uid: str,
+    request: Request,
+    _: Principal = Depends(instance_access()),
+) -> dict:
+    """One user for the admin panel's detail page.
+
+    The list row's fields plus ``memberships`` (org slug, name, role, owner
+    flag; a soft-deleted user's snapshot, minus orgs that no longer exist),
+    ``sessions`` of both kinds (never the hash; rows past their lifetime
+    are left out), ``tokens`` (connection tokens, live and revoked),
+    ``spend`` (this month's spend by org), and the latest 20 audit
+    ``events`` where the user is the actor or the target.
+    """
+    state = portal_state(request)
+    now = _iso(_now())
+    with get_session() as db:
+        user = _user_by_uid(db, uid)
+        assert user.id is not None
+        if user.deleted_at is None:
+            member_rows = db.exec(
+                select(
+                    Organization.id,
+                    Organization.slug,
+                    Organization.name,
+                    Membership.role,
+                )
+                .join(Membership, col(Membership.org_id) == col(Organization.id))
+                .where(col(Membership.user_id) == user.id)
+                .order_by(Organization.slug)
+            ).all()
+        else:
+            roles = {e["org_id"]: e.get("role") for e in _snapshot_memberships(user)}
+            member_rows = [
+                (org_id, slug, name, roles[org_id])
+                for org_id, slug, name in db.exec(
+                    select(Organization.id, Organization.slug, Organization.name)
+                    .where(col(Organization.id).in_(list(roles)))
+                    .order_by(Organization.slug)
+                ).all()
+            ]
+        memberships = [
+            {
+                "org": slug,
+                "name": name,
+                "role": role,
+                "owner": role == Role.OWNER,
+            }
+            for _id, slug, name, role in member_rows
+        ]
+        spend = [
+            {"org": slug, "spent_usd": usd(state.spend.spent(org_id, user_id=user.id))}
+            for org_id, slug, _name, _role in member_rows
+        ]
+        owned = sum(1 for m in memberships if m["owner"])
+        seen = db.exec(
+            select(func.max(UserSession.last_seen_at)).where(
+                col(UserSession.user_id) == user.id, col(UserSession.kind) == "user"
+            )
+        ).first()
+        deleted_by = (
+            db.exec(select(User.uid).where(User.id == user.deleted_by)).first()
+            if user.deleted_by is not None
+            else None
+        )
+        session_rows = db.exec(
+            select(UserSession)
+            .where(
+                col(UserSession.user_id) == user.id,
+                col(UserSession.expires_at) > now,
+            )
+            .order_by(col(UserSession.created_at).desc(), col(UserSession.id).desc())
+        ).all()
+        org_slugs = dict(db.exec(select(Organization.id, Organization.slug)).all())
+        tokens = [
+            {
+                "uid": t.uid,
+                "org": org_slugs.get(t.org_id) if t.org_id is not None else None,
+                "project": t.project_slug,
+                "project_name": t.project_name,
+                "client_name": t.client_name,
+                "created_at": t.created_at,
+                "last_used_at": t.last_used_at,
+                "revoked_at": t.revoked_at,
+                "revoked_reason": t.revoked_reason,
+            }
+            for t in connections.list_for_user(db, user.id)
+        ]
+        result = _admin_user_row(
+            user,
+            org_count=len(memberships),
+            owner_of=owned,
+            session_last_seen_at=seen,
+            deleted_by=deleted_by,
+        )
+        result["memberships"] = memberships
+        result["sessions"] = [
+            {
+                "id": row.id,
+                "kind": row.kind,
+                "created_at": row.created_at,
+                "last_seen_at": row.last_seen_at,
+                "user_agent": row.user_agent,
+            }
+            for row in session_rows
+        ]
+        result["tokens"] = tokens
+        result["spend"] = spend
+    events, _next = audit_store.query_events(
+        audit_store.make_filter(subject=uid), limit=20
+    )
+    result["events"] = events
+    return result
 
 
 def _user_by_uid(db: Session, uid: str, *, lock: bool = False) -> User:
@@ -1519,7 +1715,9 @@ def patch_admin_user(
 
     ``422`` with neither field. ``409 self_disable`` for your own account;
     ``409 last_admin`` when a demotion or a disable would leave no
-    **enabled** admin. The enabled admins' rows are locked (``SELECT ...
+    **enabled** admin; ``409 user_deleted`` / ``409 erased`` for a
+    soft-deleted or erased account (read from the row already locked).
+    The enabled admins' rows are locked (``SELECT ...
     FOR UPDATE``) first, so two concurrent changes cannot both pass the
     count. Disabling ends every session of the user at once, revokes their
     connection tokens (``user_disabled``) and kills their unused reset
@@ -1539,6 +1737,7 @@ def patch_admin_user(
         ).all()
         user = _user_by_uid(db, uid, lock=True)
         assert user.id is not None
+        _refuse_gone_user(user)
         was_admin, was_disabled = user.is_instance_admin, user.disabled_at is not None
         admin = was_admin if body.is_instance_admin is None else body.is_instance_admin
         disabled = was_disabled if body.disabled is None else body.disabled
@@ -1626,6 +1825,7 @@ def post_admin_reset_link(
     with get_session() as db:
         user = _user_by_uid(db, uid)
         assert user.id is not None
+        _refuse_gone_user(user)
         if user.password_hash is None:
             raise _no_password()
         if user.disabled_at is not None:
@@ -1647,6 +1847,202 @@ def post_admin_reset_link(
         target = user.uid
     audit("reset_link_issued", request, uid=principal.uid, target=target)
     return {"url": f"{base.origin}/reset#token={raw}"}
+
+
+def _caller_pairing(db: Session, principal: Principal) -> int | None:
+    """The everyday session the calling admin session is paired with (D51)."""
+    if principal.session_id is None:
+        return None
+    return db.exec(
+        select(UserSession.paired_session_id).where(
+            col(UserSession.id) == principal.session_id
+        )
+    ).first()
+
+
+def _self_session() -> ApiError:
+    return ApiError(
+        409,
+        "that would end the admin session you are using: sign out instead",
+        code="self_session",
+    )
+
+
+@auth_router.delete("/api/admin/users/{uid}/sessions")
+def delete_admin_user_sessions(
+    uid: str,
+    request: Request,
+    body: AdminSessionsBody | None = None,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """End every session of a user, or every one of one ``kind``.
+
+    Ending everyday sessions first ends the admin sessions paired with them
+    (plan 59 D51). ``409 self_session`` when the request would end the admin
+    session making it: your own account with ``kind`` ``"admin"`` or
+    omitted, or ``kind`` ``"user"`` while your admin session is paired with
+    one of those rows. ``409 user_deleted`` / ``409 erased`` for a gone
+    account. Audited as ``sessions_revoked``.
+
+    Returns
+    -------
+    dict
+        ``{"revoked": <how many sessions ended>}``.
+    """
+    kind = body.kind if body is not None else None
+    with get_session() as db:
+        user = _user_by_uid(db, uid)
+        assert user.id is not None
+        _refuse_gone_user(user)
+        if user.id == principal.user_id and kind in (None, "admin"):
+            raise _self_session()
+        if kind == "user":
+            paired = _caller_pairing(db, principal)
+            if (
+                paired is not None
+                and db.exec(
+                    select(UserSession.id).where(
+                        col(UserSession.id) == paired,
+                        col(UserSession.user_id) == user.id,
+                    )
+                ).first()
+                is not None
+            ):
+                raise _self_session()
+        statement = select(UserSession.id, UserSession.kind).where(
+            col(UserSession.user_id) == user.id
+        )
+        if kind is not None:
+            statement = statement.where(col(UserSession.kind) == kind)
+        rows = db.exec(statement).all()
+        paired_ended = 0
+        if kind in (None, "user"):
+            for session_id, row_kind in rows:
+                if row_kind == "user":
+                    paired_ended += end_paired_admin(db, session_id)
+        if kind is None:
+            revoke_user(user.id, db=db)
+        else:
+            revoke_user_kind(user.id, kind, db=db)
+        count = len(rows) + (paired_ended if kind == "user" else 0)
+        target, target_id = user.uid, user.id
+        ended = [session_id for session_id, _kind in rows]
+    state = portal_state(request)
+    if kind == "admin":
+        for session_id in ended:
+            end_user_tokens(state, session_id=session_id)
+    else:
+        end_user_tokens(state, user_id=target_id)
+    audit(
+        "sessions_revoked",
+        request,
+        uid=principal.uid,
+        target=target,
+        kind=kind or "all",
+        count=count,
+    )
+    return {"revoked": count}
+
+
+@auth_router.delete("/api/admin/users/{uid}/sessions/{id}")
+def delete_admin_user_session(
+    uid: str,
+    id: int,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """End one session of a user (``404`` when it is not theirs).
+
+    ``409 self_session`` for the admin session making the request and for
+    the everyday session it is paired with. Ending an everyday session ends
+    the admin session paired with it first (D51). Audited as
+    ``sessions_revoked``.
+
+    Returns
+    -------
+    dict
+        ``{"revoked": 1}``.
+    """
+    with get_session() as db:
+        user = _user_by_uid(db, uid)
+        assert user.id is not None
+        _refuse_gone_user(user)
+        row = db.exec(
+            select(UserSession.id, UserSession.kind).where(
+                col(UserSession.id) == id, col(UserSession.user_id) == user.id
+            )
+        ).first()
+        if row is None:
+            raise ApiError(404, "session not found")
+        if id == principal.session_id or id == _caller_pairing(db, principal):
+            raise _self_session()
+        if row[1] == "user":
+            end_paired_admin(db, id)
+        db.exec(
+            delete(UserSession).where(
+                col(UserSession.id) == id, col(UserSession.user_id) == user.id
+            )
+        )
+        target, session_kind = user.uid, row[1]
+    end_user_tokens(portal_state(request), session_id=id)
+    audit(
+        "sessions_revoked",
+        request,
+        uid=principal.uid,
+        target=target,
+        kind=session_kind,
+        count=1,
+    )
+    return {"revoked": 1}
+
+
+@auth_router.delete("/api/admin/users/{uid}/tokens/{token_uid}", status_code=204)
+def delete_admin_user_token(
+    uid: str,
+    token_uid: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> Response:
+    """Revoke one live connection token of a user (``admin_revoked``).
+
+    ``404`` for an unknown token, another user's, or one already revoked.
+    Audited as ``connection_revoked`` with the token's org and project, so
+    the organization sees it in its own log (``via="instance_admin"``).
+    """
+    with get_session() as db:
+        user = _user_by_uid(db, uid)
+        assert user.id is not None
+        _refuse_gone_user(user)
+        found = db.exec(
+            select(ConnectionToken.org_id, Organization.slug, Project.slug)
+            .outerjoin(
+                Organization, col(Organization.id) == col(ConnectionToken.org_id)
+            )
+            .outerjoin(Project, col(Project.id) == col(ConnectionToken.project_id))
+            .where(
+                ConnectionToken.uid == token_uid,
+                ConnectionToken.user_id == user.id,
+            )
+        ).first()
+        if found is None or not connections.revoke(
+            db, reason="admin_revoked", uid=token_uid, user_id=user.id
+        ):
+            raise ApiError(404, "token not found")
+        org_id, org_slug, project_slug = found
+        target = user.uid
+    audit(
+        "connection_revoked",
+        request,
+        uid=principal.uid,
+        target=target,
+        org_id=org_id,
+        org=org_slug,
+        project=project_slug,
+        token_uid=token_uid,
+        reason="admin_revoked",
+        via="instance_admin",
+    )
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

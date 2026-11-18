@@ -51,6 +51,7 @@ import contextlib
 import dataclasses
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import (
@@ -68,7 +69,7 @@ import anyio
 import anyio.to_thread
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
-from sqlmodel import Session, select
+from sqlmodel import Session, col, func, select
 from starlette.datastructures import Headers
 from starlette.types import Scope
 
@@ -96,7 +97,14 @@ from .github_app import UserTokens
 from .hosts import BaseUrl, classify
 from .linked import LinkRefresh
 from .migrate import ProjectMigrations
-from .models import Membership, Organization, Project, ProjectGrant, User
+from .models import (
+    Membership,
+    Organization,
+    Project,
+    ProjectGrant,
+    ReaderGrant,
+    User,
+)
 from .orgs import is_valid_org_slug
 from .paths import check_project_db, check_project_paths
 from .platform_pending import PendingConnects, PendingLinks
@@ -848,18 +856,22 @@ def load_org_access(
         The organization slug the request addresses.
     instance_admin : bool, optional
         Whether the principal is an instance admin: without a membership
-        they get :attr:`~whygraph.portal.authz.Role.READER`. Passed by
-        :func:`current_org` and ``GET /api/portal/state``, never by the MCP
-        dispatcher.
+        they get :attr:`~whygraph.portal.authz.Role.READER`, but only while
+        they hold a live reader grant on the org (``revoked_at IS NULL AND
+        expires_at > now``; plan 59 D3). Passed by :func:`current_org`,
+        ``GET /api/portal/state`` and the scan-event stream's re-check,
+        never by the MCP dispatcher.
 
     Returns
     -------
     OrgAccess or None
         ``None`` when the org does not exist (or the slug is malformed) or
-        the user is neither a member of it nor an instance admin - callers
-        answer both the same way. A real membership wins over ``READER``.
-        Carries ``user_id`` and the org's ``default_project_role`` (for the
-        project role :func:`bind_project` computes).
+        the user is neither a member of it nor an instance admin with a
+        live reader grant on it - callers answer all of these the same
+        way. A real membership wins over ``READER``. Carries ``user_id``,
+        the org's ``default_project_role`` (for the project role
+        :func:`bind_project` computes) and, for ``READER``, the grant's
+        ``expires_at`` as ``reader_until``.
     """
     if not is_valid_org_slug(org_slug):
         return None
@@ -876,17 +888,29 @@ def load_org_access(
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
         ).first()
+        reader_until = None
         if row is None and instance_admin:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             org = session.exec(
                 select(
                     Organization.id,
                     Organization.slug,
                     Organization.name,
                     Organization.default_project_role,
-                ).where(Organization.slug == org_slug)
+                    func.max(ReaderGrant.expires_at),
+                )
+                .join(ReaderGrant, col(ReaderGrant.org_id) == col(Organization.id))
+                .where(
+                    Organization.slug == org_slug,
+                    col(ReaderGrant.user_id) == user_id,
+                    col(ReaderGrant.revoked_at).is_(None),
+                    col(ReaderGrant.expires_at) > now,
+                )
+                .group_by(col(Organization.id))
             ).first()
             if org is not None:
-                row = (*org, Role.READER.value, False)
+                *org_columns, reader_until = org
+                row = (*org_columns, Role.READER.value, False)
     if row is None:
         return None
     org_id, slug, name, default_project_role, role, welcome_pending = row
@@ -898,6 +922,7 @@ def load_org_access(
         user_id=user_id,
         default_project_role=default_project_role,
         welcome_pending=bool(welcome_pending),
+        reader_until=reader_until,
     )
 
 
@@ -908,8 +933,9 @@ async def current_org(
 
     FastAPI resolves it once per request, after :func:`current_user` (so
     ``409 setup required`` comes first). An instance admin without a
-    membership reads the org as ``reader``: only ``GET`` / ``HEAD``, and
-    each such request writes one security event record.
+    membership but with a live reader grant on the org reads it as
+    ``reader``: only ``GET`` / ``HEAD``, and each such request writes one
+    security event record. Without a grant they are a non-member (``404``).
 
     Returns
     -------

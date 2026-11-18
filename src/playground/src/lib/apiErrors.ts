@@ -179,6 +179,9 @@ export const MESSAGES: Record<string, Resolver> = {
           message:
             "This account is not a platform administrator. Sign in with an administrator's GitHub account, or ask another administrator to make you one.",
         },
+  github_account_required:
+    "This needs a GitHub account. Sign in to the admin panel with GitHub to use Open as reader; an organization's owner must be a GitHub account.",
+  org_deleted: "This organization is deleted. Restore it before changing it.",
   setup_required: "WhyGraph isn't set up yet. Finish the setup page first.",
   bootstrap_required: "This WhyGraph instance isn't set up yet. Finish the setup page first.",
   throttled: (err) => ({ title: "Too many attempts", tone: "warn", message: `Too many attempts. ${retryLine(err)}` }),

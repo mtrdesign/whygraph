@@ -426,13 +426,17 @@ def _user_dict(principal: Principal | None, access: OrgAccess | None) -> dict | 
 def _org_dict(access: OrgAccess | None) -> dict | None:
     if access is None:
         return None
-    return {
+    org = {
         "slug": access.org_slug,
         "name": access.org_name,
         "role": str(access.role),
         # What a member holds on a project they have no grant on (M2f-1).
         "default_project_role": access.default_project_role,
     }
+    if access.role == Role.READER:
+        # When the instance admin's reader grant ends (plan 59 D59).
+        org["reader_until"] = access.reader_until
+    return org
 
 
 def _port_change_in(state: PortalState, access: OrgAccess | None) -> dict | None:

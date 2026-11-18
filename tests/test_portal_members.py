@@ -10,7 +10,8 @@ round trip, and the GitHub sign-in throttle stays out of the way).
 
 Ada is admin-only (plan 59 D4): she has no everyday session, so the admin
 panel is reached with :func:`be_admin` and an instance admin reading an org
-is Ivy, a GitHub instance admin in no org (:func:`be_reader`).
+is Ivy, a GitHub instance admin in no org (:func:`be_reader`), who reads
+``acme`` through a reader grant (plan 59 section 4.4).
 """
 
 # ruff: noqa: F811 -- pytest fixtures (`env`, `production_env`, ...) are imported
@@ -39,6 +40,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     github_admin,
     github_fake,
     github_sign_in,
+    grant_reader,
     make_repo,
     password_user,
     portal_client,
@@ -85,8 +87,9 @@ USAGE_FIELDS = {"month_spend_usd", "month_split"}
 NEWCOMERS = ("cy", "dee", "eve", "finn")
 """GitHub accounts that signed in once and belong to no org."""
 READER = "ivy"
-"""A GitHub instance admin in no org: plan 59 Phase 1's always-on ``reader``.
-Known to the fake GitHub only until :func:`be_reader` first signs her in."""
+"""A GitHub instance admin in no org who reads ``acme`` as ``reader`` through
+a reader grant (plan 59 D3). Known to the fake GitHub only until
+:func:`be_reader` first signs her in."""
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +132,9 @@ def team(github_fake: FakeGitHub) -> Iterator[SimpleNamespace]:
 def be(t: SimpleNamespace, name: str) -> str:
     """Make ``name`` the client's one session; return its token.
 
-    ``name`` may be :data:`READER` (:func:`be_reader`).
+    ``name`` may be :data:`READER` (:func:`be_reader`), who then also holds
+    a live reader grant on ``acme`` (the first call opens it; a later one
+    gets the same grant back, D17).
     """
     if name == READER and READER not in t.ids:
         t.client.cookies.clear()
@@ -139,7 +144,10 @@ def be(t: SimpleNamespace, name: str) -> str:
                 select(User.id).where(User.uid == t.uids[READER])
             ).one()
     t.client.cookies.clear()
-    return signed_in(t.client, t.ids[name])
+    token = signed_in(t.client, t.ids[name])
+    if name == READER:
+        grant_reader(t.client, t.uids[READER], "acme")
+    return token
 
 
 def be_admin(t: SimpleNamespace) -> str:
@@ -155,8 +163,9 @@ def be_reader(t: SimpleNamespace) -> str:
     """Make Ivy, a GitHub instance admin in no org, the client's one session.
 
     The first call signs her in through the fake GitHub, sets her
-    ``is_instance_admin`` and adds her to ``t.ids`` / ``t.uids``. Returns
-    the session token.
+    ``is_instance_admin`` and adds her to ``t.ids`` / ``t.uids``; every call
+    leaves her with a live reader grant on ``acme``. Returns the session
+    token.
     """
     return be(t, READER)
 

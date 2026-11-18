@@ -30,6 +30,7 @@ from sqlmodel import select
 from test_portal_app import (  # noqa: F401 -- fixtures
     at,
     env,
+    grant_reader,
     production_env,
     signed_in,
 )
@@ -597,7 +598,8 @@ def _as(v1: V1World, who: str) -> TestClient:
 
     ``"ivy"`` is a GitHub instance admin in no org, made on first use: the
     password admin Ada has no everyday session (plan 59 D4), so Ivy is the
-    instance admin who reads an org as ``reader``.
+    instance admin who reads ``acme`` as ``reader``, through a reader grant
+    (plan 59 D3).
     """
     v1.client.cookies.clear()
     if who == "ivy" and who not in v1.ids:
@@ -612,6 +614,8 @@ def _as(v1: V1World, who: str) -> TestClient:
             session.flush()
             v1.ids["ivy"] = ivy.id
     signed_in(v1.client, v1.ids[who])
+    if who == "ivy":
+        grant_reader(v1.client, _uid(v1.ids["ivy"]), ORG)
     return v1.client
 
 

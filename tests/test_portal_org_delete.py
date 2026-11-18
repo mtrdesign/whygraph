@@ -32,6 +32,7 @@ from test_portal_app import (  # noqa: F401
     at,
     github_admin,
     github_sign_in,
+    grant_reader,
     log_in,
     portal_client,
 )
@@ -217,10 +218,12 @@ def test_only_an_owner_deletes_an_org(world: World) -> None:
     assert log_in(w.client, "ada@example.com").status_code == 200
     response = delete_org(w)
     assert (response.status_code, response.json()["code"]) == (401, "login_required")
-    # ... and a GitHub instance admin reads every org and writes to none.
+    # ... and a GitHub instance admin reading acme (a reader grant, plan 59
+    # D3) writes to none.
     w.client.cookies.clear()
     w.fake.add_user("ivy")
-    github_admin(w.client, "ivy")
+    ivy = github_admin(w.client, "ivy")
+    grant_reader(w.client, ivy, "acme")
     response = delete_org(w)
     assert (response.status_code, response.json()["code"]) == (403, "forbidden")
     assert org_id("acme") is not None

@@ -46,6 +46,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     github_admin,
     github_fake,
     github_sign_in,
+    grant_reader,
     log_in,
     password_user,
     prod_portal,
@@ -1165,15 +1166,18 @@ def test_an_unchanged_admin_flag_is_never_the_last_admin(
 def test_an_instance_admin_reads_an_org_they_do_not_belong_to(
     world: SimpleNamespace,
 ) -> None:
-    # A GitHub admin's everyday session (a password account has none, D4).
+    # A GitHub admin's everyday session (a password account has none, D4),
+    # with a reader grant on quokka (plan 59 D3).
     client = world.client
     dee = github_admin(client, "dee")
+    grant = grant_reader(client, dee, "quokka")
     state = client.get(at("quokka") + "/api/portal/state").json()
     assert state["org"] == {
         "slug": "quokka",
         "name": "Quokka",
         "role": "reader",
         "default_project_role": "contributor",
+        "reader_until": grant["expires_at"],
     }
     assert client.get(at("quokka") + "/api/projects").status_code == 200
     # Demoting the admin removes the access on the very next request.
@@ -1575,6 +1579,7 @@ def test_every_security_event_is_logged_once_with_its_fields(
             == 200
         )
         dee = github_admin(client, "dee")  # ends Ann's admin session (D29)
+        grant_reader(client, dee, "quokka")  # "Open as reader" (plan 59 D3)
         client.get(at("quokka") + "/api/projects")  # dee reads as `reader`
         github_sign_in(client, "dee", admin=True)
         client.patch(
@@ -1619,6 +1624,7 @@ def test_every_security_event_is_logged_once_with_its_fields(
         "user_enabled",
         "reset_link_used",
         "github_signin",
+        "reader_grant_created",
         "reader_request",
         "admin_signin",
         "admin_revoked",
@@ -1693,6 +1699,8 @@ def test_every_security_event_is_logged_once_with_its_fields(
     )
     for event in ("user_disabled", "user_enabled"):
         assert (by_event[event]["uid"], by_event[event]["target"]) == (ada, cy)
+    granted = by_event["reader_grant_created"]
+    assert (granted["uid"], granted["org"]) == (dee, "quokka")
     assert by_event["reader_request"]["org"] == "quokka"
     assert by_event["reader_request"]["method"] == "GET"
     assert all(r["ip"] == "203.0.113.5" for r in records)

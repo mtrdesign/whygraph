@@ -78,6 +78,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   connection_revoked: { label: "Connection revoked", group: "Security" },
   webhook_rejected: { label: "Webhook rejected", group: "Security" },
   reader_request: { label: "Instance admin read", group: "Security" },
+  reader_grant_created: { label: "Read-only access granted", group: "Security" },
+  reader_grant_revoked: { label: "Read-only access ended", group: "Security" },
   key_tested: { label: "API key tested", group: "Security" },
   // Organization
   org_created: { label: "Organization created", group: "Organization" },
@@ -149,6 +151,8 @@ const REASONS: Record<string, string> = {
   unknown_user: "No account for this GitHub user",
   not_admin: "Not a platform administrator",
   signout: "Signed out of the portal",
+  // Reader grants
+  demoted: "No longer a platform administrator",
   // Adding a member
   bad_login: "Not a valid GitHub username",
   owner_required: "Only an owner can add an owner",

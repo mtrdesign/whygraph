@@ -44,7 +44,7 @@ from whygraph.core.releases import format_version, running_version
 
 from . import audit_store, connections, updates
 from .audit import audit, truncate_email
-from .authz import Role
+from .authz import Action, Role
 from .db import get_session
 from .deps import (
     ApiError,
@@ -68,6 +68,7 @@ from .models import (
     Membership,
     Organization,
     PasswordReset,
+    ReaderGrant,
     RetiredOrgSlug,
     User,
     UserSession,
@@ -107,6 +108,9 @@ from .usage_routes import account_usage
 
 RESET_LINK_LIFETIME = timedelta(hours=24)
 """How long an admin-issued reset link works."""
+
+READER_GRANT_TTL = timedelta(minutes=60)
+"""How long a platform administrator's reader grant lasts (plan 59 D17)."""
 
 _PUBLIC_BASE = [Depends(require_mode_and_host("base"))]
 _PUBLIC_ANY = [Depends(require_mode_and_host("any"))]
@@ -266,6 +270,38 @@ def _invalidate_reset_links(db: Session, user_id: int) -> None:
         )
         .values(used_at=_iso(_now()))
     )
+
+
+def _revoke_reader_grants(db: Session, user_id: int) -> list[tuple[int, str]]:
+    """Revoke ``user_id``'s live reader grants; return each grant's org.
+
+    Returns
+    -------
+    list of (int, str)
+        ``(org_id, org_slug)`` of every grant that was live, for the
+        ``reader_grant_revoked`` events the caller writes after its commit.
+    """
+    now = _iso(_now())
+    org_ids = db.exec(
+        update(ReaderGrant)
+        .where(
+            col(ReaderGrant.user_id) == user_id,
+            col(ReaderGrant.revoked_at).is_(None),
+            col(ReaderGrant.expires_at) > now,
+        )
+        .values(revoked_at=now)
+        .returning(col(ReaderGrant.org_id))
+    ).all()
+    if not org_ids:
+        return []
+    slugs = dict(
+        db.exec(
+            select(Organization.id, Organization.slug).where(
+                col(Organization.id).in_({org_id for (org_id,) in org_ids})
+            )
+        ).all()
+    )
+    return [(org_id, slugs[org_id]) for (org_id,) in org_ids]
 
 
 def _email_taken() -> ApiError:
@@ -1515,6 +1551,16 @@ def patch_admin_user(
             revoke_user(user.id, db=db)
             connections.revoke_for_user(db, user.id, "user_disabled")
             _invalidate_reset_links(db, user.id)
+        # A demotion or a disable ends the user's reader grants (plan 59
+        # section 4.4), in this transaction.
+        revoked_grants: list[tuple[int, str]] = []
+        grant_reason = None
+        if disabled and not was_disabled:
+            grant_reason = "disabled"
+        elif was_admin and not admin:
+            grant_reason = "demoted"
+        if grant_reason is not None:
+            revoked_grants = _revoke_reader_grants(db, user.id)
         target = user.uid
         target_id = user.id
         result = {
@@ -1534,6 +1580,16 @@ def patch_admin_user(
     if disabled != was_disabled:
         event = "user_disabled" if disabled else "user_enabled"
         audit(event, request, uid=principal.uid, target=target)
+    for org_id, org_slug in revoked_grants:
+        audit(
+            "reader_grant_revoked",
+            request,
+            uid=principal.uid,
+            target=target,
+            org_id=org_id,
+            org=org_slug,
+            reason=grant_reason,
+        )
     return result
 
 
@@ -1587,20 +1643,38 @@ def post_admin_reset_link(
 
 
 @auth_router.get("/api/admin/me")
-def get_admin_me(principal: Principal = Depends(instance_access())) -> dict:
+def get_admin_me(
+    request: Request, principal: Principal = Depends(instance_access())
+) -> dict:
     """The signed-in admin and this admin session.
 
     ``session`` holds the admin session's start and its absolute end (8
     hours; there is no idle limit). ``reader_grants`` lists the admin's live
-    per-org reader grants (none yet: they arrive with plan 59 step 8).
+    per-org reader grants, the soonest to end first.
     """
     assert principal.session_id is not None  # an admin session principal
+    base = _base(portal_state(request))
     with get_session() as db:
         row = db.exec(
             select(UserSession.created_at, UserSession.expires_at).where(
                 UserSession.id == principal.session_id
             )
         ).first()
+        grants = db.exec(
+            select(
+                ReaderGrant.id,
+                Organization.slug,
+                Organization.name,
+                ReaderGrant.expires_at,
+            )
+            .join(Organization, col(Organization.id) == col(ReaderGrant.org_id))
+            .where(
+                col(ReaderGrant.user_id) == principal.user_id,
+                col(ReaderGrant.revoked_at).is_(None),
+                col(ReaderGrant.expires_at) > _iso(_now()),
+            )
+            .order_by(col(ReaderGrant.expires_at), col(ReaderGrant.id))
+        ).all()
     if row is None:  # ended since this request was resolved
         raise ApiError(401, "admin sign-in required", code="admin_login_required")
     created_at, expires_at = row
@@ -1611,8 +1685,156 @@ def get_admin_me(principal: Principal = Depends(instance_access())) -> dict:
         "avatar_url": principal.avatar_url,
         "has_password": principal.has_password,
         "session": {"created_at": created_at, "expires_at": expires_at},
-        "reader_grants": [],
+        "reader_grants": [
+            {
+                "id": grant_id,
+                "org_slug": slug,
+                "org_name": name,
+                "org_url": base.org_origin(slug),
+                "expires_at": grant_expires_at,
+            }
+            for grant_id, slug, name, grant_expires_at in grants
+        ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-org reader grants (plan 59 section 4.4, D3)
+# ---------------------------------------------------------------------------
+
+
+@auth_router.post("/api/admin/orgs/{slug}/reader-grant")
+def post_reader_grant(
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Give the calling admin's everyday session read-only access to one org.
+
+    The grant is the admin's **own** and lasts :data:`READER_GRANT_TTL`
+    with no renewal (D17): while the admin holds a live grant on the org,
+    this returns that grant unchanged and audits nothing. ``409
+    github_account_required`` for a password account (it has no everyday
+    session to carry the grant, D4), ``404`` for an unknown org, ``409
+    org_deleted`` for a soft-deleted one (D34); a suspended org is allowed
+    (D33). The admin's row is locked first, so two requests (or a request
+    and a demotion) are serialized and leave at most one live grant.
+
+    Returns
+    -------
+    dict
+        ``{"id", "org_url", "expires_at"}``. A new grant is audited as
+        ``reader_grant_created`` in the org's own log.
+    """
+    base = _base(portal_state(request))
+    now = _now()
+    with get_session() as db:
+        user = db.exec(
+            select(User)
+            .where(User.id == principal.user_id)
+            .with_for_update(key_share=True)
+        ).first()
+        if user is None or not user.is_instance_admin or user.disabled_at is not None:
+            raise ApiError(
+                403,
+                f"only instance admins can {Action.INSTANCE_ADMIN}",
+                code="forbidden",
+                action=str(Action.INSTANCE_ADMIN),
+            )
+        if user.password_hash is not None:
+            raise ApiError(
+                409,
+                "a password account has no everyday session to read an "
+                "organization with: sign in with GitHub",
+                code="github_account_required",
+            )
+        org = db.exec(
+            select(Organization)
+            .where(Organization.slug == slug)
+            .with_for_update(read=True)
+        ).first()
+        if org is None:
+            raise ApiError(404, "organization not found")
+        if org.deleted_at is not None:
+            raise ApiError(
+                409,
+                "this organization is deleted: restore it first",
+                code="org_deleted",
+            )
+        assert org.id is not None
+        org_id = org.id
+        live = db.exec(
+            select(ReaderGrant)
+            .where(
+                col(ReaderGrant.user_id) == principal.user_id,
+                col(ReaderGrant.org_id) == org_id,
+                col(ReaderGrant.revoked_at).is_(None),
+                col(ReaderGrant.expires_at) > _iso(now),
+            )
+            .order_by(col(ReaderGrant.expires_at).desc())
+        ).first()
+        if live is not None:
+            return {
+                "id": live.id,
+                "org_url": base.org_origin(org.slug),
+                "expires_at": live.expires_at,
+            }
+        grant = ReaderGrant(
+            user_id=principal.user_id,
+            org_id=org_id,
+            created_at=_iso(now),
+            expires_at=_iso(now + READER_GRANT_TTL),
+        )
+        db.add(grant)
+        db.flush()
+        result = {
+            "id": grant.id,
+            "org_url": base.org_origin(org.slug),
+            "expires_at": grant.expires_at,
+        }
+        org_slug = org.slug
+    audit(
+        "reader_grant_created", request, uid=principal.uid, org_id=org_id, org=org_slug
+    )
+    return result
+
+
+@auth_router.delete("/api/admin/reader-grants/{id}", status_code=204)
+def delete_reader_grant(
+    id: int,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> None:
+    """End one of the calling admin's own reader grants now.
+
+    ``404`` for an unknown grant and for another admin's. A grant that has
+    already ended (revoked or expired) is left as it is and audits
+    nothing; a live one is audited as ``reader_grant_revoked`` in the
+    org's log.
+    """
+    now = _iso(_now())
+    with get_session() as db:
+        row = db.exec(
+            select(ReaderGrant, Organization.slug)
+            .join(Organization, col(Organization.id) == col(ReaderGrant.org_id))
+            .where(
+                col(ReaderGrant.id) == id,
+                col(ReaderGrant.user_id) == principal.user_id,
+            )
+            .with_for_update(of=ReaderGrant)
+        ).first()
+        if row is None:
+            raise ApiError(404, "reader grant not found")
+        grant, org_slug = row
+        if grant.revoked_at is not None or grant.expires_at <= now:
+            return None
+        grant.revoked_at = now
+        db.add(grant)
+        org_id = grant.org_id
+    audit(
+        "reader_grant_revoked", request, uid=principal.uid, org_id=org_id, org=org_slug
+    )
+    return None
 
 
 @auth_router.post("/api/admin/me/logout")

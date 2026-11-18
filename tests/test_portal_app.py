@@ -653,6 +653,34 @@ def github_admin(client: TestClient, login: str) -> str:
         return user.uid
 
 
+def grant_reader(client: TestClient, admin: str, org_slug: str) -> dict:
+    """Open ``org_slug`` read-only for the instance admin ``admin`` (a uid).
+
+    Calls the real ``POST /api/admin/orgs/{slug}/reader-grant`` (asserted
+    ``200``) with a fresh admin session of ``admin`` (plan 59 section 4.4):
+    the grant then lets ``admin``'s **everyday** session read the org for
+    60 minutes. Whatever admin cookie ``client`` held before is put back,
+    so the helper never changes who the client is in the admin panel.
+    Returns the grant (``{"id", "org_url", "expires_at"}``).
+    """
+    from whygraph.portal import sessions
+
+    base = client.app.state.portal.base_url
+    name = sessions.admin_cookie_name(base)
+    before = client.cookies.get(name, domain=base.host)
+    with portal_db.get_session() as session:
+        user_id = session.exec(select(User.id).where(User.uid == admin)).one()
+    admin_signed_in(client, user_id)
+    try:
+        response = client.post(at() + f"/api/admin/orgs/{org_slug}/reader-grant")
+    finally:
+        client.cookies.delete(name, domain=base.host)
+        if before is not None:
+            client.cookies.set(name, before, domain=base.host)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 def uid_of_login(login: str) -> str:
     """The stable uid of the GitHub account currently holding ``login``."""
     with portal_db.get_session() as session:
@@ -1606,6 +1634,8 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/me", "GET"): "instance.admin",
     ("/api/admin/me/logout", "POST"): "instance.admin",
     ("/api/admin/me/password", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/reader-grant", "POST"): "instance.admin",
+    ("/api/admin/reader-grants/{id}", "DELETE"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 

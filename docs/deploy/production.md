@@ -685,6 +685,7 @@ plus these GitHub, member, project and organization events:
 | `admin_signin` | Someone signed in to [platform administration](administration.md) (with the `method`, `password` or `github`). |
 | `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin` or `disabled`. It writes nothing else: no account, no session. |
 | `admin_signout` | An admin session ended by sign-out, from the admin panel or (with `reason` `signout`) because the everyday session it was started beside signed out. |
+| `reader_grant_created`, `reader_grant_revoked` | A platform administrator opened an organization read-only for 60 minutes ("Open as reader"), or that access ended early: revoked by the administrator, or (with the `reason` `demoted` or `disabled`) because they stopped being an administrator or were disabled. Both are in the organization's own log. |
 | `github_token_revoke_failed` | GitHub's one-time token could not be revoked. |
 | `github_login_released` | A username moved to another account and was taken from the older one. |
 | `member_added`, `member_add_refused` | A member was added, or the attempt was refused (with the reason and the username tried). |

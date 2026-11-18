@@ -128,6 +128,7 @@ from .deps import (
     current_user,
     load_org_access,
     org_access,
+    org_suspended_error,
     portal_state,
     principal_of,
     project_access,
@@ -207,6 +208,7 @@ from .estimate import scan_estimate as _scan_estimate
 from .codegraph_host import HostBusy
 from .runner import (
     COST_SUMMARY_KEYS,
+    OrgSuspended,
     ProjectAccessLost,
     ProjectBusy,
     RunFinished,
@@ -437,6 +439,25 @@ def _org_dict(access: OrgAccess | None) -> dict | None:
         # When the instance admin's reader grant ends (plan 59 D59).
         org["reader_until"] = access.reader_until
     return org
+
+
+def _suspension(access: OrgAccess | None) -> dict | None:
+    """``{"at", "reason"}`` of a suspended org (plan 59 section 4.5), else ``None``.
+
+    Read only when ``access`` says the org is suspended, so a live org costs
+    no query.
+    """
+    if access is None or not access.suspended:
+        return None
+    with get_session() as session:
+        row = session.exec(
+            select(Organization.suspended_at, Organization.suspended_reason).where(
+                Organization.id == access.org_id
+            )
+        ).first()
+    if row is None or row[0] is None:  # gone or unsuspended since the lookup
+        return None
+    return {"at": row[0], "reason": row[1]}
 
 
 def _port_change_in(state: PortalState, access: OrgAccess | None) -> dict | None:
@@ -985,9 +1006,22 @@ def _github_full_name(project: Project) -> str | None:
     return f"{parts[1]}/{parts[2]}" if len(parts) == 3 else None
 
 
-def _permissions(role: ProjectRole) -> list[str]:
-    """The project actions ``role`` may perform, in declaration order (the wire form)."""
-    return [str(a) for a in Action if a in PROJECT_ROLE_ACTIONS[role]]
+SUSPENDED_KEPT = frozenset(
+    {Action.PROJECT_READ, Action.PROJECT_USAGE, Action.PROJECT_ACCESS}
+)
+"""The project actions a suspended org's members keep in ``permissions``: the
+ones the SPA gates reads on (plan 59 section 4.5). The write actions go."""
+
+
+def _permissions(role: ProjectRole, *, suspended: bool = False) -> list[str]:
+    """The project actions ``role`` may perform, in declaration order (the wire form).
+
+    While the org is ``suspended`` only :data:`SUSPENDED_KEPT` remain.
+    """
+    actions = PROJECT_ROLE_ACTIONS[role]
+    if suspended:
+        actions = actions & SUSPENDED_KEPT
+    return [str(a) for a in Action if a in actions]
 
 
 def _summary(
@@ -998,11 +1032,14 @@ def _summary(
     state: PortalState,
     role: ProjectRole,
     user_id: int | None,
+    suspended: bool,
 ) -> dict:
     """One project as the list shows it; ``user_id=None`` leaves ``llm_block`` to the caller.
 
     Reads the portal DB only through ``data`` (:func:`_list_data`), and
     ``stale`` through the runner's :class:`~whygraph.portal.runner.StaleCache`.
+    ``suspended`` (the org's, plan 59 section 4.5) drops the write actions
+    from ``permissions`` and makes ``llm_block`` ``"org_suspended"``.
     """
     mode = state.mode
     project_id: int = project.id  # type: ignore[assignment]
@@ -1025,6 +1062,7 @@ def _summary(
             project.id,  # type: ignore[arg-type]
             role,
             user_id,
+            suspended=suspended,
         )
     return {
         "slug": project.slug,
@@ -1073,7 +1111,7 @@ def _summary(
         # project control on `permissions`, never on role names.
         "restricted": project.restricted,
         "my_role": str(role),
-        "permissions": _permissions(role),
+        "permissions": _permissions(role, suspended=suspended),
         # Why the caller cannot spend LLM money here ("role" /
         # "budget_exceeded" / null) and the exhausted budget's scope; the
         # month's spend against the project budget for project admins
@@ -1097,6 +1135,7 @@ def _details(state: PortalState, project: BoundProject) -> dict:
             state=state,
             role=project.role,
             user_id=None,
+            suspended=project.org_suspended,
         )
         body["agents"] = sorted(
             a.agent
@@ -1316,6 +1355,9 @@ def get_state(request: Request) -> dict:
             body["user"]["github_login"] = principal.github_login
             body["user"]["avatar_url"] = principal.avatar_url
             body["user"]["has_password"] = principal.has_password
+        if body["org"] is not None:
+            # The suspended banner (plan 59 section 4.5): when and why, or null.
+            body["org"]["suspended"] = _suspension(access)
         # The welcome banner (M2f-3 section 4.12): this org only, this
         # caller's own membership flag.
         body["welcome"] = (
@@ -1419,11 +1461,15 @@ def post_check_path(body: PathBody, request: Request) -> dict:
         raise ApiError(422, str(exc)) from exc
 
 
-def _defaults_view(session: Session, org_id: int, *, configurer: bool) -> dict:
+def _defaults_view(
+    session: Session, org_id: int, *, configurer: bool, suspended: bool = False
+) -> dict:
     """The defaults payload; ``configurer`` = the caller holds ``org.configure``.
 
     Without it the payload is ``read_only``, carries no key tails
-    (``hint: null``) and no ``key_last_used`` (M2f-3 plan section 4.13).
+    (``hint: null``) and no ``key_last_used`` (M2f-3 plan section 4.13). A
+    ``suspended`` org's payload is ``read_only`` with no key tests either
+    (plan 59 section 4.5).
     """
     any_key = session.exec(
         select(Secret.id).where(Secret.org_id == org_id, Secret.kind == LLM_API_KEY)
@@ -1432,8 +1478,8 @@ def _defaults_view(session: Session, org_id: int, *, configurer: bool) -> dict:
         "config": load_layer(session, None, org_id=org_id),
         "secrets": _secrets_view(session, None, org_id=org_id, hints=configurer),
         "no_provider_key": any_key is None,
-        "read_only": not configurer,
-        "can_test_keys": configurer,
+        "read_only": not configurer or suspended,
+        "can_test_keys": configurer and not suspended,
     }
     if configurer:
         view["key_last_used"] = _org_key_last_used(
@@ -1455,6 +1501,7 @@ def get_defaults(access: OrgAccess = Depends(org_access(Action.ORG_READ))) -> di
             session,
             access.org_id,
             configurer=allowed(access.role, Action.ORG_CONFIGURE),
+            suspended=access.suspended,
         )
 
 
@@ -1592,6 +1639,7 @@ def list_projects(
                 state=state,
                 role=role,
                 user_id=access.user_id,
+                suspended=access.suspended,
             )
             for project, role in visible
         ]
@@ -2215,7 +2263,8 @@ def _insert_import_row(
     Raises
     ------
     ApiError
-        ``404`` when the org was deleted meanwhile; ``409 duplicate`` when
+        ``404`` when the org was deleted meanwhile; ``403 org_suspended``
+        when it was suspended meanwhile; ``409 duplicate`` when
         a concurrent import of the repository won
         (``uq_projects_org_github_repo``); ``409 busy`` when no slug held.
     """
@@ -2228,12 +2277,15 @@ def _insert_import_row(
         try:
             with get_session() as session:
                 org = session.exec(
-                    select(Organization.id)
+                    select(Organization.id, Organization.suspended_at)
                     .where(Organization.id == access.org_id)
                     .with_for_update(read=True)
                 ).first()
                 if org is None:
                     raise ApiError(404, "not found")
+                if org[1] is not None:
+                    # Suspended since current_org checked (plan 59 section 4.5).
+                    raise org_suspended_error()
                 slug = _history_slug(
                     session,
                     org_id=access.org_id,
@@ -2299,6 +2351,7 @@ SCAN_REFUSAL_CODES: tuple[tuple[type[Exception], str], ...] = (
     (ProjectBusy, "busy"),
     (SourceNotAllowed, "source_not_allowed"),
     (ProjectAccessLost, "github_access_lost"),
+    (OrgSuspended, "org_suspended"),
     (ManagedOnPlatform, "managed_on_platform"),
     (ScanForbidden, "forbidden"),
     (ScanBudgetExceeded, "budget_exceeded"),
@@ -2714,9 +2767,10 @@ def _config_view(
                 session, project.id, org_id=project.org_id, hints=configurer
             )
         ),
-        "read_only": linked or not configurer,
+        # A suspended org's settings are read-only (plan 59 section 4.5).
+        "read_only": linked or not configurer or project.org_suspended,
         "managed_on_platform": linked,
-        "can_test_keys": configurer and not linked,
+        "can_test_keys": configurer and not linked and not project.org_suspended,
     }
     if linked:
         return view
@@ -3235,6 +3289,8 @@ async def post_scan(
         raise ApiError(
             409, str(exc), code="github_access_lost", reason=exc.reason
         ) from exc
+    except OrgSuspended as exc:
+        raise org_suspended_error() from exc
     return {"run_id": run_id}
 
 
@@ -3282,6 +3338,8 @@ async def _retry_import(
         raise ApiError(
             409, str(exc), code="github_access_lost", reason=exc.reason
         ) from exc
+    except OrgSuspended as exc:
+        raise org_suspended_error() from exc
 
 
 def _scan_full_forbidden(project: BoundProject) -> ApiError:

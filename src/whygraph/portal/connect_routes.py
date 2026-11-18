@@ -75,6 +75,7 @@ from .deps import (
     BoundProject,
     PortalState,
     current_user,
+    org_suspended_error,
     portal_state,
     project_access,
     require_mode_and_host,
@@ -397,6 +398,7 @@ def post_authorize(
     intent is spent first and must match the caller, the project and the
     ``redirect_uri`` port; otherwise ``409 intent_expired`` and no code is
     issued (the page then shows Allow). The audit records ``pre_approved``.
+    ``403 org_suspended`` when the org is suspended (plan 59 D6): no code.
     """
     state = portal_state(request)
     _throttled(state.connect_user.hit(principal.user_id))
@@ -408,12 +410,16 @@ def post_authorize(
                 Project.id,
                 Project.org_id,
                 Project.access_lost_at,
+                Organization.suspended_at,
                 user_id=principal.user_id,
             ).where(Organization.slug == body.org, Project.slug == body.project)
         ).first()
-    if row is None or member_project_role(*row[3:]) is None:
+    if row is None or member_project_role(*row[4:]) is None:
         raise ApiError(404, "not found")
-    project_id, org_id, access_lost_at = row[:3]
+    project_id, org_id, access_lost_at, suspended_at = row[:4]
+    if suspended_at is not None:
+        # Minting a token is a write (plan 59 D6).
+        raise org_suspended_error()
     if body.intent is not None and not state.connect_intents.pop(
         body.intent,
         user_id=principal.user_id,
@@ -469,7 +475,9 @@ def post_token(body: TokenBody, request: Request) -> dict:
     consent's, a disabled account, a lost membership, lost access to the
     project (audited as ``project_access_removed``) or a deleted project -
     one answer for all. The code is spent by the first attempt, whatever
-    its outcome. Returns :class:`~whygraph.api_v1.TokenReply`.
+    its outcome. ``403 org_suspended`` when the project's org was
+    suspended since the consent (plan 59 D6): no token. Returns
+    :class:`~whygraph.api_v1.TokenReply`.
     """
     state = portal_state(request)
     client = ip_key(request.scope)
@@ -509,9 +517,14 @@ def post_token(body: TokenBody, request: Request) -> dict:
             member = db.get(Membership, (project.org_id, user.id))
             reason = "member_removed" if member is None else "project_access_removed"
             raise refused(reason, target=user.uid)
-        org_slug = db.exec(
-            select(Organization.slug).where(Organization.id == project.org_id)
+        org_slug, suspended_at = db.exec(
+            select(Organization.slug, Organization.suspended_at).where(
+                Organization.id == project.org_id
+            )
         ).one()
+        if suspended_at is not None:
+            # The org was suspended after the consent: no token (plan 59 D6).
+            raise org_suspended_error()
         token = connections.issue(
             db, user=user, project=project, client_name=pending.client_name
         )
@@ -745,10 +758,16 @@ def delete_project_connection(
 @connect_router.delete("/api/v1/projects/{slug}/token", status_code=204)
 def delete_v1_token(
     request: Request,
-    project: BoundProject = Depends(v1_project_access(Action.PROJECT_READ)),
+    project: BoundProject = Depends(
+        v1_project_access(Action.PROJECT_READ, allow_suspended=True)
+    ),
     principal: Principal = Depends(v1_user),
 ) -> Response:
-    """Revoke the bearer token of this request (``removed_locally``)."""
+    """Revoke the bearer token of this request (``removed_locally``).
+
+    The one ``/api/v1`` call a suspended org still answers: a machine may
+    always give up its own token (plan 59 D35).
+    """
     assert principal.token_id is not None  # v1_user only passes token principals
     with get_session() as db:
         token_uid = db.exec(

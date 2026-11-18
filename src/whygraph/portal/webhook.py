@@ -53,12 +53,13 @@ from starlette.background import BackgroundTask
 from .audit import audit
 from .db import get_session
 from .github_auth import GitHubUnavailable
-from .models import Project
+from .models import Organization, Project
 from .runner import (
     REASON_GIT_DENIED,
     REASON_NO_ACCESS,
     REASON_REPO_DELETED,
     REASON_TRACKED_STATE,
+    OrgSuspended,
     ProjectAccessLost,
     ProjectBusy,
     RunnerUnavailable,
@@ -390,8 +391,14 @@ async def _queue(state: PortalState, repo_id: int, trigger: str) -> None:
     for project_id in await anyio.to_thread.run_sync(_push_targets, repo_id):
         try:
             await state.runner.request_sync(project_id, trigger=trigger)
-        except (ProjectBusy, RunnerUnavailable, ProjectAccessLost, SourceNotAllowed):
-            continue  # removed or its org deleted, stopping, access lost
+        except (
+            ProjectBusy,
+            RunnerUnavailable,
+            ProjectAccessLost,
+            SourceNotAllowed,
+            OrgSuspended,
+        ):
+            continue  # removed or its org deleted, stopping, access lost, suspended
 
 
 def _push_targets(repo_id: int) -> list[int]:
@@ -400,12 +407,15 @@ def _push_targets(repo_id: int) -> list[int]:
     Initialized, already scanned (a never-scanned project is left to its
     first, explicit scan), and not access-lost - a project marked only for
     tracking WhyGraph's state is synced, since the push may be the fix.
-    A project being removed, or one of an org being deleted, is refused by
-    the runner itself (:class:`~whygraph.portal.runner.ProjectBusy`).
+    Not a suspended org's (plan 59 section 4.5). A project being removed,
+    or one of an org being deleted, is refused by the runner itself
+    (:class:`~whygraph.portal.runner.ProjectBusy`).
     """
     with get_session() as session:
         rows = session.exec(
             select(Project.id, Project.access_lost_at, Project.access_lost_reason)
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .where(col(Organization.suspended_at).is_(None))
             .where(Project.github_repo_id == repo_id)
             .where(Project.source == "github")
             .where(col(Project.initialized_at).is_not(None))

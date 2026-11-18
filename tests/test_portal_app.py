@@ -1636,6 +1636,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/me/password", "POST"): "instance.admin",
     ("/api/admin/orgs/{slug}/reader-grant", "POST"): "instance.admin",
     ("/api/admin/reader-grants/{id}", "DELETE"): "instance.admin",
+    # Org suspension (plan 59 section 4.5)
+    ("/api/admin/orgs/{slug}/suspend", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/unsuspend", "POST"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 

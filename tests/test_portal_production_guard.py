@@ -235,6 +235,7 @@ def test_a_session_serves_only_its_own_orgs(world: SimpleNamespace) -> None:
         "name": "Quokka",
         "role": "owner",
         "default_project_role": "contributor",
+        "suspended": None,
     }
     other = world.client.get(at("narwhal") + "/api/portal/state").json()
     assert other["org"] is None and other["user"]["role"] is None

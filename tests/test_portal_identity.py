@@ -560,6 +560,7 @@ def test_a_members_session_works_on_its_org_host(
             "name": "Quokka",
             "role": "owner",
             "default_project_role": "contributor",
+            "suspended": None,
         }
         assert body["user"] == {
             "uid": world.ann_uid,

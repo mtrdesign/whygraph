@@ -1290,12 +1290,15 @@ def llm_block(
     project_id: int,
     role: ProjectRole,
     user_id: int,
+    *,
+    suspended: bool = False,
 ) -> tuple[str | None, str | None]:
     """A caller's ``(llm_block, llm_block_scope)`` on a project.
 
     The same rule as :func:`~whygraph.portal.deps.bind_project`, computed
-    without a context (the projects list binds none): a viewer is
-    ``"role"``; anyone an exhausted hard-stopped budget covers is
+    without a context (the projects list binds none): a suspended org's
+    project is ``"org_suspended"`` (plan 59 section 4.5); otherwise a
+    viewer is ``"role"``; anyone an exhausted hard-stopped budget covers is
     ``"budget_exceeded"`` with its scope; the role wins.
 
     Parameters
@@ -1308,13 +1311,17 @@ def llm_block(
         The caller's effective role on it.
     user_id : int
         The caller.
+    suspended : bool, optional
+        Whether the project's org is suspended (it wins over both rules).
 
     Returns
     -------
     tuple of (str or None, str or None)
-        ``("role", None)``, ``("budget_exceeded", scope)`` or
-        ``(None, None)``.
+        ``("org_suspended", None)``, ``("role", None)``,
+        ``("budget_exceeded", scope)`` or ``(None, None)``.
     """
+    if suspended:
+        return "org_suspended", None
     if role is ProjectRole.VIEWER:
         return "role", None
     blocked = state.budgets.blocked_scope(org_id, project_id, user_id)

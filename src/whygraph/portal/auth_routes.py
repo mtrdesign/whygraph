@@ -31,8 +31,10 @@ from __future__ import annotations
 import hmac
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, literal_column, update
@@ -41,6 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
 
 from whygraph.core.releases import format_version, running_version
+from whygraph.mcp.evidence import stop_describes
 
 from . import audit_store, connections, updates
 from .audit import audit, truncate_email
@@ -68,6 +71,7 @@ from .models import (
     Membership,
     Organization,
     PasswordReset,
+    Project,
     ReaderGrant,
     RetiredOrgSlug,
     User,
@@ -81,12 +85,14 @@ from .orgs import (
     is_valid_org_slug,
     validate_org_slug,
 )
+from .paths import project_db_path
 from .passwords import (
     hash_password,
     normalize_email,
     validate_password,
     verify_password,
 )
+from .runner import ProjectBusy
 from .security import Principal
 from .sessions import (
     admin_cookie_name,
@@ -186,6 +192,12 @@ class OrgBody(_Strict):
 
     slug: str = Field(max_length=100)
     name: str = Field(min_length=1, max_length=200)
+
+
+class SuspendBody(_Strict):
+    """``POST /api/admin/orgs/{slug}/suspend``: the reason members are shown."""
+
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class AdminUserBody(_Strict):
@@ -1835,6 +1847,168 @@ def delete_reader_grant(
         "reader_grant_revoked", request, uid=principal.uid, org_id=org_id, org=org_slug
     )
     return None
+
+
+# ---------------------------------------------------------------------------
+# Org suspension (plan 59 section 4.5, D6)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _OrgState:
+    """An org's id, slug and the columns suspend / unsuspend decide on."""
+
+    id: int
+    slug: str
+    suspended_at: str | None
+    suspended_reason: str | None
+    deleted_at: str | None
+
+
+def _org_state(
+    slug: str, *, lock: bool = False, db: Session | None = None
+) -> _OrgState | None:
+    """The org ``slug``'s :class:`_OrgState` (``FOR UPDATE`` with ``lock``), or ``None``."""
+    statement = select(
+        Organization.id,
+        Organization.slug,
+        Organization.suspended_at,
+        Organization.suspended_reason,
+        Organization.deleted_at,
+    ).where(Organization.slug == slug)
+    if lock:
+        statement = statement.with_for_update()
+    if db is None:
+        with get_session() as session:
+            row = session.exec(statement).first()
+    else:
+        row = db.exec(statement).first()
+    return None if row is None else _OrgState(*row)
+
+
+def _refuse_deleted(org: _OrgState | None) -> _OrgState:
+    """``404`` for an unknown org and ``409 org_deleted`` for a soft-deleted one (D34)."""
+    if org is None:
+        raise ApiError(404, "organization not found")
+    if org.deleted_at is not None:
+        raise ApiError(
+            409, "this organization is deleted: restore it first", code="org_deleted"
+        )
+    return org
+
+
+def _suspension_body(org: _OrgState) -> dict:
+    """The answer of both routes: the org's slug and its suspension, or ``None``."""
+    suspended = (
+        None
+        if org.suspended_at is None
+        else {"at": org.suspended_at, "reason": org.suspended_reason}
+    )
+    return {"slug": org.slug, "suspended": suspended}
+
+
+def _suspend_rows(
+    slug: str, reason: str, by: int
+) -> tuple[_OrgState, list[str] | None]:
+    """Lock the org row, set the three columns (one transaction); the org and its project slugs.
+
+    Re-checked under the lock: a concurrent soft delete answers ``409
+    org_deleted``, and a suspension that committed first is returned as
+    it is, with ``None`` for the slugs (nothing changed).
+    """
+    with get_session() as db:
+        org = _refuse_deleted(_org_state(slug, lock=True, db=db))
+        if org.suspended_at is not None:
+            return org, None
+        now = _iso(_now())
+        db.exec(
+            update(Organization)
+            .where(col(Organization.id) == org.id)
+            .values(suspended_at=now, suspended_reason=reason, suspended_by=by)
+        )
+        project_slugs = list(
+            db.exec(select(Project.slug).where(Project.org_id == org.id)).all()
+        )
+    return _OrgState(org.id, org.slug, now, reason, None), project_slugs
+
+
+@auth_router.post("/api/admin/orgs/{slug}/suspend")
+async def post_suspend_org(
+    slug: str,
+    body: SuspendBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Suspend an org: its members only read until it is unsuspended (plan 59 D6).
+
+    ``404`` for an unknown org, ``409 org_deleted`` for a soft-deleted one
+    (D34). An org already suspended answers ``200`` and changes nothing,
+    before any reservation. Otherwise, under
+    :meth:`~whygraph.portal.runner.ScanRunner.reserve_projects` (new run
+    requests refused, the ones in flight waited for, queued runs dropped as
+    ``cancelled`` and running ones ended): the org row is locked and its
+    ``suspended_at`` / ``suspended_reason`` / ``suspended_by`` set, then
+    every describe running for one of its projects is stopped (D35). ``409
+    busy`` when the reservation cannot be taken (the org is being deleted,
+    one of its projects removed, or a sync cannot be stopped yet): nothing
+    changes. Every gate reads the columns per request, so no context is
+    invalidated. A chat turn or a purpose generation already running
+    finishes; the next one is refused.
+
+    Returns
+    -------
+    dict
+        ``{"slug", "suspended": {"at", "reason"}}``. A new suspension is
+        audited as ``org_suspended`` in the org's own log.
+    """
+    state = portal_state(request)
+    org = _refuse_deleted(await anyio.to_thread.run_sync(_org_state, slug))
+    if org.suspended_at is not None:
+        return _suspension_body(org)
+    try:
+        async with state.runner.reserve_projects(org.id, reason="suspended"):
+            org, project_slugs = await anyio.to_thread.run_sync(
+                _suspend_rows, slug, body.reason, principal.user_id
+            )
+            for project_slug in project_slugs or ():
+                stop_describes(project_db_path(state.data_dir, org.slug, project_slug))
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc), code="busy") from exc
+    if project_slugs is not None:  # this request suspended it
+        audit("org_suspended", request, uid=principal.uid, org_id=org.id, org=org.slug)
+    return _suspension_body(org)
+
+
+@auth_router.post("/api/admin/orgs/{slug}/unsuspend")
+def post_unsuspend_org(
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Lift an org's suspension: every gate opens on the next request.
+
+    ``404`` for an unknown org, ``409 org_deleted`` for a soft-deleted one
+    (D34); an org that is not suspended answers ``200`` and changes
+    nothing. Runs and imports the suspension cancelled are not queued
+    again.
+
+    Returns
+    -------
+    dict
+        ``{"slug", "suspended": null}``. Lifting a suspension is audited as
+        ``org_unsuspended`` in the org's own log.
+    """
+    with get_session() as db:
+        org = _refuse_deleted(_org_state(slug, lock=True, db=db))
+        if org.suspended_at is None:
+            return _suspension_body(org)
+        db.exec(
+            update(Organization)
+            .where(col(Organization.id) == org.id)
+            .values(suspended_at=None, suspended_reason=None, suspended_by=None)
+        )
+    audit("org_unsuspended", request, uid=principal.uid, org_id=org.id, org=org.slug)
+    return {"slug": org.slug, "suspended": None}
 
 
 @auth_router.post("/api/admin/me/logout")

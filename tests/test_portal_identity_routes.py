@@ -1003,6 +1003,7 @@ def test_creating_an_org_makes_the_caller_its_owner(claimed: TestClient) -> None
         "name": "Quokka",
         "role": "owner",
         "default_project_role": "contributor",
+        "suspended": None,
     }
 
 
@@ -1178,6 +1179,7 @@ def test_an_instance_admin_reads_an_org_they_do_not_belong_to(
         "role": "reader",
         "default_project_role": "contributor",
         "reader_until": grant["expires_at"],
+        "suspended": None,
     }
     assert client.get(at("quokka") + "/api/projects").status_code == 200
     # Demoting the admin removes the access on the very next request.

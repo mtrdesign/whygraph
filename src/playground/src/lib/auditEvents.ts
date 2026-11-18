@@ -87,6 +87,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   org_default_role_changed: { label: "Default project role changed", group: "Organization" },
   org_ownership_transferred: { label: "Ownership transferred", group: "Organization" },
   org_deleted: { label: "Organization deleted", group: "Organization" },
+  org_suspended: { label: "Organization suspended", group: "Organization" },
+  org_unsuspended: { label: "Suspension lifted", group: "Organization" },
 };
 
 /** "Member added" for `member_added`; an unknown event reads as its name with spaces. */

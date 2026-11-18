@@ -82,6 +82,7 @@ from whygraph.mcp.evidence import (
 )
 from whygraph.mcp.path_history import area_history_commits
 from whygraph.mcp.rationale import (
+    ORG_SUSPENDED,
     GenerationNotPermitted,
     NoEvidenceError,
     RationaleGenerationError,
@@ -407,6 +408,10 @@ def _mapped_errors() -> Iterator[None]:
                 code=BUDGET_EXCEEDED,
                 scope=exc.scope,
             ) from None
+        if exc.reason == ORG_SUSPENDED:
+            # Defence in depth: bind_v1_project refuses a suspended org's
+            # calls first (plan 59 section 4.5).
+            raise ApiError(403, str(exc), code=ORG_SUSPENDED) from None
         raise ApiError(403, str(exc), code="generation_not_permitted") from None
     except (RationaleGenerationError, AnalyzeError, LlmError):
         missing = _missing_key(get_config(), ("rationale",))

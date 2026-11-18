@@ -707,6 +707,7 @@ plus these GitHub, member, project and organization events:
 | `imported_rationale_removed` | A project admin removed the rationale cards imports had added (with the count). |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
 | `org_deleted` | An owner deleted an organization (with its project count). |
+| `org_suspended`, `org_unsuspended` | A platform administrator suspended an organization (its members can only read; changes, scans, chat and agent calls stop), or lifted the suspension. Both are in the organization's own log. |
 | `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |
 | `budget_hard_stop_engaged` | A budget with the hard stop reached 100% (same fields): LLM spend it covers is off until the month resets or the budget is raised. |
 | `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |

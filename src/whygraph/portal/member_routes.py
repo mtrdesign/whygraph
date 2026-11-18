@@ -892,7 +892,9 @@ def redeem_invitations(db: Session, *, github_id: int, user_id: int) -> list[Red
     grants whose projects still exist are inserted ``ON CONFLICT DO
     NOTHING`` (none for an org admin or owner), and ``redeemed_at`` /
     ``redeemed_by`` are set. A failure rolls back that savepoint only and
-    skips that invitation; it never fails the sign-in.
+    skips that invitation; it never fails the sign-in. A suspended org's
+    invitations wait (plan 59 D36): they are skipped and stay open, and
+    the org row lock keeps a suspension from committing in between.
 
     Parameters
     ----------
@@ -914,14 +916,16 @@ def redeem_invitations(db: Session, *, github_id: int, user_id: int) -> list[Red
     )
     if not org_ids:
         return []
-    orgs = dict(
-        db.exec(
-            select(Organization.id, Organization.slug)
+    orgs = {
+        org_id: slug
+        for org_id, slug, suspended_at in db.exec(
+            select(Organization.id, Organization.slug, Organization.suspended_at)
             .where(col(Organization.id).in_(org_ids))
             .order_by(col(Organization.id))
             .with_for_update(read=True)
         ).all()
-    )
+        if suspended_at is None
+    }
     if not orgs:
         return []
     invitations = [

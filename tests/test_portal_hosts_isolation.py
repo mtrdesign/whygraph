@@ -189,6 +189,8 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/me/password", "POST"),
         ("/api/admin/orgs/{slug}/reader-grant", "POST"),
         ("/api/admin/reader-grants/{id}", "DELETE"),
+        ("/api/admin/orgs/{slug}/suspend", "POST"),
+        ("/api/admin/orgs/{slug}/unsuspend", "POST"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),
@@ -1044,6 +1046,7 @@ def test_an_instance_admin_reads_every_org_and_writes_to_none(
             "role": "reader",
             "default_project_role": "contributor",
             "reader_until": grant["expires_at"],
+            "suspended": None,
         }
         for method, path in READ_ROUTES:
             response = w.client.request(method, prefix + _url(path, org))

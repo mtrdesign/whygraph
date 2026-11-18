@@ -3,17 +3,21 @@
 Every route here is **production-only** - local mode answers ``404`` - and
 none names an organization, so none is org-scoped (M2c plan section 4.7):
 
-* Public routes (bootstrap, GitHub sign-in, login, logout, reset) declare
-  no action. Their gate (:func:`~whygraph.portal.deps.require_mode_and_host`)
-  runs as a route dependency, so a wrong mode or host is a ``404`` before
-  the body is even validated. The credential routes are served on the base
-  host only; logout on any host. End users sign in with GitHub (M2d-1 plan
-  section 4.4); email + password is kept for password accounts only - in
-  practice the bootstrap instance admin - and no route creates another.
+* Public routes (bootstrap, GitHub sign-in, the admin sign-ins, logout,
+  reset) declare no action. Their gate
+  (:func:`~whygraph.portal.deps.require_mode_and_host`) runs as a route
+  dependency, so a wrong mode or host is a ``404`` before the body is even
+  validated. The credential routes are served on the base host only; logout
+  on any host. End users sign in with GitHub (M2d-1 plan section 4.4). The
+  admin panel has its own session (plan 59 section 4.2): a GitHub admin
+  signs in to it through the same OAuth App with ``purpose="admin"``, and
+  email + password is kept for password accounts only - in practice the
+  bootstrap instance admin, break-glass (D4) - and gives an admin session
+  only. No route creates another password account.
 * ``user.self`` routes (:func:`~whygraph.portal.deps.user_access`): the
   caller's own account, and org creation (base host).
 * ``instance.admin`` routes (:func:`~whygraph.portal.deps.instance_access`):
-  the admin page's data (base host).
+  the admin panel's data and its own account (base host, admin session).
 
 Handlers are sync ``def`` (the threadpool runs them; argon2 work is bounded
 by :mod:`whygraph.portal.passwords`' own semaphore). Session cookies are set
@@ -31,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import literal_column, update
+from sqlalchemy import delete, literal_column, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, func, select
@@ -56,10 +60,18 @@ from .github_auth import (
     GitHubOAuth,
     GitHubUnavailable,
     GitHubUser,
+    PendingLogin,
 )
-from .hosts import BaseUrl, safe_redirect
+from .hosts import BaseUrl, safe_admin_redirect, safe_redirect
 from .member_routes import Redeemed, redeem_invitations
-from .models import Membership, Organization, PasswordReset, RetiredOrgSlug, User
+from .models import (
+    Membership,
+    Organization,
+    PasswordReset,
+    RetiredOrgSlug,
+    User,
+    UserSession,
+)
 from .orgs import (
     RESERVED_ORG_SLUGS,
     OrgSlugTaken,
@@ -76,12 +88,18 @@ from .passwords import (
 )
 from .security import Principal
 from .sessions import (
+    admin_cookie_name,
+    clear_admin_cookie,
     clear_cookie,
     create_session,
+    end_paired_admin,
     hash_token,
+    repair_admin,
     revoke,
     revoke_user,
     rotate,
+    session_cookies,
+    set_admin_cookie,
     set_cookie,
 )
 from .throttle import ip_key
@@ -132,7 +150,7 @@ class GitHubCallbackBody(_Strict):
 
 
 class LoginBody(_Strict):
-    """``POST /api/auth/login``."""
+    """``POST /api/auth/admin/login``."""
 
     email: str = Field(max_length=1024)
     password: str = _PASSWORD
@@ -153,7 +171,7 @@ class AccountBody(_Strict):
 
 
 class PasswordBody(_Strict):
-    """``POST /api/account/password``."""
+    """``POST /api/admin/me/password``."""
 
     current: str = _PASSWORD
     new: str = _PASSWORD
@@ -268,6 +286,94 @@ def _no_password() -> ApiError:
     )
 
 
+def _reset_not_an_admin() -> ApiError:
+    """``409 not_an_admin``: a password account that is no admin gets no reset (D28)."""
+    return ApiError(
+        409,
+        "this password account is not an instance admin, so it gets no reset link",
+        code="not_an_admin",
+    )
+
+
+# ---------------------------------------------------------------------------
+# The admin session's sign-in rules (plan 59 section 4.2)
+# ---------------------------------------------------------------------------
+
+
+def _principal(request: Request) -> Principal | None:
+    """The request's resolved principal (on ``/api/auth`` always an everyday one)."""
+    return request.scope.get("state", {}).get("principal")
+
+
+def _end_admin_cookie_sessions(
+    db: Session, request: Request, base: BaseUrl
+) -> list[int]:
+    """Delete the admin sessions this browser's admin cookie names (rule 1).
+
+    The admin cookie is read **directly**: no route here is under
+    ``/api/admin``, so the request's principal is the everyday session and
+    never the admin one. Run it in the same transaction as the new admin
+    session, so an admin sign-in can never leave a fixated one behind.
+
+    Returns
+    -------
+    list of int
+        ``users.id`` of each admin row deleted.
+    """
+    values = session_cookies(
+        request.headers.getlist("cookie"), name=admin_cookie_name(base)
+    )
+    ended: list[int] = []
+    for value in values:
+        ended += db.exec(
+            delete(UserSession)
+            .where(
+                col(UserSession.token_hash) == hash_token(value),
+                col(UserSession.kind) == "admin",
+            )
+            .returning(col(UserSession.user_id))
+        ).scalars()
+    return ended
+
+
+def _paired_session(request: Request, user_id: int) -> int | None:
+    """The everyday session a new admin session of ``user_id`` pairs with (D51).
+
+    The request's everyday session when it belongs to the same user; else
+    ``None`` (no everyday session, as for a password account, or another
+    user's), and the admin session is unpaired.
+    """
+    principal = _principal(request)
+    if (
+        principal is None
+        or principal.token_id is not None
+        or principal.session_kind != "user"
+        or principal.user_id != user_id
+    ):
+        return None
+    return principal.session_id
+
+
+def _start_admin_session(
+    db: Session, request: Request, base: BaseUrl, user_id: int
+) -> str:
+    """Rules 1 and 3: end the cookie's admin sessions, start a paired new one."""
+    _end_admin_cookie_sessions(db, request, base)
+    return create_session(
+        db,
+        user_id,
+        _user_agent(request),
+        kind="admin",
+        paired_session_id=_paired_session(request, user_id),
+    )
+
+
+def _admin_surface(exc: ApiError) -> ApiError:
+    """Mark a refusal of an admin sign-in (rule 4), so the SPA links to ``/admin/login``."""
+    exc.extra.setdefault("surface", "admin")
+    return exc
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap (plan section 4.3)
 # ---------------------------------------------------------------------------
@@ -288,7 +394,9 @@ def post_bootstrap(body: BootstrapBody, request: Request, response: Response) ->
     bad_secret``, the email and password rules (``422``), ``409 email_taken``.
     The password is hashed before ``setup_lock`` is taken; under it the
     pending secret and the absence of an admin are re-checked, so a double
-    submit makes one admin.
+    submit makes one admin. The new admin gets an **admin** session (the
+    admin cookie; a password account has no everyday session, plan 59 D4)
+    and lands on ``<base>/admin``.
     """
     state = portal_state(request)
     base = _base(state)
@@ -323,12 +431,12 @@ def post_bootstrap(body: BootstrapBody, request: Request, response: Response) ->
             db.add(user)
             db.flush()
             assert user.id is not None
-            token = create_session(db, user.id, _user_agent(request))
+            token = _start_admin_session(db, request, base, user.id)
             uid = user.uid
         state.bootstrap_secret = None
     audit("bootstrap_claimed", request, uid=uid)
-    set_cookie(response, token, base)
-    return {"redirect": f"{base.origin}/orgs/new"}
+    set_admin_cookie(response, token, base)
+    return {"redirect": f"{base.origin}/admin"}
 
 
 # ---------------------------------------------------------------------------
@@ -398,12 +506,33 @@ def post_github_start(
     (``Path=/api/auth/github``, ``HttpOnly``, ``SameSite=Lax``, ``Secure``
     on https, ten minutes) carrying the same ``state``.
     """
+    return _github_start(body, request, response, purpose="user")
+
+
+@auth_router.post("/api/auth/github/admin/start", dependencies=_PUBLIC_BASE)
+def post_github_admin_start(
+    body: GitHubStartBody, request: Request, response: Response
+) -> dict:
+    """Start a GitHub sign-in to the admin panel (plan 59 section 4.2).
+
+    :func:`post_github_start` with ``purpose="admin"``: the same throttle,
+    cookie and answers. It lives under ``/api/auth/github`` so the
+    ``whygraph_oauth`` cookie's path covers it, and finishes at the one
+    callback, which then starts an admin session instead of an everyday one.
+    """
+    return _github_start(body, request, response, purpose="admin")
+
+
+def _github_start(
+    body: GitHubStartBody, request: Request, response: Response, *, purpose: str
+) -> dict:
+    """The start routes' body; ``purpose`` is kept with the pending sign-in."""
     state = portal_state(request)
     base = _base(state)
     _require_claimed(state)
     _throttled(state.github_ip.hit(ip_key(request.scope)))
     oauth_state, url = _github(state).begin(
-        safe_redirect(body.next, base), _redirect_uri(base)
+        safe_redirect(body.next, base), _redirect_uri(base), purpose=purpose
     )
     response.set_cookie(
         OAUTH_COOKIE,
@@ -431,7 +560,13 @@ def post_github_callback(
     every one of these outcomes and on success. On success the account is
     created or refreshed by its GitHub id, any session the request carried
     ends, a new one starts, and ``redirect`` is the pending ``next`` or
-    ``<base>/orgs``.
+    ``<base>/orgs``. A sign-in by another GitHub user also ends this
+    browser's admin session (plan 59 D29) and clears the admin cookie.
+
+    A sign-in started by ``/api/auth/github/admin/start`` (``purpose
+    "admin"``) instead starts an **admin** session for an existing, enabled
+    instance admin and writes nothing else: ``403 not_an_admin`` for anyone
+    else, and its refusals after the state check carry ``surface: "admin"``.
     """
     state = portal_state(request)
     base = _base(state)
@@ -461,8 +596,20 @@ def _github_callback(
     _require_claimed(state)
     github = _github(state)
 
+    admin = False  # the pending sign-in's purpose, once it is known
+
     def refused(reason: str, login: str | None = None) -> None:
-        audit("github_signin_refused", request, reason=reason, github_login=login)
+        fields = {"surface": "admin"} if admin else {}
+        audit(
+            "github_signin_refused",
+            request,
+            reason=reason,
+            github_login=login,
+            **fields,
+        )
+
+    def refusal(exc: ApiError) -> ApiError:
+        return _admin_surface(exc) if admin else exc
 
     # The cookie must be the browser's one and only, and equal the posted
     # state; only then is the state spent (single use).
@@ -479,6 +626,7 @@ def _github_callback(
             "this sign-in expired or was started in another browser: try again",
             code="oauth_state",
         )
+    admin = pending.purpose == "admin"
 
     try:
         user = github.identify(
@@ -489,38 +637,50 @@ def _github_callback(
         )
     except GitHubAuthFailed as exc:
         refused(exc.reason)
-        raise ApiError(
-            400,
-            "GitHub did not confirm this sign-in: try again",
-            code="github_auth_failed",
+        raise refusal(
+            ApiError(
+                400,
+                "GitHub did not confirm this sign-in: try again",
+                code="github_auth_failed",
+            )
         ) from None
     except GitHubUnavailable:
         refused("unavailable")
-        raise ApiError(
-            502,
-            "GitHub could not be reached: try again in a moment",
-            code="github_unavailable",
+        raise refusal(
+            ApiError(
+                502,
+                "GitHub could not be reached: try again in a moment",
+                code="github_unavailable",
+            )
         ) from None
 
     if not user.two_factor:
         refused("2fa_required", user.login)
-        raise ApiError(
-            403,
-            "turn on two-factor authentication for your GitHub account, then "
-            "sign in again",
-            code="github_2fa_required",
-            fix_url=f"{github.config.web_url}/settings/security",
+        raise refusal(
+            ApiError(
+                403,
+                "turn on two-factor authentication for your GitHub account, then "
+                "sign in again",
+                code="github_2fa_required",
+                fix_url=f"{github.config.web_url}/settings/security",
+            )
         )
-    principal: Principal | None = request.scope.get("state", {}).get("principal")
+    if admin:
+        return _admin_github_sign_in(state, base, user, pending, request, response)
+    principal = _principal(request)
     signed_in = _sign_in_github_user(
         user,
         replaces=None if principal is None else principal.session_id,
         user_agent=_user_agent(request),
+        replaces_user_id=None if principal is None else principal.user_id,
+        admin_tokens=session_cookies(
+            request.headers.getlist("cookie"), name=admin_cookie_name(base)
+        ),
     )
     if signed_in is None:
         refused("disabled", user.login)
         raise ApiError(403, "this account is disabled", code="account_disabled")
-    token, uid, new_user, released, redeemed = signed_in
+    token, uid, new_user, released, redeemed, clear_admin = signed_in
     if principal is not None and principal.session_id is not None:
         end_user_tokens(state, session_id=principal.session_id)  # it was revoked
     for target in released:
@@ -538,12 +698,70 @@ def _github_callback(
             github_login=user.login,
         )
     set_cookie(response, token, base)
+    if clear_admin:
+        clear_admin_cookie(response, base)
     return {"redirect": safe_redirect(pending.next, base) or f"{base.origin}/orgs"}
 
 
+def _admin_github_sign_in(
+    state: PortalState,
+    base: BaseUrl,
+    user: GitHubUser,
+    pending: PendingLogin,
+    request: Request,
+    response: Response,
+) -> dict:
+    """Finish a GitHub sign-in to the admin panel (plan 59 section 4.2).
+
+    The account is found by its GitHub id and **nothing else is written**:
+    no account is created, no login released, no invitation redeemed, no
+    everyday session revoked and no profile field refreshed (so this never
+    calls :func:`_sign_in_github_user`). An unknown GitHub id, a user who is
+    not an instance admin and a disabled one all get the same ``403
+    not_an_admin``, audited as ``admin_signin_refused`` with the reason.
+    Otherwise rules 1 and 3: the admin cookie's sessions end and a new admin
+    session starts, paired with this browser's everyday session of the same
+    user.
+    """
+    with get_session() as db:
+        row = db.exec(
+            select(User.id, User.uid, User.is_instance_admin, User.disabled_at).where(
+                User.github_id == user.id
+            )
+        ).first()
+        reason = None
+        if row is None:
+            reason = "unknown_user"
+        elif row[3] is not None:
+            reason = "disabled"
+        elif not row[2]:
+            reason = "not_admin"
+        if reason is None:
+            assert row is not None
+            token = _start_admin_session(db, request, base, row[0])
+    if reason is not None:
+        audit("admin_signin_refused", request, reason=reason, github_login=user.login)
+        raise _admin_surface(
+            ApiError(
+                403,
+                "this account is not an instance admin",
+                code="not_an_admin",
+            )
+        )
+    assert row is not None
+    audit("admin_signin", request, uid=row[1], method="github", github_login=user.login)
+    set_admin_cookie(response, token, base)
+    return {"redirect": safe_admin_redirect(pending.next, base)}
+
+
 def _sign_in_github_user(
-    user: GitHubUser, *, replaces: int | None, user_agent: str | None
-) -> tuple[str, str, bool, list[str], list[Redeemed]] | None:
+    user: GitHubUser,
+    *,
+    replaces: int | None,
+    user_agent: str | None,
+    replaces_user_id: int | None = None,
+    admin_tokens: list[str] | None = None,
+) -> tuple[str, str, bool, list[str], list[Redeemed], bool] | None:
     """Upsert the account by GitHub id and start its session, in one transaction.
 
     Any other row holding the incoming login (case-insensitively) has it
@@ -557,11 +775,34 @@ def _sign_in_github_user(
     M2f-1 plan section 4.8), each in its own savepoint, so a failed one
     never fails the sign-in.
 
+    The browser's admin session follows its everyday one (plan 59 D29,
+    D51). ``fk_sessions_paired`` unpairs on delete, so every pairing step
+    runs before ``replaces`` is revoked: a ``replaces`` of another user
+    ends its paired admin session; one of the same user hands its pairing
+    to the new session. Then each admin row the admin cookie names is
+    deleted when it is another user's (and the caller clears the cookie),
+    or paired with the new session when it is this user's, whatever it
+    was paired with before.
+
+    Parameters
+    ----------
+    user : GitHubUser
+        The identified GitHub account.
+    replaces : int or None
+        The everyday session the request carried, ended by this sign-in.
+    user_agent : str or None
+        The request's ``User-Agent``.
+    replaces_user_id : int or None, optional
+        ``users.id`` of ``replaces``.
+    admin_tokens : list of str, optional
+        Every value of the request's admin cookie.
+
     Returns
     -------
     tuple or None
-        ``(session token, uid, new_user, released uids, redeemed)``, or
-        ``None`` when the account is disabled (then nothing is written).
+        ``(session token, uid, new_user, released uids, redeemed,
+        clear_admin_cookie)``, or ``None`` when the account is disabled
+        (then nothing is written).
     """
     users = User.__table__
     for attempt in range(_UPSERT_ATTEMPTS):
@@ -606,34 +847,125 @@ def _sign_in_github_user(
                     db.rollback()  # the refresh and any release are undone
                     return None
                 redeemed = redeem_invitations(db, github_id=user.id, user_id=user_id)
+                # Read before step 1 ends any of them, so the caller still
+                # learns that the cookie names another user's session.
+                owners = _admin_cookie_owners(db, admin_tokens or [])
+                same_user = replaces is not None and replaces_user_id == user_id
+                if replaces is not None and not same_user:
+                    end_paired_admin(db, replaces)
+                token = create_session(db, user_id, user_agent)
+                new_id = db.exec(
+                    select(UserSession.id).where(
+                        UserSession.token_hash == hash_token(token)
+                    )
+                ).one()
+                if same_user:
+                    assert replaces is not None
+                    repair_admin(db, replaces, new_id)
                 if replaces is not None:
                     revoke(replaces, db=db)  # plan section 0.2 #20
-                token = create_session(db, user_id, user_agent)
-            return token, uid, bool(inserted), released, redeemed
+                clear_admin = _follow_admin_cookie(db, owners, user_id, new_id)
+            return token, uid, bool(inserted), released, redeemed, clear_admin
         except IntegrityError:
             if attempt == _UPSERT_ATTEMPTS - 1:
                 raise
     raise AssertionError("unreachable")
 
 
-# ---------------------------------------------------------------------------
-# Login, logout, reset (plan sections 4.7, 4.8)
-# ---------------------------------------------------------------------------
+def _admin_cookie_owners(db: Session, tokens: list[str]) -> list[tuple[str, int]]:
+    """``(token hash, users.id)`` of each admin row the admin cookie names."""
+    owners = []
+    for value in tokens:
+        token_hash = hash_token(value)
+        owner = db.exec(
+            select(UserSession.user_id).where(
+                UserSession.token_hash == token_hash, UserSession.kind == "admin"
+            )
+        ).first()
+        if owner is not None:
+            owners.append((token_hash, owner))
+    return owners
 
 
-@auth_router.post("/api/auth/login", dependencies=_PUBLIC_BASE)
-def post_login(body: LoginBody, request: Request, response: Response) -> dict:
-    """Sign in with email and password.
+def _follow_admin_cookie(
+    db: Session, owners: list[tuple[str, int]], user_id: int, new_session_id: int
+) -> bool:
+    """Step 5 of the everyday sign-in's pairing: the admin cookie's own rows.
 
-    ``409 bootstrap_required`` before the bootstrap. A wrong password and
-    an unknown email answer the same ``401 bad_credentials`` in the same
-    time (a dummy verify). Failures count per ``(email, ip_key)``, per
-    email and per ``ip_key``; all three are checked first (``429``). A
-    disabled account is ``403 account_disabled`` - only after a correct
-    password, so the route tells nothing to a guesser. An outdated hash is
-    upgraded. ``redirect`` is ``next`` when it is a safe
-    portal URL, else ``<base>/orgs``.
+    Another user's admin row is deleted (a no-op when step 1 already ended
+    it); this user's is paired with the new everyday session, whatever its
+    pairing was (after duplicate everyday cookies the request had no
+    principal, so nothing else moved it).
+
+    Parameters
+    ----------
+    db : Session
+        The sign-in's open transaction.
+    owners : list of tuple
+        :func:`_admin_cookie_owners`, read before step 1.
+    user_id : int
+        ``users.id`` of the user signing in.
+    new_session_id : int
+        ``sessions.id`` of the new everyday session.
+
+    Returns
+    -------
+    bool
+        Whether the caller must clear the admin cookie.
     """
+    clear = False
+    for token_hash, owner in owners:
+        if owner != user_id:
+            db.exec(
+                delete(UserSession).where(
+                    col(UserSession.token_hash) == token_hash,
+                    col(UserSession.kind) == "admin",
+                )
+            )
+            clear = True
+        else:
+            db.exec(
+                update(UserSession)
+                .where(
+                    col(UserSession.token_hash) == token_hash,
+                    col(UserSession.kind) == "admin",
+                )
+                .values(paired_session_id=new_session_id)
+            )
+    return clear
+
+
+# ---------------------------------------------------------------------------
+# Admin sign-in, logout, reset (plan sections 4.7, 4.8; plan 59 section 4.2)
+# ---------------------------------------------------------------------------
+
+
+@auth_router.post("/api/auth/admin/login", dependencies=_PUBLIC_BASE)
+def post_admin_login(body: LoginBody, request: Request, response: Response) -> dict:
+    """Sign in to the admin panel with email and password (plan 59 section 4.2).
+
+    The only password sign-in (D4): it starts an **admin** session, never an
+    everyday one. ``409 bootstrap_required`` before the bootstrap. A wrong
+    password and an unknown email answer the same ``401 bad_credentials``
+    in the same time (a dummy verify). Failures count per ``(email,
+    ip_key)``, per email and per ``ip_key``; all three are checked first
+    (``429``). Only after a correct password: ``403 account_disabled``,
+    then ``403 not_an_admin``, so the route tells nothing to a guesser.
+    Every refusal carries ``surface: "admin"`` and is audited as
+    ``login_failure`` with the same field. An outdated hash is upgraded.
+    The admin cookie's earlier admin sessions end in the same transaction
+    (no fixation), and ``redirect`` is ``next`` when it is a URL of the
+    admin panel, else ``<base>/admin``.
+    """
+    try:
+        return _admin_login(body, request, response)
+    except ApiError as exc:
+        _admin_surface(exc)
+        raise
+
+
+def _admin_login(body: LoginBody, request: Request, response: Response) -> dict:
+    """The admin password sign-in's steps; every refusal is an :class:`ApiError`."""
     state = portal_state(request)
     base = _base(state)
     _require_claimed(state)
@@ -643,9 +975,13 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
     _check_login_throttles(rules)
     with get_session() as db:
         row = db.exec(
-            select(User.id, User.uid, User.password_hash, User.disabled_at).where(
-                User.email == email
-            )
+            select(
+                User.id,
+                User.uid,
+                User.password_hash,
+                User.disabled_at,
+                User.is_instance_admin,
+            ).where(User.email == email)
         ).first()
     ok, needs_rehash = verify_password(None if row is None else row[2], body.password)
     if row is None or not ok:
@@ -656,9 +992,10 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
             request,
             uid=None if row is None else row[1],
             email=truncate_email(email),
+            surface="admin",
         )
         raise ApiError(401, "wrong email or password", code="bad_credentials")
-    user_id, uid, _, disabled_at = row
+    user_id, uid, _, disabled_at, is_admin = row
     if disabled_at is not None:
         audit(
             "login_failure",
@@ -666,8 +1003,21 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
             uid=uid,
             email=truncate_email(email),
             reason="disabled",
+            surface="admin",
         )
         raise _account_disabled()
+    if not is_admin:
+        audit(
+            "login_failure",
+            request,
+            uid=uid,
+            email=truncate_email(email),
+            reason="not_admin",
+            surface="admin",
+        )
+        raise ApiError(
+            403, "this account is not an instance admin", code="not_an_admin"
+        )
     new_hash = hash_password(body.password) if needs_rehash else None
     with get_session() as db:
         if new_hash is not None:
@@ -675,23 +1025,52 @@ def post_login(body: LoginBody, request: Request, response: Response) -> dict:
             if user is not None:
                 user.password_hash = new_hash
                 db.add(user)
-        token = create_session(db, user_id, _user_agent(request))
-    audit("login_success", request, uid=uid, email=truncate_email(email))
-    set_cookie(response, token, base)
-    return {"redirect": safe_redirect(body.next, base) or f"{base.origin}/orgs"}
+        token = _start_admin_session(db, request, base, user_id)
+    audit("admin_signin", request, uid=uid, method="password")
+    set_admin_cookie(response, token, base)
+    return {"redirect": safe_admin_redirect(body.next, base)}
 
 
 @auth_router.post("/api/auth/logout", dependencies=_PUBLIC_ANY)
 def post_logout(request: Request, response: Response) -> dict:
-    """End this session (a no-op without one) and clear the cookie, on any host."""
+    """End this session (a no-op without one) and clear the cookie, on any host.
+
+    It also ends this browser's admin session (plan 59 D29, D51), in one
+    transaction and in this order: the admin session paired with the
+    everyday one (the only way from an org host, where the host-only admin
+    cookie never arrives); on the base host, with or without an everyday
+    session, every admin session the admin cookie names (an unpaired one:
+    every password admin's), and the admin cookie is cleared; then the
+    everyday session. Ending an admin session is audited as
+    ``admin_signout`` with ``reason="signout"``.
+    """
     state = portal_state(request)
     base = _base(state)
-    principal: Principal | None = request.scope.get("state", {}).get("principal")
-    if principal is not None and principal.session_id is not None:
-        revoke(principal.session_id)
-        end_user_tokens(state, session_id=principal.session_id)
+    principal = _principal(request)
+    session_id = None if principal is None else principal.session_id
+    on_base = request.scope.get("state", {}).get("host_kind") == "base"
+    ended: set[int] = set()
+    with get_session() as db:
+        if principal is not None and session_id is not None:
+            if end_paired_admin(db, session_id):
+                ended.add(principal.user_id)
+        if on_base:
+            ended.update(_end_admin_cookie_sessions(db, request, base))
+        if session_id is not None:
+            revoke(session_id, db=db)
+        uids = (
+            db.exec(select(User.id, User.uid).where(col(User.id).in_(ended))).all()
+            if ended
+            else []
+        )
+    if principal is not None and session_id is not None:
+        end_user_tokens(state, session_id=session_id)
         audit("logout", request, uid=principal.uid)
+    for _, uid in sorted(uids):
+        audit("admin_signout", request, uid=uid, reason="signout")
     clear_cookie(response, base)
+    if on_base:
+        clear_admin_cookie(response, base)
     return {"redirect": f"{base.origin}/signin"}
 
 
@@ -701,9 +1080,11 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
 
     ``429`` past 10 attempts per ``ip_key`` in 15 minutes; ``400 bad_token``
     for an unknown, used, superseded or expired link; ``403
-    account_disabled`` for a disabled account; the password rules
-    (``422``). Marks the link used, ends **every** session of the user,
-    then starts a new one.
+    account_disabled`` for a disabled account; ``409 not_an_admin`` for an
+    account that is not an instance admin (plan 59 D28: nothing changes and
+    the link stays unused); the password rules (``422``). Marks the link
+    used, ends **every** session of the user and the admin cookie's, then
+    starts an **admin** session and lands on ``<base>/admin``.
     """
     state = portal_state(request)
     base = _base(state)
@@ -728,6 +1109,8 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
             raise bad_token
         if user.disabled_at is not None:
             raise _account_disabled()
+        if not user.is_instance_admin:
+            raise _reset_not_an_admin()
         email = user.email or ""
     validate_password(body.password, email)
     password_hash = hash_password(body.password)
@@ -739,19 +1122,21 @@ def post_reset(body: ResetBody, request: Request, response: Response) -> dict:
             raise bad_token
         if user.disabled_at is not None:
             raise _account_disabled()
+        if not user.is_instance_admin:
+            raise _reset_not_an_admin()
         assert user.id is not None
         user.password_hash = password_hash
         user.password_changed_at = now
         db.add(user)
         _invalidate_reset_links(db, user.id)
         revoke_user(user.id, db=db)
-        token = create_session(db, user.id, _user_agent(request))
+        token = _start_admin_session(db, request, base, user.id)
         uid = user.uid
         user_id = user.id
     end_user_tokens(state, user_id=user_id)  # every earlier session ended
     audit("reset_link_used", request, uid=uid)
-    set_cookie(response, token, base)
-    return {"redirect": f"{base.origin}/orgs"}
+    set_admin_cookie(response, token, base)
+    return {"redirect": f"{base.origin}/admin"}
 
 
 # ---------------------------------------------------------------------------
@@ -799,68 +1184,6 @@ def patch_account(
         db.add(user)
         db.flush()
         return _account(user)
-
-
-@auth_router.post("/api/account/password")
-def post_account_password(
-    body: PasswordBody,
-    request: Request,
-    response: Response,
-    principal: Principal = Depends(user_access()),
-) -> dict:
-    """Change the password; rotate this session, end every other one.
-
-    ``409 no_password`` for a GitHub account. A wrong ``current`` is ``403
-    bad_credentials`` and counts as a sign-in failure (the same three
-    throttles, ``429``). On success the current
-    session is replaced by a new one (new cookie), the user's other
-    sessions end and their unused reset links stop working.
-    """
-    state = portal_state(request)
-    base = _base(state)
-    with get_session() as db:
-        user = db.get(User, principal.user_id)
-        if user is None:
-            raise ApiError(404, "not found")
-        email, stored = user.email or "", user.password_hash
-    if stored is None:
-        raise _no_password()
-    rules = _login_throttles(state, email, ip_key(request.scope))
-    _check_login_throttles(rules)
-    ok, _ = verify_password(stored, body.current)
-    if not ok:
-        for rule, key in rules:
-            rule.record(key)
-        audit(
-            "login_failure",
-            request,
-            uid=principal.uid,
-            email=truncate_email(email),
-            reason="password_change",
-        )
-        raise ApiError(403, "the current password is wrong", code="bad_credentials")
-    validate_password(body.new, email)
-    password_hash = hash_password(body.new)
-    with get_session() as db:
-        user = db.get(User, principal.user_id)
-        if user is None:
-            raise ApiError(404, "not found")
-        user.password_hash = password_hash
-        user.password_changed_at = _iso(_now())
-        db.add(user)
-        revoke_user(principal.user_id, except_id=principal.session_id, db=db)
-        if principal.session_id is not None:
-            token = rotate(
-                db, principal.session_id, principal.user_id, _user_agent(request)
-            )
-        else:
-            token = create_session(db, principal.user_id, _user_agent(request))
-        _invalidate_reset_links(db, principal.user_id)
-    # Every session ended: the others, and this one (rotated).
-    end_user_tokens(state, user_id=principal.user_id)
-    audit("password_changed", request, uid=principal.uid)
-    set_cookie(response, token, base)
-    return {"changed": True}
 
 
 @auth_router.get("/api/account/orgs")
@@ -1223,7 +1546,8 @@ def post_admin_reset_link(
     """Issue a one-time, 24-hour reset link for a password account.
 
     ``409 no_password`` for a GitHub account, ``409 user_disabled`` for a
-    disabled one. The user's earlier unused
+    disabled one, ``409 not_an_admin`` for a password account that is not
+    an instance admin (plan 59 D28). The user's earlier unused
     links stop working. The token travels in the
     URL **fragment** (``<base>/reset#token=...``), so it never reaches a
     proxy log or a ``Referer``; only its SHA-256 is stored.
@@ -1240,6 +1564,8 @@ def post_admin_reset_link(
             raise ApiError(
                 409, "this account is disabled: enable it first", code="user_disabled"
             )
+        if not user.is_instance_admin:
+            raise _reset_not_an_admin()
         _invalidate_reset_links(db, user.id)
         db.add(
             PasswordReset(
@@ -1253,6 +1579,119 @@ def post_admin_reset_link(
         target = user.uid
     audit("reset_link_issued", request, uid=principal.uid, target=target)
     return {"url": f"{base.origin}/reset#token={raw}"}
+
+
+# ---------------------------------------------------------------------------
+# The admin panel's own account (plan 59 section 4.2)
+# ---------------------------------------------------------------------------
+
+
+@auth_router.get("/api/admin/me")
+def get_admin_me(principal: Principal = Depends(instance_access())) -> dict:
+    """The signed-in admin and this admin session.
+
+    ``session`` holds the admin session's start and its absolute end (8
+    hours; there is no idle limit). ``reader_grants`` lists the admin's live
+    per-org reader grants (none yet: they arrive with plan 59 step 8).
+    """
+    assert principal.session_id is not None  # an admin session principal
+    with get_session() as db:
+        row = db.exec(
+            select(UserSession.created_at, UserSession.expires_at).where(
+                UserSession.id == principal.session_id
+            )
+        ).first()
+    if row is None:  # ended since this request was resolved
+        raise ApiError(401, "admin sign-in required", code="admin_login_required")
+    created_at, expires_at = row
+    return {
+        "uid": principal.uid,
+        "display_name": principal.display_name,
+        "github_login": principal.github_login,
+        "avatar_url": principal.avatar_url,
+        "has_password": principal.has_password,
+        "session": {"created_at": created_at, "expires_at": expires_at},
+        "reader_grants": [],
+    }
+
+
+@auth_router.post("/api/admin/me/logout")
+def post_admin_logout(
+    request: Request,
+    response: Response,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """End this admin session and clear the admin cookie.
+
+    The everyday session of the same browser is left alone (plan 59 D29).
+    Audited as ``admin_signout``.
+    """
+    base = _base(portal_state(request))
+    assert principal.session_id is not None
+    revoke(principal.session_id)
+    audit("admin_signout", request, uid=principal.uid)
+    clear_admin_cookie(response, base)
+    return {"redirect": f"{base.origin}/admin/login"}
+
+
+@auth_router.post("/api/admin/me/password")
+def post_admin_password(
+    body: PasswordBody,
+    request: Request,
+    response: Response,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Change a password admin's password; rotate this session, end every other.
+
+    ``409 no_password`` for a GitHub account. A wrong ``current`` is ``403
+    bad_credentials`` and counts as a sign-in failure (the same three
+    throttles, ``429``). On success this admin session is replaced by a new
+    one, set in the **admin** cookie; the user's other sessions end and
+    their unused reset links stop working.
+    """
+    state = portal_state(request)
+    base = _base(state)
+    with get_session() as db:
+        user = db.get(User, principal.user_id)
+        if user is None:
+            raise ApiError(404, "not found")
+        email, stored = user.email or "", user.password_hash
+    if stored is None:
+        raise _no_password()
+    rules = _login_throttles(state, email, ip_key(request.scope))
+    _check_login_throttles(rules)
+    ok, _ = verify_password(stored, body.current)
+    if not ok:
+        for rule, key in rules:
+            rule.record(key)
+        audit(
+            "login_failure",
+            request,
+            uid=principal.uid,
+            email=truncate_email(email),
+            reason="password_change",
+        )
+        raise ApiError(403, "the current password is wrong", code="bad_credentials")
+    validate_password(body.new, email)
+    password_hash = hash_password(body.new)
+    assert principal.session_id is not None  # an admin session principal
+    with get_session() as db:
+        user = db.get(User, principal.user_id)
+        if user is None:
+            raise ApiError(404, "not found")
+        user.password_hash = password_hash
+        user.password_changed_at = _iso(_now())
+        db.add(user)
+        revoke_user(principal.user_id, except_id=principal.session_id, db=db)
+        token = rotate(
+            db, principal.session_id, principal.user_id, _user_agent(request)
+        )
+        _invalidate_reset_links(db, principal.user_id)
+    # Every session ended: the others, and this one (rotated).
+    end_user_tokens(state, user_id=principal.user_id)
+    audit("password_changed", request, uid=principal.uid)
+    set_admin_cookie(response, token, base)
+    return {"changed": True}
 
 
 __all__ = [

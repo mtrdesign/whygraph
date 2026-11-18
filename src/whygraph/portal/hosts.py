@@ -218,6 +218,37 @@ def safe_redirect(next_url: str | None, base: BaseUrl) -> str | None:
     return next_url
 
 
+def safe_admin_redirect(next_url: str | None, base: BaseUrl) -> str:
+    """Return where an admin sign-in may land: the admin panel on the base host.
+
+    Parameters
+    ----------
+    next_url : str or None
+        The caller-supplied target.
+    base : BaseUrl
+        The portal's base URL.
+
+    Returns
+    -------
+    str
+        ``next_url`` unchanged when :func:`safe_redirect` accepts it **and**
+        its host is the base host **and** its path is ``/admin`` or starts
+        with ``/admin/``; else ``<base>/admin``. :func:`safe_redirect` alone
+        also accepts org hosts, which an admin session never reaches.
+    """
+    fallback = f"{base.origin}/admin"
+    if safe_redirect(next_url, base) is None:
+        return fallback
+    assert next_url is not None
+    parts = urlsplit(next_url)
+    kind = classify(parts.netloc, base)
+    if kind is None or not kind.is_base:
+        return fallback
+    if parts.path != "/admin" and not parts.path.startswith("/admin/"):
+        return fallback
+    return next_url
+
+
 def parse_trusted_proxies(raw: str | None) -> str:
     """Validate ``WHYGRAPH_TRUSTED_PROXIES`` into uvicorn's ``forwarded_allow_ips``.
 

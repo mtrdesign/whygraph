@@ -153,7 +153,8 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/bootstrap", "POST"),
         ("/api/auth/github/start", "POST"),
         ("/api/auth/github/callback", "POST"),
-        ("/api/auth/login", "POST"),
+        ("/api/auth/admin/login", "POST"),
+        ("/api/auth/github/admin/start", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
         ("/api/orgs/slug-check", "GET"),  # M2f-3 section 4.12
@@ -165,6 +166,9 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/users/{uid}", "PATCH"),
         ("/api/admin/users/{uid}/reset-link", "POST"),
         ("/api/admin/audit", "GET"),
+        ("/api/admin/me", "GET"),
+        ("/api/admin/me/logout", "POST"),
+        ("/api/admin/me/password", "POST"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),
@@ -182,7 +186,6 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/logout", "POST"),
         ("/api/account", "GET"),
         ("/api/account", "PATCH"),
-        ("/api/account/password", "POST"),
         ("/api/account/orgs", "GET"),
         ("/api/account/usage", "GET"),  # M2f-2 section 4.11
         ("/api/v1/meta", "GET"),  # public: a connected portal's version check

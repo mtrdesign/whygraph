@@ -593,15 +593,25 @@ def test_price_override_and_revert_are_audited(
 
 
 def _as(v1: V1World, who: str) -> TestClient:
+    """Make ``who`` the client's one session.
+
+    ``"ivy"`` is a GitHub instance admin in no org, made on first use: the
+    password admin Ada has no everyday session (plan 59 D4), so Ivy is the
+    instance admin who reads an org as ``reader``.
+    """
     v1.client.cookies.clear()
-    if who == "ada":
+    if who == "ivy" and who not in v1.ids:
         with portal_db.get_session() as session:
-            user_id = session.exec(
-                select(User.id).where(User.email == "ada@example.com")
-            ).one()
-    else:
-        user_id = v1.ids[who]
-    signed_in(v1.client, user_id)
+            ivy = User(
+                display_name="Ivy",
+                github_id=6199,
+                github_login="ivy",
+                is_instance_admin=True,
+            )
+            session.add(ivy)
+            session.flush()
+            v1.ids["ivy"] = ivy.id
+    signed_in(v1.client, v1.ids[who])
     return v1.client
 
 
@@ -715,7 +725,7 @@ def test_who_sees_which_usage(v1: V1World, tmp_path: Path) -> None:
     )
     assert fay_put.status_code == 200, fay_put.text
 
-    client = _as(v1, "ada")  # the instance admin reads, writes nothing
+    client = _as(v1, "ivy")  # the instance admin reads, writes nothing
     read = client.get(base + "/api/usage").json()
     assert read["totals"]["calls"] == 4
     assert client.get(base + "/api/usage/me").json()["totals"]["calls"] == 0
@@ -868,7 +878,7 @@ def test_the_payload_fields_follow_the_role(v1: V1World) -> None:
     (listed,) = client.get(base + "/api/projects").json()["projects"]
     assert (listed["llm_block"], listed["llm_block_scope"]) == ("role", None)
 
-    client = _as(v1, "ada")  # a reader: no "me", the org's numbers
+    client = _as(v1, "ivy")  # a reader: no "me", the org's numbers
     usage = client.get(base + "/api/portal/state").json()["usage"]
     assert usage["me"] is None and usage["org"]["spent_usd"] == 3.75
     # The base host names no org.
@@ -899,7 +909,7 @@ def test_account_usage_lists_memberships_only(v1: V1World) -> None:
         "hard_stop": True,
     }
     assert (beta["spent_usd"], beta["calls"], beta["budget_usd"]) == (0.0, 0, None)
-    client = _as(v1, "ada")  # an instance admin reads orgs, but is in none
+    client = _as(v1, "ivy")  # an instance admin reads orgs, but is in none
     assert client.get(at() + "/api/account/usage").json()["orgs"] == []
     with portal_db.get_session() as session:
         assert session.get(Membership, (other, v1.ids["cy"])) is None

@@ -171,7 +171,7 @@ def test_a_name_of_200_characters_is_fine(acme: SimpleNamespace) -> None:
 
 def test_only_owners_change_org_settings(acme: SimpleNamespace) -> None:
     t = acme
-    for name in ("cy", "dee", "ada"):  # admin, member, instance admin (reader)
+    for name in ("cy", "dee", "ivy"):  # admin, member, instance admin (reader)
         be(t, name)
         response = patch(t, name="Mine")
         assert response.status_code == 403, (name, response.text)
@@ -302,7 +302,7 @@ def test_transfer_refusals(acme: SimpleNamespace) -> None:
 
 def test_only_owners_transfer(acme: SimpleNamespace) -> None:
     t = acme
-    for name in ("cy", "dee", "ada"):
+    for name in ("cy", "dee", "ivy"):  # ivy: an instance admin (reader)
         be(t, name)
         response = transfer(t, t.uids["eve"])
         assert response.status_code == 403, (name, response.text)

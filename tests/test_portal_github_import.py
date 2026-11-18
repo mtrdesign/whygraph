@@ -470,11 +470,33 @@ def test_another_github_account_is_refused_and_revoked(
 def test_a_password_account_cannot_connect_github(world: World) -> None:
     w = world
     w.client.cookies.clear()
+    # A password account is admin-only (plan 59 D4): no org host serves it.
     assert log_in(w.client, "ada@example.com").status_code == 200
-    assert create_org(w.client, "adas", "Ada's").status_code == 201
-    response = w.client.post(at("adas") + "/api/github/app/authorize", json={})
+    response = w.client.post(at("acme") + "/api/github/app/authorize", json={})
+    assert (response.status_code, response.json()["code"]) == (401, "login_required")
+    # An account with no GitHub id at the start is refused ...
+    w.client.cookies.clear()
+    assert github_sign_in(w.client, "ben").status_code == 200
+    with portal_db.get_session() as session:
+        saved = session.exec(
+            text("SELECT uid, github_id FROM users WHERE github_login = 'ben'")
+        ).one()
+        session.exec(
+            text(
+                "UPDATE users SET github_id = NULL, github_login = NULL "
+                "WHERE github_login = 'ben'"
+            )
+        )
+    response = w.client.post(at("acme") + "/api/github/app/authorize", json={})
     assert (response.status_code, response.json()["code"]) == (403, "github_required")
-    # And at the callback: an account that lost its GitHub id meanwhile.
+    with portal_db.get_session() as session:
+        session.exec(
+            text(
+                "UPDATE users SET github_id = :id, github_login = 'ben' "
+                "WHERE uid = :uid"
+            ).bindparams(id=saved[1], uid=saved[0])
+        )
+    # ... and at the callback: an account that lost its GitHub id meanwhile.
     w.client.cookies.clear()
     assert github_sign_in(w.client, "ben").status_code == 200
     url = start(w)

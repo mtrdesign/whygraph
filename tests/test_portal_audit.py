@@ -32,7 +32,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     production_env,
 )
 from test_portal_identity_routes import audit_log, events  # noqa: F401
-from test_portal_members import be, team  # noqa: F401
+from test_portal_members import be, be_admin, team  # noqa: F401
 from whygraph.portal import audit as audit_mod
 from whygraph.portal import audit_store
 from whygraph.portal import db as portal_db
@@ -435,7 +435,7 @@ def test_the_org_log_is_the_owners(team: SimpleNamespace) -> None:
     t = team
     join(t, "cy", "admin")
     join(t, "dee", "member")
-    for name in ("cy", "dee", "ada"):  # ada: an instance admin reading acme
+    for name in ("cy", "dee", "ivy"):  # ivy: an instance admin reading acme
         be(t, name)
         for path in ("/api/org/audit", "/api/org/audit.csv"):
             response = t.client.get(at("acme") + path)
@@ -462,9 +462,11 @@ def test_the_admin_log_shows_orgless_and_deleted_orgs_events(
     )
     assert deleted.status_code == 200, deleted.text
     flush()
+    # Ben's everyday session does not open the admin panel (plan 59 section 4.1).
     refused = t.client.get(at() + "/api/admin/audit")
-    assert refused.status_code == 403
-    be(t, "ada")
+    assert refused.status_code == 401
+    assert refused.json()["code"] == "admin_login_required"
+    be_admin(t)
     assert t.client.get(at("acme") + "/api/admin/audit").status_code == 404
     response = t.client.get(at() + "/api/admin/audit", params={"limit": 200})
     assert response.status_code == 200, response.text

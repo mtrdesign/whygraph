@@ -1716,6 +1716,9 @@ _FILL = {
     "{installation_id}": "7",
     "{link_id}": "nolink",
     "{provider}": "openrouter",
+    "{org}": "someorg",
+    "{id}": "1",
+    "{token_uid}": "sometoken",
 }
 
 

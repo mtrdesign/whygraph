@@ -7,6 +7,10 @@ yet, and Pat is a password account. Each test builds the roles it needs
 through the members routes themselves. Who the next request is changes with
 :func:`be`, which starts a real session row directly (cheaper than a GitHub
 round trip, and the GitHub sign-in throttle stays out of the way).
+
+Ada is admin-only (plan 59 D4): she has no everyday session, so the admin
+panel is reached with :func:`be_admin` and an instance admin reading an org
+is Ivy, a GitHub instance admin in no org (:func:`be_reader`).
 """
 
 # ruff: noqa: F811 -- pytest fixtures (`env`, `production_env`, ...) are imported
@@ -28,9 +32,11 @@ from github_fake import FakeGitHub
 from test_portal_app import (  # noqa: F401 -- fixtures
     PRODUCTION_ORG_ROUTES,
     _filled,
+    admin_signed_in,
     at,
     claim_instance,
     env,
+    github_admin,
     github_fake,
     github_sign_in,
     make_repo,
@@ -78,6 +84,9 @@ USAGE_FIELDS = {"month_spend_usd", "month_split"}
 """What an ``org.usage`` caller's member rows add (``GET`` only)."""
 NEWCOMERS = ("cy", "dee", "eve", "finn")
 """GitHub accounts that signed in once and belong to no org."""
+READER = "ivy"
+"""A GitHub instance admin in no org: plan 59 Phase 1's always-on ``reader``.
+Known to the fake GitHub only until :func:`be_reader` first signs her in."""
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +96,12 @@ NEWCOMERS = ("cy", "dee", "eve", "finn")
 
 @pytest.fixture
 def team(github_fake: FakeGitHub) -> Iterator[SimpleNamespace]:
-    """Ada (instance admin), Ben (owner of ``acme``), four newcomers and Pat."""
-    for login in ("eve", "finn"):
+    """Ada (password admin), Ben (owner of ``acme``), four newcomers and Pat.
+
+    Ivy, the GitHub instance admin of :func:`be_reader`, is known to the fake
+    only: she has no account until a test reads as her.
+    """
+    for login in ("eve", "finn", READER):
         github_fake.add_user(login)
     with prod_portal() as client:
         claim_instance(client)
@@ -114,9 +127,38 @@ def team(github_fake: FakeGitHub) -> Iterator[SimpleNamespace]:
 
 
 def be(t: SimpleNamespace, name: str) -> str:
-    """Make ``name`` the client's one session; return its token."""
+    """Make ``name`` the client's one session; return its token.
+
+    ``name`` may be :data:`READER` (:func:`be_reader`).
+    """
+    if name == READER and READER not in t.ids:
+        t.client.cookies.clear()
+        t.uids[READER] = github_admin(t.client, READER)
+        with portal_db.get_session() as session:
+            t.ids[READER] = session.exec(
+                select(User.id).where(User.uid == t.uids[READER])
+            ).one()
     t.client.cookies.clear()
     return signed_in(t.client, t.ids[name])
+
+
+def be_admin(t: SimpleNamespace) -> str:
+    """Make Ada's admin session the client's one session; return its token.
+
+    Only the admin panel (``/api/admin``) reads it (plan 59 section 4.1).
+    """
+    t.client.cookies.clear()
+    return admin_signed_in(t.client, t.ids["ada"])
+
+
+def be_reader(t: SimpleNamespace) -> str:
+    """Make Ivy, a GitHub instance admin in no org, the client's one session.
+
+    The first call signs her in through the fake GitHub, sets her
+    ``is_instance_admin`` and adds her to ``t.ids`` / ``t.uids``. Returns
+    the session token.
+    """
+    return be(t, READER)
 
 
 def add(
@@ -275,7 +317,7 @@ def test_an_existing_member_is_409_already_member(team: SimpleNamespace) -> None
 
 def test_a_disabled_account_is_409_user_disabled(team: SimpleNamespace) -> None:
     t = team
-    be(t, "ada")
+    be_admin(t)
     disabled = t.client.patch(
         at() + f"/api/admin/users/{t.uids['dee']}", json={"disabled": True}
     )
@@ -389,7 +431,7 @@ def test_an_instance_admin_reads_the_members_and_changes_nothing(
 ) -> None:
     t = team
     with_roles(t, cy="member")
-    be(t, "ada")  # no membership: reader
+    be_reader(t)  # no membership: reader
     listed = t.client.get(at("acme") + "/api/org/members")
     assert listed.status_code == 200
     assert [m["github_login"] for m in listed.json()] == ["ben", "cy"]

@@ -45,6 +45,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     PORT,
     PROD_BASE,
     PROD_CLIENT,
+    admin_signed_in,
     at,
     claim_instance,
     env,
@@ -58,6 +59,7 @@ from test_portal_identity_routes import create_org
 from whygraph.portal import connections
 from whygraph.portal import db as portal_db
 from whygraph.portal import orgs
+from whygraph.portal import sessions
 from whygraph.portal.app import create_portal_app
 from whygraph.portal.authz import Action
 from whygraph.portal.deps import (
@@ -82,7 +84,7 @@ from whygraph.services.git import redact_tokens
 
 CONNECTIONS_REVISION = "c4e7a19b52d8"
 PREVIOUS_REVISION = "73bf248ea6fd"
-HEAD_REVISION = "496953df26b4"
+HEAD_REVISION = "df854cdd4f03"
 
 
 # ---------------------------------------------------------------------------
@@ -385,19 +387,19 @@ def test_v1_path_tricks(net: SimpleNamespace) -> None:
 
 
 def test_token_principal_never_instance_admin(net: SimpleNamespace) -> None:
+    # A GitHub instance admin who is a member of acme: a password account's
+    # token is refused outright (plan 59 D4), so Ada cannot be the admin here.
     with portal_db.get_session() as session:
-        orgs.add_member(
-            session, org_id=net.orgs["acme"], user_id=net.ids["ada"], role="member"
-        )
-    token = issue(net, "ada", "api")
+        session.get(User, net.ids["cy"]).is_instance_admin = True
+    token = issue(net, "cy", "api")
     response = call(net, token)
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["uid"] == net.uids["ada"]
+    assert body["uid"] == net.uids["cy"]
     assert body["is_instance_admin"] is False and body["session_id"] is None
 
     # Without a membership the reader fallback never applies to a token.
-    stray = issue(net, "ada", "lib")
+    stray = issue(net, "cy", "lib")
     refused(call(net, stray, "lib", "bravo"), "member_removed")
 
     # A token never reaches a session route either (current_user refuses it).
@@ -549,14 +551,16 @@ def test_member_left_and_user_disabled_reasons(net: SimpleNamespace) -> None:
 
     dee_token = issue(net, "dee", "lib")
     assert call(net, dee_token, "lib", "bravo").status_code == 200
-    signed_in(net.client, net.ids["ada"])
+    net.client.cookies.clear()
+    admin_signed_in(net.client, net.ids["ada"])  # the admin panel's session
     patch = net.client.patch(
         at() + f"/api/admin/users/{net.uids['dee']}", json={"disabled": True}
     )
     assert patch.status_code == 200, patch.text
     refused(call(net, dee_token, "lib", "bravo"), "user_disabled")
     # Enabling the account does not bring the token back.
-    signed_in(net.client, net.ids["ada"])
+    net.client.cookies.clear()
+    admin_signed_in(net.client, net.ids["ada"])
     enable = net.client.patch(
         at() + f"/api/admin/users/{net.uids['dee']}", json={"disabled": False}
     )
@@ -885,7 +889,10 @@ def test_sweep(net: SimpleNamespace) -> None:
 def test_production_start_sweeps(github_fake: FakeGitHub, tmp_path: Path) -> None:
     with probe_portal() as client:
         claim_instance(client)
-        admin = client.cookies.get("whygraph_session")
+        # The bootstrap starts an admin session (plan 59 section 4.2).
+        admin = client.cookies.get(
+            sessions.admin_cookie_name(client.app.state.portal.base_url)
+        )
         assert admin
     with portal_db.get_session() as session:
         org = orgs.create_org(session, slug="acme", name="Acme")

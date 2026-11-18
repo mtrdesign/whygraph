@@ -22,6 +22,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     at,
     env,
     github_fake,
+    github_sign_in,
     log_in,
     production_env,
 )
@@ -99,13 +100,24 @@ def test_a_production_owner_sees_every_item_open(
     assert got["project"]["can_act"] is True
 
 
-def test_a_password_owner_cannot_act_on_the_project_item(world: World) -> None:
+def test_a_password_account_never_reaches_the_project_item(world: World) -> None:
+    """A password account is admin-only (plan 59 D4): it owns no org it can open.
+
+    So the item's password rule cannot be reached; a GitHub owner of a new
+    org is the one who acts on it.
+    """
     w = world
     w.client.cookies.clear()
     assert log_in(w.client, "ada@example.com").status_code == 200
-    assert create_org(w.client, "adas", "Ada's").status_code == 201
-    got = items(w.client.get(at("adas") + "/api/onboarding"))
-    assert got["project"]["can_act"] is False
+    refused = create_org(w.client, "adas", "Ada's")
+    assert (refused.status_code, refused.json()["code"]) == (401, "login_required")
+    refused = w.client.get(at("acme") + "/api/onboarding")
+    assert (refused.status_code, refused.json()["code"]) == (401, "login_required")
+    w.client.cookies.clear()
+    assert github_sign_in(w.client, "cy").status_code == 200
+    assert create_org(w.client, "cys", "Cy's").status_code == 201
+    got = items(w.client.get(at("cys") + "/api/onboarding"))
+    assert got["project"]["can_act"] is True
 
 
 def test_each_production_item_closes_on_its_own_rule(

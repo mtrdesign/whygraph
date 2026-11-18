@@ -85,7 +85,11 @@ def _user(session, login: str, github_id: int) -> User:  # noqa: ANN001
 
 @pytest.fixture
 def cn(production_env: SimpleNamespace, tmp_path: Path) -> Iterator[SimpleNamespace]:
-    """Ada (instance admin), Ben / Fay / Cy in ``acme``, Dee in ``bravo``."""
+    """Ada (instance admin), Ben / Fay / Cy in ``acme``, Dee in ``bravo``.
+
+    Ada is a password account, so admin-only (plan 59 D4); Ivy is a GitHub
+    instance admin in no org, the always-on ``reader`` of plan 59 Phase 1.
+    """
     with prod_portal() as client:
         claim_instance(client)
         client.cookies.clear()
@@ -94,9 +98,10 @@ def cn(production_env: SimpleNamespace, tmp_path: Path) -> Iterator[SimpleNamesp
             ada = session.exec(select(User).where(User.email == "ada@example.com"))
             ada = ada.one()
             ids["ada"], uids["ada"] = ada.id, ada.uid
-            for n, login in enumerate(("ben", "cy", "dee", "fay", "eve")):
+            for n, login in enumerate(("ben", "cy", "dee", "fay", "eve", "ivy")):
                 user = _user(session, login, 5100 + n)
                 ids[login], uids[login] = user.id, user.uid
+            session.get(User, ids["ivy"]).is_instance_admin = True
             for slug in ("acme", "bravo"):
                 org_ids[slug] = orgs.create_org(
                     session, slug=slug, name=slug.title()
@@ -500,7 +505,7 @@ def test_client_name_charset_enforced(cn: SimpleNamespace) -> None:
 
 def test_reader_cannot_authorize(cn: SimpleNamespace) -> None:
     """An instance admin reads every org as ``reader``, but never consents."""
-    be(cn, "ada")
+    be(cn, "ivy")
     # The reader access exists (a browser-only administrative view) ...
     assert cn.client.get(at("acme") + "/api/projects/api").status_code == 200
     # ... and gives no consent, no projects and no code.
@@ -1012,7 +1017,7 @@ def test_connect_intent_is_minted_for_project_readers(cn: SimpleNamespace) -> No
     be(cn, "cy")
     assert mint(cn).status_code == 200
     # An instance admin's reader access never mints (current_org: 403).
-    be(cn, "ada")
+    be(cn, "ivy")
     refused = mint(cn)
     assert refused.status_code == 403 and refused.json()["code"] == "forbidden"
     # A Restricted project without a grant is a 404, like a missing one.

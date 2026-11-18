@@ -30,6 +30,7 @@ from sqlmodel import col, select
 
 from test_portal_app import (  # noqa: F401
     at,
+    github_admin,
     github_sign_in,
     log_in,
     portal_client,
@@ -211,9 +212,15 @@ def test_only_an_owner_deletes_an_org(world: World) -> None:
             "code": "forbidden",
             "action": "org.own",
         }
-    # An instance admin reads every org and writes to none.
+    # The password admin has no everyday session (plan 59 D4) ...
     w.client.cookies.clear()
     assert log_in(w.client, "ada@example.com").status_code == 200
+    response = delete_org(w)
+    assert (response.status_code, response.json()["code"]) == (401, "login_required")
+    # ... and a GitHub instance admin reads every org and writes to none.
+    w.client.cookies.clear()
+    w.fake.add_user("ivy")
+    github_admin(w.client, "ivy")
     response = delete_org(w)
     assert (response.status_code, response.json()["code"]) == (403, "forbidden")
     assert org_id("acme") is not None

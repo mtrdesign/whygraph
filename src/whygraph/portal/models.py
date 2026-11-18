@@ -71,6 +71,7 @@ REVOKED_REASONS: tuple[str, ...] = (
     "org_deleted",
     "idle",
     "project_access_removed",
+    "user_deleted",
 )
 """Why a connection token was revoked (``connection_tokens.revoked_reason``)."""
 LINK_STATUSES: tuple[str, ...] = (
@@ -213,6 +214,16 @@ class Organization(PortalBase, table=True):
     default_project_role : str
         What a member holds on a project they have no grant on: one of
         :data:`~whygraph.portal.authz.DEFAULT_PROJECT_ROLES`.
+    suspended_at, suspended_reason : str or None
+        When a platform administrator suspended the organization and why
+        (at most 500 characters); ``NULL`` while it is active.
+    suspended_by : int or None
+        ``users.id`` of the administrator; ``NULL`` when none or the user
+        is gone.
+    deleted_at : str or None
+        When the organization was soft-deleted; ``NULL`` while it is live.
+    deleted_by : int or None
+        ``users.id`` of the administrator who deleted it.
     """
 
     __tablename__ = "organizations"
@@ -224,6 +235,22 @@ class Organization(PortalBase, table=True):
             _in("default_project_role", DEFAULT_PROJECT_ROLES),
             name="ck_organizations_default_project_role",
         ),
+        CheckConstraint(
+            "suspended_reason IS NULL OR char_length(suspended_reason) <= 500",
+            name="ck_organizations_suspended_reason",
+        ),
+        ForeignKeyConstraint(
+            ["suspended_by"],
+            ["users.id"],
+            name="fk_organizations_suspended_by",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["deleted_by"],
+            ["users.id"],
+            name="fk_organizations_deleted_by",
+            ondelete="SET NULL",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -232,6 +259,11 @@ class Organization(PortalBase, table=True):
     name: str = Field(sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
     default_project_role: str = Field(default="contributor", sa_type=Text)
+    suspended_at: str | None = Field(default=None, sa_type=Text)
+    suspended_reason: str | None = Field(default=None, sa_type=Text)
+    suspended_by: int | None = Field(default=None)
+    deleted_at: str | None = Field(default=None, sa_type=Text)
+    deleted_by: int | None = Field(default=None)
 
 
 class Membership(PortalBase, table=True):
@@ -310,6 +342,15 @@ class User(PortalBase, table=True):
     disabled_at : str or None
         ISO-8601 UTC timestamp when an instance admin disabled the
         account; ``NULL`` means active.
+    deleted_at : str or None
+        When an instance admin soft-deleted the account; ``NULL`` while it
+        is live.
+    deleted_by : int or None
+        ``users.id`` of the administrator who deleted it.
+    deleted_memberships : str or None
+        JSON list of the memberships the delete removed, for Restore.
+    erased_at : str or None
+        When the account was erased; set once, never cleared.
 
     Notes
     -----
@@ -336,6 +377,12 @@ class User(PortalBase, table=True):
             "github_login IS NULL OR github_id IS NOT NULL",
             name="ck_users_login_needs_id",
         ),
+        ForeignKeyConstraint(
+            ["deleted_by"],
+            ["users.id"],
+            name="fk_users_deleted_by",
+            ondelete="SET NULL",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -349,6 +396,10 @@ class User(PortalBase, table=True):
     github_login: str | None = Field(default=None, sa_type=Text)
     avatar_url: str | None = Field(default=None, sa_type=Text)
     disabled_at: str | None = Field(default=None, sa_type=Text)
+    deleted_at: str | None = Field(default=None, sa_type=Text)
+    deleted_by: int | None = Field(default=None)
+    deleted_memberships: str | None = Field(default=None, sa_type=Text)
+    erased_at: str | None = Field(default=None, sa_type=Text)
     created_at: str = Field(default_factory=_now, sa_type=Text)
 
 
@@ -494,6 +545,10 @@ class Project(PortalBase, table=True):
     restricted : bool
         When true only org admins / owners and users with a
         :class:`ProjectGrant` can see the project.
+    deleted_at : str or None
+        When the project was soft-deleted; ``NULL`` while it is live.
+    deleted_by : int or None
+        ``users.id`` of the administrator who deleted it.
     """
 
     __tablename__ = "projects"
@@ -513,6 +568,12 @@ class Project(PortalBase, table=True):
             ["created_by"],
             ["users.id"],
             name="fk_projects_created_by",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["deleted_by"],
+            ["users.id"],
+            name="fk_projects_deleted_by",
             ondelete="SET NULL",
         ),
         Index(
@@ -543,6 +604,8 @@ class Project(PortalBase, table=True):
     access_lost_at: str | None = Field(default=None, sa_type=Text)
     access_lost_reason: str | None = Field(default=None, sa_type=Text)
     restricted: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    deleted_at: str | None = Field(default=None, sa_type=Text)
+    deleted_by: int | None = Field(default=None)
 
 
 class RetiredOrgSlug(PortalBase, table=True):
@@ -1070,6 +1133,47 @@ class InvitationGrant(PortalBase, table=True):
     role: str = Field(sa_type=Text)
 
 
+class ReaderGrant(PortalBase, table=True):
+    """A platform administrator's time-limited read-only access to one org.
+
+    Attributes
+    ----------
+    user_id : int
+        The administrator the grant belongs to; the row goes with the user.
+    org_id : int
+        The organization it opens; the row goes with the organization.
+    created_at, expires_at : str
+        ISO-8601 UTC timestamps; ``expires_at`` is ``created_at`` plus the
+        grant lifetime (60 minutes).
+    revoked_at : str or None
+        When the administrator (or a demotion) ended it early.
+    """
+
+    __tablename__ = "reader_grants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="fk_reader_grants_user",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_reader_grants_org",
+            ondelete="CASCADE",
+        ),
+        Index("ix_reader_grants_user_org", "user_id", "org_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field()
+    org_id: int = Field()
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    expires_at: str = Field(sa_type=Text)
+    revoked_at: str | None = Field(default=None, sa_type=Text)
+
+
 class AuditEvent(PortalBase, table=True):
     """One persisted security event (M2f-1, written by the audit writer).
 
@@ -1111,6 +1215,8 @@ class AuditEvent(PortalBase, table=True):
         ),
         Index("ix_audit_events_org_id_id", "org_id", text("id DESC")),
         Index("ix_audit_events_event", "event"),
+        Index("ix_audit_events_actor", "actor_id"),
+        Index("ix_audit_events_target", "target"),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
@@ -1625,6 +1731,7 @@ __all__ = [
     "Project",
     "ProjectAgent",
     "ProjectConfig",
+    "ReaderGrant",
     "RetiredOrgSlug",
     "ScanRun",
     "Secret",

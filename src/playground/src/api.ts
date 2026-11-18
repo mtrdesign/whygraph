@@ -1385,7 +1385,8 @@ export type RevokedReason =
   | "project_deleted"
   | "org_deleted"
   | "idle"
-  | "project_access_removed";
+  | "project_access_removed"
+  | "user_deleted";
 
 /** `GET /api/connect/tokens`: one of the caller's own connected portals. */
 export interface MyConnection {

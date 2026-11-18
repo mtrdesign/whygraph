@@ -6,7 +6,10 @@ liberal about domains, so what the jar sends proves nothing about
 host-only), the per-kind lifetimes (8 hours absolute and no idle limit for
 the admin kind, D50), pairing (D51), D4's refusal of a password account's
 everyday session and connection token, and the migration in both
-directions. Step 2 adds the request resolution and guard cases.
+directions. Step 2 adds the request resolution and guard cases: which
+cookie a path reads, ``admin_login_required``, :func:`instance_access`'s
+checks, duplicate admin cookies, the Origin / fetch-metadata guard in front
+of an admin cookie (P1), and local mode.
 """
 
 # ruff: noqa: F811 -- pytest fixtures (`env`, `production_env`) imported from test_portal_app
@@ -24,11 +27,15 @@ from sqlmodel import select
 from starlette.responses import Response
 
 from test_portal_app import (  # noqa: F401 -- fixtures
+    PORT,
     PROD_BASE,
     admin_signed_in,
+    at,
     env,
+    portal_client,
     prod_portal,
     production_env,
+    signed_in,
 )
 from whygraph.portal import connections
 from whygraph.portal import db as portal_db
@@ -36,11 +43,17 @@ from whygraph.portal import sessions
 from whygraph.portal.hosts import BaseUrl
 from whygraph.portal.models import ConnectionToken, Project, User, UserSession
 from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.security import Principal
 
 DEV = BaseUrl.parse(PROD_BASE)
 HTTPS = BaseUrl.parse("https://whygraph.example.com")
 UPDATE_CHECK = "496953df26b4"
 ADMIN_SESSION = "df854cdd4f03"
+ADMIN_LOGIN_REQUIRED = {
+    "error": "admin sign-in required",
+    "code": "admin_login_required",
+}
+LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
 
 
 def _iso(moment: datetime) -> str:
@@ -364,6 +377,261 @@ def test_admin_signed_in_sets_the_admin_cookie(
         found = sessions.lookup(token, kind="admin")
         assert found is not None and found.user_id == ada
         assert _row(token).paired_session_id is None
+
+
+# ---------------------------------------------------------------------------
+# Resolution: which cookie a path reads (D2), and instance_access
+# ---------------------------------------------------------------------------
+
+ADMIN_ROUTE = "/api/admin/users"
+
+
+def _set_cookies(response) -> list[str]:  # noqa: ANN001
+    return response.headers.get_list("set-cookie")
+
+
+def test_an_admin_session_opens_admin_routes(production_env: SimpleNamespace) -> None:
+    with prod_portal() as client:
+        pat = _user("pat@example.com", admin=True, password=True)  # D4: admin-only
+        assert client.get(at() + ADMIN_ROUTE).json() == ADMIN_LOGIN_REQUIRED
+        admin_signed_in(client, pat)
+        response = client.get(at() + ADMIN_ROUTE)
+        assert response.status_code == 200, response.text
+        assert [u["email"] for u in response.json()] == ["pat@example.com"]
+
+
+def test_a_user_cookie_on_an_admin_route_is_admin_login_required(
+    production_env: SimpleNamespace,
+) -> None:
+    """An everyday session of an instance admin opens no admin route."""
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        signed_in(client, gil)
+        account = client.get(at() + "/api/account")
+        assert account.status_code == 200
+        assert account.json()["is_instance_admin"] is True  # shown, opens nothing
+        for path in (ADMIN_ROUTE, "/api/admin/orgs", "/api/admin/audit"):
+            response = client.get(at() + path)
+            assert response.status_code == 401, path
+            assert response.json() == ADMIN_LOGIN_REQUIRED
+
+
+def test_an_admin_cookie_is_ignored_on_non_admin_routes(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        admin_signed_in(client, gil)
+        assert client.get(at() + ADMIN_ROUTE).status_code == 200
+        account = client.get(at() + "/api/account")
+        assert account.status_code == 401
+        assert account.json() == LOGIN_REQUIRED
+        state = client.get(at() + "/api/portal/state").json()
+        assert state["user"] is None
+        # An unknown non-admin path still asks for the everyday sign-in.
+        assert client.get(at() + "/api/nope").json() == LOGIN_REQUIRED
+
+
+def test_both_cookies_resolve_by_path(production_env: SimpleNamespace) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        signed_in(client, gil)
+        admin_signed_in(client, gil)
+        assert client.get(at() + ADMIN_ROUTE).status_code == 200
+        assert client.get(at() + "/api/account").status_code == 200
+
+
+def test_demoting_the_admin_ends_the_admin_session_on_the_next_request(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        token = admin_signed_in(client, gil)
+        assert client.get(at() + ADMIN_ROUTE).status_code == 200
+        with portal_db.get_session() as session:
+            session.get(User, gil).is_instance_admin = False
+        response = client.get(at() + ADMIN_ROUTE)
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        assert _row(token) is not None  # refused by the lookup, not deleted
+
+
+class _FixedIdentity:
+    """An identity resolver that hands every request the same principal."""
+
+    def __init__(self, principal: Principal) -> None:
+        self._principal = principal
+
+    async def principal(self, scope) -> Principal:  # noqa: ANN001
+        return self._principal
+
+    async def org_slug(self, scope) -> None:  # noqa: ANN001
+        return None
+
+
+@pytest.mark.parametrize(
+    ("kind", "admin", "status", "code"),
+    [
+        ("user", True, 401, "admin_login_required"),
+        ("admin", False, 403, "forbidden"),
+    ],
+)
+def test_instance_access_needs_an_admin_kind_session_of_an_admin(
+    production_env: SimpleNamespace, kind: str, admin: bool, status: int, code: str
+) -> None:
+    """``instance_access`` checks the kind and the flag itself (defence in depth).
+
+    ``SessionIdentity`` never resolves either principal under ``/api/admin``
+    (it reads only the admin cookie, and an admin lookup needs the flag), so
+    an injected resolver hands them over.
+    """
+    principal = Principal(
+        user_id=1,
+        uid="u-x",
+        display_name="X",
+        session_id=1,
+        is_instance_admin=admin,
+        session_kind=kind,
+    )
+    with prod_portal(identity=_FixedIdentity(principal)) as client:
+        response = client.get(at() + ADMIN_ROUTE)
+    assert response.status_code == status, response.text
+    assert response.json()["code"] == code
+
+
+def test_unknown_admin_paths(production_env: SimpleNamespace) -> None:
+    """The ``/api`` catch-all depends on ``current_user`` (P12)."""
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        # Base host, no admin session.
+        response = client.get(at() + "/api/admin/nope")
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        # Org host with an everyday session: the host-only admin cookie never
+        # arrives there, so the catch-all finds no principal.
+        signed_in(client, gil)
+        response = client.get(at("acme") + "/api/admin/nope")
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        # With an admin session the unknown path is a plain 404.
+        admin_signed_in(client, gil)
+        response = client.get(at() + "/api/admin/nope")
+        assert response.status_code == 404
+        assert response.json() == {"error": "no API route /api/admin/nope"}
+        # A real admin route on an org host: its host gate runs first.
+        response = client.get(at("acme") + ADMIN_ROUTE)
+        assert response.status_code == 404
+        assert response.json() == {"error": "not found"}
+
+
+# ---------------------------------------------------------------------------
+# Duplicate admin cookies, and the guard in front of an admin cookie (P1)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_admin_cookies_give_no_session_and_are_cleared(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        with portal_db.get_session() as session:
+            token = sessions.create_session(session, gil, None, kind="admin")
+        cookie = {"Cookie": f"whygraph_admin={token}; whygraph_admin=other"}
+        response = client.get(at() + ADMIN_ROUTE, headers=cookie)
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        cleared = _set_cookies(response)
+        assert cleared == [v.decode() for _, v in sessions.admin_clearing_headers(DEV)]
+        assert len(cleared) == 2  # http: host-only and Domain=<base host>
+        # One admin cookie is a session; the everyday cookie is never cleared.
+        ok = client.get(
+            at() + ADMIN_ROUTE, headers={"Cookie": f"whygraph_admin={token}"}
+        )
+        assert ok.status_code == 200 and _set_cookies(ok) == []
+        # Off /api/admin the admin cookie is not read, so nothing is cleared.
+        off = client.get(at() + "/api/account", headers=cookie)
+        assert off.json() == LOGIN_REQUIRED and _set_cookies(off) == []
+
+
+def test_duplicate_admin_cookies_on_https_are_cleared_with_one_header(
+    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = f"https://whygraph.localhost:{PORT}"
+    monkeypatch.setenv("WHYGRAPH_BASE_URL", base)
+    with prod_portal(base_url=base) as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        with portal_db.get_session() as session:
+            token = sessions.create_session(session, gil, None, kind="admin")
+        name = "__Host-whygraph_admin"
+        ok = client.get(base + ADMIN_ROUTE, headers={"Cookie": f"{name}={token}"})
+        assert ok.status_code == 200, ok.text
+        # The http name means nothing on https.
+        plain = client.get(
+            base + ADMIN_ROUTE, headers={"Cookie": f"whygraph_admin={token}"}
+        )
+        assert plain.json() == ADMIN_LOGIN_REQUIRED
+        response = client.get(
+            base + ADMIN_ROUTE, headers={"Cookie": f"{name}={token}; {name}=x"}
+        )
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        (header,) = _set_cookies(response)
+        assert header.startswith(f"{name}=") and "Max-Age=0" in header
+        assert "domain" not in _cookie_parts(header)
+        assert "secure" in _cookie_parts(header)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": at("acme")},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Origin": at("acme"), "Sec-Fetch-Site": "same-site"},
+    ],
+)
+@pytest.mark.parametrize("method", ["GET", "PATCH"])
+def test_an_admin_cookie_from_an_org_page_is_refused(
+    production_env: SimpleNamespace, headers: dict[str, str], method: str
+) -> None:
+    """P1: script on an org host cannot use the admin cookie."""
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        bob = _user("bob@example.com", github_id=8)
+        admin_signed_in(client, gil)
+        with portal_db.get_session() as session:
+            bob_uid = session.get(User, bob).uid
+        path = ADMIN_ROUTE if method == "GET" else f"{ADMIN_ROUTE}/{bob_uid}"
+        body = None if method == "GET" else {"is_instance_admin": True}
+        response = client.request(method, at() + path, json=body, headers=headers)
+        assert response.status_code == 403, response.text
+        assert response.json()["error"] in (
+            "origin not allowed",
+            "cross-site request refused",
+        )
+        with portal_db.get_session() as session:
+            assert session.get(User, bob).is_instance_admin is False
+        # The same request from the base host's own page passes.
+        own = client.get(at() + ADMIN_ROUTE, headers={"Origin": at()})
+        assert own.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Local mode (D7)
+# ---------------------------------------------------------------------------
+
+
+def test_local_mode_never_answers_admin_login_required(env: SimpleNamespace) -> None:
+    with portal_client() as client:
+        before = client.get("/api/admin/nope")
+        assert before.status_code == 409
+        assert before.json()["code"] == "setup_required"
+        assert (
+            client.post("/api/portal/setup", json={"display_name": "Tess"}).status_code
+            == 201
+        )
+        for path in ("/api/admin/nope", ADMIN_ROUTE):
+            response = client.get(path)
+            assert response.status_code == 404, path
+            assert response.json().get("code") != "admin_login_required"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 [
   "access_denied",
   "account_disabled",
+  "admin_login_required",
   "already_invited",
   "already_member",
   "already_owner",

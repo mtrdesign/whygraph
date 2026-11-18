@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { portalApi, setBaseUrl } from "../api";
 import { RationaleTab } from "../components/RationaleTab";
 import { authMessage } from "../lib/authErrors";
-import { isSafeNext, needsGitHubToImport, signInUrl } from "../lib/identity";
+import { isSafeNext, signInUrl } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 import { ProjectProvider } from "../lib/project";
 import { createAppRouter } from "../router";
@@ -28,7 +28,6 @@ type Handler = (method: string, body: unknown) => Response;
 interface Fake {
   state: Record<string, unknown>;
   orgs: { slug: string; name: string; role: string; url: string; new?: boolean }[];
-  login: { status: number; body: unknown };
   calls: { path: string; method: string; body: unknown; search: string; headers: Record<string, string> }[];
   // Per-test routes, matched by exact path before the fixed ones.
   routes: Record<string, Handler>;
@@ -117,7 +116,6 @@ function fakeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Respon
   if (route) return Promise.resolve(route(init?.method ?? "GET", body));
   if (path === "/api/portal/state") return Promise.resolve(json(fake.state));
   if (path === "/api/account/orgs") return Promise.resolve(json(fake.orgs));
-  if (path === "/api/auth/login") return Promise.resolve(json(fake.login.body, fake.login.status));
   if (path === "/api/auth/reset") return Promise.resolve(json({ redirect: `${BASE}/orgs` }));
   if (path === "/api/projects") return Promise.resolve(json({ projects: [project("alpha")] }));
   if (path === "/api/projects/alpha") return Promise.resolve(json(project("alpha")));
@@ -145,7 +143,6 @@ beforeEach(() => {
   fake = {
     state: baseState(),
     orgs: [],
-    login: { status: 401, body: { error: "bad", code: "bad_credentials" } },
     calls: [],
     routes: {},
   };
@@ -173,6 +170,7 @@ describe("router gate - production base host", () => {
     const router = mount("/signin");
     await screen.findByLabelText("Bootstrap secret");
     expect(where(router)).toBe("/setup");
+    expect(screen.getByText(/This password account is for platform administration only; to use organizations, sign in with GitHub\./)).toBeInTheDocument();
   });
 
   it("sends /setup to / (then the picker) once the bootstrap is done", async () => {
@@ -182,7 +180,7 @@ describe("router gate - production base host", () => {
 
   it("sends a signed-out visitor to /signin from anywhere else", async () => {
     fake.state = baseState({ user: null });
-    for (const path of ["/", "/orgs", "/admin", "/account", "/p/alpha"]) {
+    for (const path of ["/", "/orgs", "/account", "/p/alpha"]) {
       const router = mount(path);
       await waitFor(() => expect(where(router)).toBe("/signin"));
       screen.getByRole("heading", { name: "Sign in" });
@@ -216,14 +214,20 @@ describe("router gate - production base host", () => {
     expect(fake.calls.some((c) => c.path === "/api/projects")).toBe(false);
   });
 
-  it("keeps /admin for instance admins", async () => {
+  it("serves /admin to a visitor with no everyday session (the admin app has its own)", async () => {
+    fake.state = baseState({ user: null });
+    fake.routes["/api/admin/me"] = () => json({ error: "x", code: "admin_login_required" }, 401);
     const router = mount("/admin");
-    await waitFor(() => expect(where(router)).toBe("/orgs"));
+    await waitFor(() => expect(hard).toHaveBeenCalled());
+    expect(where(router)).toBe("/admin");
+    expect(String(hard.mock.calls[0][0])).toMatch(/\/admin\/login\?next=/);
+  });
 
-    document.body.innerHTML = "";
-    fake.state = baseState({ user: adminAda });
-    const admin = mount("/admin");
-    await waitFor(() => expect(where(admin)).toBe("/admin"));
+  it("does not bounce a signed-in non-admin from /admin: the admin session decides", async () => {
+    fake.routes["/api/admin/me"] = () => json({ error: "x", code: "forbidden" }, 403);
+    const router = mount("/admin");
+    await screen.findByText(/You don't have access to the admin panel/);
+    expect(where(router)).toBe("/admin");
   });
 
   it("sends the org tree and legacy paths to /", async () => {
@@ -380,11 +384,6 @@ describe("login_required redirect", () => {
 // ---- pages -------------------------------------------------------------------------
 
 describe("sign-in page", () => {
-  /** Open the "Administrator sign-in" disclosure. */
-  async function openAdmin(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(await screen.findByRole("button", { name: "Administrator sign-in" }));
-  }
-
   it("leads with GitHub: start with next, then go to the authorize URL", async () => {
     fake.state = baseState({ user: null });
     const authorize = "https://github.com/login/oauth/authorize?client_id=x&state=s";
@@ -411,58 +410,13 @@ describe("sign-in page", () => {
     expect(hard).not.toHaveBeenCalled();
   });
 
-  it("keeps the password form behind the Administrator sign-in disclosure", async () => {
+  it("has no administrator sign-in on /signin any more (that is /admin/login)", async () => {
     fake.state = baseState({ user: null });
     mount("/signin");
-    const toggle = await screen.findByRole("button", { name: "Administrator sign-in" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await screen.findByRole("button", { name: "Sign in with GitHub" });
+    expect(screen.queryByRole("button", { name: "Administrator sign-in" })).toBeNull();
     expect(screen.queryByLabelText("Email")).toBeNull();
     expect(screen.queryByLabelText("Password")).toBeNull();
-    const user = userEvent.setup();
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByLabelText("Email")).toBeInTheDocument();
-    expect(screen.getByText(/Ask an instance administrator for a reset link/)).toBeInTheDocument();
-  });
-
-  it("posts the credentials with next, then follows the server's redirect", async () => {
-    fake.state = baseState({ user: null });
-    fake.login = { status: 200, body: { redirect: `${ORG}/` } };
-    const next = `${ORG}/p/alpha`;
-    mount(`/signin?next=${encodeURIComponent(next)}`);
-    const user = userEvent.setup();
-    await openAdmin(user);
-    await user.type(await screen.findByLabelText("Email"), "ada@example.com");
-    await user.type(screen.getByLabelText("Password"), "correct horse battery");
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
-    await waitFor(() => expect(hard).toHaveBeenCalledWith(`${ORG}/`));
-    const login = fake.calls.find((c) => c.path === "/api/auth/login");
-    expect(login?.body).toEqual({ email: "ada@example.com", password: "correct horse battery", next });
-  });
-
-  it("shows bad credentials inline and does not navigate", async () => {
-    fake.state = baseState({ user: null });
-    mount("/signin");
-    const user = userEvent.setup();
-    await openAdmin(user);
-    await user.type(await screen.findByLabelText("Email"), "ada@example.com");
-    await user.type(screen.getByLabelText("Password"), "wrong");
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
-    await screen.findByText("Incorrect email or password.");
-    expect(hard).not.toHaveBeenCalled();
-  });
-
-  it("says so when a correct password belongs to a disabled account", async () => {
-    fake.state = baseState({ user: null });
-    fake.login = { status: 403, body: { error: "this account is disabled", code: "account_disabled" } };
-    mount("/signin");
-    const user = userEvent.setup();
-    await openAdmin(user);
-    await user.type(await screen.findByLabelText("Email"), "ada@example.com");
-    await user.type(screen.getByLabelText("Password"), "correct horse battery");
-    await user.click(screen.getByRole("button", { name: "Sign in" }));
-    await screen.findByText(/This account is disabled/);
-    expect(hard).not.toHaveBeenCalled();
   });
 });
 
@@ -498,6 +452,14 @@ describe("GitHub callback page", () => {
     expect(window.location.search).toBe("");
     expect(fake.calls.some((c) => c.path === "/api/auth/github/callback")).toBe(false);
     expect(screen.getByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/signin");
+  });
+
+  it("links back to /admin/login when the refusal carries surface: admin", async () => {
+    callbackReply(403, { error: "no", code: "not_an_admin", surface: "admin" });
+    visit("?code=c&state=s");
+    const alert = await screen.findByTestId("github-callback-error");
+    expect(alert).toHaveTextContent(/not a platform administrator/);
+    expect(screen.getByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/admin/login");
   });
 
   it("links to GitHub's security settings when 2FA is required", async () => {
@@ -584,6 +546,18 @@ describe("org picker", () => {
 });
 
 describe("reset page", () => {
+  it("says it is for an administrator account, and its way back is /admin/login", async () => {
+    fake.state = baseState({ user: null });
+    window.history.replaceState(null, "", "/reset#token=t");
+    mount("/reset");
+    expect(await screen.findByText("Choose a new password for this administrator account.")).toBeInTheDocument();
+    expect(screen.queryByText(/You will be signed in/)).toBeNull();
+    document.body.innerHTML = "";
+    window.history.replaceState(null, "", "/reset");
+    mount("/reset");
+    expect(await screen.findByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/admin/login");
+  });
+
   it("reads the token from the fragment, removes it from the address bar and posts it", async () => {
     fake.state = baseState({ user: null });
     window.history.replaceState(null, "", "/reset#token=secret-token");
@@ -683,26 +657,6 @@ describe("sidebar account menu avatar", () => {
     const trigger = await screen.findByRole("button", { name: "Account menu" });
     expect(trigger.querySelector("img")).toBeNull();
     expect(within(trigger).getByText("A")).toBeInTheDocument();
-  });
-});
-
-describe("needsGitHubToImport", () => {
-  it("is true only for a production password account", () => {
-    const pw = { ...ada, github_login: null, has_password: true };
-    expect(needsGitHubToImport({ mode: "local", user: pw } as never)).toBe(false);
-    expect(needsGitHubToImport(orgState("owner", { user: { ...ada, has_password: false } }) as never)).toBe(false);
-    expect(needsGitHubToImport(orgState("owner", { user: pw }) as never)).toBe(true);
-    expect(needsGitHubToImport(orgState("owner", { user: null }) as never)).toBe(false);
-    expect(needsGitHubToImport(undefined)).toBe(false);
-  });
-
-  it("hides Import a repository in a password owner's project switcher", async () => {
-    fake.state = orgState("owner", { user: { ...ada, github_login: null, has_password: true } });
-    mount("/");
-    const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Switch project" }));
-    await screen.findByRole("menuitem", { name: /Project alpha/ });
-    expect(screen.queryByRole("menuitem", { name: "Import a repository" })).toBeNull();
   });
 });
 
@@ -1173,91 +1127,13 @@ describe("account page", () => {
     expect(screen.queryByTestId("account-usage-stopped-rocket")).toBeNull();
   });
 
-  it("keeps the password section for a password account", async () => {
+  it("has no password section any more, even for a password account (that is /admin/account)", async () => {
     fake.routes["/api/account"] = () =>
       json(account({ email: "ada@example.com", github_login: null, avatar_url: null, has_password: true }));
     mount("/account");
     expect(await screen.findByTestId("account-identity")).toHaveTextContent("ada@example.com");
-    expect(await screen.findByRole("heading", { name: "Change password" })).toBeInTheDocument();
-  });
-});
-
-describe("admin page", () => {
-  const user = (over: Record<string, unknown>) => ({
-    uid: "u2",
-    email: null,
-    display_name: "Ben",
-    is_instance_admin: false,
-    github_login: "ben",
-    has_password: false,
-    disabled: false,
-    created_at: "2026-10-01T00:00:00Z",
-    org_count: 1,
-    ...over,
-  });
-  let users: ReturnType<typeof user>[];
-
-  beforeEach(() => {
-    fake.state = baseState({ user: adminAda });
-    users = [
-      user({ uid: "u1", email: "ada@example.com", display_name: "Ada", github_login: null, has_password: true, is_instance_admin: true }),
-      user({}),
-    ];
-    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: [] });
-    fake.routes["/api/admin/orgs"] = () => json([]);
-    fake.routes["/api/admin/users"] = () => json(users);
-    fake.routes["/api/admin/users/u2"] = (_method, body) => {
-      users = users.map((u) => (u.uid === "u2" ? { ...u, ...(body as object) } : u));
-      return json(users[1]);
-    };
-  });
-
-  it("lists @login or email by uid, reset links only for password accounts", async () => {
-    mount("/admin");
-    const ben = within(await screen.findByTestId("admin-user-u2"));
-    expect(ben.getByText("@ben")).toBeInTheDocument();
-    expect(ben.queryByRole("button", { name: "Copy reset link" })).toBeNull();
-    const ada = within(screen.getByTestId("admin-user-u1"));
-    expect(ada.getByText("ada@example.com")).toBeInTheDocument();
-    expect(ada.getByRole("button", { name: "Copy reset link" })).toBeInTheDocument();
-    // Your own account cannot be disabled from here.
-    expect(ada.queryByRole("button", { name: "Disable" })).toBeNull();
-  });
-
-  it("shows the settings check card, clean or with problems", async () => {
-    mount("/admin");
-    expect(await screen.findByTestId("base-check-ok")).toHaveTextContent("found no problems");
-  });
-
-  it("lists the base URL problems in the settings check card", async () => {
-    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: ["*.whygraph.localhost does not resolve"] });
-    mount("/admin");
-    expect(await screen.findByTestId("base-check")).toHaveTextContent("does not resolve");
-  });
-
-  it("makes an admin with a secondary button", async () => {
-    mount("/admin");
-    const ben = within(await screen.findByTestId("admin-user-u2"));
-    expect(ben.getByRole("button", { name: "Make admin" }).className).toContain("bg-secondary");
-  });
-
-  it("disables only after a confirmation, and enables at once", async () => {
-    mount("/admin");
-    const u = userEvent.setup();
-    const ben = within(await screen.findByTestId("admin-user-u2"));
-    await u.click(ben.getByRole("button", { name: "Disable" }));
-    expect(fake.calls.some((c) => c.path === "/api/admin/users/u2" && c.method === "PATCH")).toBe(false);
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("Disable Ben?");
-    await u.click(within(dialog).getByRole("button", { name: "Disable" }));
-    await waitFor(() =>
-      expect(fake.calls.find((c) => c.path === "/api/admin/users/u2")?.body).toEqual({ disabled: true }),
-    );
-    expect(await ben.findByText("disabled")).toBeInTheDocument();
-    await u.click(ben.getByRole("button", { name: "Enable" }));
-    await waitFor(() =>
-      expect(fake.calls.filter((c) => c.path === "/api/admin/users/u2").at(-1)?.body).toEqual({ disabled: false }),
-    );
+    expect(screen.queryByRole("heading", { name: "Change password" })).toBeNull();
+    expect(screen.queryByLabelText("Current password")).toBeNull();
   });
 });
 
@@ -1775,22 +1651,6 @@ describe("audit log", () => {
     fake.routes["/api/org/members"] = () => json([]);
     const nav = await screen.findByRole("navigation", { name: "Main" });
     expect(await within(nav).findByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/audit");
-  });
-});
-
-describe("admin security events", () => {
-  it("lists the orgless events on the admin page", async () => {
-    fake.state = baseState({ user: adminAda });
-    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, warnings: [] });
-    fake.routes["/api/admin/users"] = () => json([]);
-    fake.routes["/api/admin/orgs"] = () => json([]);
-    fake.routes["/api/admin/audit"] = () =>
-      json({ events: [{ id: 5, created_at: "2026-10-05T10:00:00Z", org: null, actor: null, event: "github_signin", target: null, ip: null, fields: {} }], next: null });
-    mount("/admin");
-    const box = within(await screen.findByTestId("admin-audit"));
-    expect(await box.findByText("Signed in with GitHub")).toBeInTheDocument();
-    expect(box.getAllByText("System").length).toBeGreaterThan(0);
-    expect(box.queryByRole("button", { name: "Download CSV" })).toBeNull();
   });
 });
 

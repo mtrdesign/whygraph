@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { portalApi, projectKey } from "../../api";
 import { can } from "../../lib/permissions";
@@ -21,6 +21,7 @@ export function useGlobalShortcuts() {
   const navigate = useNavigate();
   const { slug } = useParams({ strict: false }) as { slug?: string };
   const setPaletteOpen = useUi((s) => s.setPaletteOpen);
+  const inAdmin = useRouterState({ select: (s) => s.location.pathname.startsWith("/admin") });
   // The project layout's query (already cached on a project page).
   const project = useQuery({
     queryKey: projectKey(slug ?? "", "project"),
@@ -56,7 +57,10 @@ export function useGlobalShortcuts() {
         return;
       }
       disarm();
-      if (key === "p") navigate({ to: "/" });
+      // `g p` is off inside the admin app: `/` is the org tree, not a page there.
+      if (key === "p") {
+        if (!inAdmin) navigate({ to: "/" });
+      }
       else if (slug && key === "o") navigate({ to: "/p/$slug", params: { slug } });
       else if (slug && explorer && key === "e") navigate({ to: "/p/$slug/explorer", params: { slug } });
       else if (slug && chat && key === "c") navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: undefined } });
@@ -68,5 +72,5 @@ export function useGlobalShortcuts() {
       window.removeEventListener("keydown", onKey);
       clearTimeout(timer);
     };
-  }, [navigate, slug, setPaletteOpen, explorer, chat]);
+  }, [navigate, slug, setPaletteOpen, explorer, chat, inAdmin]);
 }

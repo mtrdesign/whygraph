@@ -206,6 +206,16 @@ describe("Admin updates card", () => {
       user: { uid: "u1", display_name: "Ada", email: "a@example.com", role: null, is_instance_admin: true },
       org: null,
     };
+    routes["GET /api/admin/me"] = () =>
+      json({
+        uid: "u1",
+        display_name: "Ada",
+        github_login: "ada",
+        avatar_url: null,
+        has_password: false,
+        session: { created_at: "2026-11-18T08:00:00Z", expires_at: "2026-11-18T16:00:00Z" },
+        reader_grants: [],
+      });
     routes["GET /api/admin/update"] = () => json(block(over));
     routes["GET /api/admin/settings"] = () => json({ base_url: "http://whygraph.localhost:8765", base_check: [] });
     routes["GET /api/admin/users"] = () => json([]);
@@ -248,6 +258,16 @@ describe("Admin updates card", () => {
       user: { uid: "u1", display_name: "Ada", email: "a@example.com", role: null, is_instance_admin: true },
       org: null,
     };
+    routes["GET /api/admin/me"] = () =>
+      json({
+        uid: "u1",
+        display_name: "Ada",
+        github_login: "ada",
+        avatar_url: null,
+        has_password: false,
+        session: { created_at: "2026-11-18T08:00:00Z", expires_at: "2026-11-18T16:00:00Z" },
+        reader_grants: [],
+      });
     routes["GET /api/admin/update"] = () => json(block());
     routes["GET /api/admin/settings"] = () => json({ base_url: "http://whygraph.localhost:8765", base_check: [] });
     routes["GET /api/admin/users"] = () => json([]);

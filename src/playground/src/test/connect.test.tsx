@@ -384,12 +384,37 @@ describe("router gates", () => {
     expect(baseHostRedirect(baseState({ user: null }) as never, "/account", `${BASE}/account`)).toBe("/signin");
   });
 
+  it("baseHostRedirect lets /admin and /admin/login through, signed out too", () => {
+    for (const path of ["/admin", "/admin/", "/admin/login", "/admin/users", "/admin/orgs/acme"]) {
+      expect(baseHostRedirect(baseState({ user: null }) as never, path)).toBeNull();
+      expect(baseHostRedirect(baseState() as never, path)).toBeNull();
+    }
+    // The bootstrap still comes first; a lookalike path is not the admin app.
+    expect(baseHostRedirect(baseState({ user: null, bootstrap_required: true }) as never, "/admin")).toBe("/setup");
+    expect(baseHostRedirect(baseState({ user: null }) as never, "/administrator")).toBe("/signin");
+  });
+
   it("sends a signed-out /connect to /signin with its whole address as next", async () => {
     fake.state = baseState({ user: null });
     const router = mount(`/connect${query()}`);
     await waitFor(() => expect(router.state.location.pathname).toBe("/signin"));
     const next = (router.state.location.search as { next?: string }).next;
     expect(next).toBe(`http://localhost:3000/connect${query()}`.replace("http://localhost:3000", window.location.origin));
+  });
+
+  it.each([
+    ["/admin", "member"],
+    ["/admin/users?q=ben", "owner"],
+  ])("an org host hands %s to the base host, with or without a session", async (path, role) => {
+    fake.state = orgState(role);
+    mount(path);
+    await waitFor(() => expect(hard).toHaveBeenCalledWith(`http://whygraph.localhost:8765${path}`));
+  });
+
+  it("an org host hands /admin/login to the base host when signed out", async () => {
+    fake.state = { ...orgState("member"), user: null, org: null };
+    mount("/admin/login");
+    await waitFor(() => expect(hard).toHaveBeenCalledWith("http://whygraph.localhost:8765/admin/login"));
   });
 
   it("an org host sends /connect to the base host", async () => {

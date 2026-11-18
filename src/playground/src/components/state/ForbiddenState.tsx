@@ -3,12 +3,13 @@ import { ApiError, getErrorMode } from "../../api";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 
-export type Grantor = "org-admin" | "project-admin" | "owner";
+export type Grantor = "org-admin" | "project-admin" | "owner" | "instance-admin";
 
 const GRANTED_BY: Record<Grantor, string> = {
   "org-admin": "An organization owner or admin can give you access.",
   "project-admin": "A project admin can give you access.",
   owner: "An organization owner can give you access.",
+  "instance-admin": "Another platform administrator can give you access.",
 };
 
 /**

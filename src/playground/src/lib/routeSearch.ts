@@ -187,3 +187,27 @@ export function validateBaseSearch(search: Record<string, unknown>): BaseSearch 
   const from = text(search.from, 63);
   return { next: text(search.next, Infinity), stay: stay || undefined, from: from && ORG_SLUG.test(from) ? from : undefined };
 }
+
+// ---- admin app (plan 59) -----------------------------------------------------------------
+
+/** `/admin/login?next=&reauth=1`: where to return to, and whether a session just ended. */
+export interface AdminLoginSearch {
+  next?: string;
+  reauth?: boolean;
+}
+
+export function validateAdminLoginSearch(search: Record<string, unknown>): AdminLoginSearch {
+  return {
+    next: text(search.next, Infinity),
+    reauth: search.reauth === "1" || search.reauth === true || undefined,
+  };
+}
+
+/** `/admin/users?q=` and `/admin/orgs?q=`: the search box (filtered on the client). */
+export interface AdminListSearch {
+  q?: string;
+}
+
+export function validateAdminListSearch(search: Record<string, unknown>): AdminListSearch {
+  return { q: text(search.q, 200) };
+}

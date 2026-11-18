@@ -50,7 +50,7 @@ export function ResetPasswordPage() {
             This reset link is incomplete. Ask an instance administrator for a new one.
           </AlertDescription>
         </Alert>
-        <Link to="/signin" className="text-sm text-primary-text hover:underline">
+        <Link to="/admin/login" className="text-sm text-primary-text hover:underline">
           Back to sign in
         </Link>
       </AuthLayout>
@@ -58,7 +58,7 @@ export function ResetPasswordPage() {
   }
 
   return (
-    <AuthLayout title="Reset your password" description="Choose a new password. You will be signed in.">
+    <AuthLayout title="Reset your password" description="Choose a new password for this administrator account.">
       <form noValidate className="flex flex-col gap-4" onSubmit={submit}>
         <Field
           label="New password"

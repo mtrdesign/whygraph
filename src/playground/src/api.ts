@@ -1111,6 +1111,31 @@ function redirectToSignIn(): void {
   hardNavigate(`${base.origin}/signin?next=${encodeURIComponent(window.location.href)}&reauth=1`);
 }
 
+// Admin app (plan 59, D48): set once `GET /api/admin/me` has answered, so a 401 that
+// follows is "the session ended" (`reauth=1`) and a first visit's 401 is not.
+let adminSessionSeen = false;
+
+/** Whether an admin session answered in this page load (the admin shell sets it). */
+export function setAdminSessionSeen(seen: boolean): void {
+  adminSessionSeen = seen;
+}
+
+// A signed-out admin call answers `401 admin_login_required`: send the browser to
+// the base host's admin sign-in with an absolute way back (`safe_admin_redirect`).
+// It does nothing without a base URL or on `/admin/login` itself (no reload loop).
+function redirectToAdminLogin(): void {
+  if (!baseUrl) return;
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return;
+  }
+  if (window.location.origin === base.origin && window.location.pathname === "/admin/login") return;
+  const reauth = adminSessionSeen ? "&reauth=1" : "";
+  hardNavigate(`${base.origin}/admin/login?next=${encodeURIComponent(window.location.href)}${reauth}`);
+}
+
 // FastAPI's validation `loc` starts with where the value came from; the rest is the field.
 const LOC_SOURCES = new Set(["body", "query", "path", "header", "cookie"]);
 
@@ -1134,6 +1159,7 @@ async function failure(res: Response): Promise<ApiError> {
   }
   const serverCode = typeof code === "string" ? code : undefined;
   if (res.status === 401 && serverCode === "login_required") redirectToSignIn();
+  if (res.status === 401 && serverCode === "admin_login_required") redirectToAdminLogin();
   if (Array.isArray(detail)) {
     // A 422 from request validation: `detail` is a list of {loc, msg, type}.
     const fields = fieldErrors(detail);
@@ -1294,8 +1320,11 @@ export const authApi = {
   githubStart: (body: { next?: string }) => send<{ authorize_url: string }>("POST", "/auth/github/start", body),
   githubCallback: (body: { code: string; state: string }) =>
     send<Redirect>("POST", "/auth/github/callback", body),
-  login: (body: { email: string; password: string; next?: string }) =>
-    send<Redirect>("POST", "/auth/login", body),
+  // Administration (plan 59): the password form and the GitHub flow of `/admin/login`.
+  adminLogin: (body: { email: string; password: string; next?: string }) =>
+    send<Redirect>("POST", "/auth/admin/login", body),
+  githubAdminStart: (body: { next?: string }) =>
+    send<{ authorize_url: string }>("POST", "/auth/github/admin/start", body),
   logout: () => send<Redirect>("POST", "/auth/logout"),
   reset: (body: { token: string; password: string }) => send<Redirect>("POST", "/auth/reset", body),
 };
@@ -1303,8 +1332,6 @@ export const authApi = {
 export const accountApi = {
   get: () => get<AccountView>("/account"),
   update: (display_name: string) => send<AccountView>("PATCH", "/account", { display_name }),
-  password: (body: { current: string; new: string }) =>
-    send<unknown>("POST", "/account/password", body),
   orgs: () => get<OrgEntry[]>("/account/orgs"),
   // Production, base host (M2f-2).
   usage: () => get<AccountUsage>("/account/usage"),
@@ -1539,7 +1566,23 @@ export const githubApi = {
   },
 };
 
+/** `GET /api/admin/me`: the admin session's own account and its two timestamps. */
+export interface AdminMe {
+  uid: string;
+  display_name: string;
+  github_login: string | null;
+  avatar_url: string | null;
+  has_password: boolean;
+  session: { created_at: string; expires_at: string };
+  // Live per-org reader grants (Phase 2, step 14).
+  reader_grants: unknown[];
+}
+
 export const adminApi = {
+  me: () => get<AdminMe>("/admin/me"),
+  logout: () => send<Redirect>("POST", "/admin/me/logout"),
+  changePassword: (body: { current: string; new: string }) =>
+    send<{ changed: boolean }>("POST", "/admin/me/password", body),
   settings: () => get<AdminSettings>("/admin/settings"),
   update: () => get<UpdateInfo>("/admin/update"),
   orgs: () => get<AdminOrg[]>("/admin/orgs"),

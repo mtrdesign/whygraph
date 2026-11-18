@@ -4,7 +4,6 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { GitBranchIcon, LockIcon, RefreshCwIcon } from "lucide-react";
 import {
   ApiError,
-  authApi,
   githubApi,
   portalApi,
   portalKey,
@@ -16,7 +15,6 @@ import {
 } from "../../api";
 import { authMessage } from "../../lib/authErrors";
 import { errorMessage } from "../../lib/apiErrors";
-import { needsGitHubToImport, usePortalState } from "../../lib/identity";
 import { hardNavigate } from "../../lib/navigation";
 import { plural } from "../../lib/plural";
 import { cn } from "@/lib/utils";
@@ -31,7 +29,6 @@ import { Skeleton } from "../ui/skeleton";
 const SEARCH_DEBOUNCE_MS = 250;
 
 const needsConnect = (err: unknown) => err instanceof ApiError && err.code === "github_authorization_required";
-const needsGitHubIdentity = (err: unknown) => err instanceof ApiError && err.code === "github_required";
 
 /** A failed import, in the registry's words (the `github` context). */
 export function importMessage(err: unknown): string {
@@ -62,35 +59,6 @@ function Connect() {
       {go.isError && (
         <Alert variant="destructive">
           <AlertDescription>{authMessage(go.error)}</AlertDescription>
-        </Alert>
-      )}
-    </div>
-  );
-}
-
-/** The bootstrap owner has no GitHub identity, and importing needs one (ONB-2). */
-export function GitHubRequired() {
-  const start = useMutation({
-    mutationFn: () => authApi.githubStart({ next: window.location.href }),
-    onSuccess: ({ authorize_url }) => hardNavigate(authorize_url),
-  });
-  return (
-    <div className="flex flex-col items-start gap-3 p-5" data-testid="github-required">
-      <p className="text-sm text-muted-foreground">
-        Importing needs a GitHub sign-in. You're signed in with the bootstrap password account, which has
-        no GitHub identity. In Members, invite your GitHub account as an owner, then sign in with GitHub
-        as that account.
-      </p>
-      <div className="flex flex-wrap gap-2">
-        <Button render={<Link to="/members" />}>Open Members</Button>
-        <Button variant="outline" onClick={() => start.mutate()} disabled={start.isPending || start.isSuccess}>
-          <GitBranchIcon data-icon="inline-start" />
-          {start.isPending || start.isSuccess ? "Opening GitHub…" : "Sign in with GitHub"}
-        </Button>
-      </div>
-      {start.isError && (
-        <Alert variant="destructive">
-          <AlertDescription>{authMessage(start.error)}</AlertDescription>
         </Alert>
       )}
     </div>
@@ -515,21 +483,17 @@ function Footer({ count, onImport }: { count: number; onImport: (() => void) | n
  *     rides in the URL), and the wizard page can stop passing it.
  */
 export function GitHubImport(_props: { onImported?: (result: AddProjectResult) => void } = {}) {
-  const passwordAccount = needsGitHubToImport(usePortalState().data);
   const installations = useQuery({
     queryKey: portalKey("github", "installations"),
     queryFn: githubApi.installations,
-    enabled: !passwordAccount,
     retry: false,
   });
   const [picked, setPicked] = useState<number | null>(null);
   const go = useGoToGitHub();
 
-  if (passwordAccount) return <GitHubRequired />;
   if (installations.isLoading) return <Skeleton className="m-5 h-24" />;
   if (installations.isError) {
     if (needsConnect(installations.error)) return <Connect />;
-    if (needsGitHubIdentity(installations.error)) return <GitHubRequired />;
     return (
       <Alert variant="destructive" className="m-5 w-auto" data-testid="github-error">
         <AlertDescription>{authMessage(installations.error)}</AlertDescription>

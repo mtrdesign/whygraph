@@ -19,7 +19,7 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { ApiError, portalApi, portalKey, projectApi, projectKey, type PortalState, type ProjectSummary } from "../../api";
-import { canAdmin, canOwn, isProduction, needsGitHubToImport, signedInAs, useSignOut } from "../../lib/identity";
+import { canAdmin, canOwn, isProduction, signedInAs, useSignOut } from "../../lib/identity";
 import { projectStatus, type StatusTone } from "../../lib/projectStatus";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
@@ -47,7 +47,7 @@ import { cn } from "@/lib/utils";
 // the fixed blocks leave the Chats section less than four rows (a short window, a
 // landscape phone) the whole sidebar scrolls instead, so the nav is never clipped.
 
-interface NavItem {
+export interface NavItem {
   label: string;
   icon: ComponentType<{ className?: string }>;
   to: string;
@@ -60,7 +60,7 @@ interface NavItem {
 const ITEM =
   "flex h-8 items-center gap-2.5 rounded-md px-2 text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring data-[status=active]:bg-accent data-[status=active]:font-medium data-[status=active]:text-foreground";
 
-function NavLink({ item }: { item: NavItem }) {
+export function NavLink({ item }: { item: NavItem }) {
   const setNavOpen = useUi((s) => s.setNavOpen);
   return (
     <Link
@@ -85,7 +85,7 @@ function NavLink({ item }: { item: NavItem }) {
   );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-0.5">
       <div className="px-2 pb-1.5 pt-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -183,7 +183,7 @@ function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data;
   const production = isProduction(state);
   // Local mode's user may always add; in production `org.add_project` is the org's owners and admins.
-  const canAdd = (!production || canAdmin(state?.org?.role ?? undefined)) && !needsGitHubToImport(state);
+  const canAdd = (!production || canAdmin(state?.org?.role ?? undefined));
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const label = slug ? (name ?? slug) : "All projects";
   return (

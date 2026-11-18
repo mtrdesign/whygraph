@@ -25,7 +25,6 @@ const BASE_TITLES: Record<string, string> = {
   "/reset": "Reset password",
   "/orgs": "Organizations",
   "/orgs/new": "Create organization",
-  "/admin": "Administration",
   "/account": "Account",
   "/connect": "Connect",
 };

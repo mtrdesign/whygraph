@@ -37,7 +37,7 @@ export function BootstrapPage() {
   return (
     <AuthLayout
       title="Set up WhyGraph"
-      description="Create the first administrator. The portal printed a one-time setup secret in its log when it started."
+      description="Create the first administrator. This password account is for platform administration only; to use organizations, sign in with GitHub. The portal printed a one-time setup secret in its log when it started."
     >
       <form noValidate className="flex flex-col gap-4" onSubmit={submit}>
         <Field

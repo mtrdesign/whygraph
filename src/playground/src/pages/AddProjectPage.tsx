@@ -1,9 +1,9 @@
 import { PageContainer } from "../components/layout/PageContainer";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, githubApi, portalKey, projectKey, type AddProjectResult } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
+import { portalKey, projectKey, type AddProjectResult } from "../api";
 import { saveDetected } from "../lib/detected";
-import { isProduction, needsGitHubToImport, usePortalState } from "../lib/identity";
+import { isProduction, usePortalState } from "../lib/identity";
 import { cn } from "@/lib/utils";
 import { GitHubImport } from "../components/portal/GitHubImport";
 import { LocalSource } from "../components/portal/LocalSource";
@@ -28,22 +28,9 @@ export function AddProjectPage() {
   const queryClient = useQueryClient();
   const state = usePortalState().data;
   const production = isProduction(state);
-  const passwordAccount = needsGitHubToImport(state);
   const search = useSearch({ strict: false }) as NewProjectSearch;
   // A pending link only exists on the platform source; local mode only (M2e).
   const platform = !production && (search.source === "platform" || !!search.link);
-  // The same request the import page makes (one cache entry): a bootstrap
-  // password account cannot import, and then a stepper would promise steps.
-  const installations = useQuery({
-    queryKey: portalKey("github", "installations"),
-    queryFn: githubApi.installations,
-    enabled: production && !passwordAccount,
-    retry: false,
-  });
-  const githubRequired =
-    passwordAccount ||
-    (installations.error instanceof ApiError && installations.error.code === "github_required");
-
   const onAdded = (result: AddProjectResult) => {
     const { slug } = result.project;
     saveDetected(slug, result.detected);
@@ -86,9 +73,7 @@ export function AddProjectPage() {
           ))}
         </nav>
       )}
-      {!githubRequired && (
-        <WizardSteps current="source" mode={production ? "production" : platform ? "linked" : "local"} />
-      )}
+      <WizardSteps current="source" mode={production ? "production" : platform ? "linked" : "local"} />
       <div className="rounded-xl border border-border bg-card shadow-card">
         {production ? (
           <GitHubImport />

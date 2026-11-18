@@ -534,6 +534,25 @@ def signed_in(client: TestClient, user_id: int, domain: str = PROD_DOMAIN) -> st
     return token
 
 
+def admin_signed_in(client: TestClient, user_id: int) -> str:
+    """Give ``client`` an admin session for ``user_id``; return the token.
+
+    Like :func:`signed_in`, the ``kind="admin"`` row is made directly and
+    unpaired. The cookie is set under the name the portal's base URL scheme
+    uses (``__Host-whygraph_admin`` on https, ``whygraph_admin`` on http) for
+    the base host. httpx's jar is liberal about host-only cookies, so it
+    also sends this one to org hosts: a test of host-only behaviour asserts
+    on the ``Set-Cookie`` header, not on what the jar sends.
+    """
+    from whygraph.portal import sessions
+
+    base = client.app.state.portal.base_url
+    with portal_db.get_session() as session:
+        token = sessions.create_session(session, user_id, "pytest", kind="admin")
+    client.cookies.set(sessions.admin_cookie_name(base), token, domain=base.host)
+    return token
+
+
 PROD_PASSWORD = "correct horse battery staple"
 """A password that passes production's rules (15+ chars, not blocklisted)."""
 

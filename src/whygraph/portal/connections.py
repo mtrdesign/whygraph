@@ -647,10 +647,11 @@ def lookup(db: Session, raw: str) -> TokenPrincipal | Refusal:
     The refusals, in order: an unknown or malformed token
     (``invalid_token``); a revoked one (``token_revoked`` + its reason); a
     token whose org or project is gone (``org_deleted`` / ``project_deleted``);
-    a disabled user (``user_disabled``); an expired one (``idle`` - the row
-    is revoked); a user who no longer holds a ``memberships`` row in the
-    token's org (``member_removed``), whether or not that removal revoked
-    the token; and a member who has no access to the project any more - a
+    a disabled user (``user_disabled``); a password account's token
+    (``admin_revoked``: password accounts are admin-only, plan 59 D4; nothing
+    is written); an expired one (``idle`` - the row is revoked); a user who
+    no longer holds a ``memberships`` row in the token's org
+    (``member_removed``), whether or not that removal revoked the token; and a member who has no access to the project any more - a
     grant removed, the project Restricted, the org default ``none``
     (``project_access_removed``, M2f-1). The last two write nothing, so a
     restored membership or grant makes the token work again unless an eager
@@ -697,6 +698,8 @@ def lookup(db: Session, raw: str) -> TokenPrincipal | Refusal:
         return Refusal("token_revoked", "project_deleted")
     if disabled_at is not None:
         return Refusal("token_revoked", "user_disabled")
+    if has_password:  # plan 59 D4: a password account is admin-only
+        return Refusal("token_revoked", "admin_revoked")
     now = _now()
     last = token.last_used_at
     if (last is not None and last < _iso(now - IDLE)) or (

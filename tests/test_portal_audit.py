@@ -474,7 +474,9 @@ def test_the_admin_log_shows_orgless_and_deleted_orgs_events(
     assert refused.json()["code"] == "admin_login_required"
     be_admin(t)
     assert t.client.get(at("acme") + "/api/admin/audit").status_code == 404
-    response = t.client.get(at() + "/api/admin/audit", params={"limit": 200})
+    response = t.client.get(
+        at() + "/api/admin/audit", params={"limit": 200, "scope": "orgless"}
+    )
     assert response.status_code == 200, response.text
     found = response.json()["events"]
     names = {e["event"] for e in found}

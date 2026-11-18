@@ -19,6 +19,7 @@ erase routes' own state checks and the admin side of ``[Deleted User]``
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -39,11 +40,20 @@ from test_portal_connect import (  # noqa: F401 -- `cn` is a fixture
 )
 from test_portal_identity_routes import audit_log, events  # noqa: F401 -- fixture
 from whygraph.portal import audit_store, sessions
+from whygraph.portal import orgs as orgs_mod
 from whygraph.portal import db as portal_db
+from whygraph.portal.budgets import reload_org_budgets
 from whygraph.portal.models import (
+    AgentCallDay,
     AuditEvent,
+    Budget,
     ConnectionToken,
+    Invitation,
     Membership,
+    Organization,
+    Project,
+    ProjectGrant,
+    RetiredOrgSlug,
     User,
     UserSession,
 )
@@ -583,3 +593,544 @@ def test_users_admin_reads_show_a_deleted_users_real_identity(
     assert login["fields"]["email"] == "cy@example.com"
     audit = cn.client.get(url("/api/admin/audit"), params={"actor": "@cy"}).json()
     assert [e["actor"]["label"] for e in audit["events"]] == ["@cy"]
+
+
+# ---------------------------------------------------------------------------
+# Organizations (plan 59 section 4.7)
+# ---------------------------------------------------------------------------
+
+
+def org_row(slug: str):  # noqa: ANN201
+    with portal_db.get_session() as db:
+        row = db.exec(select(Organization).where(Organization.slug == slug)).one()
+        db.expunge(row)
+        return row
+
+
+def set_org(slug: str, **fields) -> None:
+    with portal_db.get_session() as db:
+        row = db.exec(select(Organization).where(Organization.slug == slug)).one()
+        for name, value in fields.items():
+            setattr(row, name, value)
+        db.add(row)
+
+
+def members_of(slug: str) -> dict[str, str]:
+    """``uid -> role`` of an org."""
+    with portal_db.get_session() as db:
+        return {
+            uid: role
+            for uid, role in db.exec(
+                select(User.uid, Membership.role)
+                .join(Membership, col(Membership.user_id) == col(User.id))
+                .join(Organization, col(Organization.id) == col(Membership.org_id))
+                .where(Organization.slug == slug)
+            ).all()
+        }
+
+
+def test_orgs_list_has_the_new_fields_and_includes_deleted_ones(
+    cn: SimpleNamespace,
+) -> None:
+    now = _iso(datetime.now(timezone.utc))
+    with portal_db.get_session() as db:
+        db.add(
+            AgentCallDay(
+                org_id=cn.orgs["acme"],
+                project_id=cn.projects["api"],
+                day="2026-11-05",
+                source="mcp",
+                kind="whygraph_evidence_for",
+                calls=1,
+            )
+        )
+        db.add(
+            Project(
+                org_id=cn.orgs["acme"],
+                slug="gone",
+                name="Gone",
+                source="github",
+                root="x",
+                deleted_at=now,
+            )
+        )
+    set_org("bravo", deleted_at=now, deleted_by=cn.ids["ada"])
+    set_org("acme", suspended_at=now, suspended_reason="abuse")
+    be_ada(cn)
+    response = cn.client.get(url("/api/admin/orgs"))
+    assert response.status_code == 200, response.text
+    rows = {r["slug"]: r for r in response.json()}
+    assert set(rows) == {"acme", "bravo"}  # the soft-deleted one is listed
+    acme, bravo = rows["acme"], rows["bravo"]
+    assert acme["project_count"] == 2  # the soft-deleted project is not counted
+    assert acme["owners"] == ["ben"] and acme["member_count"] == 3
+    assert acme["suspended"] == {"at": now, "reason": "abuse"}
+    assert acme["deleted_at"] is None and acme["deleted_by"] is None
+    assert acme["last_activity_day"] == "2026-11-05"
+    assert acme["storage_bytes"] is None and acme["spend_mtd"] == 0
+    assert bravo["deleted_at"] == now and bravo["deleted_by"] == cn.uids["ada"]
+    assert bravo["suspended"] is None and bravo["last_activity_day"] is None
+    assert bravo["owners"] == ["dee"]
+
+
+def test_orgs_detail_collects_members_projects_budgets_and_counts(
+    cn: SimpleNamespace,
+) -> None:
+    with portal_db.get_session() as db:
+        db.add(
+            Invitation(
+                org_id=cn.orgs["acme"],
+                github_id=999,
+                github_login="newbie",
+                role="member",
+                invited_by=cn.ids["ben"],
+                created_at=_iso(datetime.now(timezone.utc)),
+                expires_at=_iso(datetime.now(timezone.utc) + timedelta(days=3)),
+            )
+        )
+        db.add(
+            Project(
+                org_id=cn.orgs["acme"],
+                slug="gone",
+                name="Gone",
+                source="github",
+                root="x",
+                deleted_at=_iso(datetime.now(timezone.utc)),
+            )
+        )
+        db.add(
+            Budget(
+                org_id=cn.orgs["acme"],
+                scope="org",
+                monthly_usd=Decimal("12.5"),
+                hard_stop=True,
+            )
+        )
+    reload_org_budgets(cn.state.budgets, cn.orgs["acme"])
+    audit_event(event="org_renamed", org_id=cn.orgs["acme"], org_slug="acme")
+    be_ada(cn)
+    response = cn.client.get(url("/api/admin/orgs/acme"))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["slug"], body["name"]) == ("acme", "Acme")
+    assert body["suspended"] is None and body["deleted_at"] is None
+    members = {m["github_login"]: m for m in body["members"]}
+    assert {k: v["role"] for k, v in members.items()} == {
+        "ben": "owner",
+        "cy": "member",
+        "fay": "admin",
+    }
+    assert members["ben"]["uid"] == cn.uids["ben"]
+    assert members["ben"]["has_password"] is False
+    assert body["open_invitations"] == 1
+    projects = {p["slug"]: p for p in body["projects"]}
+    assert set(projects) == {"api", "web", "gone"}  # soft-deleted included
+    assert projects["gone"]["deleted_at"] is not None
+    assert projects["api"]["source"] == "github"
+    assert projects["api"]["storage_bytes"] is None
+    assert body["budgets"] == [
+        {
+            "scope": "org",
+            "monthly_usd": 12.5,
+            "hard_stop": True,
+            "spent_usd": 0,
+            "project": None,
+            "member": None,
+        }
+    ]
+    assert body["rows"]["audit_events"] >= 1
+    assert body["rows"]["usage_events"] == 0
+    assert body["rows"]["agent_call_days"] == 0
+    assert body["spend_mtd"] == 0
+    assert cn.client.get(url("/api/admin/orgs/nope")).status_code == 404
+    # A soft-deleted org still has a detail page.
+    set_org("bravo", deleted_at=_iso(datetime.now(timezone.utc)))
+    deleted = cn.client.get(url("/api/admin/orgs/bravo")).json()
+    assert deleted["deleted_at"] is not None
+
+
+def test_orgs_create_makes_a_github_account_the_owner(
+    cn: SimpleNamespace, audit_log
+) -> None:
+    be_ada(cn)
+    response = cn.client.post(
+        url("/api/admin/orgs"),
+        json={"slug": "newco", "name": " New Co ", "owner_uid": cn.uids["eve"]},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["slug"] == "newco" and response.json()["name"] == "New Co"
+    assert members_of("newco") == {cn.uids["eve"]: "owner"}
+    (event,) = [e for e in events(audit_log) if e["event"] == "org_created"]
+    assert event["target"] == cn.uids["eve"] and event["via"] == "instance_admin"
+    assert event["org"] == "newco"
+
+
+def test_orgs_create_refuses_bad_slugs_and_taken_ones(cn: SimpleNamespace) -> None:
+    be_ada(cn)
+
+    def create(slug: str, owner: str = "eve"):  # noqa: ANN202
+        return cn.client.post(
+            url("/api/admin/orgs"),
+            json={"slug": slug, "name": "X", "owner_uid": cn.uids[owner]},
+        )
+
+    assert create("Bad Slug").status_code == 422
+    assert create("Bad Slug").json()["code"] == "bad_slug"
+    assert create("acme").json()["code"] == "slug_taken"  # live
+    set_org("bravo", deleted_at=_iso(datetime.now(timezone.utc)))
+    assert create("bravo").json()["code"] == "slug_taken"  # soft-deleted
+    with portal_db.get_session() as db:
+        db.add(RetiredOrgSlug(slug="retired"))
+    assert create("retired").json()["code"] == "slug_taken"  # retired
+    assert create("fresh").status_code == 201
+    unknown = cn.client.post(
+        url("/api/admin/orgs"),
+        json={"slug": "other", "name": "X", "owner_uid": "nobody"},
+    )
+    assert unknown.status_code == 404
+
+
+def test_orgs_create_refuses_a_password_disabled_or_deleted_owner(
+    cn: SimpleNamespace,
+) -> None:
+    be_ada(cn)
+
+    def create(owner_uid: str):  # noqa: ANN202
+        return cn.client.post(
+            url("/api/admin/orgs"),
+            json={"slug": "newco", "name": "N", "owner_uid": owner_uid},
+        )
+
+    password = create(cn.uids["ada"])
+    assert (password.status_code, password.json()["code"]) == (
+        409,
+        "github_account_required",
+    )
+    mark(cn.ids["eve"], disabled_at=_iso(datetime.now(timezone.utc)))
+    assert create(cn.uids["eve"]).json()["code"] == "user_disabled"
+    mark(
+        cn.ids["dee"],
+        deleted_at=_iso(datetime.now(timezone.utc)),
+    )
+    deleted = create(cn.uids["dee"])
+    assert (deleted.status_code, deleted.json()["code"]) == (409, "user_deleted")
+    with portal_db.get_session() as db:
+        assert (
+            db.exec(select(Organization.id).where(Organization.slug == "newco")).first()
+            is None
+        )
+
+
+def test_orgs_rename_audits_and_works_on_a_suspended_org(
+    cn: SimpleNamespace, audit_log
+) -> None:
+    set_org("acme", suspended_at=_iso(datetime.now(timezone.utc)))  # D33
+    be_ada(cn)
+    response = cn.client.patch(
+        url("/api/admin/orgs/acme"), json={"name": "  Acme Two "}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"slug": "acme", "name": "Acme Two"}
+    assert org_row("acme").name == "Acme Two"
+    (event,) = [e for e in events(audit_log) if e["event"] == "org_renamed"]
+    assert event["via"] == "instance_admin" and event["previous"] == "Acme"
+    blank = cn.client.patch(url("/api/admin/orgs/acme"), json={"name": "   "})
+    assert (blank.status_code, blank.json()["code"]) == (422, "bad_name")
+    assert (
+        cn.client.patch(url("/api/admin/orgs/nope"), json={"name": "x"}).status_code
+        == 404
+    )
+
+
+def test_orgs_add_a_member_by_uid(cn: SimpleNamespace, audit_log) -> None:
+    be_ada(cn)
+    response = cn.client.post(
+        url("/api/admin/orgs/acme/members"),
+        json={"uid": cn.uids["eve"], "role": "admin"},
+    )
+    assert response.status_code == 200, response.text
+    row = response.json()
+    assert (row["uid"], row["role"], row["github_login"]) == (
+        cn.uids["eve"],
+        "admin",
+        "eve",
+    )
+    assert members_of("acme")[cn.uids["eve"]] == "admin"
+    (event,) = [e for e in events(audit_log) if e["event"] == "member_added"]
+    assert event["target"] == cn.uids["eve"] and event["via"] == "instance_admin"
+    again = cn.client.post(
+        url("/api/admin/orgs/acme/members"),
+        json={"uid": cn.uids["eve"], "role": "member"},
+    )
+    assert again.json()["code"] == "already_member"
+    bad = cn.client.post(
+        url("/api/admin/orgs/acme/members"),
+        json={"uid": cn.uids["dee"], "role": "reader"},
+    )
+    assert bad.json()["code"] == "bad_role"
+    unknown = cn.client.post(
+        url("/api/admin/orgs/acme/members"), json={"uid": "nobody", "role": "member"}
+    )
+    assert unknown.status_code == 404
+
+
+def test_orgs_add_a_member_reads_the_user_first_and_refuses_gone_accounts(
+    cn: SimpleNamespace,
+) -> None:
+    be_ada(cn)
+
+    def add(uid: str, role: str = "member"):  # noqa: ANN202
+        return cn.client.post(
+            url("/api/admin/orgs/acme/members"), json={"uid": uid, "role": role}
+        )
+
+    mark(cn.ids["eve"], deleted_at=_iso(datetime.now(timezone.utc)))
+    assert add(cn.uids["eve"]).json()["code"] == "user_deleted"
+    mark(cn.ids["dee"], disabled_at=_iso(datetime.now(timezone.utc)))
+    assert add(cn.uids["dee"]).json()["code"] == "user_disabled"
+    owner = add(cn.uids["ada"], "owner")  # a password account
+    assert (owner.status_code, owner.json()["code"]) == (409, "github_account_required")
+    assert add(cn.uids["ada"], "member").status_code == 200  # but may be a member
+    assert cn.uids["eve"] not in members_of("acme")
+    assert cn.uids["dee"] not in members_of("acme")
+
+
+def test_orgs_role_changes_keep_the_last_owner_rule_and_transfer_ownership(
+    cn: SimpleNamespace, audit_log
+) -> None:
+    be_ada(cn)
+    base = "/api/admin/orgs/acme/members/"
+    last = cn.client.patch(url(base + cn.uids["ben"]), json={"role": "member"})
+    assert (last.status_code, last.json()["code"]) == (409, "last_owner")
+    remove_last = cn.client.delete(url(base + cn.uids["ben"]))
+    assert remove_last.json()["code"] == "last_owner"
+    # A hand-over: promote another member, then the first owner may go.
+    promoted = cn.client.patch(url(base + cn.uids["cy"]), json={"role": "owner"})
+    assert promoted.status_code == 200, promoted.text
+    assert promoted.json()["role"] == "owner"
+    demoted = cn.client.patch(url(base + cn.uids["ben"]), json={"role": "member"})
+    assert demoted.status_code == 200 and demoted.json()["role"] == "member"
+    assert members_of("acme")[cn.uids["cy"]] == "owner"
+    changed = [e for e in events(audit_log) if e["event"] == "member_role_changed"]
+    assert [(e["target"], e["role"], e["via"]) for e in changed] == [
+        (cn.uids["cy"], "owner", "instance_admin"),
+        (cn.uids["ben"], "member", "instance_admin"),
+    ]
+    assert (
+        cn.client.patch(url(base + cn.uids["dee"]), json={"role": "member"}).json()[
+            "code"
+        ]
+        == "not_member"
+    )
+    assert (
+        cn.client.patch(url(base + cn.uids["cy"]), json={"role": "reader"}).json()[
+            "code"
+        ]
+        == "bad_role"
+    )
+
+
+def test_orgs_promoting_a_password_account_to_owner_is_refused(
+    cn: SimpleNamespace,
+) -> None:
+    with portal_db.get_session() as db:
+        orgs_mod.add_member(
+            db, org_id=cn.orgs["acme"], user_id=cn.ids["ada"], role="member"
+        )
+    be_ada(cn)
+    response = cn.client.patch(
+        url("/api/admin/orgs/acme/members/" + cn.uids["ada"]), json={"role": "owner"}
+    )
+    assert (response.status_code, response.json()["code"]) == (
+        409,
+        "github_account_required",
+    )
+    assert members_of("acme")[cn.uids["ada"]] == "member"
+
+
+def test_orgs_promotion_drops_grants_and_removal_revokes_tokens(
+    cn: SimpleNamespace, audit_log
+) -> None:
+    with portal_db.get_session() as db:
+        db.add(
+            ProjectGrant(
+                org_id=cn.orgs["acme"],
+                project_id=cn.projects["api"],
+                user_id=cn.ids["cy"],
+                role="viewer",
+                granted_by=cn.ids["ben"],
+                created_at=_iso(datetime.now(timezone.utc)),
+            )
+        )
+    be_ada(cn)
+    base = "/api/admin/orgs/acme/members/"
+    up = cn.client.patch(url(base + cn.uids["cy"]), json={"role": "admin"})
+    assert up.status_code == 200, up.text
+    with portal_db.get_session() as db:
+        assert db.exec(select(ProjectGrant.user_id)).all() == []
+    gone = cn.client.delete(url(base + cn.uids["cy"]))
+    assert gone.status_code == 204
+    assert cn.uids["cy"] not in members_of("acme")
+    (event,) = [e for e in events(audit_log) if e["event"] == "member_removed"]
+    assert event["target"] == cn.uids["cy"] and event["via"] == "instance_admin"
+    assert cn.client.delete(url(base + cn.uids["cy"])).json()["code"] == "not_member"
+
+
+def test_orgs_member_and_rename_writes_work_on_a_suspended_org(
+    cn: SimpleNamespace,
+) -> None:
+    """D33: the admin routes are not gated by suspension."""
+    set_org("acme", suspended_at=_iso(datetime.now(timezone.utc)), suspended_reason="r")
+    be_ada(cn)
+    add = cn.client.post(
+        url("/api/admin/orgs/acme/members"),
+        json={"uid": cn.uids["eve"], "role": "member"},
+    )
+    assert add.status_code == 200, add.text
+    change = cn.client.patch(
+        url("/api/admin/orgs/acme/members/" + cn.uids["eve"]), json={"role": "admin"}
+    )
+    assert change.status_code == 200, change.text
+    remove = cn.client.delete(url("/api/admin/orgs/acme/members/" + cn.uids["eve"]))
+    assert remove.status_code == 204
+    created = cn.client.post(
+        url("/api/admin/orgs"),
+        json={"slug": "newco", "name": "N", "owner_uid": cn.uids["eve"]},
+    )
+    assert created.status_code == 201
+
+
+def test_orgs_writes_on_a_deleted_org_give_org_deleted(cn: SimpleNamespace) -> None:
+    set_org("acme", deleted_at=_iso(datetime.now(timezone.utc)))
+    be_ada(cn)
+    members = "/api/admin/orgs/acme/members"
+    answers = [
+        cn.client.patch(url("/api/admin/orgs/acme"), json={"name": "X"}),
+        cn.client.post(url(members), json={"uid": cn.uids["eve"], "role": "member"}),
+        cn.client.patch(url(members + "/" + cn.uids["cy"]), json={"role": "admin"}),
+        cn.client.delete(url(members + "/" + cn.uids["cy"])),
+    ]
+    for response in answers:
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "org_deleted"
+    assert org_row("acme").name == "Acme"
+    assert members_of("acme")[cn.uids["cy"]] == "member"
+    # Reads, Restore and the other admin reads keep working.
+    assert cn.client.get(url("/api/admin/orgs/acme")).status_code == 200
+
+
+def test_orgs_routes_refuse_a_non_admin_and_the_wrong_host(cn: SimpleNamespace) -> None:
+    cn.client.cookies.clear()
+    for method, path, body in (
+        ("POST", "/api/admin/orgs", {"slug": "x", "name": "x", "owner_uid": "u"}),
+        ("GET", "/api/admin/orgs/acme", None),
+        ("PATCH", "/api/admin/orgs/acme", {"name": "x"}),
+        ("POST", "/api/admin/orgs/acme/members", {"uid": "u", "role": "member"}),
+        ("PATCH", "/api/admin/orgs/acme/members/u", {"role": "member"}),
+        ("DELETE", "/api/admin/orgs/acme/members/u", None),
+        ("GET", "/api/admin/audit.csv", None),
+    ):
+        response = cn.client.request(method, url(path), json=body)
+        assert response.status_code == 401, (method, path)
+        assert response.json()["code"] == ADMIN_LOGIN_REQUIRED
+
+
+# ---------------------------------------------------------------------------
+# Audit across orgs (plan 59 section 4.9)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_defaults_to_every_org_and_scope_orgless_narrows_it(
+    cn: SimpleNamespace,
+) -> None:
+    audit_event(event="org_renamed", org_id=cn.orgs["acme"], org_slug="acme")
+    audit_event(event="org_renamed", org_id=cn.orgs["bravo"], org_slug="bravo")
+    audit_event(event="github_signin", org_id=None)
+    be_ada(cn)
+    everything = cn.client.get(url("/api/admin/audit")).json()["events"]
+    assert {(e["event"], e["org"]) for e in everything} >= {
+        ("org_renamed", "acme"),
+        ("org_renamed", "bravo"),
+        ("github_signin", None),
+    }
+    orgless = cn.client.get(url("/api/admin/audit"), params={"scope": "orgless"})
+    assert {e["org"] for e in orgless.json()["events"]} == {None}
+    one = cn.client.get(url("/api/admin/audit"), params={"org": "bravo"}).json()
+    assert {e["org"] for e in one["events"]} == {"bravo"}
+    bad = cn.client.get(url("/api/admin/audit"), params={"scope": "nope"})
+    assert bad.status_code == 422
+    assert (
+        cn.client.get(url("/api/admin/audit"), params={"from": "x"}).json()["code"]
+        == "bad_date"
+    )
+
+
+def test_audit_labels_a_project_target_against_its_own_events_org(
+    cn: SimpleNamespace,
+) -> None:
+    audit_event(
+        event="project_removed", org_id=cn.orgs["acme"], org_slug="acme", target="api"
+    )
+    audit_event(
+        event="project_removed", org_id=cn.orgs["bravo"], org_slug="bravo", target="lib"
+    )
+    # "api" is acme's project, not bravo's: no label in bravo's event.
+    audit_event(
+        event="project_removed", org_id=cn.orgs["bravo"], org_slug="bravo", target="api"
+    )
+    be_ada(cn)
+    events_ = cn.client.get(url("/api/admin/audit")).json()["events"]
+    labels = {(e["org"], e["target"]): e["target_label"] for e in events_}
+    assert labels[("acme", "api")] == "Api project"
+    assert labels[("bravo", "lib")] == "Lib project"
+    assert labels[("bravo", "api")] is None
+
+
+def test_audit_shows_a_deleted_users_real_identity(cn: SimpleNamespace) -> None:
+    audit_event(
+        event="member_added",
+        org_id=cn.orgs["acme"],
+        org_slug="acme",
+        actor_id=cn.ids["cy"],
+        actor_label="@cy",
+        target=cn.uids["cy"],
+        fields={"github_login": "cy"},
+    )
+    mark(cn.ids["cy"], deleted_at=_iso(datetime.now(timezone.utc)))
+    be_ada(cn)
+    (event,) = [
+        e
+        for e in cn.client.get(url("/api/admin/audit")).json()["events"]
+        if e["event"] == "member_added"
+    ]
+    assert event["actor"]["label"] == "@cy"
+    assert event["target_label"] == "Cy (@cy)"
+    assert event["fields"]["github_login"] == "cy"
+
+
+def test_audit_csv_streams_the_same_filters_unmasked(cn: SimpleNamespace) -> None:
+    audit_event(event="org_renamed", org_id=cn.orgs["acme"], org_slug="acme")
+    audit_event(
+        event="member_added",
+        org_id=cn.orgs["bravo"],
+        org_slug="bravo",
+        actor_id=cn.ids["cy"],
+        actor_label="@cy",
+    )
+    mark(cn.ids["cy"], deleted_at=_iso(datetime.now(timezone.utc)))
+    be_ada(cn)
+    response = cn.client.get(url("/api/admin/audit.csv"))
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/csv")
+    assert (
+        'filename="whygraph-admin-audit.csv"' in response.headers["content-disposition"]
+    )
+    lines = response.text.splitlines()
+    assert lines[0].split(",")[:3] == ["id", "created_at", "org"]
+    body = "\n".join(lines[1:])
+    assert "org_renamed" in body and "member_added" in body
+    assert "@cy" in body and "[Deleted User]" not in body
+    filtered = cn.client.get(url("/api/admin/audit.csv"), params={"org": "bravo"})
+    assert "member_added" in filtered.text and "org_renamed" not in filtered.text
+    bad = cn.client.get(url("/api/admin/audit.csv"), params={"to": "x"})
+    assert bad.status_code == 422

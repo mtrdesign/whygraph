@@ -1114,6 +1114,14 @@ def test_the_admin_lists_every_user_and_org(world: SimpleNamespace) -> None:
         "url": at("quokka"),
         "member_count": 1,
         "created_at": orgs[1]["created_at"],
+        "project_count": 0,
+        "owners": ["ann"],
+        "suspended": None,
+        "deleted_at": None,
+        "deleted_by": None,
+        "spend_mtd": 0,
+        "storage_bytes": None,
+        "last_activity_day": None,
     }
     settings = client.get(at() + "/api/admin/settings").json()
     assert settings["base_url"] == PROD_BASE

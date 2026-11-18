@@ -37,7 +37,17 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Integer, Text, and_, bindparam, delete, func, or_
+from sqlalchemy import (
+    JSON,
+    Integer,
+    Text,
+    and_,
+    bindparam,
+    delete,
+    func,
+    or_,
+    tuple_,
+)
 from sqlalchemy import insert as sa_insert
 from sqlmodel import Session, col, select
 
@@ -619,6 +629,21 @@ def _target_labels(
             )
         ).all():
             labels[slug] = name
+    elif wanted:
+        # No org given (the admin's cross-org view): each event's project is
+        # resolved against that event's own org, keyed ``(org_id, slug)``.
+        pairs = {
+            (e.org_id, e.target)
+            for e in events
+            if e.org_id is not None and e.target in wanted
+        }
+        if pairs:
+            for pair_org, slug, name in db.exec(
+                select(Project.org_id, Project.slug, Project.name).where(
+                    tuple_(col(Project.org_id), col(Project.slug)).in_(pairs)
+                )
+            ).all():
+                labels[(pair_org, slug)] = name
     return labels
 
 
@@ -648,7 +673,12 @@ def _row(
         ),
         "event": event.event,
         "target": event.target,
-        "target_label": (labels or {}).get(event.target) if event.target else None,
+        "target_label": (
+            (labels or {}).get(event.target)
+            or (labels or {}).get((event.org_id, event.target))
+            if event.target
+            else None
+        ),
         "ip": event.ip,
         "fields": fields,
     }

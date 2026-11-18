@@ -42,6 +42,7 @@ from typing import Literal
 import anyio.to_thread
 from alembic.util import CommandError as AlembicCommandError
 from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, literal_column, or_, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -84,8 +85,17 @@ from .github_auth import (
     PendingLogin,
 )
 from .hosts import BaseUrl, safe_admin_redirect, safe_redirect
-from .member_routes import Redeemed, _lock_owners, redeem_invitations
+from .member_routes import (
+    Redeemed,
+    _checked_role,
+    _last_owner,
+    _lock_owners,
+    _locked_target,
+    _member_row,
+    redeem_invitations,
+)
 from .models import (
+    AgentCallDay,
     AuditEvent,
     ConnectionToken,
     Invitation,
@@ -93,8 +103,10 @@ from .models import (
     Organization,
     PasswordReset,
     Project,
+    ProjectGrant,
     ReaderGrant,
     RetiredOrgSlug,
+    ScanRun,
     UsageEvent,
     User,
     UserSession,
@@ -108,6 +120,7 @@ from .orgs import (
     validate_org_slug,
 )
 from .org_routes import (
+    _checked_name,
     not_deleted_error,
     org_deleted_error,
     purge_org,
@@ -228,6 +241,33 @@ class OrgBody(_Strict):
 
     slug: str = Field(max_length=100)
     name: str = Field(min_length=1, max_length=200)
+
+
+class AdminOrgBody(_Strict):
+    """``POST /api/admin/orgs``: the new org and the account that owns it."""
+
+    slug: str = Field(max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    owner_uid: str = Field(min_length=1, max_length=100)
+
+
+class AdminOrgPatchBody(_Strict):
+    """``PATCH /api/admin/orgs/{slug}``."""
+
+    name: str = Field(min_length=1, max_length=1000)
+
+
+class AdminMemberBody(_Strict):
+    """``POST /api/admin/orgs/{slug}/members``: an existing account and its role."""
+
+    uid: str = Field(min_length=1, max_length=100)
+    role: str = Field(max_length=20)
+
+
+class AdminMemberRoleBody(_Strict):
+    """``PATCH /api/admin/orgs/{slug}/members/{uid}``."""
+
+    role: str = Field(max_length=20)
 
 
 class SuspendBody(_Strict):
@@ -1513,24 +1553,81 @@ def get_admin_update(
     }
 
 
+def _last_activity_day(org_id_column) -> object:
+    """The later of the org's newest usage event and agent-call day, as ``YYYY-MM-DD``.
+
+    One correlated lookup per org, each on its ``(org_id, time)`` index.
+    """
+    usage = (
+        select(func.substr(func.max(col(UsageEvent.created_at)), 1, 10))
+        .where(col(UsageEvent.org_id) == org_id_column)
+        .scalar_subquery()
+    )
+    calls = (
+        select(func.max(col(AgentCallDay.day)))
+        .where(col(AgentCallDay.org_id) == org_id_column)
+        .scalar_subquery()
+    )
+    return func.greatest(usage, calls)
+
+
 @auth_router.get("/api/admin/orgs")
 def get_admin_orgs(
     request: Request, _: Principal = Depends(instance_access())
 ) -> list[dict]:
-    """Every org, with its member count."""
-    base = _base(portal_state(request))
+    """Every org, soft-deleted ones included (plan 59 section 4.7).
+
+    Returns
+    -------
+    list of dict
+        Per org: ``slug``, ``name``, ``url``, ``member_count``,
+        ``created_at``, ``project_count`` (live projects), ``owners``
+        (their GitHub logins, else display names), ``suspended`` (``{at,
+        reason}`` or ``null``), ``deleted_at``, ``deleted_by`` (a user
+        uid), ``spend_mtd`` (USD), ``storage_bytes`` (``null`` until the
+        storage sampler exists) and ``last_activity_day``.
+    """
+    state = portal_state(request)
+    base = _base(state)
     with get_session() as db:
         rows = db.exec(
             select(
+                Organization.id,
                 Organization.slug,
                 Organization.name,
                 Organization.created_at,
+                Organization.suspended_at,
+                Organization.suspended_reason,
+                Organization.deleted_at,
                 func.count(col(Membership.user_id)),
+                _last_activity_day(col(Organization.id)),
             )
             .outerjoin(Membership, col(Membership.org_id) == col(Organization.id))
             .group_by(col(Organization.id))
             .order_by(Organization.slug)
         ).all()
+        projects = dict(
+            db.exec(
+                select(Project.org_id, func.count())
+                .where(col(Project.deleted_at).is_(None))
+                .group_by(Project.org_id)
+            ).all()
+        )
+        owners: dict[int, list[str]] = {}
+        for org_id, login, name in db.exec(
+            select(Membership.org_id, User.github_login, User.display_name)
+            .join(User, col(User.id) == col(Membership.user_id))
+            .where(Membership.role == Role.OWNER.value)
+            .order_by(Membership.org_id, User.id)
+        ).all():
+            owners.setdefault(org_id, []).append(login or name)
+        deleted_by = dict(
+            db.exec(
+                select(Organization.id, User.uid).join(
+                    User, col(User.id) == col(Organization.deleted_by)
+                )
+            ).all()
+        )
     return [
         {
             "slug": slug,
@@ -1538,14 +1635,551 @@ def get_admin_orgs(
             "url": base.org_origin(slug),
             "member_count": count,
             "created_at": created_at,
+            "project_count": projects.get(org_id, 0),
+            "owners": owners.get(org_id, []),
+            "suspended": (
+                None
+                if suspended_at is None
+                else {"at": suspended_at, "reason": suspended_reason}
+            ),
+            "deleted_at": deleted_at,
+            "deleted_by": deleted_by.get(org_id),
+            "spend_mtd": usd(state.spend.spent(org_id)),
+            "storage_bytes": None,
+            "last_activity_day": last_day,
         }
-        for slug, name, created_at, count in rows
+        for (
+            org_id,
+            slug,
+            name,
+            created_at,
+            suspended_at,
+            suspended_reason,
+            deleted_at,
+            count,
+            last_day,
+        ) in rows
     ]
+
+
+def _budget_rows(state: PortalState, db: Session, org_id: int) -> list[dict]:
+    """The org's budgets (``state.budgets``) with their month-to-date spend."""
+    budgets = state.budgets.for_org(org_id)
+    if budgets is None or budgets.empty:
+        return []
+    limits = [
+        limit for limit in (budgets.org, budgets.member_default) if limit is not None
+    ]
+    limits += list(budgets.members.values()) + list(budgets.projects.values())
+    project_slugs = dict(
+        db.exec(select(Project.id, Project.slug).where(Project.org_id == org_id)).all()
+    )
+    user_uids = dict(
+        db.exec(
+            select(User.id, User.uid).where(
+                col(User.id).in_([m for m in budgets.members])
+            )
+        ).all()
+    )
+    rows = []
+    for limit in limits:
+        if limit.scope == "org":
+            spent = state.spend.spent(org_id)
+        elif limit.scope == "project":
+            spent = state.spend.spent(org_id, project_id=limit.project_id)
+        elif limit.scope == "member":
+            spent = state.spend.spent(org_id, user_id=limit.user_id)
+        else:
+            spent = None
+        rows.append(
+            {
+                "scope": limit.scope,
+                "monthly_usd": usd(limit.monthly_usd),
+                "hard_stop": limit.hard_stop,
+                "spent_usd": None if spent is None else usd(spent),
+                "project": project_slugs.get(limit.project_id),
+                "member": user_uids.get(limit.user_id),
+            }
+        )
+    return rows
+
+
+@auth_router.get("/api/admin/orgs/{slug}")
+def get_admin_org(
+    slug: str,
+    request: Request,
+    _: Principal = Depends(instance_access()),
+) -> dict:
+    """One org for the admin panel, soft-deleted or suspended included.
+
+    Returns
+    -------
+    dict
+        The org's fields (``slug``, ``name``, ``url``, ``created_at``,
+        ``default_project_role``, ``suspended``, ``deleted_at``,
+        ``deleted_by``); ``members`` (``uid``, ``display_name``,
+        ``github_login``, ``role``, ``joined_at``, ``has_password``,
+        ``disabled``); ``open_invitations`` (a count); ``projects``
+        (``slug``, ``name``, ``source``, ``last_scan_at``,
+        ``last_run_status``, ``access_lost_reason``, ``storage_bytes`` (``null``
+        until the sampler exists), ``deleted_at``), soft-deleted ones
+        included; ``budgets``; ``spend_mtd``; and ``rows`` (the Postgres row
+        counts of ``usage_events``, ``audit_events`` and ``agent_call_days``).
+        ``404`` for an unknown org.
+    """
+    state = portal_state(request)
+    base = _base(state)
+    now = _iso(_now())
+    with get_session() as db:
+        org = db.exec(select(Organization).where(Organization.slug == slug)).first()
+        if org is None:
+            raise ApiError(404, "organization not found")
+        assert org.id is not None
+        org_id = org.id
+        members = [
+            {
+                "uid": user.uid,
+                "display_name": user.display_name,
+                "github_login": user.github_login,
+                "role": membership.role,
+                "joined_at": membership.created_at,
+                "has_password": user.password_hash is not None,
+                "disabled": user.disabled_at is not None,
+            }
+            for membership, user in db.exec(
+                select(Membership, User)
+                .join(User, col(User.id) == col(Membership.user_id))
+                .where(Membership.org_id == org_id)
+                .order_by(Membership.created_at, User.id)
+            ).all()
+        ]
+        open_invitations = db.exec(
+            select(func.count())
+            .select_from(Invitation)
+            .where(
+                col(Invitation.org_id) == org_id,
+                col(Invitation.redeemed_at).is_(None),
+                col(Invitation.revoked_at).is_(None),
+                col(Invitation.expires_at) > now,
+            )
+        ).one()
+        latest_run = (
+            select(ScanRun.status)
+            .where(col(ScanRun.project_id) == col(Project.id))
+            .order_by(col(ScanRun.id).desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        projects = [
+            {
+                "slug": project.slug,
+                "name": project.name,
+                "source": project.source,
+                "last_scan_at": project.last_scan_at,
+                "last_run_status": status,
+                "access_lost_reason": project.access_lost_reason,
+                "storage_bytes": None,
+                "deleted_at": project.deleted_at,
+            }
+            for project, status in db.exec(
+                select(Project, latest_run)
+                .where(col(Project.org_id) == org_id)
+                .order_by(Project.slug)
+            ).all()
+        ]
+        counts = {
+            "usage_events": db.exec(
+                select(func.count())
+                .select_from(UsageEvent)
+                .where(col(UsageEvent.org_id) == org_id)
+            ).one(),
+            "audit_events": db.exec(
+                select(func.count())
+                .select_from(AuditEvent)
+                .where(col(AuditEvent.org_id) == org_id)
+            ).one(),
+            "agent_call_days": db.exec(
+                select(func.count())
+                .select_from(AgentCallDay)
+                .where(col(AgentCallDay.org_id) == org_id)
+            ).one(),
+        }
+        deleted_by = (
+            None
+            if org.deleted_by is None
+            else db.exec(select(User.uid).where(User.id == org.deleted_by)).first()
+        )
+        budgets = _budget_rows(state, db, org_id)
+        body = {
+            "slug": org.slug,
+            "name": org.name,
+            "url": base.org_origin(org.slug),
+            "created_at": org.created_at,
+            "default_project_role": org.default_project_role,
+            "suspended": (
+                None
+                if org.suspended_at is None
+                else {"at": org.suspended_at, "reason": org.suspended_reason}
+            ),
+            "deleted_at": org.deleted_at,
+            "deleted_by": deleted_by,
+        }
+    return body | {
+        "members": members,
+        "open_invitations": open_invitations,
+        "projects": projects,
+        "budgets": budgets,
+        "spend_mtd": usd(state.spend.spent(org_id)),
+        "rows": counts,
+    }
+
+
+def _owner_candidate(db: Session, uid: str) -> User:
+    """The account ``uid`` as an owner or member candidate, read ``FOR SHARE``.
+
+    Must be the first statement of its transaction (plan 59 section 4.3.1):
+    it waits for a running soft delete of the account, then refuses.
+    ``404`` for an unknown uid, ``409 user_deleted``, ``409 user_disabled``
+    (the code ``POST /api/org/members`` answers for one).
+    """
+    user = db.exec(
+        select(User).where(User.uid == uid).with_for_update(read=True)
+    ).first()
+    if user is None:
+        raise ApiError(404, "user not found")
+    if user.deleted_at is not None:
+        raise user_deleted_error()
+    if user.disabled_at is not None:
+        raise ApiError(409, "this account is disabled", code="user_disabled")
+    return user
+
+
+def _owner_needs_github() -> ApiError:
+    return ApiError(
+        409,
+        "an organization's owner must be a GitHub account, not a password account",
+        code="github_account_required",
+    )
+
+
+@auth_router.post("/api/admin/orgs", status_code=201)
+def post_admin_org(
+    body: AdminOrgBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Create an org for an existing GitHub account (plan 59 section 4.7).
+
+    Mirrors ``POST /api/orgs``'s slug rules: ``422 bad_slug``, ``409
+    slug_taken`` for a live, soft-deleted or retired slug. The owner's row
+    is read ``FOR SHARE`` first: ``404`` unknown, ``409 user_deleted``,
+    ``409 user_disabled``, ``409 github_account_required`` for a password
+    account. Ignores the org quota (D43).
+
+    Returns
+    -------
+    dict
+        ``{"slug", "name", "url"}``, audited as ``org_created`` with
+        ``via="instance_admin"`` and the owner as ``target``.
+    """
+    base = _base(portal_state(request))
+    slug = body.slug
+    try:
+        validate_org_slug(slug)
+    except ValueError as exc:
+        raise ApiError(422, str(exc), code="bad_slug") from exc
+    name = body.name.strip()
+    if not name:
+        raise ApiError(422, "name must not be blank")
+    slug_taken = ApiError(
+        409, f"the organization {slug!r} already exists", code="slug_taken"
+    )
+    with get_session() as db:
+        owner = _owner_candidate(db, body.owner_uid)
+        if owner.password_hash is not None:
+            raise _owner_needs_github()
+        assert owner.id is not None
+        if (
+            db.exec(select(Organization.id).where(Organization.slug == slug)).first()
+            is not None
+        ):
+            raise slug_taken
+        try:
+            org = create_org(db, slug=slug, name=name)
+        except OrgSlugTaken as exc:  # retired by a deletion: the same answer
+            raise slug_taken from exc
+        except IntegrityError as exc:  # a concurrent create of the same slug
+            raise slug_taken from exc
+        assert org.id is not None
+        org_id = org.id
+        add_member(db, org_id=org_id, user_id=owner.id, role=Role.OWNER)
+    audit(
+        "org_created",
+        request,
+        uid=principal.uid,
+        target=body.owner_uid,
+        org_id=org_id,
+        org=slug,
+        via="instance_admin",
+    )
+    return {"slug": slug, "name": name, "url": base.org_origin(slug)}
+
+
+@auth_router.patch("/api/admin/orgs/{slug}")
+def patch_admin_org(
+    slug: str,
+    body: AdminOrgPatchBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Rename an org (``422 bad_name`` as the owner's route; works while suspended).
+
+    ``404`` for an unknown org, ``409 org_deleted`` for a soft-deleted one.
+
+    Returns
+    -------
+    dict
+        ``{"slug", "name"}``; audited as ``org_renamed`` with
+        ``via="instance_admin"`` when the name changed.
+    """
+    name = _checked_name(body.name)
+    with get_session() as db:
+        org = _refuse_deleted(_org_state(slug, lock=True, db=db))
+        row = db.exec(select(Organization).where(Organization.id == org.id)).one()
+        previous = row.name
+        row.name = name
+        db.add(row)
+    if name != previous:
+        audit(
+            "org_renamed",
+            request,
+            uid=principal.uid,
+            org_id=org.id,
+            org=org.slug,
+            name=name,
+            previous=previous,
+            via="instance_admin",
+        )
+    return {"slug": org.slug, "name": name}
+
+
+def _admin_member_row(user: User, role: str, joined_at: str) -> dict:
+    return _member_row(user, role, joined_at) | {
+        "has_password": user.password_hash is not None
+    }
+
+
+@auth_router.post("/api/admin/orgs/{slug}/members")
+def post_admin_org_member(
+    slug: str,
+    body: AdminMemberBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Add an existing account to an org (plan 59 section 4.7).
+
+    Existing accounts only: someone with no account is invited by an org
+    owner. The account's row is read ``FOR SHARE`` first: ``404`` unknown,
+    ``409 user_deleted``, ``409 user_disabled``; ``409
+    github_account_required`` for a password account as owner; ``422
+    bad_role``; ``409 already_member``; ``404`` unknown org, ``409
+    org_deleted``. Works on a suspended org (D33).
+
+    Returns
+    -------
+    dict
+        The member's row (``uid``, ``display_name``, ``github_login``,
+        ``avatar_url``, ``role``, ``joined_at``, ``disabled``,
+        ``has_password``); audited as ``member_added`` with ``via``.
+    """
+    role = _checked_role(body.role)
+    already = ApiError(
+        409, "they are already a member of this organization", code="already_member"
+    )
+    try:
+        with get_session() as db:
+            user = _owner_candidate(db, body.uid)
+            if role == Role.OWNER.value and user.password_hash is not None:
+                raise _owner_needs_github()
+            org = db.exec(
+                select(Organization.id, Organization.slug, Organization.deleted_at)
+                .where(Organization.slug == slug)
+                .with_for_update(read=True)
+            ).first()
+            if org is None:
+                raise ApiError(404, "organization not found")
+            if org[2] is not None:
+                raise org_deleted_error()
+            org_id, org_slug = org[0], org[1]
+            assert user.id is not None
+            if db.get(Membership, (org_id, user.id)) is not None:
+                raise already
+            membership = add_member(db, org_id=org_id, user_id=user.id, role=role)
+            membership.welcome_pending = True
+            db.add(membership)
+            db.flush()
+            row = _admin_member_row(user, membership.role, membership.created_at)
+    except IntegrityError:  # a concurrent add of the same account won
+        raise already from None
+    audit(
+        "member_added",
+        request,
+        uid=principal.uid,
+        target=body.uid,
+        org_id=org_id,
+        org=org_slug,
+        role=role,
+        github_login=row["github_login"],
+        grants=0,
+        via="instance_admin",
+    )
+    return row
+
+
+@auth_router.patch("/api/admin/orgs/{slug}/members/{uid}")
+def patch_admin_org_member(
+    slug: str,
+    uid: str,
+    body: AdminMemberRoleBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Change a member's role: the owner's rules without "caller must be owner".
+
+    ``409 last_owner`` for the final owner's demotion; ``409
+    github_account_required`` promoting a password account to owner (the
+    way an owner is handed over, P4); ``404 not_member``; ``409
+    org_deleted``. Reads no user row beyond the member's own.
+
+    Returns
+    -------
+    dict
+        The member's row; audited as ``member_role_changed`` with ``via``.
+    """
+    role = _checked_role(body.role)
+    with get_session() as db:
+        org = _lock_org_share(db, slug)
+        owners = _lock_owners(db, org.id)
+        membership, user = _locked_target(db, org.id, uid)
+        previous = membership.role
+        owner = Role.OWNER.value
+        if role == owner and previous != owner and user.password_hash is not None:
+            raise _owner_needs_github()
+        if previous == owner and role != owner and not set(owners) - {user.id}:
+            raise _last_owner()
+        membership.role = role
+        db.add(membership)
+        db.flush()
+        assert user.id is not None
+        if role in (Role.OWNER.value, Role.ADMIN.value):
+            db.exec(
+                delete(ProjectGrant).where(
+                    col(ProjectGrant.org_id) == org.id,
+                    col(ProjectGrant.user_id) == user.id,
+                )
+            )
+        elif previous != role:
+            connections.revoke_lost_access(db, org.id, user_id=user.id)
+        row = _admin_member_row(user, role, membership.created_at)
+    if previous != role:
+        audit(
+            "member_role_changed",
+            request,
+            uid=principal.uid,
+            target=uid,
+            org_id=org.id,
+            org=org.slug,
+            role=role,
+            previous=previous,
+            via="instance_admin",
+        )
+    return row
+
+
+@auth_router.delete("/api/admin/orgs/{slug}/members/{uid}", status_code=204)
+def delete_admin_org_member(
+    slug: str,
+    uid: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> Response:
+    """Remove a member (``409 last_owner`` for the final owner), as the owner's route.
+
+    Their connection tokens for the org are revoked (``member_removed``)
+    and their member budget reloaded. ``404 not_member``, ``409
+    org_deleted``. ``204``; audited as ``member_removed`` with ``via``.
+    """
+    with get_session() as db:
+        org = _lock_org_share(db, slug)
+        owners = _lock_owners(db, org.id)
+        membership, user = _locked_target(db, org.id, uid)
+        previous = membership.role
+        if previous == Role.OWNER.value and not set(owners) - {user.id}:
+            raise _last_owner()
+        db.delete(membership)
+        assert user.id is not None
+        connections.revoke_for_member(db, org.id, user.id, "member_removed")
+    reload_org_budgets(portal_state(request).budgets, org.id)
+    audit(
+        "member_removed",
+        request,
+        uid=principal.uid,
+        target=uid,
+        org_id=org.id,
+        org=org.slug,
+        role=previous,
+        via="instance_admin",
+    )
+    return Response(status_code=204)
+
+
+def _lock_org_share(db: Session, slug: str) -> _OrgState:
+    """The org row ``FOR SHARE`` as a transaction's first statement; else ``404`` / ``409 org_deleted``.
+
+    A concurrent soft delete (``FOR UPDATE``) either finished first, so the
+    write is refused, or waits for this transaction.
+    """
+    row = db.exec(
+        select(
+            Organization.id,
+            Organization.slug,
+            Organization.suspended_at,
+            Organization.suspended_reason,
+            Organization.deleted_at,
+        )
+        .where(Organization.slug == slug)
+        .with_for_update(read=True)
+    ).first()
+    return _refuse_deleted(None if row is None else _OrgState(*row))
+
+
+def _admin_audit_filter(
+    scope: str,
+    org: str | None,
+    event: str | None,
+    actor: str | None,
+    since: str | None,
+    until: str | None,
+) -> audit_store.AuditFilter:
+    try:
+        return audit_store.make_filter(
+            orgless=scope == "orgless",
+            org=org,
+            event=event,
+            actor=actor,
+            since=since,
+            until=until,
+        )
+    except ValueError as exc:
+        raise ApiError(
+            422, "from and to must be ISO-8601 dates or date-times", code="bad_date"
+        ) from exc
 
 
 @auth_router.get("/api/admin/audit")
 def get_admin_audit(
     _: Principal = Depends(instance_access()),
+    scope: Literal["all", "orgless"] = Query(default="all"),
     org: str | None = Query(default=None, max_length=100),
     event: str | None = Query(default=None, max_length=100),
     actor: str | None = Query(default=None, max_length=200),
@@ -1556,29 +2190,47 @@ def get_admin_audit(
         default=audit_store.PAGE_SIZE, ge=1, le=audit_store.MAX_PAGE_SIZE
     ),
 ) -> dict:
-    """Security events of no org: sign-ins, instance admin, deleted orgs' events.
+    """Security events across every org, or only those of no org.
 
-    The filters of ``GET /api/org/audit``, plus ``org`` (a deleted org's
-    slug, as its events kept it); ``422 bad_date`` for a malformed
-    ``from`` / ``to``.
+    The filters of ``GET /api/org/audit``, plus ``scope`` (``all``, the
+    default, is cross-org; ``orgless`` is sign-ins, instance admin and
+    deleted orgs' events) and ``org`` (an org's slug, as its events kept
+    it - a deleted org's too). Soft-deleted users show their real identity
+    (``mask_deleted=False``, until Erase); a project target is labelled
+    against its own event's org. ``422 bad_date`` for a malformed ``from``
+    / ``to``.
 
     Returns
     -------
     dict
         ``{"events": [...], "next": <id or null>}``, newest first.
     """
-    try:
-        f = audit_store.make_filter(
-            orgless=True, org=org, event=event, actor=actor, since=since, until=until
-        )
-    except ValueError as exc:
-        raise ApiError(
-            422, "from and to must be ISO-8601 dates or date-times", code="bad_date"
-        ) from exc
+    f = _admin_audit_filter(scope, org, event, actor, since, until)
     events, next_before = audit_store.query_events(
         f, before=before, limit=limit, mask_deleted=False
     )
     return {"events": events, "next": next_before}
+
+
+@auth_router.get("/api/admin/audit.csv")
+def get_admin_audit_csv(
+    _: Principal = Depends(instance_access()),
+    scope: Literal["all", "orgless"] = Query(default="all"),
+    org: str | None = Query(default=None, max_length=100),
+    event: str | None = Query(default=None, max_length=100),
+    actor: str | None = Query(default=None, max_length=200),
+    since: str | None = Query(default=None, alias="from", max_length=40),
+    until: str | None = Query(default=None, alias="to", max_length=40),
+) -> StreamingResponse:
+    """The same events and filters as CSV, streamed, at most 50 000 rows."""
+    f = _admin_audit_filter(scope, org, event, actor, since, until)
+    return StreamingResponse(
+        audit_store.iter_csv(f, mask_deleted=False),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="whygraph-admin-audit.csv"'
+        },
+    )
 
 
 def _admin_user_row(

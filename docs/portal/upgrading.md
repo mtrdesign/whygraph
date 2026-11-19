@@ -61,6 +61,10 @@ you come from:
 - **From 2.5.0**, `whygraph update`; each project's database is upgraded on first use. Run **Update
   agent files** in each project, and update a linked portal and its platform together (platform API
   version 2). See [WhyGraph 2.6.0](../releases/2.6.0.md).
+- **From 2.6.0**, `whygraph update`; the portal's database is upgraded when it starts. A local portal
+  needs nothing else. In production, hand over any organization a password account owns; see
+  [Platform administration and password accounts](#admin-mode) and
+  [WhyGraph 2.7.0](../releases/2.7.0.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the
@@ -88,8 +92,8 @@ every 24 hours (6 hours after a failed check). A failed check never shows a bann
   releases in between, and says the same.
 - **Switch it off in Settings.** The toggle is under the portal's global Settings. Turning it off and
   on again makes a check due within 15 minutes. `whygraph update --check` answers on demand.
-- **Production** shows the notice to instance admins only, as an Updates card on the admin
-  Dashboard; see [Upgrading](../deploy/production.md#upgrading).
+- **Production** shows the notice to instance admins only, as an attention item on the admin
+  Dashboard and in the Instance card of the admin Configuration page; see [Upgrading](../deploy/production.md#upgrading).
 
 What the check sends, and the other ways to turn it off, are in
 [The update check](security.md#update-check).

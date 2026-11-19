@@ -277,3 +277,40 @@ export function validateAdminOrgSearch(search: Record<string, unknown>): AdminOr
   const { event, actor, from, to } = auditSearch(search);
   return { tab: oneOf(ADMIN_ORG_TABS, search.tab), event, actor, from, to };
 }
+
+export const ADMIN_PROJECT_STATES = ["ok", "failing", "access_lost", "never_scanned", "deleted"] as const;
+/** The Projects list's "State" filter (All is the default, so it is never in the URL). */
+export type AdminProjectState = (typeof ADMIN_PROJECT_STATES)[number];
+
+/** `/admin/projects?org=&state=&q=`: an org slug, a state and the search box (filtered on the client). */
+export interface AdminProjectsSearch {
+  org?: string;
+  state?: AdminProjectState;
+  q?: string;
+}
+
+export function validateAdminProjectsSearch(search: Record<string, unknown>): AdminProjectsSearch {
+  const org = text(search.org, 63);
+  return {
+    org: org && ORG_SLUG.test(org) ? org : undefined,
+    state: oneOf(ADMIN_PROJECT_STATES, search.state),
+    q: text(search.q),
+  };
+}
+
+export const ADMIN_RANKS = ["storage", "agent_calls"] as const;
+/** The dashboard's top-organizations metric (spend is the default). */
+export type AdminRank = (typeof ADMIN_RANKS)[number];
+
+/** `/admin?from=&to=&rank=`: the range (`to` exclusive; both or neither) and the top-orgs metric. */
+export interface AdminDashboardSearch {
+  from?: string;
+  to?: string;
+  rank?: AdminRank;
+}
+
+export function validateAdminDashboardSearch(search: Record<string, unknown>): AdminDashboardSearch {
+  const { from, to } = auditSearch({ from: search.from, to: search.to });
+  const range = from && to && from < to ? { from, to } : {};
+  return { ...range, rank: oneOf(ADMIN_RANKS, search.rank) };
+}

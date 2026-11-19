@@ -104,9 +104,18 @@ from whygraph.serve.routes import generate_router
 from whygraph.serve.routes import router as data_router
 from whygraph.services.codegraph import configure_lock_dir
 from whygraph.services.codegraph.writer_lock import portal_lock_dir
-from . import agent_calls, audit_store, budgets, connections, updates, usage_store
+from . import (
+    agent_calls,
+    audit_store,
+    budgets,
+    connections,
+    storage,
+    updates,
+    usage_store,
+)
 from . import db as portal_db
 from .access_routes import access_router
+from .admin_stats import admin_stats_router
 from .agent_hook_routes import agent_hooks_router
 from .audit import clear_writer, set_writer
 from .auth_routes import auth_router
@@ -177,6 +186,8 @@ SUPPORTED_MODES: tuple[str, ...] = ("local", "production")
 """Modes this release can run."""
 
 CONNECTION_SWEEP_EVERY_SEC = 60 * 60
+STORAGE_FIRST_DELAY_SEC = 5 * 60
+STORAGE_SAMPLE_SEC = 6 * 3600
 """How often production sweeps expired connection tokens (also once at start)."""
 
 AUDIT_PRUNE_EVERY_SEC = 24 * 60 * 60
@@ -309,6 +320,7 @@ def create_portal_app(
 
     app.include_router(public_router)
     app.include_router(auth_router)  # production-only; local mode answers 404
+    app.include_router(admin_stats_router)  # production-only: the Dashboard's stats
     app.include_router(members_router)  # production-only, org-scoped
     app.include_router(access_router)  # production-only, project-scoped
     app.include_router(org_router)  # production-only: settings, audit, DELETE /api/org
@@ -568,6 +580,7 @@ async def _serving(state: PortalState) -> AsyncIterator[None]:
             if not state.degraded:
                 watcher.start_soon(_sweep_connections)
                 watcher.start_soon(_prune_audit_events)
+                watcher.start_soon(_sample_storage, state)
         elif state.mode == "local" and not state.degraded:
             watcher.start_soon(_refresh_link_statuses, state)
         set_strict(True)
@@ -628,6 +641,30 @@ async def _sweep_connections() -> None:
                     "connection token sweep: %d expired, %d deleted", revoked, deleted
                 )
         await anyio.sleep(CONNECTION_SWEEP_EVERY_SEC)
+
+
+async def _sample_storage(state: PortalState) -> None:
+    """Sample project storage: 5 minutes after start, then every 6 hours; never fatal.
+
+    Plan 59 section 4.10. Each pass measures the due projects and prunes
+    samples past their retention. Not ``abandon_on_cancel``: an abandoned
+    sampler would keep writing to Postgres during shutdown.
+    """
+    await anyio.sleep(STORAGE_FIRST_DELAY_SEC)
+    while True:
+        try:
+            measured = await anyio.to_thread.run_sync(storage.sample, state)
+            pruned = await anyio.to_thread.run_sync(storage.prune)
+        except Exception:  # noqa: BLE001 -- a failed pass is retried next time
+            _log.exception("storage sampling failed")
+        else:
+            if measured or pruned:
+                _log.info(
+                    "storage sampling: %d project(s) measured, %d row(s) pruned",
+                    measured,
+                    pruned,
+                )
+        await anyio.sleep(STORAGE_SAMPLE_SEC)
 
 
 async def _stop_audit_writer(writer: audit_store.AuditWriter) -> None:

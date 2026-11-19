@@ -72,6 +72,7 @@ from .deps import (
     PortalState,
     bound_from,
     instance_access,
+    org_suspended_error,
     portal_state,
     require_mode_and_host,
     user_access,
@@ -107,6 +108,7 @@ from .models import (
     ReaderGrant,
     RetiredOrgSlug,
     ScanRun,
+    StorageSample,
     UsageEvent,
     User,
     UserSession,
@@ -134,14 +136,29 @@ from .passwords import (
     validate_password,
     verify_password,
 )
+from .overview_routes import overview_payload
 from .routes import (
     DeleteProjectBody,
     _remove_project,
+    _run_dict,
+    _run_people,
     soft_delete_project,
     soft_delete_result,
 )
-from .runner import ProjectBusy, ProjectGone
+from .runner import (
+    OrgSuspended,
+    ProjectAccessLost,
+    ProjectBusy,
+    ProjectGone,
+    RunFinished,
+    RunNotFound,
+    RunnerUnavailable,
+    SourceNotAllowed,
+    log_tail,
+)
 from .security import Principal
+from .storage import StorageBusy, latest_project_bytes
+from .storage import sample as sample_storage
 from .sessions import (
     admin_cookie_name,
     clear_admin_cookie,
@@ -1584,8 +1601,8 @@ def get_admin_orgs(
         ``created_at``, ``project_count`` (live projects), ``owners``
         (their GitHub logins, else display names), ``suspended`` (``{at,
         reason}`` or ``null``), ``deleted_at``, ``deleted_by`` (a user
-        uid), ``spend_mtd`` (USD), ``storage_bytes`` (``null`` until the
-        storage sampler exists) and ``last_activity_day``.
+        uid), ``spend_mtd`` (USD), ``storage_bytes`` (the latest
+        samples carried forward, else ``null``) and ``last_activity_day``.
     """
     state = portal_state(request)
     base = _base(state)
@@ -1606,6 +1623,9 @@ def get_admin_orgs(
             .group_by(col(Organization.id))
             .order_by(Organization.slug)
         ).all()
+        org_storage: dict[int, int] = {}
+        for owner, size in latest_project_bytes(db).values():
+            org_storage[owner] = org_storage.get(owner, 0) + size
         projects = dict(
             db.exec(
                 select(Project.org_id, func.count())
@@ -1645,7 +1665,7 @@ def get_admin_orgs(
             "deleted_at": deleted_at,
             "deleted_by": deleted_by.get(org_id),
             "spend_mtd": usd(state.spend.spent(org_id)),
-            "storage_bytes": None,
+            "storage_bytes": org_storage.get(org_id),
             "last_activity_day": last_day,
         }
         for (
@@ -1723,7 +1743,7 @@ def get_admin_org(
         ``disabled``); ``open_invitations`` (a count); ``projects``
         (``slug``, ``name``, ``source``, ``last_scan_at``,
         ``last_run_status``, ``access_lost_reason``, ``storage_bytes`` (``null``
-        until the sampler exists), ``deleted_at``), soft-deleted ones
+        with no sample), ``deleted_at``), soft-deleted ones
         included; ``budgets``; ``spend_mtd``; and ``rows`` (the Postgres row
         counts of ``usage_events``, ``audit_events`` and ``agent_call_days``).
         ``404`` for an unknown org.
@@ -1771,6 +1791,7 @@ def get_admin_org(
             .limit(1)
             .scalar_subquery()
         )
+        project_storage = latest_project_bytes(db, org_id=org_id)
         projects = [
             {
                 "slug": project.slug,
@@ -1779,7 +1800,9 @@ def get_admin_org(
                 "last_scan_at": project.last_scan_at,
                 "last_run_status": status,
                 "access_lost_reason": project.access_lost_reason,
-                "storage_bytes": None,
+                "storage_bytes": (
+                    stored[1] if (stored := project_storage.get(project.id)) else None
+                ),
                 "deleted_at": project.deleted_at,
             }
             for project, status in db.exec(
@@ -3922,6 +3945,7 @@ class _ProjectState:
     org_id: int
     org_slug: str
     org_deleted: bool
+    org_deleted_at: str | None = None
 
 
 def _project_state(org_slug: str, slug: str) -> _ProjectState:
@@ -3936,7 +3960,9 @@ def _project_state(org_slug: str, slug: str) -> _ProjectState:
             raise ApiError(404, "project not found")
         project, org_deleted_at = row
         db.expunge(project)
-    return _ProjectState(project, project.org_id, org_slug, org_deleted_at is not None)
+    return _ProjectState(
+        project, project.org_id, org_slug, org_deleted_at is not None, org_deleted_at
+    )
 
 
 def _bound(state: PortalState, project: Project) -> BoundProject:
@@ -4142,6 +4168,398 @@ def post_purge_project(
         history_deleted=result["history_deleted"],
     )
     return result
+
+
+# ---- Projects (plan 59 section 4.8) ---------------------------------------
+
+STORAGE_SERIES_DAYS = 90
+"""Days of a project's storage line (carried forward, one point per day)."""
+
+DETAIL_RUNS = 20
+"""Scan runs a project's detail carries (the newest)."""
+
+
+def _live_project(org: str, slug: str) -> _ProjectState:
+    """The project of an admin write: ``404`` unknown, ``409`` when it or its org is deleted."""
+    found = _project_state(org, slug)
+    if found.org_deleted:
+        raise org_deleted_error()
+    if found.project.deleted_at is not None:
+        raise _project_deleted_error()
+    return found
+
+
+def _sample_dict(row: StorageSample | None) -> dict | None:
+    """A storage sample as the admin panel shows it (``None`` for no sample)."""
+    if row is None:
+        return None
+    return {
+        "day": row.day,
+        "measured_at": row.measured_at,
+        "history_bytes": row.history_bytes,
+        "git_bytes": row.git_bytes,
+        "codegraph_bytes": row.codegraph_bytes,
+        "worktree_bytes": row.worktree_bytes,
+        "runs_bytes": row.runs_bytes,
+        "total_bytes": row.history_bytes
+        + row.git_bytes
+        + row.codegraph_bytes
+        + row.worktree_bytes
+        + row.runs_bytes,
+    }
+
+
+def _storage_series(db: Session, project_id: int, now: datetime) -> dict:
+    """One project's total bytes per day, the latest sample carried forward.
+
+    Days before the first sample have no point. ``{from, to, columns:
+    ["day", "bytes"], rows}`` with ``to`` today (UTC).
+    """
+    last = now.astimezone(timezone.utc).date()
+    first = last - timedelta(days=STORAGE_SERIES_DAYS - 1)
+    rows = db.execute(
+        text(
+            "SELECT to_char(d, 'YYYY-MM-DD') AS day, s.bytes "
+            "FROM generate_series(CAST(:first AS timestamp), "
+            "CAST(:last AS timestamp), interval '1 day') AS d "
+            "CROSS JOIN LATERAL ("
+            "SELECT history_bytes + git_bytes + codegraph_bytes + worktree_bytes "
+            "+ runs_bytes AS bytes FROM storage_samples "
+            "WHERE project_id = :pid AND day <= to_char(d, 'YYYY-MM-DD') "
+            "ORDER BY day DESC LIMIT 1) AS s ORDER BY d"
+        ),
+        {"first": first.isoformat(), "last": last.isoformat(), "pid": project_id},
+    ).all()
+    return {
+        "from": first.isoformat(),
+        "to": last.isoformat(),
+        "columns": ["day", "bytes"],
+        "rows": [[day, int(size)] for day, size in rows],
+    }
+
+
+@auth_router.get("/api/admin/projects")
+def get_admin_projects(
+    request: Request,
+    _: Principal = Depends(instance_access()),
+) -> dict:
+    """Every project of every org, soft-deleted ones included (D21).
+
+    Unpaged and unfiltered: the SPA filters (and its Cmd-K palette searches)
+    this list. Ordered by org slug, then project slug.
+
+    Returns
+    -------
+    dict
+        ``{"projects": [...]}``; a row has ``org`` (slug), ``org_deleted_at``,
+        ``slug``, ``name``, ``source``, ``created_at``, ``last_scan_at``,
+        ``last_run`` (``{status, finished_at}`` of the newest finished run,
+        or ``null``), ``access_lost_reason``, ``restricted``, ``deleted_at``,
+        ``storage_bytes`` (``null`` with no sample) and ``spend_mtd`` (USD).
+    """
+    state = portal_state(request)
+    with get_session() as db:
+        last_run = (
+            select(ScanRun.id)
+            .where(
+                col(ScanRun.project_id) == col(Project.id),
+                col(ScanRun.finished_at).is_not(None),
+            )
+            .order_by(col(ScanRun.id).desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+        storage = latest_project_bytes(db)
+        found = db.exec(
+            select(Project, Organization.slug, Organization.deleted_at, last_run)
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .order_by(Organization.slug, Project.slug)
+        ).all()
+        run_ids = {run_id for *_, run_id in found if run_id is not None}
+        runs = (
+            {
+                run.id: run
+                for run in db.exec(
+                    select(ScanRun).where(col(ScanRun.id).in_(run_ids))
+                ).all()
+            }
+            if run_ids
+            else {}
+        )
+        projects = []
+        for project, org_slug, org_deleted_at, run_id in found:
+            run = runs.get(run_id)
+            stored = storage.get(project.id)
+            projects.append(
+                {
+                    "org": org_slug,
+                    "org_deleted_at": org_deleted_at,
+                    "slug": project.slug,
+                    "name": project.name,
+                    "source": project.source,
+                    "created_at": project.created_at,
+                    "last_scan_at": project.last_scan_at,
+                    "last_run": (
+                        None
+                        if run is None
+                        else {"status": run.status, "finished_at": run.finished_at}
+                    ),
+                    "access_lost_reason": project.access_lost_reason,
+                    "restricted": project.restricted,
+                    "deleted_at": project.deleted_at,
+                    "storage_bytes": stored[1] if stored else None,
+                    "spend_mtd": usd(
+                        state.spend.spent(project.org_id, project_id=project.id)
+                    ),
+                }
+            )
+    return {"projects": projects}
+
+
+@auth_router.get("/api/admin/projects/{org}/{slug}")
+def get_admin_project(
+    org: str,
+    slug: str,
+    request: Request,
+    _: Principal = Depends(instance_access()),
+) -> dict:
+    """One project for the admin panel, soft-deleted or suspended included.
+
+    The org's own Overview (:func:`~whygraph.portal.overview_routes.overview_payload`
+    with ``mask_deleted=False``), the newest runs and the storage figures.
+
+    Returns
+    -------
+    dict
+        ``org``, ``org_deleted_at``, ``org_suspended`` (``{at, reason}`` or
+        ``null``), ``slug``, ``name``, ``source``,
+        ``created_at``, ``last_scan_at``, ``access_lost_reason``,
+        ``restricted``, ``deleted_at``, ``deleted_by`` (the deleting user's
+        display label, ``null`` when unknown), ``overview`` (the Overview answer),
+        ``runs`` (the newest :data:`DETAIL_RUNS`, shaped as the org's scan
+        list, requesters named plainly) and ``storage`` (``latest``: the
+        newest sample's five parts and total, or ``null``; ``series``: the
+        90-day carried-forward line). ``404`` unknown; ``400`` for an
+        invalid project config.
+    """
+    state = portal_state(request)
+    found = _project_state(org, slug)
+    project = found.project
+    assert project.id is not None
+    bound = _bound(state, project)
+    overview = overview_payload(state, bound, mask_deleted=False)
+    with get_session() as db:
+        runs = db.exec(
+            select(ScanRun)
+            .where(ScanRun.project_id == project.id)
+            .order_by(col(ScanRun.id).desc())
+            .limit(DETAIL_RUNS)
+        ).all()
+        people = _run_people(db, runs, production=True, mask_deleted=False)
+        latest = db.exec(
+            select(StorageSample)
+            .where(StorageSample.project_id == project.id)
+            .order_by(col(StorageSample.day).desc())
+            .limit(1)
+        ).first()
+        latest_sample = _sample_dict(latest)
+        series = _storage_series(db, project.id, _now())
+        suspension = db.exec(
+            select(Organization.suspended_at, Organization.suspended_reason).where(
+                Organization.id == found.org_id
+            )
+        ).first()
+        deleted_by = None
+        if project.deleted_by is not None:
+            who = db.exec(
+                select(User.display_name, User.github_login, User.deleted_at).where(
+                    User.id == project.deleted_by
+                )
+            ).first()
+            if who is not None:
+                deleted_by = user_label(*who)[0]
+        run_rows = [_run_dict(run, people, show_cost=True) for run in runs]
+    return {
+        "org": found.org_slug,
+        "org_deleted_at": found.org_deleted_at,
+        "org_suspended": (
+            None
+            if suspension is None or suspension[0] is None
+            else {"at": suspension[0], "reason": suspension[1]}
+        ),
+        "slug": project.slug,
+        "name": project.name,
+        "source": project.source,
+        "created_at": project.created_at,
+        "last_scan_at": project.last_scan_at,
+        "access_lost_reason": project.access_lost_reason,
+        "restricted": project.restricted,
+        "deleted_at": project.deleted_at,
+        "deleted_by": deleted_by,
+        "overview": overview,
+        "runs": run_rows,
+        "storage": {"latest": latest_sample, "series": series},
+    }
+
+
+@auth_router.post("/api/admin/projects/{org}/{slug}/rescan", status_code=202)
+async def post_admin_rescan(
+    org: str,
+    slug: str,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Queue (or coalesce into) a sync-and-scan of a project, as an admin.
+
+    The runner mints the GitHub App installation token, so no user token is
+    needed. Errors are ``post_scan``'s: ``501 runner_unavailable``, ``409``
+    when busy, ``409 source_not_allowed``, ``409 github_access_lost``,
+    ``403 org_suspended`` (D33: an admin's rescan is refused too), and
+    ``409 project_deleted`` / ``409 org_deleted`` (D34).
+
+    Returns
+    -------
+    dict
+        ``{"run_id": <id>}``, audited as ``project_scan_requested``.
+    """
+    state = portal_state(request)
+    found = await anyio.to_thread.run_sync(_live_project, org, slug)
+    project_id = found.project.id
+    assert project_id is not None
+    try:
+        run_id = await state.runner.request_sync(
+            project_id, trigger="sync", scan_requested=True, principal=principal
+        )
+    except RunnerUnavailable as exc:
+        raise ApiError(501, str(exc), code="runner_unavailable") from exc
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc)) from exc
+    except SourceNotAllowed as exc:
+        raise ApiError(409, str(exc), code="source_not_allowed") from exc
+    except ProjectAccessLost as exc:
+        raise ApiError(
+            409, str(exc), code="github_access_lost", reason=exc.reason
+        ) from exc
+    except OrgSuspended as exc:
+        raise org_suspended_error() from exc
+    except ProjectGone as exc:
+        raise ApiError(409, str(exc), code=exc.code) from exc
+    audit(
+        "project_scan_requested",
+        request,
+        uid=principal.uid,
+        org_id=found.org_id,
+        org=found.org_slug,
+        project=slug,
+        run_id=run_id,
+        via="instance_admin",
+    )
+    return {"run_id": run_id}
+
+
+@auth_router.post("/api/admin/projects/{org}/{slug}/scans/{run_id}/cancel")
+async def post_admin_cancel_scan(
+    org: str,
+    slug: str,
+    run_id: int,
+    request: Request,
+    response: Response,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Cancel a queued (``200``) or running (``202``) run, as an admin.
+
+    Errors are ``cancel_scan``'s: ``404`` unknown run, ``409`` finished,
+    ``501`` no runner. An admin may cancel a full (describing) run.
+
+    Returns
+    -------
+    dict
+        ``{"run_id", "was"}``, audited as ``project_scan_cancelled``.
+    """
+    state = portal_state(request)
+    found = await anyio.to_thread.run_sync(_live_project, org, slug)
+    project_id = found.project.id
+    assert project_id is not None
+    try:
+        was = await state.runner.cancel(
+            project_id, run_id, may_cancel_full=True, by=principal.user_id
+        )
+    except RunNotFound as exc:
+        raise ApiError(404, f"run {run_id} not found") from exc
+    except RunFinished as exc:
+        raise ApiError(409, str(exc)) from exc
+    except RunnerUnavailable as exc:
+        raise ApiError(501, str(exc)) from exc
+    if was == "running":
+        response.status_code = 202
+    audit(
+        "project_scan_cancelled",
+        request,
+        uid=principal.uid,
+        org_id=found.org_id,
+        org=found.org_slug,
+        project=slug,
+        run_id=run_id,
+        via="instance_admin",
+    )
+    return {"run_id": run_id, "was": was}
+
+
+@auth_router.get("/api/admin/projects/{org}/{slug}/scans/{run_id}/log")
+def get_admin_scan_log(
+    org: str,
+    slug: str,
+    run_id: int,
+    _: Principal = Depends(instance_access()),
+) -> dict:
+    """The tail of a run's log, ``{run_id, text, size, truncated}`` (no client limit)."""
+    found = _project_state(org, slug)
+    assert found.project.id is not None
+    try:
+        return log_tail(found.project.id, run_id)
+    except RunNotFound as exc:
+        raise ApiError(404, f"run {run_id} not found") from exc
+
+
+@auth_router.post("/api/admin/projects/{org}/{slug}/storage")
+def post_admin_measure_storage(
+    org: str,
+    slug: str,
+    request: Request,
+    _: Principal = Depends(instance_access()),
+) -> dict:
+    """Measure one project's storage now, whether or not it is due (D42).
+
+    A sync route: the walk takes ``state.storage_lock`` and would block the
+    event loop in an ``async def``. ``409 busy`` while another walk runs.
+
+    Returns
+    -------
+    dict
+        ``{"measured": bool, "sample": ...}``: the new sample's parts, or
+        ``measured: false`` with ``sample: null`` for a project the sampler
+        never walks (not a GitHub project, or an unsafe clone path).
+    """
+    state = portal_state(request)
+    found = _live_project(org, slug)
+    project_id = found.project.id
+    assert project_id is not None
+    try:
+        count = sample_storage(state, project_id=project_id, blocking=False)
+    except StorageBusy as exc:
+        raise ApiError(409, str(exc), code="busy") from exc
+    latest = None
+    if count:
+        with get_session() as db:
+            latest = _sample_dict(
+                db.exec(
+                    select(StorageSample)
+                    .where(StorageSample.project_id == project_id)
+                    .order_by(col(StorageSample.day).desc())
+                    .limit(1)
+                ).first()
+            )
+    return {"measured": bool(count), "sample": latest}
 
 
 @auth_router.post("/api/admin/me/logout")

@@ -430,24 +430,24 @@ def _people(
     db: Session,
     org_id: int,
     rows: list[_AgentRow],
+    *,
+    mask_deleted: bool = True,
 ) -> list[dict[str, Any]]:
-    """Calls per person (and machine), labelled from the live rows."""
+    """Calls per person (and machine), labelled from the live rows.
+
+    With ``mask_deleted=False`` (the admin panel) the membership join is
+    dropped, so a removed or deleted member shows under their real name.
+    """
     user_ids = {row.user_id for row in rows if row.user_id is not None}
     connection_ids = {
         row.connection_id for row in rows if row.connection_id is not None
     }
-    users = (
-        {
-            user.id: user
-            for user in db.exec(
-                select(User)
-                .join(Membership, col(Membership.user_id) == col(User.id))
-                .where(Membership.org_id == org_id, col(User.id).in_(user_ids))
-            ).all()
-        }
-        if user_ids
-        else {}
-    )
+    user_query = select(User).where(col(User.id).in_(user_ids))
+    if mask_deleted:
+        user_query = user_query.join(
+            Membership, col(Membership.user_id) == col(User.id)
+        ).where(Membership.org_id == org_id)
+    users = {user.id: user for user in db.exec(user_query).all()} if user_ids else {}
     machines = (
         dict(
             db.exec(
@@ -476,7 +476,15 @@ def _people(
             label = f"{machines[connection_id]} ({user.display_name})"
         else:
             key = ("user", user_id)
-            label = actor_label(user, production=True)  # type: ignore[arg-type]
+            label = (
+                actor_label(user, production=True)  # type: ignore[arg-type]
+                if mask_deleted
+                else (
+                    f"{user.display_name} (@{user.github_login})"
+                    if user.github_login
+                    else user.display_name
+                )
+            )
         group = groups.setdefault(key, {"label": label, "calls": 0, "last_day": day})
         group["calls"] += calls
         group["last_day"] = max(group["last_day"], day)
@@ -498,7 +506,12 @@ def _connections(db: Session, project_id: int) -> list[dict[str, Any]]:
 
 
 def _agents(
-    db: Session, state: PortalState, project: BoundProject, now: datetime
+    db: Session,
+    state: PortalState,
+    project: BoundProject,
+    now: datetime,
+    *,
+    mask_deleted: bool = True,
 ) -> dict[str, Any]:
     """The ``agents`` block (plan section 4.10)."""
     production = state.mode == "production"
@@ -536,7 +549,7 @@ def _agents(
         "errors": errors,
         "internal_errors": internal_errors,
         "by_kind": by_kind,
-        "people": _people(db, project.org_id, rows)
+        "people": _people(db, project.org_id, rows, mask_deleted=mask_deleted)
         if production and can_usage
         else None,
         "connections": _connections(db, project.id)
@@ -552,13 +565,31 @@ def _agents(
     }
 
 
-@overview_router.get("/api/projects/{slug}/overview")
-def get_overview(
-    request: Request,
-    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+def overview_payload(
+    state: PortalState, project: BoundProject, *, mask_deleted: bool = True
 ) -> dict[str, Any]:
-    """The project Overview's coverage history, events, usage and agent activity."""
-    state = portal_state(request)
+    """The Overview answer of one project (blocking).
+
+    The body of ``GET /api/projects/{slug}/overview``, shared with the
+    admin panel's project detail (plan 59 section 4.8), which passes
+    ``mask_deleted=False`` so the agent-activity people show real names.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal's state.
+    project : BoundProject
+        The project, bound with the caller's role.
+    mask_deleted : bool
+        Label removed and soft-deleted members as the org's own page does
+        (default); ``False`` shows their real names.
+
+    Returns
+    -------
+    dict
+        ``coverage``, ``events``, ``last_failure``, ``usage``, ``agents``
+        and ``codegraph``.
+    """
     now = _utcnow()
     with get_session() as db:
         points, events = _history(db, project.id, now)
@@ -567,9 +598,18 @@ def get_overview(
             "events": events,
             "last_failure": _last_failure(db, project.id),
             "usage": _usage(db, state, project, now),
-            "agents": _agents(db, state, project, now),
+            "agents": _agents(db, state, project, now, mask_deleted=mask_deleted),
             "codegraph": _codegraph(db, state, project),
         }
+
+
+@overview_router.get("/api/projects/{slug}/overview")
+def get_overview(
+    request: Request,
+    project: BoundProject = Depends(project_access(Action.PROJECT_READ)),
+) -> dict[str, Any]:
+    """The project Overview's coverage history, events, usage and agent activity."""
+    return overview_payload(portal_state(request), project, mask_deleted=True)
 
 
 __all__ = [
@@ -579,5 +619,6 @@ __all__ = [
     "MAX_POINTS",
     "REMOVED_MEMBER_LABEL",
     "TOP_KINDS",
+    "overview_payload",
     "overview_router",
 ]

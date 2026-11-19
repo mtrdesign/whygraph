@@ -208,9 +208,18 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/orgs/{slug}", "DELETE"),
         ("/api/admin/orgs/{slug}/restore", "POST"),
         ("/api/admin/orgs/{slug}/purge", "POST"),
+        ("/api/admin/projects", "GET"),
+        ("/api/admin/projects/{org}/{slug}", "GET"),
         ("/api/admin/projects/{org}/{slug}", "DELETE"),
+        ("/api/admin/projects/{org}/{slug}/rescan", "POST"),
+        ("/api/admin/projects/{org}/{slug}/scans/{run_id}/cancel", "POST"),
+        ("/api/admin/projects/{org}/{slug}/scans/{run_id}/log", "GET"),
+        ("/api/admin/projects/{org}/{slug}/storage", "POST"),
         ("/api/admin/projects/{org}/{slug}/restore", "POST"),
         ("/api/admin/projects/{org}/{slug}/purge", "POST"),
+        ("/api/admin/stats/overview", "GET"),
+        ("/api/admin/stats/series", "GET"),
+        ("/api/admin/stats/top", "GET"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),

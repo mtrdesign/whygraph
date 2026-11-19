@@ -37,6 +37,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   project_removed: { label: "Project removed", group: "Projects" },
   project_restored: { label: "Project restored", group: "Projects" },
   project_purged: { label: "Project deleted permanently", group: "Projects" },
+  project_scan_requested: { label: "Scan requested", group: "Projects" },
+  project_scan_cancelled: { label: "Scan cancelled", group: "Projects" },
   project_grant_added: { label: "Project access given", group: "Projects" },
   project_grant_changed: { label: "Project access changed", group: "Projects" },
   project_grant_removed: { label: "Project access removed", group: "Projects" },

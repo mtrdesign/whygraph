@@ -36,6 +36,21 @@ export function formatTokens(value: number | null | undefined): string {
   return `${sign}${Math.round(n)}`;
 }
 
+/** A byte count in binary units, one decimal: `1.2 GiB`, `512 KiB`, `0 B`. `null` is `-`. */
+export function formatBytes(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  const sign = value < 0 ? "-" : "";
+  let n = Math.abs(value);
+  if (n < 1024) return `${sign}${Math.round(n)} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+  let unit = -1;
+  while (n >= 1024 && unit < units.length - 1) {
+    n /= 1024;
+    unit += 1;
+  }
+  return `${sign}${n.toFixed(1)} ${units[unit]}`;
+}
+
 /** A percentage as the API sends it (one decimal), or `-`. */
 export function formatPct(value: number | null | undefined): string {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";

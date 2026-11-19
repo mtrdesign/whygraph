@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   adminApi,
@@ -19,6 +19,7 @@ import {
   toastError,
   userLabel,
 } from "../components/admin/adminParts";
+import { ProjectActions, projectState } from "../components/admin/ProjectActions";
 import { RenameOrgDialog, SuspendOrgDialog, NO_SUCH_ACCOUNT, findByLogin } from "../components/admin/OrgDialogs";
 import { PageContainer } from "../components/layout/PageContainer";
 import { ResponsiveTable, type Column } from "../components/layout/ResponsiveTable";
@@ -27,7 +28,6 @@ import { AuditTable, type AuditUrlFilters } from "../components/portal/AuditTabl
 import { ConfirmDialog } from "../components/portal/ConfirmDialog";
 import { Field, nativeSelect } from "../components/portal/Field";
 import { TypedConfirmDialog } from "../components/portal/TypedConfirmDialog";
-import { DisabledReason } from "../components/state/DisabledReason";
 import { ErrorState } from "../components/state/ErrorState";
 import { FormSkeleton } from "../components/state/Skeletons";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -37,7 +37,7 @@ import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { StatTile } from "../components/usage/parts";
 import { errorMessage } from "../lib/apiErrors";
-import { formatClock, formatDate, formatUsd, formatNumber, timeAgo } from "../lib/format";
+import { formatBytes, formatClock, formatDate, formatUsd, formatNumber, timeAgo } from "../lib/format";
 import { orgRoleLabel } from "../lib/labels";
 import { plural } from "../lib/plural";
 import { ADMIN_ORG_TABS, type AdminOrgSearch, type AdminOrgTab } from "../lib/routeSearch";
@@ -388,107 +388,6 @@ function Members({ org, writable }: { org: AdminOrgDetail; writable: boolean }) 
   );
 }
 
-function projectState(p: AdminOrgProject): { label: string; variant: "destructive" | "outline" | "secondary" } {
-  if (p.deleted_at) return { label: "Deleted", variant: "destructive" };
-  if (p.access_lost_reason) return { label: "Access lost", variant: "destructive" };
-  if (p.last_run_status === "failed" || p.last_run_status === "interrupted") return { label: "Failing", variant: "destructive" };
-  if (!p.last_scan_at) return { label: "Never scanned", variant: "outline" };
-  return { label: "OK", variant: "secondary" };
-}
-
-/** An org's projects: a live one has Delete, a soft-deleted one Restore and Delete permanently (D34). */
-function ProjectActions({ org, project }: { org: AdminOrgDetail; project: AdminOrgProject }) {
-  const queryClient = useQueryClient();
-  const [deleting, setDeleting] = useState(false);
-  const [purging, setPurging] = useState(false);
-  const done = () => queryClient.invalidateQueries({ queryKey: ADMIN });
-  const remove = useMutation({
-    mutationFn: () => adminApi.deleteProject(org.slug, project.slug, project.name),
-    onSuccess: async () => {
-      setDeleting(false);
-      await done();
-    },
-  });
-  const purge = useMutation({
-    mutationFn: () => adminApi.purgeProject(org.slug, project.slug, project.name),
-    onSuccess: async () => {
-      setPurging(false);
-      await done();
-    },
-  });
-  const restore = useMutation({
-    mutationFn: () => adminApi.restoreProject(org.slug, project.slug),
-    onSuccess: done,
-    onError: toastError,
-  });
-  const orgGone = !!org.deleted_at;
-  const restoreButton = (
-    <Button size="sm" variant="secondary" disabled={orgGone || restore.isPending} onClick={() => restore.mutate()}>
-      Restore
-    </Button>
-  );
-  return (
-    <span className="flex flex-wrap items-center gap-2">
-      {project.deleted_at ? (
-        <>
-          {orgGone ? <DisabledReason reason="Restore the organization first.">{restoreButton}</DisabledReason> : restoreButton}
-          <Button
-            size="sm"
-            variant="outline"
-            className={DESTRUCTIVE}
-            onClick={() => {
-              purge.reset();
-              setPurging(true);
-            }}
-          >
-            Delete permanently
-          </Button>
-        </>
-      ) : (
-        !orgGone && (
-          <Button
-            size="sm"
-            variant="outline"
-            className={DESTRUCTIVE}
-            onClick={() => {
-              remove.reset();
-              setDeleting(true);
-            }}
-          >
-            Delete
-          </Button>
-        )
-      )}
-      <TypedConfirmDialog
-        open={deleting}
-        onOpenChange={setDeleting}
-        testId="delete-project-dialog"
-        title={`Delete ${project.name}?`}
-        description={`${project.name} disappears for everyone in ${org.name} at once, and its scans stop. Nothing is erased: you can restore it, or delete it permanently later.`}
-        expected={project.name}
-        confirmLabel="Delete project"
-        pendingLabel="Deleting..."
-        pending={remove.isPending}
-        error={remove.isError ? errorMessage(remove.error) : null}
-        onConfirm={() => remove.mutate()}
-      />
-      <TypedConfirmDialog
-        open={purging}
-        onOpenChange={setPurging}
-        testId="purge-project-dialog"
-        title={`Delete ${project.name} permanently?`}
-        description="Its server copy and its history (descriptions, rationale cards, chats) are deleted. This cannot be undone. The repository on GitHub is not changed."
-        expected={project.name}
-        confirmLabel="Delete permanently"
-        pendingLabel="Deleting..."
-        pending={purge.isPending}
-        error={purge.isError ? errorMessage(purge.error) : null}
-        onConfirm={() => purge.mutate()}
-      />
-    </span>
-  );
-}
-
 function Projects({ org }: { org: AdminOrgDetail }) {
   const columns: Column<AdminOrgProject>[] = [
     {
@@ -496,10 +395,14 @@ function Projects({ org }: { org: AdminOrgDetail }) {
       header: "Project",
       primary: true,
       cell: (p) => (
-        <span className="flex min-w-0 flex-col leading-tight">
+        <Link
+          to="/admin/projects/$org/$slug"
+          params={{ org: org.slug, slug: p.slug }}
+          className="flex min-w-0 flex-col leading-tight hover:underline"
+        >
           <span className="truncate font-medium">{p.name}</span>
-          <span className="truncate font-mono text-xs text-muted-foreground">{p.slug}</span>
-        </span>
+          <span className="truncate font-mono text-xs font-normal text-muted-foreground">{p.slug}</span>
+        </Link>
       ),
     },
     {
@@ -511,6 +414,12 @@ function Projects({ org }: { org: AdminOrgDetail }) {
       },
     },
     { key: "scan", header: "Last scan", cell: (p) => timeAgo(p.last_scan_at) ?? "-" },
+    {
+      key: "storage",
+      header: "Storage",
+      align: "right",
+      cell: (p) => (p.storage_bytes === null ? <span className="text-muted-foreground">-</span> : formatBytes(p.storage_bytes)),
+    },
     { key: "actions", header: <span className="sr-only">Actions</span>, cell: (p) => <ProjectActions org={org} project={p} /> },
   ];
   return (
@@ -550,6 +459,22 @@ function Usage({ org }: { org: AdminOrgDetail }) {
         rows={org.budgets}
         rowKey={(b) => `${b.scope}:${b.project ?? ""}:${b.member ?? ""}`}
         empty={<p className="text-sm text-muted-foreground">No budgets are set.</p>}
+      />
+      <h3 className="text-sm font-semibold">Storage</h3>
+      <ResponsiveTable
+        columns={[
+          { key: "project", header: "Project", primary: true, cell: (p) => <span className="truncate">{p.name}</span> },
+          {
+            key: "bytes",
+            header: "Storage",
+            align: "right",
+            cell: (p) => (p.storage_bytes === null ? <span className="text-muted-foreground">-</span> : formatBytes(p.storage_bytes)),
+          },
+        ]}
+        rows={org.projects}
+        rowKey={(p) => p.slug}
+        rowTestId={(p) => `org-storage-${p.slug}`}
+        empty={<p className="text-sm text-muted-foreground">This organization has no projects.</p>}
       />
     </div>
   );

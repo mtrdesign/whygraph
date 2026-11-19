@@ -626,6 +626,7 @@ class PortalState:
         self.codegraph_host: Any = None
         self.codegraph_session_manager: Any = None
         self.setup_lock = threading.Lock()
+        self.storage_lock = threading.Lock()
         self.port_change: dict | None = None
         self.instance_lock: InstanceLock | None = None
         self.lock_check_interval = LOCK_CHECK_INTERVAL_SEC

@@ -176,6 +176,8 @@ test.describe("platform administration at 390px", () => {
     const routes: [string, string][] = [
       ["admin dashboard", `${base.origin}/admin`],
       ["admin organizations", `${base.origin}/admin/orgs`],
+      ["admin projects", `${base.origin}/admin/projects`],
+      ["admin project detail", `${base.origin}/admin/projects/comet/demo`],
       ["admin users", `${base.origin}/admin/users`],
       ["admin audit", `${base.origin}/admin/audit`],
       ["admin account", `${base.origin}/admin/account`],

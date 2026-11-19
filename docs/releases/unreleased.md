@@ -35,3 +35,8 @@ Changes that are on `main` and not in a release yet.
   removes one no longer deletes it: a platform administrator can restore it or delete it permanently.
   The import picker shows a removed repository as removed.
 - **The cross-organization audit log** has an Organization filter and column and a CSV download.
+- **A real Dashboard and a Projects module.** The admin Dashboard lists what needs attention, shows
+  seven figures and three charts (LLM spend, scans, the top organizations) for a date range you pick,
+  and every project has a page with its scans, logs, Rescan and storage. Organizations and projects
+  show how much disk they use, measured by the portal every six hours. See
+  [Platform administration](../deploy/administration.md#dashboard).

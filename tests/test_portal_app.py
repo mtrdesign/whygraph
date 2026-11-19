@@ -1689,9 +1689,22 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/orgs/{slug}", "DELETE"): "instance.admin",
     ("/api/admin/orgs/{slug}/restore", "POST"): "instance.admin",
     ("/api/admin/orgs/{slug}/purge", "POST"): "instance.admin",
+    ("/api/admin/projects", "GET"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}", "GET"): "instance.admin",
     ("/api/admin/projects/{org}/{slug}", "DELETE"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/rescan", "POST"): "instance.admin",
+    (
+        "/api/admin/projects/{org}/{slug}/scans/{run_id}/cancel",
+        "POST",
+    ): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/scans/{run_id}/log", "GET"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/storage", "POST"): "instance.admin",
     ("/api/admin/projects/{org}/{slug}/restore", "POST"): "instance.admin",
     ("/api/admin/projects/{org}/{slug}/purge", "POST"): "instance.admin",
+    # The Dashboard's stats (plan 59 section 4.12)
+    ("/api/admin/stats/overview", "GET"): "instance.admin",
+    ("/api/admin/stats/series", "GET"): "instance.admin",
+    ("/api/admin/stats/top", "GET"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 

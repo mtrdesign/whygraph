@@ -1,9 +1,9 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BASE, ME, USERS, fake, json, mountAdmin, resetAdminFake, signedInAdmin, strays } from "./adminHarness";
+import { ME, USERS, fake, json, mountAdmin, resetAdminFake, signedInAdmin, strays } from "./adminHarness";
 
-// The Phase 1 modules: what the old `AdminPage` held, one module per route.
+// The Phase 1 modules: what the old `AdminPage` held, one module per route (the Dashboard moved to adminDashboard.test.tsx).
 
 beforeEach(() => {
   resetAdminFake();
@@ -12,29 +12,6 @@ beforeEach(() => {
 afterEach(() => {
   expect(strays()).toEqual([]);
   vi.unstubAllGlobals();
-});
-
-describe("Dashboard", () => {
-  it("shows user and organization counts, the settings check and the updates card", async () => {
-    mountAdmin("/admin");
-    expect(await screen.findByTestId("tile-users")).toHaveTextContent("3");
-    expect(screen.getByTestId("tile-orgs")).toHaveTextContent("1");
-    expect(await screen.findByTestId("base-check-ok")).toHaveTextContent("found no problems");
-    expect(await screen.findByTestId("admin-updates")).toHaveTextContent("Current version: 2.6.0");
-  });
-
-  it("lists the base URL problems in the settings check card", async () => {
-    fake.routes["/api/admin/settings"] = () =>
-      json({ base_url: BASE, base_check: ["*.whygraph.localhost does not resolve"] });
-    mountAdmin("/admin");
-    expect(await screen.findByTestId("base-check")).toHaveTextContent("does not resolve");
-  });
-
-  it("an error on the counts shows one retryable block", async () => {
-    fake.routes["/api/admin/users"] = () => json({ error: "boom" }, 500);
-    mountAdmin("/admin");
-    expect(await screen.findByText("Couldn't load the platform figures")).toBeInTheDocument();
-  });
 });
 
 describe("Users", () => {

@@ -47,13 +47,17 @@ export function useUserName(): (uid: string | null | undefined) => string {
 export function DeletedAlert({
   deletedAt,
   deletedBy,
+  deletedByName,
   children,
 }: {
   deletedAt: string;
   deletedBy: string | null;
+  /** The deleting user's display label when the answer carries one rather than a uid. */
+  deletedByName?: string | null;
   children?: ReactNode;
 }) {
-  const name = useUserName()(deletedBy);
+  const lookup = useUserName()(deletedBy);
+  const name = deletedByName ?? lookup;
   return (
     <Alert variant="warning" data-testid="deleted-alert">
       <AlertDescription>

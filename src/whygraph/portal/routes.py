@@ -157,6 +157,7 @@ from .linked import due_for_refresh, link_block, revoke_token, revoke_token_outc
 from .models import (
     SCAN_STATUSES,
     SCAN_TRIGGERS,
+    Membership,
     Organization,
     PlatformLink,
     Project,
@@ -3634,9 +3635,20 @@ def _summary_cost(summary: Any, key: str) -> float | None:
 
 
 def _run_people(
-    session: Session, runs: list[ScanRun], *, production: bool
+    session: Session,
+    runs: list[ScanRun],
+    *,
+    production: bool,
+    org_id: int | None = None,
+    mask_deleted: bool = True,
 ) -> dict[int, dict]:
-    """``{users.id: {uid, label}}`` for a page's requesters and cancellers (one query)."""
+    """``{users.id: {uid, label}}`` for a page's requesters and cancellers.
+
+    With ``org_id`` (an org's own scan history) a platform administrator
+    who is not a member of that org is labelled ``"Platform administrator
+    (name)"`` (plan 59 D53); a deleted user stays ``[Deleted User]``.
+    ``mask_deleted=False`` (the admin panel) shows plain real names.
+    """
     ids = {
         user_id
         for run in runs
@@ -3646,11 +3658,32 @@ def _run_people(
     if not ids:
         return {}
     users = session.exec(select(User).where(col(User.id).in_(ids))).all()
+    members: set[int] = set()
+    if org_id is not None and production:
+        members = set(
+            session.exec(
+                select(Membership.user_id).where(
+                    Membership.org_id == org_id, col(Membership.user_id).in_(ids)
+                )
+            ).all()
+        )
+
+    def label(user: User) -> str:
+        if not mask_deleted:
+            name, login = user.display_name, user.github_login
+            return f"{name} (@{login})" if production and login else name
+        if (
+            org_id is not None
+            and production
+            and user.is_instance_admin
+            and user.deleted_at is None
+            and user.id not in members
+        ):
+            return f"Platform administrator ({user.display_name})"
+        return actor_label(user, production=production)  # type: ignore[arg-type]
+
     return {
-        user.id: {
-            "uid": user.uid,
-            "label": actor_label(user, production=production),  # type: ignore[arg-type]
-        }
+        user.id: {"uid": user.uid, "label": label(user)}
         for user in users
         if user.id is not None
     }
@@ -3774,7 +3807,9 @@ def list_scans(
             ).all()
         )
         page = rows[:size]
-        people = _run_people(session, page, production=production)
+        people = _run_people(
+            session, page, production=production, org_id=project.org_id
+        )
         show_cost = project_allowed(project.role, Action.PROJECT_USAGE)
         return {
             "runs": [_run_dict(r, people, show_cost=show_cost) for r in page],
@@ -3801,7 +3836,9 @@ def get_scan(
         ).first()
         if run is None:
             raise ApiError(404, f"run {run_id} not found")
-        people = _run_people(session, [run], production=production)
+        people = _run_people(
+            session, [run], production=production, org_id=project.org_id
+        )
         return _run_dict(
             run,
             people,

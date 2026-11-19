@@ -43,6 +43,7 @@ from whygraph.portal import audit_store, sessions
 from whygraph.portal import orgs as orgs_mod
 from whygraph.portal import db as portal_db
 from whygraph.portal.budgets import reload_org_budgets
+from whygraph.portal.runner import RunFinished, RunNotFound
 from whygraph.portal.models import (
     AgentCallDay,
     AuditEvent,
@@ -54,6 +55,8 @@ from whygraph.portal.models import (
     Project,
     ProjectGrant,
     RetiredOrgSlug,
+    ScanRun,
+    StorageSample,
     User,
     UserSession,
 )
@@ -1143,3 +1146,392 @@ def test_audit_csv_streams_the_same_filters_unmasked(cn: SimpleNamespace) -> Non
     assert "member_added" in filtered.text and "org_renamed" not in filtered.text
     bad = cn.client.get(url("/api/admin/audit.csv"), params={"to": "x"})
     assert bad.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Projects (plan 59 section 4.8)
+# ---------------------------------------------------------------------------
+
+
+def set_project(slug: str, **fields) -> None:
+    with portal_db.get_session() as db:
+        row = db.exec(select(Project).where(Project.slug == slug)).one()
+        for name, value in fields.items():
+            setattr(row, name, value)
+        db.add(row)
+
+
+def add_run(slug: str, **fields) -> int:
+    with portal_db.get_session() as db:
+        project_id = db.exec(select(Project.id).where(Project.slug == slug)).one()
+        run = ScanRun(project_id=project_id, trigger="manual", **fields)
+        db.add(run)
+        db.flush()
+        return run.id
+
+
+def test_projects_list_is_unpaged_and_includes_soft_deleted_ones(
+    cn: SimpleNamespace,
+) -> None:
+    now = _iso(datetime.now(timezone.utc))
+    set_project("web", deleted_at=now)
+    set_project("api", last_scan_at=now, access_lost_reason="uninstalled")
+    add_run("api", status="ok", finished_at=now)
+    add_run("api", status="failed", finished_at=now)
+    add_run("api", status="running")  # unfinished: not the "last run"
+    with portal_db.get_session() as db:
+        db.add(
+            StorageSample(
+                org_id=cn.orgs["acme"],
+                project_id=cn.projects["api"],
+                day="2026-11-01",
+                history_bytes=1,
+                git_bytes=2,
+                codegraph_bytes=3,
+                worktree_bytes=4,
+                runs_bytes=5,
+                measured_at=now,
+            )
+        )
+    cn.state.spend.seed(
+        cn.state.spend.month,
+        [(cn.orgs["acme"], cn.projects["api"], cn.ids["ben"], Decimal("1.25"))],
+    )
+    be_ada(cn)
+    response = cn.client.get(url("/api/admin/projects"))
+    assert response.status_code == 200, response.text
+    rows = response.json()["projects"]
+    assert [(r["org"], r["slug"]) for r in rows] == [
+        ("acme", "api"),
+        ("acme", "web"),
+        ("bravo", "lib"),
+    ]
+    by_slug = {r["slug"]: r for r in rows}
+    assert by_slug["web"]["deleted_at"] == now
+    api = by_slug["api"]
+    assert api["last_run"] == {"status": "failed", "finished_at": now}
+    assert api["access_lost_reason"] == "uninstalled" and api["last_scan_at"] == now
+    assert api["storage_bytes"] == 15 and by_slug["lib"]["storage_bytes"] is None
+    assert by_slug["lib"]["last_run"] is None and by_slug["lib"]["restricted"] is False
+    assert api["spend_mtd"] == 1.25 and by_slug["web"]["spend_mtd"] == 0
+    assert api["source"] == "github" and api["org_deleted_at"] is None
+    set_org("bravo", deleted_at=now)
+    again = {
+        r["slug"]: r
+        for r in cn.client.get(url("/api/admin/projects")).json()["projects"]
+    }
+    assert again["lib"]["org_deleted_at"] == now  # a deleted org's project stays listed
+
+
+def test_projects_detail_equals_the_orgs_own_overview(cn: SimpleNamespace) -> None:
+    now = datetime.now(timezone.utc)
+    run_id = add_run("api", status="ok", finished_at=_iso(now))
+    set_project("api", last_scan_at=_iso(now))
+    with portal_db.get_session() as db:
+        run = db.get(ScanRun, run_id)
+        run.requested_by = cn.ids["ben"]
+        db.add(run)
+        db.add(
+            StorageSample(
+                org_id=cn.orgs["acme"],
+                project_id=cn.projects["api"],
+                day=(now - timedelta(days=3)).date().isoformat(),
+                history_bytes=10,
+                git_bytes=20,
+                codegraph_bytes=30,
+                worktree_bytes=40,
+                runs_bytes=50,
+                measured_at=_iso(now),
+            )
+        )
+    cn.client.cookies.clear()
+    signed_in(cn.client, cn.ids["ben"])
+    own = cn.client.get(at("acme") + "/api/projects/api/overview")
+    assert own.status_code == 200, own.text
+    be_ada(cn)
+    response = cn.client.get(url("/api/admin/projects/acme/api"))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["overview"] == own.json()
+    assert (body["org"], body["slug"], body["deleted_at"]) == ("acme", "api", None)
+    assert body["org_suspended"] is None and body["deleted_by"] is None
+    assert [r["id"] for r in body["runs"]] == [run_id]
+    assert body["runs"][0]["requested_by"]["label"] == "Ben (@ben)"
+    latest = body["storage"]["latest"]
+    assert latest["total_bytes"] == 150 and latest["git_bytes"] == 20
+    series = body["storage"]["series"]
+    assert series["columns"] == ["day", "bytes"]
+    assert len(series["rows"]) == 4  # carried forward from day -3 to today
+    assert {size for _, size in series["rows"]} == {150}
+    assert series["rows"][0][0] == (now - timedelta(days=3)).date().isoformat()
+    assert series["rows"][-1][0] == series["to"] == now.date().isoformat()
+    # No sample: no latest, an empty line.
+    empty = cn.client.get(url("/api/admin/projects/acme/web")).json()["storage"]
+    assert empty["latest"] is None and empty["series"]["rows"] == []
+    # Soft-deleted projects and projects of deleted orgs still have a detail.
+    set_project("web", deleted_at=_iso(now), deleted_by=cn.ids["ada"])
+    deleted = cn.client.get(url("/api/admin/projects/acme/web"))
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_by"] == "Ada"
+    set_project("web", deleted_by=None)
+    set_org("acme", suspended_at=_iso(now), suspended_reason="abuse")
+    suspended = cn.client.get(url("/api/admin/projects/acme/api")).json()
+    assert suspended["org_suspended"] == {"at": _iso(now), "reason": "abuse"}
+    assert cn.client.get(url("/api/admin/projects/acme/nope")).status_code == 404
+    assert cn.client.get(url("/api/admin/projects/nope/api")).status_code == 404
+
+
+def test_projects_detail_shows_a_deleted_requesters_real_name(
+    cn: SimpleNamespace,
+) -> None:
+    add_run("api", status="ok", finished_at=_iso(datetime.now(timezone.utc)))
+    with portal_db.get_session() as db:
+        run = db.exec(select(ScanRun)).first()
+        run.requested_by = cn.ids["cy"]
+        db.add(run)
+    mark(cn.ids["cy"], deleted_at=_iso(datetime.now(timezone.utc)))
+    be_ada(cn)
+    (run,) = cn.client.get(url("/api/admin/projects/acme/api")).json()["runs"]
+    assert run["requested_by"]["label"] == "Cy (@cy)"
+
+
+def test_projects_rescan_requests_a_sync_and_audits_with_the_org(
+    cn: SimpleNamespace, audit_log, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple] = []
+
+    async def fake(project_id, **kwargs):  # noqa: ANN001, ANN202
+        seen.append((project_id, kwargs))
+        return 41
+
+    monkeypatch.setattr(cn.state.runner, "request_sync", fake)
+    be_ada(cn)
+    response = cn.client.post(url("/api/admin/projects/acme/api/rescan"))
+    assert response.status_code == 202, response.text
+    assert response.json() == {"run_id": 41}
+    ((project_id, kwargs),) = seen
+    assert project_id == cn.projects["api"]
+    assert kwargs["trigger"] == "sync" and kwargs["scan_requested"] is True
+    assert kwargs["principal"].user_id == cn.ids["ada"]
+    (event,) = [e for e in events(audit_log) if e["event"] == "project_scan_requested"]
+    assert event["uid"] == cn.uids["ada"] and event["run_id"] == 41
+    assert event["org_id"] == cn.orgs["acme"] and event["org"] == "acme"
+    assert event["project"] == "api" and event["via"] == "instance_admin"
+
+
+def test_projects_rescan_maps_the_runners_errors_as_post_scan_does(
+    cn: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.portal.runner import (
+        ProjectAccessLost,
+        ProjectBusy,
+        RunnerUnavailable,
+        SourceNotAllowed,
+    )
+
+    be_ada(cn)
+    cases = [
+        (RunnerUnavailable("down"), 501, "runner_unavailable"),
+        (ProjectBusy("busy"), 409, None),
+        (SourceNotAllowed("no"), 409, "source_not_allowed"),
+        (ProjectAccessLost("uninstalled"), 409, "github_access_lost"),
+    ]
+    for exc, status, code in cases:
+
+        async def boom(project_id, **kwargs):  # noqa: ANN001, ANN202
+            raise exc
+
+        monkeypatch.setattr(cn.state.runner, "request_sync", boom)
+        response = cn.client.post(url("/api/admin/projects/acme/api/rescan"))
+        assert response.status_code == status, (exc, response.text)
+        assert response.json().get("code") == code
+
+
+def test_projects_rescan_of_a_suspended_orgs_project_is_refused(
+    cn: SimpleNamespace, audit_log
+) -> None:
+    """D33: management works on a suspended org, a scan does not."""
+    set_org("acme", suspended_at=_iso(datetime.now(timezone.utc)))
+    be_ada(cn)
+    response = cn.client.post(url("/api/admin/projects/acme/api/rescan"))
+    assert (response.status_code, response.json()["code"]) == (403, "org_suspended")
+    assert not [e for e in events(audit_log) if e["event"] == "project_scan_requested"]
+    with portal_db.get_session() as db:
+        assert db.exec(select(ScanRun)).first() is None
+
+
+def test_projects_rescan_and_cancel_of_deleted_things_give_their_own_codes(
+    cn: SimpleNamespace,
+) -> None:
+    be_ada(cn)
+    set_project("api", deleted_at=_iso(datetime.now(timezone.utc)))
+    for path in (
+        "/api/admin/projects/acme/api/rescan",
+        "/api/admin/projects/acme/api/scans/1/cancel",
+        "/api/admin/projects/acme/api/storage",
+    ):
+        response = cn.client.post(url(path))
+        assert (response.status_code, response.json()["code"]) == (
+            409,
+            "project_deleted",
+        ), path
+    set_org("acme", deleted_at=_iso(datetime.now(timezone.utc)))
+    for path in (
+        "/api/admin/projects/acme/web/rescan",
+        "/api/admin/projects/acme/web/scans/1/cancel",
+        "/api/admin/projects/acme/web/storage",
+    ):
+        response = cn.client.post(url(path))
+        assert (response.status_code, response.json()["code"]) == (
+            409,
+            "org_deleted",
+        ), path
+    unknown = cn.client.post(url("/api/admin/projects/acme/nope/rescan"))
+    assert unknown.status_code == 404
+
+
+def test_projects_cancel_maps_the_runners_answers_and_audits(
+    cn: SimpleNamespace, audit_log, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple] = []
+    answers: list = ["queued", "running", RunNotFound(), RunFinished("done")]
+
+    async def fake(project_id, run_id, **kwargs):  # noqa: ANN001, ANN202
+        calls.append((project_id, run_id, kwargs))
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(cn.state.runner, "cancel", fake)
+    be_ada(cn)
+    path = "/api/admin/projects/acme/api/scans/9/cancel"
+    queued = cn.client.post(url(path))
+    assert (queued.status_code, queued.json()) == (200, {"run_id": 9, "was": "queued"})
+    running = cn.client.post(url(path))
+    assert (running.status_code, running.json()["was"]) == (202, "running")
+    assert cn.client.post(url(path)).status_code == 404
+    assert cn.client.post(url(path)).status_code == 409
+    assert calls[0] == (
+        cn.projects["api"],
+        9,
+        {"may_cancel_full": True, "by": cn.ids["ada"]},
+    )
+    cancelled = [e for e in events(audit_log) if e["event"] == "project_scan_cancelled"]
+    assert len(cancelled) == 2  # only the two that cancelled something
+    assert cancelled[0]["org_id"] == cn.orgs["acme"] and cancelled[0]["run_id"] == 9
+    assert cancelled[0]["via"] == "instance_admin"
+
+
+def test_projects_the_orgs_scan_history_names_the_admin_who_ran_it(
+    cn: SimpleNamespace,
+) -> None:
+    """D53: a platform administrator who is no member reads as one."""
+    mine = add_run("api", status="ok")
+    theirs = add_run("api", status="ok")
+    with portal_db.get_session() as db:
+        db.get(ScanRun, mine).requested_by = cn.ids["ivy"]
+        db.get(ScanRun, mine).cancelled_by = cn.ids["ben"]
+        db.get(ScanRun, theirs).requested_by = cn.ids["ben"]
+    cn.client.cookies.clear()
+    signed_in(cn.client, cn.ids["ben"])
+    runs = {
+        r["id"]: r
+        for r in cn.client.get(at("acme") + "/api/projects/api/scans").json()["runs"]
+    }
+    assert runs[mine]["requested_by"]["label"] == "Platform administrator (Ivy)"
+    assert runs[mine]["cancelled_by"]["label"] == "Ben (@ben)"
+    assert runs[theirs]["requested_by"]["label"] == "Ben (@ben)"
+    # Once the admin is a member of the org, they are plain.
+    with portal_db.get_session() as db:
+        orgs_mod.add_member(
+            db, org_id=cn.orgs["acme"], user_id=cn.ids["ivy"], role="member"
+        )
+    again = cn.client.get(at("acme") + "/api/projects/api/scans").json()["runs"]
+    assert {r["id"]: r for r in again}[mine]["requested_by"]["label"] == "Ivy (@ivy)"
+
+
+def test_projects_log_tail_takes_no_client_limit(cn: SimpleNamespace) -> None:
+    run_id = add_run("api", status="ok", log_path="runs/77.log")
+    log = cn.state.data_dir / "runs" / "77.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("one\ntwo\n")
+    be_ada(cn)
+    path = f"/api/admin/projects/acme/api/scans/{run_id}/log"
+    response = cn.client.get(url(path), params={"limit": 1})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["text"] == "one\ntwo\n" and body["truncated"] is False
+    assert (
+        cn.client.get(url("/api/admin/projects/acme/api/scans/999/log")).status_code
+        == 404
+    )
+    other = add_run("web", status="ok")  # another project's run is not found
+    assert (
+        cn.client.get(
+            url(f"/api/admin/projects/acme/api/scans/{other}/log")
+        ).status_code
+        == 404
+    )
+
+
+def _make_clone(cn: SimpleNamespace, slug: str) -> None:
+    set_project(slug, root=f"repos/acme/{slug}")
+    clone = cn.state.data_dir / "repos" / "acme" / slug
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "obj").write_bytes(b"x" * 100)
+    (clone / "README").write_bytes(b"y" * 7)
+
+
+def test_projects_measure_now_measures_a_project_that_is_not_due(
+    cn: SimpleNamespace,
+) -> None:
+    _make_clone(cn, "web")
+    be_ada(cn)
+    first = cn.client.post(url("/api/admin/projects/acme/web/storage"))
+    assert first.status_code == 200, first.text
+    sample = first.json()["sample"]
+    assert first.json()["measured"] is True
+    assert (sample["git_bytes"], sample["worktree_bytes"]) == (100, 7)
+    assert sample["total_bytes"] >= 107
+    # Freshly sampled, so not due: Measure now measures it anyway.
+    (cn.state.data_dir / "repos" / "acme" / "web" / "more").write_bytes(b"z" * 50)
+    second = cn.client.post(url("/api/admin/projects/acme/web/storage")).json()
+    assert second["sample"]["worktree_bytes"] == 57
+    with portal_db.get_session() as db:
+        rows = db.exec(select(StorageSample)).all()
+    assert len(rows) == 1  # one row per project and day: upserted
+    # A project the sampler never walks (an unsafe root) reports it.
+    skipped = cn.client.post(url("/api/admin/projects/acme/api/storage")).json()
+    assert skipped == {"measured": False, "sample": None}
+
+
+def test_projects_measure_now_gives_409_busy_while_a_walk_runs(
+    cn: SimpleNamespace,
+) -> None:
+    _make_clone(cn, "web")
+    be_ada(cn)
+    assert cn.state.storage_lock.acquire(blocking=False)
+    try:
+        response = cn.client.post(url("/api/admin/projects/acme/web/storage"))
+    finally:
+        cn.state.storage_lock.release()
+    assert (response.status_code, response.json()["code"]) == (409, "busy")
+    with portal_db.get_session() as db:
+        assert db.exec(select(StorageSample)).first() is None
+
+
+def test_projects_routes_need_an_admin_session(cn: SimpleNamespace) -> None:
+    cn.client.cookies.clear()
+    signed_in(cn.client, cn.ids["ben"])
+    for method, path in (
+        ("GET", "/api/admin/projects"),
+        ("GET", "/api/admin/projects/acme/api"),
+        ("POST", "/api/admin/projects/acme/api/rescan"),
+        ("POST", "/api/admin/projects/acme/api/scans/1/cancel"),
+        ("GET", "/api/admin/projects/acme/api/scans/1/log"),
+        ("POST", "/api/admin/projects/acme/api/storage"),
+    ):
+        response = cn.client.request(method, url(path))
+        assert response.status_code == 401, (method, path)
+        assert response.json()["code"] == ADMIN_LOGIN_REQUIRED

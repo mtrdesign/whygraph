@@ -1,5 +1,6 @@
 import {
   LayoutDashboardIcon,
+  FolderGit2Icon,
   LayoutGridIcon,
   ScrollTextIcon,
   UsersIcon,
@@ -8,12 +9,13 @@ import type { NavItem } from "../shell/Sidebar";
 
 /**
  * The admin nav (plan 59, §4.14). A module that does not exist in this release
- * (Projects, Configuration) is left out here, and so out of the palette too; its
+ * (Configuration) is left out here, and so out of the palette too; its
  * route renders "Not available yet" until the phase that builds it.
  */
 export const ADMIN_NAV: NavItem[] = [
   { label: "Dashboard", icon: LayoutDashboardIcon, to: "/admin", exact: true },
   { label: "Organizations", icon: LayoutGridIcon, to: "/admin/orgs" },
+  { label: "Projects", icon: FolderGit2Icon, to: "/admin/projects" },
   { label: "Users", icon: UsersIcon, to: "/admin/users" },
   { label: "Audit", icon: ScrollTextIcon, to: "/admin/audit" },
 ];
@@ -40,7 +42,7 @@ const MODULES: Record<string, string> = {
  */
 export function adminCrumbs(
   pathname: string,
-  names: { org?: string; user?: string } = {},
+  names: { org?: string; user?: string; project?: string } = {},
 ): { heading: string; crumbs: AdminCrumb[] } {
   const parts = pathname.replace(/\/+$/, "").split("/").filter(Boolean).slice(1).map(decodeURIComponent);
   const root: AdminCrumb = { label: "Administration", to: "/admin" };
@@ -50,9 +52,10 @@ export function adminCrumbs(
   if (!heading) return { heading: "Not found", crumbs: [root, { label: "Not found" }] };
   if (parts.length === 1) return { heading, crumbs: [root, { label: heading }] };
   if (module === "projects" && parts.length === 3) {
+    const name = names.project ?? parts[2];
     return {
-      heading: parts[2],
-      crumbs: [root, { label: heading, to: "/admin/projects" }, { label: `${parts[1]} / ${parts[2]}` }],
+      heading: name,
+      crumbs: [root, { label: heading, to: "/admin/projects" }, { label: `${parts[1]} / ${name}` }],
     };
   }
   const name = (module === "orgs" ? names.org : module === "users" ? names.user : undefined) ?? parts[1];

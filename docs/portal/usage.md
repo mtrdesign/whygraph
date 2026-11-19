@@ -125,6 +125,8 @@ and the top budget is called the **Portal budget** (the **Organization budget** 
     time, and by project, task and machine, with their most expensive calls. The **Members** page
     shows a "this month" figure per person, and a project's Access section shows what each person
     spent on it. Platform administrators reading an organization through a grant see the same, read-only.
+    The platform's own dashboard adds the instance-wide view: spend per day by provider and the top
+    organizations by spend (see [Platform administration](../deploy/administration.md#dashboard)).
 
     **A member sees only their own usage**, on **My usage**: the **Usage & cost** item in the sidebar,
     and a summary of each organization on the **Account** page. The server forces the view to the

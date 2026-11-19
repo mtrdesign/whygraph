@@ -1,7 +1,7 @@
 import ReactEChartsCore from "echarts-for-react/esm/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { formatPct, formatUsd } from "@/lib/format";
+import { formatBytes, formatPct, formatUsd } from "@/lib/format";
 import type { ChartMarker, ChartPayload } from "./chartSpec";
 import { markerColor, useChartColors, type ChartColors } from "./chartTheme";
 import echarts from "./echarts";
@@ -25,13 +25,14 @@ const ROW_HEIGHT = 22;
 // and `echarts.ts` stays the only file that reaches into the library.
 type Option = Record<string, unknown>;
 
-/** How the measure reads: a plain count, a USD amount (the Usage & cost page), or a 0-100 percentage. */
-export type ValueFormat = "number" | "usd" | "pct";
+/** How the measure reads: a plain count, a USD amount (the Usage & cost page), a 0-100 percentage or a byte count (the admin panel). */
+export type ValueFormat = "number" | "usd" | "pct" | "bytes";
 
 /** The label formatter for a {@link ValueFormat}. */
 function valueFormatter(format: ValueFormat): (value: unknown) => string {
   if (format === "usd") return (value) => (typeof value === "number" ? formatUsd(value) : "-");
   if (format === "pct") return (value) => (typeof value === "number" ? formatPct(value) : "-");
+  if (format === "bytes") return (value) => (typeof value === "number" ? formatBytes(value) : "-");
   return formatValue;
 }
 
@@ -318,7 +319,13 @@ export function buildOption(
       color: colors.muted,
       fontSize: 11,
       formatter: (value: number) =>
-        valueFormat === "usd" ? formatUsd(value) : valueFormat === "pct" ? `${value}%` : value.toLocaleString(),
+        valueFormat === "usd"
+          ? formatUsd(value)
+          : valueFormat === "pct"
+            ? `${value}%`
+            : valueFormat === "bytes"
+              ? formatBytes(value)
+              : value.toLocaleString(),
     },
     axisLine: { show: false },
     axisTick: { show: false },

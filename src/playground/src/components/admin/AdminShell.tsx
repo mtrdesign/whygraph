@@ -29,7 +29,7 @@ function AdminHeader() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const setNavOpen = useUi((s) => s.setNavOpen);
   // A detail page names itself once its query has loaded (this only reads the cache).
-  const [, , module, rawKey] = pathname.split("/");
+  const [, , module, rawKey, rawSlug] = pathname.split("/");
   const key = rawKey ? decodeURIComponent(rawKey) : "";
   const org = useQuery({
     queryKey: ["@admin", "org", key],
@@ -41,7 +41,14 @@ function AdminHeader() {
     queryFn: () => adminApi.user(key),
     enabled: false,
   }).data?.display_name;
+  const projectSlug = rawSlug ? decodeURIComponent(rawSlug) : "";
+  const project = useQuery({
+    queryKey: ["@admin", "project", key, projectSlug],
+    queryFn: () => adminApi.project(key, projectSlug),
+    enabled: false,
+  }).data?.name;
   const { heading, crumbs } = adminCrumbs(pathname, {
+    project: module === "projects" ? project : undefined,
     org: module === "orgs" ? org : undefined,
     user: module === "users" ? user : undefined,
   });

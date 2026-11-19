@@ -30,6 +30,7 @@ import {
   UsageSection,
 } from "../components/usage/parts";
 import { TabsSelect } from "../components/layout/TabsSelect";
+import { ClearFilters } from "../components/portal/ClearFilters";
 import { Field } from "../components/portal/Field";
 import { TableSkeleton } from "../components/state/Skeletons";
 import { Badge } from "../components/ui/badge";
@@ -408,7 +409,11 @@ function CallsTab({
   useEffect(() => {
     const value = model.trim() || undefined;
     if (value === latest.current.search.model) return;
-    const timer = setTimeout(() => latest.current.apply({ ...latest.current.search, model: value }), MODEL_DEBOUNCE_MS);
+    const timer = setTimeout(() => {
+      // "Clear filters" may have cleared the URL's model while this waited.
+      if (value === latest.current.search.model) return;
+      latest.current.apply({ ...latest.current.search, model: value });
+    }, MODEL_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [model]);
 
@@ -443,6 +448,16 @@ function CallsTab({
   const active: { label: string; clear: UsageSearch }[] = [];
   if (chips.scan) active.push({ label: chips.scan, clear: { ...search, scan_run: undefined } });
   if (chips.chat) active.push({ label: chips.chat, clear: { ...search, chat_session: undefined } });
+  const filtered =
+    model.trim() !== "" ||
+    [search.project, search.member, search.task, search.source, search.model, search.sort, search.scan_run, search.chat_session].some(
+      (v) => v !== undefined,
+    );
+  // The range and the tab are not filters: they stay.
+  const clearFilters = () => {
+    setModel("");
+    apply({ tab: search.tab, from: search.from, to: search.to });
+  };
 
   return (
     <div className="flex flex-col gap-4" data-testid="usage-tab-calls">
@@ -471,6 +486,7 @@ function CallsTab({
             />
           )}
         </Field>
+        {filtered && <ClearFilters onClear={clearFilters} />}
       </div>
       {active.length > 0 && (
         <div className="flex flex-wrap gap-2">

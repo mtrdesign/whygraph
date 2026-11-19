@@ -26,7 +26,7 @@ For each project the portal builds its configuration from two layers, the **proj
 2. the project's own settings.
 
 Both pages are split into sections (General, Models and keys, GitHub, ...) with a section list beside
-them; `?section=<id>` opens a page at one section. An empty project field shows the value it inherits
+them; `?section=<id>` opens a page at one section, and picking a section in the list writes it there. An empty project field shows the value it inherits
 and where from (*Inherited: ... from portal defaults*, or *from the organization*); a field the project
 sets is marked *Overridden here* with **Reset**. Each section has its own **Save** and **Discard**, so
 saving one section never sends another section's unsaved edits; a key is saved or removed on its own,

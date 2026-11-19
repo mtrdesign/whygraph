@@ -1,7 +1,7 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { env } from "../env";
 import { themeRepos } from "../lib/fixtures";
-import { horizontalOverflow } from "../lib/overflow";
+import { documentScroll, horizontalOverflow } from "../lib/overflow";
 import { adminGithubSignIn, base, githubSignIn, orgUrl, signedIn } from "../lib/production";
 import { call, configureStubLlm, STUB_REPLY } from "../lib/usage";
 
@@ -30,6 +30,7 @@ async function problems(page: Page): Promise<string[]> {
     out.push("no h1");
   }
   for (const o of await horizontalOverflow(page)) out.push(`overflow: ${o}`);
+  for (const o of await documentScroll(page)) out.push(`second scrollbar: ${o}`);
   return out;
 }
 
@@ -198,6 +199,32 @@ test.describe("platform administration at 390px", () => {
       await page.waitForTimeout(300); // the dialog's zoom-in
       expect(await horizontalOverflow(page), "suspend dialog").toEqual([]);
       await page.keyboard.press("Escape");
+    });
+
+    // The allowlist's table (with its `sr-only` Remove header) far down a desktop-wide page once
+    // stretched the document under the shell: a second scrollbar and blank space at the bottom. The
+    // policy and the list are rewritten in the browser, so the platform's own sign-up stays open.
+    test("admin configuration with the allowlist, at desktop width, has one scrollbar", async () => {
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await page.route(/\/api\/admin\/config$/, async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as { settings: Record<string, unknown> };
+        await route.fulfill({ response: res, json: { ...body, settings: { ...body.settings, signup_policy: "invite_only" } } });
+      });
+      await page.route(/\/api\/admin\/config\/signup-allowlist$/, (route) =>
+        route.fulfill({
+          json: [{ id: 1, github_login: "octocat", note: null, created_at: "2026-11-19T10:00:00Z", created_by: null, used_at: null }],
+        }),
+      );
+      try {
+        await page.goto(`${base.origin}/admin/config`);
+        await expect(page.getByTestId("allowlist-1")).toBeVisible();
+        expect(await problems(page), "admin configuration at 1280px").toEqual([]);
+      } finally {
+        await page.unroute(/\/api\/admin\/config$/);
+        await page.unroute(/\/api\/admin\/config\/signup-allowlist$/);
+        await page.setViewportSize(PHONE);
+      }
     });
 
     test("admin user detail, with the Erase dialog", async () => {

@@ -66,6 +66,29 @@ describe("Configuration page", () => {
     expect(strays()).toEqual([]);
   });
 
+  it("a chosen section goes in ?section= without a history entry; the first one and an unknown one stay out", async () => {
+    const router = mountAdmin("/admin/config?section=nope");
+    await screen.findByTestId("config-limits");
+    expect(router.state.location.search).toEqual({});
+    const nav = within(screen.getByRole("navigation", { name: "Settings sections" }));
+    const before = router.history.length;
+    const u = userEvent.setup();
+    await u.click(nav.getByRole("button", { name: "Limits" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({ section: "limits" }));
+    expect(nav.getByRole("button", { name: "Limits" })).toHaveAttribute("aria-current", "true");
+    await u.click(nav.getByRole("button", { name: "Sign-up" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(router.history.length).toBe(before);
+  });
+
+  it("opens on the section the URL names", async () => {
+    const router = mountAdmin("/admin/config?section=announcement");
+    await screen.findByTestId("config-announcement");
+    expect(router.state.location.search).toEqual({ section: "announcement" });
+    const nav = within(screen.getByRole("navigation", { name: "Settings sections" }));
+    expect(nav.getByRole("button", { name: "Announcement" })).toHaveAttribute("aria-current", "true");
+  });
+
   it("lists the address problems, and the Dashboard's attention line links here", async () => {
     baseCheck = ["*.whygraph.localhost does not resolve"];
     mountAdmin("/admin/config");

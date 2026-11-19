@@ -753,7 +753,7 @@ They go to the portal's normal log (`docker compose logs portal`) and, in produc
 portal's database**, where they are kept for **400 days** and then deleted.
 
 - **The audit page.** Owners see an **Audit** page for their organization, filterable by event, person
-  and date, 50 events to a page. Each event has a plain label ("Member added", "API key tested"),
+  and date (**Clear filters** empties them all), 50 events to a page. Each event has a plain label ("Member added", "API key tested"),
   and the **Event** filter groups them as Members, Projects, Budgets, Security and Organization. A
   row names the person or project it concerns, shows its details as label / value pairs, and reads
   "System" where no one acted (a sign-in refusal, a webhook, a budget threshold). The event names in

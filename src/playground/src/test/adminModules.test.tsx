@@ -96,6 +96,19 @@ describe("Audit", () => {
     expect(box.getByRole("button", { name: "Download CSV" })).toBeInTheDocument();
     expect(fake.calls.find((c) => c.path === "/api/admin/audit")?.search).toBe("?scope=all");
   });
+
+  it("Clear filters empties the form and the URL, and asks for the unfiltered log", async () => {
+    const router = mountAdmin("/admin/audit?scope=orgless&actor=ben&from=2026-10-01");
+    const box = within(await screen.findByTestId("admin-audit"));
+    expect(box.getByLabelText("Actor")).toHaveValue("ben");
+    await userEvent.setup().click(box.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(box.getByLabelText("Actor")).toHaveValue("");
+    expect(box.getByLabelText("From")).toHaveValue("");
+    expect(box.getByLabelText("Organization")).toHaveValue("");
+    await waitFor(() => expect(fake.calls.filter((c) => c.path === "/api/admin/audit").at(-1)?.search).toBe("?scope=all"));
+    expect(box.queryByRole("button", { name: "Clear filters" })).toBeNull();
+  });
 });
 
 it("keeps the shared fixtures in step with /api/admin/me", () => {

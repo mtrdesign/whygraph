@@ -65,3 +65,18 @@ export async function horizontalOverflow(page: Page): Promise<string[]> {
     return out;
   });
 }
+
+/**
+ * Whether the document scrolls vertically while the app shell's `main` is the page's scroller (empty
+ * means it does not). Inside the shells only `main` scrolls; a document taller than the window means
+ * something inside `main` is positioned against the window instead (an `sr-only` element with no
+ * positioned ancestor), which shows a second scrollbar and blank space under the page.
+ */
+export async function documentScroll(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const main = document.getElementById("main");
+    if (!main || getComputedStyle(main).overflowY !== "auto") return [];
+    const height = document.documentElement.scrollHeight;
+    return height > window.innerHeight + 1 ? [`document ${height}px tall in ${window.innerHeight}px beside a scrolling main`] : [];
+  });
+}

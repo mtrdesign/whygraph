@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { CloudIcon, FolderGit2Icon, GitBranchIcon, LockIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "lucide-react";
@@ -36,6 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "../components/ui/dropdown-menu";
 import { Input } from "../components/ui/input";
+import { ClearFilters } from "../components/portal/ClearFilters";
 import { nativeSelect } from "../components/portal/Field";
 
 /** Cards rendered before "Show more" (plan section 0.3 #1). */
@@ -284,6 +285,12 @@ export function ProjectsPage() {
 
   const setSearch = (next: ProjectsSearch) =>
     void navigate({ to: "/", search: { q: search.q, sort: search.sort, ...next }, replace: true });
+  // The search box is uncontrolled (typing never waits on the router), so clearing empties it directly.
+  const searchBox = useRef<HTMLInputElement>(null);
+  const clearFilters = () => {
+    if (searchBox.current) searchBox.current.value = "";
+    void navigate({ to: "/", search: {}, replace: true });
+  };
 
   const addButton = canAdd && (
     <Button render={<Link to="/projects/new" />}>
@@ -329,6 +336,7 @@ export function ProjectsPage() {
           <div className="relative min-w-0 flex-1 sm:max-w-xs">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
+              ref={searchBox}
               type="search"
               aria-label="Search projects"
               placeholder="Search projects"
@@ -357,6 +365,7 @@ export function ProjectsPage() {
                 ))}
             </select>
           </label>
+          {(search.q || search.sort) && <ClearFilters onClear={clearFilters} />}
         </div>
       )}
 

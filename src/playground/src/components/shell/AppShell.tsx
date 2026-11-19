@@ -193,7 +193,7 @@ export function AppShell({
       <div className="flex min-w-0 flex-1 flex-col">
         <BannerStack slug={slug} />
         <PageHeader projectName={projectName} />
-        <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-auto outline-none">
+        <main id="main" tabIndex={-1} className="relative flex min-h-0 flex-1 flex-col overflow-auto outline-none">
           {children}
         </main>
       </div>

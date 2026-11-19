@@ -817,6 +817,26 @@ describe("Usage tabs, filters and copy (S21a)", () => {
     await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&model=gpt-5"));
   });
 
+  it("Clear filters empties every Calls filter, the chips and the sort, and keeps the tab and the range", async () => {
+    const { router } = mount("/usage?tab=calls&from=2026-10-01&to=2026-11-01&project=alpha&task=chat&model=gpt&sort=cost&chat_session=4");
+    const filters = await screen.findByTestId("calls-filters");
+    expect(within(filters).getByLabelText("Model")).toHaveValue("gpt");
+    await userEvent.click(within(filters).getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(here(router)).toBe("/usage?tab=calls&from=2026-10-01&to=2026-11-01"));
+    expect(within(filters).getByLabelText("Model")).toHaveValue("");
+    expect(within(filters).queryByRole("button", { name: "Clear filters" })).toBeNull();
+  });
+
+  it("Clear filters also drops Model text that was typed but not applied yet", async () => {
+    const { router } = mount("/usage?tab=calls&task=chat");
+    const filters = await screen.findByTestId("calls-filters");
+    await userEvent.type(within(filters).getByLabelText("Model"), "gp");
+    await userEvent.click(within(filters).getByRole("button", { name: "Clear filters" }));
+    expect(within(filters).getByLabelText("Model")).toHaveValue("");
+    await new Promise((r) => setTimeout(r, 600));
+    expect(here(router)).toBe("/usage?tab=calls");
+  });
+
   it("local mode: no 'because of whom', no Who column, 'Portal budget' (MODE-5)", async () => {
     fake.state = localState();
     mount("/usage");

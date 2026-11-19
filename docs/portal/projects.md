@@ -139,8 +139,9 @@ descriptions you skip backfill on demand. See [Scanning](../guide/scanning.md).
 
 A project's **Settings** set how it uses LLMs and GitHub (the wizard's Configure step links there as
 **More settings**). A list of sections sits beside the page (a strip you can scroll sideways on a
-phone) and follows your scroll position; a link such as `/p/<project>/settings?section=models` opens
-the page at that section. The section ids are `general`, `models`, `github`, `scanning`, `areas`, `budgets`,
+phone) and follows your scroll position. A section you pick there goes into the address, so a
+refresh returns to it, and a link such as `/p/<project>/settings?section=models` opens the page at that
+section. The section ids are `general`, `models`, `github`, `scanning`, `areas`, `budgets`,
 `agents`, `access`, `connections` and `danger`.
 
 | Section | What you set |
@@ -243,7 +244,7 @@ The **Projects** page lists every project you can see, as cards. Each card shows
 
 From two projects up, a search box filters by name or repository, and **Sort** orders the cards by
 Name, Last scanned, Status (problems first) or Cost (when costs are shown). Both stay in the address,
-so a link keeps them. The page shows 60 cards, then **Show more**. **New project** (locally) or
+so a link keeps them, and **Clear filters** empties the search and goes back to Name. The page shows 60 cards, then **Show more**. **New project** (locally) or
 **Import** (in production) stays in the header whenever you may add one.
 
 The card's **...** menu holds **Quick rescan**, **Full rescan** (project admins) and **Settings**.

@@ -5,6 +5,7 @@ import { adminApi, type AdminOrg } from "../api";
 import { AdminHeading } from "../components/admin/AdminHeading";
 import { orgMatches } from "../components/admin/AdminCommandPalette";
 import { AdminSearchBox } from "../components/admin/AdminSearchBox";
+import { ClearFilters } from "../components/portal/ClearFilters";
 import { CreateOrgDialog } from "../components/admin/OrgDialogs";
 import { StatusFilter } from "../components/admin/adminParts";
 import { PageContainer } from "../components/layout/PageContainer";
@@ -89,6 +90,7 @@ export function AdminOrgsPage() {
       <div className="flex flex-wrap items-end gap-3">
         <AdminSearchBox q={q} onChange={(next) => go({ status, q: next })} />
         <StatusFilter value={status} onChange={(next) => go({ status: next, q })} options={STATUS_OPTIONS} />
+        {(q || status) && <ClearFilters onClear={() => go({})} />}
       </div>
       <QueryState query={orgs} loading={<TableSkeleton />} errorTitle="Couldn't load the organizations">
         {(all) => (

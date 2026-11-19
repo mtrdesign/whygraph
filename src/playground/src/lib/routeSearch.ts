@@ -298,6 +298,19 @@ export function validateAdminProjectsSearch(search: Record<string, unknown>): Ad
   };
 }
 
+export const ADMIN_CONFIG_SECTIONS = ["signup", "organizations", "limits", "announcement", "allowlist", "instance"] as const;
+/** A Configuration page section. */
+export type AdminConfigSection = (typeof ADMIN_CONFIG_SECTIONS)[number];
+
+/** `/admin/config?section=`: the section to scroll to. */
+export interface AdminConfigSearch {
+  section?: AdminConfigSection;
+}
+
+export function validateAdminConfigSearch(search: Record<string, unknown>): AdminConfigSearch {
+  return { section: oneOf(ADMIN_CONFIG_SECTIONS, search.section) };
+}
+
 export const ADMIN_RANKS = ["storage", "agent_calls"] as const;
 /** The dashboard's top-organizations metric (spend is the default). */
 export type AdminRank = (typeof ADMIN_RANKS)[number];

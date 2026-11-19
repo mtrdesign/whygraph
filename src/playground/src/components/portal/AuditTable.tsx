@@ -17,6 +17,7 @@ import { ErrorState } from "../state/ErrorState";
 import { TableSkeleton } from "../state/Skeletons";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { ClearFilters } from "./ClearFilters";
 import { Field, nativeSelectClass } from "./Field";
 
 type Page = { events: AuditEventRow[]; next: number | null };
@@ -185,6 +186,12 @@ export function AuditTable({
     if (onFilters) onFilters(next);
     else setLocalApplied(next);
   };
+  const clear = () => {
+    setDraft(fromApplied({}));
+    if (onFilters) onFilters({});
+    else setLocalApplied({});
+  };
+  const filtered = Object.values(applied).some(Boolean) || Object.values(draft).some((v) => v !== "");
   const download = async () => {
     setCsvError(null);
     setDownloading(true);
@@ -257,6 +264,7 @@ export function AuditTable({
         <Button type="submit" variant="outline">
           Filter
         </Button>
+        {filtered && <ClearFilters onClear={clear} />}
         <Button type="button" variant="outline" disabled={downloading} onClick={() => void download()}>
           Download CSV
         </Button>

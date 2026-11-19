@@ -811,6 +811,7 @@ class ScanRun(PortalBase, table=True):
             ondelete="SET NULL",
         ),
         Index("ix_scan_runs_project_id", "project_id"),
+        Index("ix_scan_runs_queued_at", "queued_at"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -1342,6 +1343,7 @@ class UsageEvent(PortalBase, table=True):
             name="fk_usage_events_connection",
             ondelete="SET NULL",
         ),
+        Index("ix_usage_events_time", "created_at"),
         Index("ix_usage_events_org_time", "org_id", "created_at"),
         Index("ix_usage_events_org_user_time", "org_id", "user_id", "created_at"),
         Index("ix_usage_events_org_project_time", "org_id", "project_id", "created_at"),
@@ -1472,6 +1474,7 @@ class AgentCallDay(PortalBase, table=True):
             postgresql_nulls_not_distinct=True,
         ),
         Index("ix_agent_call_days_org_day", "org_id", "day"),
+        Index("ix_agent_call_days_day", "day"),
     )
 
     id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
@@ -1486,6 +1489,63 @@ class AgentCallDay(PortalBase, table=True):
     errors: int = Field(default=0)
     internal_errors: int = Field(default=0)
     duration_ms: int = Field(default=0, sa_type=BigInteger)
+
+
+class StorageSample(PortalBase, table=True):
+    """One storage measurement of one project on one UTC day (plan 59, D14).
+
+    Rows are sparse by design: a reader takes the latest sample on or before
+    a day. Written by the storage sampler; a purge cascades them away.
+
+    Attributes
+    ----------
+    id : int
+        Serial ``BIGINT`` primary key.
+    org_id, project_id : int
+        The project; the row goes with it.
+    day : str
+        UTC date, ``YYYY-MM-DD``.
+    history_bytes : int
+        Everything under the project's data-dir directory.
+    git_bytes, codegraph_bytes, worktree_bytes : int
+        The clone's ``.git``, ``.codegraph`` and the rest.
+    runs_bytes : int
+        The project's run files under ``<data>/runs``.
+    measured_at : str
+        ISO timestamp of the measurement, written with ``_now()``.
+    """
+
+    __tablename__ = "storage_samples"
+    __table_args__ = (
+        CheckConstraint(
+            "day ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'", name="ck_storage_samples_day"
+        ),
+        ForeignKeyConstraint(
+            ["org_id"],
+            ["organizations.id"],
+            name="fk_storage_samples_org",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["org_id", "project_id"],
+            ["projects.org_id", "projects.id"],
+            name="fk_storage_samples_project",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("project_id", "day", name="uq_storage_samples_project_day"),
+        Index("ix_storage_samples_org_day", "org_id", "day"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True, sa_type=BigInteger)
+    org_id: int = Field()
+    project_id: int = Field()
+    day: str = Field(sa_type=Text)
+    history_bytes: int = Field(sa_type=BigInteger)
+    git_bytes: int = Field(sa_type=BigInteger)
+    codegraph_bytes: int = Field(sa_type=BigInteger)
+    worktree_bytes: int = Field(sa_type=BigInteger)
+    runs_bytes: int = Field(sa_type=BigInteger)
+    measured_at: str = Field(sa_type=Text)
 
 
 class Budget(PortalBase, table=True):

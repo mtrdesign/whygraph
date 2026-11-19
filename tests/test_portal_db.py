@@ -93,6 +93,7 @@ PORTAL_TABLES = {
     "price_overrides",
     "agent_call_days",
     "reader_grants",
+    "storage_samples",
 }
 
 
@@ -250,7 +251,8 @@ TOOL_OUTCOME = "b5e1a7d93c42"
 UPDATE_CHECK = "496953df26b4"
 ADMIN_SESSION = "df854cdd4f03"
 ADMIN_ORGS = "7a2e5c9d1b48"
-HEAD = ADMIN_ORGS
+ADMIN_METRICS = "3c8f1b6d4e92"
+HEAD = ADMIN_METRICS
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001
@@ -941,6 +943,7 @@ def test_usage_upgrade_creates_the_tables_and_constraints(
     insp = inspect(engine)
     assert set(USAGE_TABLES) <= set(insp.get_table_names())
     assert {i["name"] for i in insp.get_indexes("usage_events")} == {
+        "ix_usage_events_time",
         "ix_usage_events_org_time",
         "ix_usage_events_org_user_time",
         "ix_usage_events_org_project_time",

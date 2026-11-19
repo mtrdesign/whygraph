@@ -324,6 +324,17 @@ class BudgetBook:
         with self._lock:
             return self._orgs.get(org_id)
 
+    def org_ids(self) -> list[int]:
+        """The ids of every org that has a budget (the admin Dashboard).
+
+        Returns
+        -------
+        list[int]
+            In ascending order.
+        """
+        with self._lock:
+            return sorted(self._orgs)
+
     # -- the hard stop ---------------------------------------------------
 
     def covering(

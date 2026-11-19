@@ -286,7 +286,7 @@ def validate_chart(
 
     if stacked:
         # `series_index` is set: rule 8 refused above if `series` was missing.
-        stack = _build_stack(
+        stack = build_stack(
             rows=rows,
             x_index=x_index,
             y_index=y_index,
@@ -325,7 +325,7 @@ def validate_chart(
     return result
 
 
-def _build_stack(
+def build_stack(
     *,
     rows: list[list],
     x_index: int,
@@ -339,7 +339,17 @@ def _build_stack(
     this repository the canonical stacked query returns 14 rows for a 4x5 grid.
     Leaving those cells out would shift later segments down and silently mislabel
     them, so the grid is filled here, **server-side**: one pivot implementation
-    means the chart and the table view cannot disagree.
+    means the chart and the table view cannot disagree. The admin Dashboard's
+    stacked series use it too (plan 59 section 4.12).
+
+    Parameters
+    ----------
+    rows : list of list
+        The long-format rows, one per ``(x, series)`` pair.
+    x_index, y_index, series_index : int
+        The columns of the x value, the plotted value and the series.
+    series_name : object
+        The series column's name (echoed as ``series``).
 
     Returns
     -------
@@ -409,5 +419,6 @@ __all__ = [
     "MIN_ROWS_BY_KIND",
     "STACKED_KINDS",
     "ChartNotAllowed",
+    "build_stack",
     "validate_chart",
 ]

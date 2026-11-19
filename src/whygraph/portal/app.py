@@ -115,6 +115,7 @@ from . import (
 )
 from . import db as portal_db
 from .access_routes import access_router
+from .admin_stats import admin_stats_router
 from .agent_hook_routes import agent_hooks_router
 from .audit import clear_writer, set_writer
 from .auth_routes import auth_router
@@ -319,6 +320,7 @@ def create_portal_app(
 
     app.include_router(public_router)
     app.include_router(auth_router)  # production-only; local mode answers 404
+    app.include_router(admin_stats_router)  # production-only: the Dashboard's stats
     app.include_router(members_router)  # production-only, org-scoped
     app.include_router(access_router)  # production-only, project-scoped
     app.include_router(org_router)  # production-only: settings, audit, DELETE /api/org

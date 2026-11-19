@@ -217,6 +217,9 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/projects/{org}/{slug}/storage", "POST"),
         ("/api/admin/projects/{org}/{slug}/restore", "POST"),
         ("/api/admin/projects/{org}/{slug}/purge", "POST"),
+        ("/api/admin/stats/overview", "GET"),
+        ("/api/admin/stats/series", "GET"),
+        ("/api/admin/stats/top", "GET"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),

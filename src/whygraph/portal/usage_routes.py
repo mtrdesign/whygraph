@@ -63,7 +63,7 @@ from .deps import (
     project_access,
     require_production,
 )
-from .models import USAGE_SOURCES, USAGE_TASKS, Project, UsageEvent, User
+from .models import USAGE_SOURCES, USAGE_TASKS, Organization, Project, UsageEvent, User
 from .people import DELETED_USER
 from .usage import SYSTEM_LABEL, actor_label
 from .usage_store import COUNTED_COST_SOURCES, current_month
@@ -99,6 +99,11 @@ GROUPS: tuple[str, ...] = (
     "day",
 )
 """The ``group`` values of ``/api/usage`` and ``/api/usage.csv``."""
+
+ADMIN_GROUPS: tuple[str, ...] = (*GROUPS, "org")
+"""The ``group`` values the admin stats routes may aggregate by (plan 59
+section 4.12). ``org`` is admin-only: the org-facing routes check
+:data:`GROUPS`, so ``/api/usage?group=org`` stays ``422 bad_group``."""
 
 SORTS: tuple[str, ...] = ("time", "cost")
 """The ``sort`` values of ``/api/usage/calls``."""
@@ -595,6 +600,8 @@ def _group_exprs(group: str) -> list[Any]:
         terms = [col(_E.source)]
     elif group == "model":
         terms = [_model_expr()]
+    elif group == "org":
+        terms = [col(_E.org_id)]
     elif group == "machine":
         terms = [
             col(_E.connection_id),
@@ -637,9 +644,15 @@ class _Lookups:
 
     projects: dict[int, str]
     users: dict[int, User]
+    orgs: dict[int, tuple[str, str]]
 
 
-def _lookups(db: Session, project_ids: set[int], user_ids: set[int]) -> _Lookups:
+def _lookups(
+    db: Session,
+    project_ids: set[int],
+    user_ids: set[int],
+    org_ids: set[int] | None = None,
+) -> _Lookups:
     projects = (
         {
             p.id: p.name
@@ -655,7 +668,19 @@ def _lookups(db: Session, project_ids: set[int], user_ids: set[int]) -> _Lookups
     )
     for user in users.values():
         db.expunge(user)
-    return _Lookups(projects=projects, users=users)  # type: ignore[arg-type]
+    orgs = (
+        {
+            org_id: (slug, name)
+            for org_id, slug, name in db.exec(
+                select(Organization.id, Organization.slug, Organization.name).where(
+                    col(Organization.id).in_(org_ids)
+                )
+            )
+        }
+        if org_ids
+        else {}
+    )
+    return _Lookups(projects=projects, users=users, orgs=orgs)  # type: ignore[arg-type]
 
 
 def _key_label(
@@ -685,6 +710,9 @@ def _key_label(
         if orphan is None:
             return None, PORTAL_LABEL
         return None, orphan or UNKNOWN_MACHINE_LABEL
+    if group == "org":
+        (org_id,) = keys
+        return lookups.orgs.get(org_id) or (str(org_id), str(org_id))
     (value,) = keys
     return value, value
 
@@ -706,7 +734,8 @@ def _group_rows(
     project_ids = {r.g0 for r in rows if group == "project" and r.g0 is not None}
     project_ids |= {t[3] for t in tops.values() if isinstance(t[3], int)}
     user_ids = {r.g0 for r in rows if group == "member" and r.g0 is not None}
-    lookups = _lookups(db, project_ids, user_ids)
+    org_ids = {r.g0 for r in rows if group == "org" and r.g0 is not None}
+    lookups = _lookups(db, project_ids, user_ids, org_ids)
     out: list[dict[str, Any]] = []
     for row in rows:
         keys = _keys(row, width)

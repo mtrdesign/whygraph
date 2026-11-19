@@ -422,6 +422,20 @@ class SpendBook:
                 return self._user.get((org_id, user_id), _ZERO)
             return self._org.get(org_id, _ZERO)
 
+    def total(self) -> Decimal:
+        """Month-to-date spend of every org together (the admin Dashboard).
+
+        Returns
+        -------
+        Decimal
+            The sum over all orgs; ``0`` when the book holds a month that
+            is not the current UTC month.
+        """
+        with self._lock:
+            if self._month != current_month(self._clock()):
+                return _ZERO
+            return sum(self._org.values(), _ZERO)
+
     def spent_by_user(self, org_id: int) -> dict[int, Decimal]:
         """Month-to-date spend of every member of an org who spent this month.
 

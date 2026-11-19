@@ -2,7 +2,7 @@ import { render } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { vi } from "vitest";
-import { setAdminSessionSeen, setBaseUrl } from "../api";
+import { setAdminSessionSeen, setBaseUrl, type AdminInstanceSettings } from "../api";
 import { hardNavigate } from "../lib/navigation";
 import { createAppRouter } from "../router";
 import { useUi } from "../store";
@@ -26,6 +26,41 @@ export const ME = {
   has_password: false,
   session: { created_at: "2026-11-18T08:00:00Z", expires_at: "2026-11-18T16:00:00Z" },
   reader_grants: [],
+};
+
+/** `GET /api/admin/config`: the defaults, a clean address check and an up-to-date instance. */
+export const CONFIG = {
+  settings: {
+    signup_policy: "open",
+    org_creation: "everyone",
+    max_orgs_per_user: null,
+    max_projects_per_org: null,
+    banner_text: null,
+    banner_level: "info",
+    updated_at: null,
+    updated_by: null,
+  } as AdminInstanceSettings,
+  instance: {
+    base_url: BASE,
+    base_check: [] as string[] | null,
+    version: "2.6.0",
+    update: {
+      enabled: true,
+      current: "2.6.0",
+      latest: "2.6.0",
+      available: false,
+      checked_at: "2026-11-18T08:00:00Z",
+      error: null,
+      source: "default",
+      notes_url: null,
+      manual_steps: false,
+      upgrading_url: "https://mtrdesign.github.io/whygraph/deploy/production/#upgrading",
+    },
+    github_app: { slug: "whygraph-app", client_id: "Iv1.app" },
+    oauth_app: { client_id: "Iv1.oauth" },
+    data_disk: { total: 107374182400, free: 53687091200 },
+    postgres_bytes: 1288490189,
+  },
 };
 
 export const fake: {
@@ -114,19 +149,7 @@ export function signedInAdmin() {
   fake.routes["/api/admin/orgs"] = () => json(ORGS);
   fake.routes["/api/admin/orgs/acme"] = () => json(ORG_DETAIL);
   fake.routes["/api/admin/users/u2"] = () => json(USER_DETAIL);
-  fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: [] });
-  fake.routes["/api/admin/update"] = () =>
-    json({
-      enabled: true,
-      current: "2.6.0",
-      latest: "2.6.0",
-      available: false,
-      checked_at: "2026-11-18T08:00:00Z",
-      error: null,
-      source: "default",
-      notes_url: null,
-      manual_steps: false,
-    });
+  fake.routes["/api/admin/config"] = () => json(CONFIG);
   fake.routes["/api/admin/audit"] = () => json({ events: [], next: null });
   fake.routes["/api/admin/projects"] = () => json({ projects: PROJECTS });
   fake.routes["/api/admin/projects/acme/api"] = () => json(PROJECT_DETAIL);

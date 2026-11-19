@@ -1654,9 +1654,6 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/connect/authorize", "POST"): "user.self",
     ("/api/connect/tokens", "GET"): "user.self",
     ("/api/connect/tokens/{uid}", "DELETE"): "user.self",
-    # Production's admin page: instance_access()
-    ("/api/admin/settings", "GET"): "instance.admin",
-    ("/api/admin/update", "GET"): "instance.admin",
     # Platform configuration (plan 59 section 4.13)
     ("/api/admin/config", "GET"): "instance.admin",
     ("/api/admin/config", "PUT"): "instance.admin",

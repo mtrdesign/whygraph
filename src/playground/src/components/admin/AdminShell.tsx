@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { adminApi, type AdminMe } from "../../api";
 import { useDocumentTitle } from "../../lib/useDocumentTitle";
 import { useUi } from "../../store";
+import { AnnouncementBanner } from "../shell/AnnouncementBanner";
 import { LiveRegion } from "../shell/LiveRegion";
 import {
   Breadcrumb,
@@ -116,7 +117,7 @@ function skipToMain(event: MouseEvent<HTMLAnchorElement>) {
 /**
  * Sidebar + header + content for the admin app, mirroring `AppShell`: a skip
  * link, the desktop sidebar, the phone sheet, `<main id="main">` and the live
- * region `RouteFocus` needs. It mounts no `BannerStack` (org banners).
+ * region `RouteFocus` needs. It mounts no `BannerStack` (org banners), only the platform announcement.
  */
 export function AdminShell({ me, children }: { me: AdminMe; children: ReactNode }) {
   const navOpen = useUi((s) => s.navOpen);
@@ -144,6 +145,7 @@ export function AdminShell({ me, children }: { me: AdminMe; children: ReactNode 
         </SheetContent>
       </Sheet>
       <div className="flex min-w-0 flex-1 flex-col">
+        <AnnouncementBanner />
         <AdminHeader />
         <main id="main" tabIndex={-1} className="flex min-h-0 flex-1 flex-col overflow-auto outline-none">
           {children}

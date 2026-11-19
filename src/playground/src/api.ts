@@ -322,7 +322,7 @@ export interface PortalUser {
   has_password?: boolean;
 }
 
-// The update-notice block (local `state.update`, `PUT /portal/update-check`, `GET /admin/update`).
+// The update-notice block (local `state.update`, `PUT /portal/update-check`, `GET /admin/config`).
 export interface UpdateInfo {
   enabled: boolean | null;
   source: "do_not_track" | "env" | "setting" | "default" | null;
@@ -1423,10 +1423,46 @@ export interface AdminOrgDetail {
   rows: { usage_events: number; audit_events: number; agent_call_days: number };
 }
 
-export interface AdminSettings {
-  base_url: string;
-  // The base-URL self-check's warnings; `null` until it has run, `[]` when clean.
-  base_check: string[] | null;
+export type SignupPolicy = "open" | "invite_only" | "closed";
+
+// `settings` of `GET /api/admin/config` (plan 59, section 4.13); `updated_by` is a uid.
+export interface AdminInstanceSettings {
+  signup_policy: SignupPolicy;
+  org_creation: "everyone" | "admins";
+  max_orgs_per_user: number | null;
+  max_projects_per_org: number | null;
+  banner_text: string | null;
+  banner_level: "info" | "warning";
+  updated_at: string | null;
+  updated_by: string | null;
+}
+
+export interface AdminConfig {
+  settings: AdminInstanceSettings;
+  instance: {
+    base_url: string;
+    // The base-URL self-check's warnings; `null` until it has run, `[]` when clean.
+    base_check: string[] | null;
+    version: string | null;
+    update: UpdateInfo;
+    github_app: { slug: string; client_id: string } | null;
+    oauth_app: { client_id: string } | null;
+    data_disk: { total: number; free: number } | null;
+    postgres_bytes: number | null;
+  };
+}
+
+// A partial update: only the keys a section owns; `null` clears a quota or the banner.
+export type AdminConfigChanges = Partial<Omit<AdminInstanceSettings, "updated_at" | "updated_by">>;
+
+export interface AllowlistEntry {
+  id: number;
+  github_login: string;
+  note: string | null;
+  created_at: string;
+  // A uid.
+  created_by: string | null;
+  used_at: string | null;
 }
 
 export const authApi = {
@@ -1822,8 +1858,13 @@ export const adminApi = {
   logout: () => send<Redirect>("POST", "/admin/me/logout"),
   changePassword: (body: { current: string; new: string }) =>
     send<{ changed: boolean }>("POST", "/admin/me/password", body),
-  settings: () => get<AdminSettings>("/admin/settings"),
-  update: () => get<UpdateInfo>("/admin/update"),
+  config: () => get<AdminConfig>("/admin/config"),
+  saveConfig: (body: AdminConfigChanges) => send<AdminInstanceSettings>("PUT", "/admin/config", body),
+  allowlist: () => get<AllowlistEntry[]>("/admin/config/signup-allowlist"),
+  addToAllowlist: (body: { github_login: string; note?: string }) =>
+    send<AllowlistEntry & { added: boolean }>("POST", "/admin/config/signup-allowlist", body),
+  removeFromAllowlist: (id: number) =>
+    send<{ removed: boolean }>("DELETE", `/admin/config/signup-allowlist/${id}`),
   orgs: () => get<AdminOrg[]>("/admin/orgs"),
   org: (slug: string) => get<AdminOrgDetail>(`/admin/orgs/${encodeURIComponent(slug)}`),
   createOrg: (body: { slug: string; name: string; owner_uid: string }) =>

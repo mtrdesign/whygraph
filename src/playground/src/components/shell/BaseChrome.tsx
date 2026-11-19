@@ -14,6 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
+import { AnnouncementBanner } from "./AnnouncementBanner";
 import { LiveRegion } from "./LiveRegion";
 import { ACCOUNT_ORGS_KEY } from "./OrgSwitcher";
 
@@ -64,6 +65,7 @@ export function BaseChrome({ children, title }: { children: ReactNode; title?: s
   if (!user) {
     return (
       <>
+        <AnnouncementBanner />
         {main}
         <LiveRegion />
       </>
@@ -71,6 +73,7 @@ export function BaseChrome({ children, title }: { children: ReactNode; title?: s
   }
   return (
     <InBaseChrome.Provider value>
+      <AnnouncementBanner />
       <header className="border-b border-border">
         <nav aria-label="Account" className="flex items-center gap-1 px-4 py-2 text-sm sm:gap-2 sm:px-6">
           <Link

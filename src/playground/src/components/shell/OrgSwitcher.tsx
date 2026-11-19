@@ -114,7 +114,9 @@ function OrgMenu({ state }: { state: PortalState | undefined }) {
         <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs?stay=1${from}`)}>
           All organizations
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs/new`)}>Create organization</DropdownMenuItem>
+        {state?.can_create_org !== false && (
+          <DropdownMenuItem onClick={() => void hardNavigate(`${base}/orgs/new`)}>Create organization</DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

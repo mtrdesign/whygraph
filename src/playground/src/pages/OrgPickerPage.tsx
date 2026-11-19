@@ -8,7 +8,7 @@ import { ErrorState } from "../components/state/ErrorState";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
-import { usePortalState } from "../lib/identity";
+import { useCanCreateOrg, usePortalState } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 
 /**
@@ -21,6 +21,7 @@ import { hardNavigate } from "../lib/navigation";
 export function OrgPickerPage() {
   const { next, stay } = useSearch({ strict: false }) as { next?: string; stay?: boolean };
   const login = usePortalState().data?.user?.github_login;
+  const canCreate = useCanCreateOrg();
   const orgs = useQuery({ queryKey: ACCOUNT_ORGS_KEY, queryFn: accountApi.orgs, staleTime: 0 });
   const list = orgs.data ?? [];
   const handOff = orgs.isSuccess && list.length === 1 && !next && !stay;
@@ -33,9 +34,13 @@ export function OrgPickerPage() {
     return (
       <AuthLayout
         title="You're not in an organization yet"
-        description="Create one for your team, or ask to join an existing one."
+        description={
+          canCreate
+            ? "Create one for your team, or ask to join an existing one."
+            : "Ask an organization owner to add you."
+        }
       >
-        <Button render={<Link to="/orgs/new" />}>Create organization</Button>
+        {canCreate && <Button render={<Link to="/orgs/new" />}>Create organization</Button>}
         <p className="text-sm text-muted-foreground" data-testid="join-hint">
           Joining a team? Ask an owner to add{" "}
           {login ? (
@@ -56,9 +61,11 @@ export function OrgPickerPage() {
       title="Your organizations"
       description="Pick an organization to open."
       footer={
-        <Link to="/orgs/new" className="text-primary-text hover:underline">
-          Create organization
-        </Link>
+        canCreate ? (
+          <Link to="/orgs/new" className="text-primary-text hover:underline">
+            Create organization
+          </Link>
+        ) : undefined
       }
     >
       {(orgs.isLoading || handOff) && <Skeleton className="h-16 rounded-lg" />}

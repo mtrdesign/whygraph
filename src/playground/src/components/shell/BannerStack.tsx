@@ -5,6 +5,7 @@ import { projectKey, type ProjectSummary } from "../../api";
 import { WelcomeBanner } from "../onboarding/WelcomeBanner";
 import { BudgetBanner, ProjectStopBanner } from "./BudgetBanner";
 import { ReaderBanner } from "./ReaderBanner";
+import { AnnouncementBanner } from "./AnnouncementBanner";
 import { SuspendedBanner } from "./SuspendedBanner";
 import { UpdateBanner } from "./UpdateBanner";
 
@@ -18,7 +19,7 @@ function useCachedProject(slug: string | undefined): ProjectSummary | undefined 
 }
 
 /**
- * The one banner slot above every page (USE-1), in a fixed order: Suspended, Welcome, Reader,
+ * The one banner slot above every page (USE-1), in a fixed order: Announcement, Suspended, Welcome, Reader,
  * Budget, Update. On a project page the Budget group also carries that project's hard-stop
  * notice, except in Chat, which says it in place of its composer (USE-3).
  */
@@ -30,6 +31,7 @@ export function BannerStack({ slug }: { slug?: string }) {
   const stopped = project?.llm_block === "budget_exceeded";
   return (
     <>
+      <AnnouncementBanner />
       <SuspendedBanner />
       <WelcomeBanner />
       <ReaderBanner />

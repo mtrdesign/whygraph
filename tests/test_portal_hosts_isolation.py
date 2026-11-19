@@ -177,8 +177,6 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/orgs", "POST"),
         ("/api/orgs/slug-check", "GET"),  # M2f-3 section 4.12
         ("/api/github/app/callback", "POST"),
-        ("/api/admin/settings", "GET"),
-        ("/api/admin/update", "GET"),
         ("/api/admin/config", "GET"),
         ("/api/admin/config", "PUT"),
         ("/api/admin/config/signup-allowlist", "GET"),

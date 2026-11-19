@@ -3,21 +3,19 @@ import {
   FolderGit2Icon,
   LayoutGridIcon,
   ScrollTextIcon,
+  SlidersHorizontalIcon,
   UsersIcon,
 } from "lucide-react";
 import type { NavItem } from "../shell/Sidebar";
 
-/**
- * The admin nav (plan 59, §4.14). A module that does not exist in this release
- * (Configuration) is left out here, and so out of the palette too; its
- * route renders "Not available yet" until the phase that builds it.
- */
+/** The admin nav (plan 59, §4.14); the palette's "Go to" group reads it too. */
 export const ADMIN_NAV: NavItem[] = [
   { label: "Dashboard", icon: LayoutDashboardIcon, to: "/admin", exact: true },
   { label: "Organizations", icon: LayoutGridIcon, to: "/admin/orgs" },
   { label: "Projects", icon: FolderGit2Icon, to: "/admin/projects" },
   { label: "Users", icon: UsersIcon, to: "/admin/users" },
   { label: "Audit", icon: ScrollTextIcon, to: "/admin/audit" },
+  { label: "Configuration", icon: SlidersHorizontalIcon, to: "/admin/config" },
 ];
 
 /** One crumb of the admin header: `to` is absent on the last one. */

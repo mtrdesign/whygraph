@@ -66,7 +66,7 @@ import { AdminOrgPage } from "./pages/AdminOrgPage";
 import { AdminOrgsPage } from "./pages/AdminOrgsPage";
 import { AdminProjectPage } from "./pages/AdminProjectPage";
 import { AdminProjectsPage } from "./pages/AdminProjectsPage";
-import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
+import { AdminConfigPage } from "./pages/AdminConfigPage";
 import { AdminUserPage } from "./pages/AdminUserPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { BootstrapPage } from "./pages/BootstrapPage";
@@ -915,7 +915,7 @@ const adminAuditRoute = createRoute({
 const adminConfigRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "config",
-  component: () => <AdminPlaceholderPage heading="Platform configuration" />,
+  component: AdminConfigPage,
 });
 const adminAccountRoute = createRoute({ getParentRoute: () => adminLayout, path: "account", component: AdminAccountPage });
 // Any other address under /admin stays inside the admin app, with a way back into it.

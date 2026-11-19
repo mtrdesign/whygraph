@@ -54,17 +54,17 @@ there is no recovery path for a locked-out one in this release.
 
 ## The modules
 
-The nav on the left has five modules in this release. More arrive in later releases and appear in the
-nav only when they exist. Press `Cmd-K` (or `Ctrl-K`), or use **Search**, to jump to a page, a user
+The nav on the left has six modules. Press `Cmd-K` (or `Ctrl-K`), or use **Search**, to jump to a page, a user
 or an organization; a deleted one is marked **Deleted**.
 
 | Module | What it shows |
 |---|---|
-| **Dashboard** | What needs attention, seven figures and three charts for a date range, then the settings check (the base URL and the DNS records the self-check found missing) and the Updates card. See [Dashboard](#dashboard). |
+| **Dashboard** | What needs attention, seven figures and three charts for a date range. See [Dashboard](#dashboard). |
 | **Organizations** | Every organization, with its detail page and **Create organization**. See [Organizations](#organizations). |
 | **Projects** | Every project of every organization, with its detail page. See [Projects](#projects). |
 | **Users** | Every account, with its detail page. See [Users](#users). |
 | **Audit** | The [security events](production.md#the-security-event-log) of every organization and the ones that belong to none. See [Audit](#audit). |
+| **Configuration** | Who can sign up, who can create organizations, limits, the announcement banner and the sign-up allowlist, plus the instance's address, version and storage. See [Configuration](#configuration). |
 
 The text on these pages is always shown as plain text, never rendered as markup, because the admin
 session shares its origin with pages that show user-supplied names.
@@ -80,7 +80,7 @@ on the tiles, and is kept in the address (`?from=&to=`).
 
 **Needs attention** lists what is broken or waits for an administrator, one line each, with a link
 to the item: a scan that failed in the last 24 hours, a project that lost its GitHub access, an
-organization, project or member that hit a hard-stopped budget, a problem the address check found, a
+organization, project or member that hit a hard-stopped budget, a problem the address check found (it links to [Configuration](#configuration)), a
 newer WhyGraph release, a password account that owns organizations or cannot sign in, a suspended
 organization, and a deleted organization or project that still holds data. With nothing to report it
 says "Nothing needs your attention."
@@ -250,6 +250,42 @@ it, then erase again. If recent events are still being written, wait a minute an
 !!! tip "Keep a break-glass account"
     Use a password account with an email address that is not published anywhere else as your break-glass
     way in, and do not use it for anything else.
+
+### Configuration
+
+**Configuration** (title "Platform configuration") sets the policy for the whole platform. Each form has
+its own **Save** and **Discard**, sends only the settings it holds, and takes effect at once without a
+restart; the page says when it was last changed and by whom. Every change is written to the
+[event log](production.md#the-security-event-log) (`instance_settings_changed`, with each setting's old
+and new value). Nothing here is enforced in local mode.
+
+| Section | What it sets |
+|---|---|
+| **Sign-up** | **Who can sign up**: anyone with a GitHub account, invited people and the allowlist, or nobody new. See [Who can sign up](production.md#sign-up). |
+| **Organizations** | **Who can create organizations**: everyone, or platform administrators only. The "Create organization" buttons disappear for everyone else, and the page itself says only administrators can create one. |
+| **Limits** | **Organizations one person may own** and **Projects per organization**: a whole number of 1 or more, or empty for no limit. A person at the limit gets "You already own ... organizations", and an import at the project limit stops, and says so on every repository it did not start. Instance administrators are not exempt on the everyday "Create organization" page. |
+| **Announcement** | **Banner text** (up to 500 characters) and **Banner style** (Info or Warning), with a preview. |
+| **Sign-up allowlist** | Shown while the saved policy is **Invited people and the allowlist**. See below. |
+| **Instance** | Read-only: the address and its self-check, the version and update status, the GitHub App's slug and client id, the OAuth App's client id, the free space on the data volume (the database is on its own volume) and the database size. No secret is ever shown. |
+
+#### Announcement
+
+!!! warning "The banner is public"
+    Everyone sees the text, **signed in or not**: it shows above the organization pages, on the sign-in
+    and organization pages of the base host, and in the admin panel and its sign-in. Do not put anything
+    in it that you would not post on the sign-in page. It cannot be closed by the viewer, and it is
+    always shown as plain text, never as markup. Empty the text to remove it.
+
+#### The sign-up allowlist
+
+Under **Invited people and the allowlist**, an entry lets one GitHub account sign up, **once**. Add a
+GitHub username and an optional note (up to 200 characters, for example "contractor, ACME"); the
+portal asks GitHub for the account and stores its numeric id, so renaming the account on GitHub changes
+nothing, and a login that someone else registers later is a different account and is refused. The
+entry shows when it was added and by whom, and **Used** once the account has signed up; a used entry
+admits nobody else. Adding someone who is already listed says so. **Remove** deletes an entry (the
+person can still be admitted by an organization's invitation). Erasing a user also deletes the entries
+for that GitHub account.
 
 ### Reset links
 

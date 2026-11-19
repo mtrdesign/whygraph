@@ -10,7 +10,8 @@ import { Button } from "../components/ui/button";
 import { DisabledReason } from "../components/state/DisabledReason";
 import { Input } from "../components/ui/input";
 import { authMessage } from "../lib/authErrors";
-import { baseHostOf, useFinishAuth, usePortalState } from "../lib/identity";
+import { baseHostOf, useCanCreateOrg, useFinishAuth, usePortalState } from "../lib/identity";
+import { EmptyState } from "../components/state/EmptyState";
 
 const SLUG_RULE = "1-40 lower-case letters, digits and dashes, starting and ending with a letter or digit.";
 
@@ -43,6 +44,7 @@ function useDebounced(value: string, ms: number): string {
 /** `<base>/orgs/new`: any signed-in user can create an organization and becomes its owner. */
 export function CreateOrgPage() {
   const state = usePortalState();
+  const canCreate = useCanCreateOrg();
   const host = baseHostOf(state.data?.base_url);
   const finish = useFinishAuth();
   const [name, setName] = useState("");
@@ -88,6 +90,25 @@ export function CreateOrgPage() {
     if (refused) return;
     create.mutate();
   };
+
+  // The page is still reachable by URL when the platform limits creation to administrators.
+  if (!canCreate) {
+    return (
+      <AuthLayout
+        title="Create an organization"
+        footer={
+          <Link to="/orgs" className="text-primary-text hover:underline">
+            Back to your organizations
+          </Link>
+        }
+      >
+        <EmptyState
+          title="You can't create organizations here"
+          description="Only platform administrators can create organizations. Ask an organization owner to invite you."
+        />
+      </AuthLayout>
+    );
+  }
 
   return (
     <AuthLayout

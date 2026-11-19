@@ -1694,15 +1694,6 @@ def post_org(
 # ---------------------------------------------------------------------------
 
 
-@auth_router.get("/api/admin/settings")
-def get_admin_settings(
-    request: Request, _: Principal = Depends(instance_access())
-) -> dict:
-    """The base URL and what its DNS self-check found (read-only)."""
-    state = portal_state(request)
-    return {"base_url": _base(state).origin, "base_check": state.base_check}
-
-
 def update_block_or_fallback(state: PortalState) -> dict:
     """The update-notice block; before the loop's first tick only ``current``."""
     block = updates.update_block(state)
@@ -1721,14 +1712,6 @@ def update_block_or_fallback(state: PortalState) -> dict:
         "checked_at": None,
         "error": None,
     }
-
-
-@auth_router.get("/api/admin/update")
-def get_admin_update(
-    request: Request, _: Principal = Depends(instance_access())
-) -> dict:
-    """The update-notice block; before the loop's first tick only ``current``."""
-    return update_block_or_fallback(portal_state(request))
 
 
 def _settings_answer(db: Session, values: instance_settings.InstanceSettings) -> dict:

@@ -11,6 +11,14 @@ export function usePortalState() {
 }
 
 /**
+ * Whether "Create organization" is offered (production: `can_create_org` of the portal state,
+ * false when the platform limits it to administrators). Absent (loading, local mode) is yes.
+ */
+export function useCanCreateOrg(): boolean {
+  return usePortalState().data?.can_create_org !== false;
+}
+
+/**
  * True for a platform administrator looking at an org they are not a member of. The
  * backend answers every non-GET with 403 for them; the UI hides the controls.
  */

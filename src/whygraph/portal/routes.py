@@ -1292,9 +1292,12 @@ def get_state(request: Request) -> dict:
     portal holds it) the body is just ``{"error": ...}``, so the UI can show
     the failure. In production the body also names ``host_kind``,
     ``base_url``, ``bootstrap_required`` and the user's ``email`` /
-    ``is_instance_admin``, and ``setup_complete`` means "an instance admin
-    exists"; local mode's body has none of them, and names ``hostname``
-    instead (the machine name the platform link page prefills, M2e).
+    ``is_instance_admin``, the platform's ``announcement`` (``{text,
+    level}`` or null), ``org_creation`` and whether the caller
+    ``can_create_org`` (plan 59 section 4.13), and ``setup_complete`` means
+    "an instance admin exists"; local mode's body has none of them, and
+    names ``hostname`` instead (the machine name the platform link page
+    prefills, M2e).
     """
     state = portal_state(request)
     if state.degraded:
@@ -1367,6 +1370,18 @@ def get_state(request: Request) -> dict:
             {"org_name": access.org_name, "role": access.role.value}
             if access is not None and access.welcome_pending
             else None
+        )
+        # Platform configuration (plan 59 section 4.13). The route is public,
+        # so the banner text is too; the quota is not part of can_create_org.
+        settings = state.instance_settings
+        body["announcement"] = (
+            {"text": settings.banner_text, "level": settings.banner_level}
+            if settings.banner_text
+            else None
+        )
+        body["org_creation"] = settings.org_creation
+        body["can_create_org"] = principal is not None and (
+            settings.org_creation == "everyone" or principal.is_instance_admin
         )
     return body
 
@@ -2237,6 +2252,31 @@ def _folder_names(folder: Path) -> set[str]:
         return set()
 
 
+def _check_project_quota(state: PortalState, session: Session, org_id: int) -> None:
+    """``409 project_quota_reached`` when the org has its live-project limit (plan 59 §4.13).
+
+    Called with the org row held ``FOR UPDATE``. Soft-deleted projects do
+    not count; lowering the limit removes nothing.
+    """
+    limit = state.instance_settings.max_projects_per_org
+    if limit is None:
+        return
+    current = session.exec(
+        select(func.count())
+        .select_from(Project)
+        .where(Project.org_id == org_id, col(Project.deleted_at).is_(None))
+    ).one()
+    if current >= limit:
+        raise ApiError(
+            409,
+            f"this organization has {current} projects, the most this platform "
+            f"allows ({limit})",
+            code="project_quota_reached",
+            limit=limit,
+            current=current,
+        )
+
+
 def _insert_import_row(
     state: PortalState,
     *,
@@ -2248,8 +2288,11 @@ def _insert_import_row(
 ) -> int:
     """Step 3 of the import: the row (not initialized) and the forge layer, one transaction.
 
-    The org row is locked ``FOR SHARE`` first, so an org deletion cannot
-    interleave. The slug re-attaches the repository's kept history
+    The org row is locked ``FOR UPDATE`` first, so an org deletion cannot
+    interleave and two imports into one org count its projects one after
+    the other: the platform's ``max_projects_per_org`` is enforced here,
+    not in the runner, so a Retry of an existing import is never blocked
+    (plan 59 section 4.13). The slug re-attaches the repository's kept history
     (``github_repo_id`` match, :func:`_history_slug`), else avoids every
     other identity's history directory; either way it avoids every name
     already present in ``repos/<org>/`` (a leftover folder never collides
@@ -2273,7 +2316,9 @@ def _insert_import_row(
         meanwhile; ``409 duplicate`` when a concurrent import of the
         repository won (``uq_projects_org_github_repo``), ``409
         project_deleted`` when the matching row is soft-deleted (D23);
-        ``409 busy`` when no slug held.
+        ``409 project_quota_reached`` (``limit``, ``current``) when the org
+        already has ``max_projects_per_org`` live projects; ``409 busy``
+        when no slug held.
     """
     web = require_github_app(state).config.web_url
     org_dir = state.data_dir / "repos" / access.org_slug
@@ -2283,6 +2328,8 @@ def _insert_import_row(
         reservation: Reservation | None = None
         try:
             with get_session() as session:
+                # FOR UPDATE (plan 59 section 4.13): it also serializes the
+                # org's imports, so the project quota below holds.
                 org = session.exec(
                     select(
                         Organization.id,
@@ -2290,7 +2337,7 @@ def _insert_import_row(
                         Organization.deleted_at,
                     )
                     .where(Organization.id == access.org_id)
-                    .with_for_update(read=True)
+                    .with_for_update()
                 ).first()
                 if org is None or org[2] is not None:
                     # Gone, or soft-deleted since current_org checked.
@@ -2298,6 +2345,7 @@ def _insert_import_row(
                 if org[1] is not None:
                     # Suspended since current_org checked (plan 59 section 4.5).
                     raise org_suspended_error()
+                _check_project_quota(state, session, access.org_id)
                 slug = _history_slug(
                     session,
                     org_id=access.org_id,

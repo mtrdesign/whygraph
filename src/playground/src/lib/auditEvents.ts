@@ -166,6 +166,8 @@ const REASONS: Record<string, string> = {
   not_admin: "Not a platform administrator",
   deleted: "The account was deleted",
   signout: "Signed out of the portal",
+  // Sign-up policy (closed, or invite-only without an invitation or allowlist entry)
+  signups_closed: "Sign-up is closed",
   // Reader grants
   demoted: "No longer a platform administrator",
   // Deleting and restoring an account

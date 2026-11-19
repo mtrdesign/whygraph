@@ -366,6 +366,11 @@ export interface PortalState {
   hostname?: string;
   // Usage & cost (M2f-2): `null` before setup or without an org.
   usage?: StateUsage | null;
+  // Production only, platform configuration (plan 59 section 4.13). The route is public,
+  // so the announcement is too. `can_create_org` leaves the org quota out.
+  announcement?: { text: string; level: "info" | "warning" } | null;
+  org_creation?: "everyone" | "admins";
+  can_create_org?: boolean;
   error?: string;
 }
 

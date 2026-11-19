@@ -98,6 +98,7 @@ from .member_routes import (
     _locked_target,
     _member_row,
     normalize_login,
+    open_invitation,
     redeem_invitations,
 )
 from .models import (
@@ -461,6 +462,23 @@ def user_deleted_error() -> ApiError:
     )
 
 
+def _require_org_creation(state: PortalState, principal: Principal) -> None:
+    """``403 org_creation_restricted`` unless the caller may create an org (plan 59 §4.13).
+
+    Under ``org_creation = "admins"`` only an instance admin may; the flag
+    comes from the everyday session and decides this one action only.
+    """
+    if (
+        state.instance_settings.org_creation == "admins"
+        and not principal.is_instance_admin
+    ):
+        raise ApiError(
+            403,
+            "only platform administrators can create organizations here",
+            code="org_creation_restricted",
+        )
+
+
 def _erased_error() -> ApiError:
     return ApiError(409, "this account was erased", code="erased")
 
@@ -652,6 +670,7 @@ class Refused(enum.Enum):
 
     DISABLED = "disabled"
     DELETED = "deleted"
+    SIGNUPS_CLOSED = "signups_closed"
 
 
 def _github(state: PortalState) -> GitHubOAuth:
@@ -755,7 +774,9 @@ def post_github_callback(
     github_unavailable`` (network error, timeout, 5xx), ``403
     github_2fa_required`` (with ``fix_url``; no user row is written) and
     ``403 account_disabled`` and ``403 account_deleted`` (a soft-deleted
-    account; nothing is written). The ``whygraph_oauth`` cookie is cleared on
+    account; nothing is written), ``403 signups_closed`` (a new GitHub id
+    the platform's sign-up policy does not admit, plan 59 section 4.13;
+    nothing is written). The ``whygraph_oauth`` cookie is cleared on
     every one of these outcomes and on success. On success the account is
     created or refreshed by its GitHub id, any session the request carried
     ends, a new one starts, and ``redirect`` is the pending ``next`` or
@@ -875,7 +896,16 @@ def _github_callback(
         admin_tokens=session_cookies(
             request.headers.getlist("cookie"), name=admin_cookie_name(base)
         ),
+        policy=state.instance_settings.signup_policy,
     )
+    if signed_in is Refused.SIGNUPS_CLOSED:
+        refused("signups_closed", user.login)
+        raise ApiError(
+            403,
+            "sign-up is closed on this platform: it only admits new accounts "
+            "it expects",
+            code="signups_closed",
+        )
     if signed_in is Refused.DISABLED:
         refused("disabled", user.login)
         raise ApiError(403, "this account is disabled", code="account_disabled")
@@ -962,6 +992,40 @@ def _admin_github_sign_in(
     return {"redirect": safe_admin_redirect(pending.next, base)}
 
 
+def _signup_admits(db: Session, github_id: int, policy: str) -> tuple[bool, int | None]:
+    """Whether ``policy`` lets ``github_id`` sign in, and the admitting allowlist entry.
+
+    The first query is ``SELECT id FROM users WHERE github_id = ...``: an
+    existing row always passes, soft-deleted or not (the caller refuses a
+    deleted one with its own answer). With no row, ``closed`` refuses and
+    ``invite_only`` needs an open, unexpired invitation of an org that is
+    neither soft-deleted nor suspended (plan 59 D36), or else an unused
+    allowlist entry for the id (D31: the id, never the login).
+    """
+    if db.exec(select(User.id).where(User.github_id == github_id)).first() is not None:
+        return True, None
+    if policy != "invite_only":
+        return False, None
+    invited = db.exec(
+        select(Invitation.id)
+        .join(Organization, col(Organization.id) == col(Invitation.org_id))
+        .where(
+            *open_invitation(github_id, _iso(_now())),
+            col(Organization.deleted_at).is_(None),
+            col(Organization.suspended_at).is_(None),
+        )
+    ).first()
+    if invited is not None:
+        return True, None
+    entry = db.exec(
+        select(SignupAllowlist.id).where(
+            SignupAllowlist.github_id == github_id,
+            col(SignupAllowlist.used_at).is_(None),
+        )
+    ).first()
+    return entry is not None, entry
+
+
 def _sign_in_github_user(
     user: GitHubUser,
     *,
@@ -969,8 +1033,17 @@ def _sign_in_github_user(
     user_agent: str | None,
     replaces_user_id: int | None = None,
     admin_tokens: list[str] | None = None,
+    policy: str = "open",
 ) -> tuple[str, str, bool, list[str], list[Redeemed], bool] | Refused:
     """Upsert the account by GitHub id and start its session, in one transaction.
+
+    The sign-up policy is checked first (plan 59 section 4.13): an account
+    that exists for the GitHub id always passes (a soft-deleted one is then
+    refused below); a new id is refused under ``closed``, and under
+    ``invite_only`` unless an open invitation of a live, unsuspended org or
+    an unused sign-up allowlist entry names the id. A refusal rolls back
+    before anything is written. An admitting allowlist entry is marked used
+    in the same transaction, after the upsert.
 
     Any other row holding the incoming login (case-insensitively) has it
     released first (plan section 0.2 #7). ``INSERT ... ON CONFLICT
@@ -1005,18 +1078,29 @@ def _sign_in_github_user(
         ``users.id`` of ``replaces``.
     admin_tokens : list of str, optional
         Every value of the request's admin cookie.
+    policy : str, optional
+        The platform's ``signup_policy`` (``open``, ``invite_only`` or
+        ``closed``).
 
     Returns
     -------
     tuple or Refused
         ``(session token, uid, new_user, released uids, redeemed,
         clear_admin_cookie)``, or :class:`Refused` when the account is
-        disabled or soft-deleted (then nothing is written).
+        disabled or soft-deleted, or the policy does not admit a new
+        account (then nothing is written).
     """
     users = User.__table__
     for attempt in range(_UPSERT_ATTEMPTS):
         try:
             with get_session() as db:
+                allowlisted: int | None = None
+                if policy != "open":
+                    # The first statement, before the login release below.
+                    admitted, allowlisted = _signup_admits(db, user.id, policy)
+                    if not admitted:
+                        db.rollback()  # nothing was written; nothing is kept
+                        return Refused.SIGNUPS_CLOSED
                 released = list(
                     db.exec(
                         update(User)
@@ -1059,6 +1143,15 @@ def _sign_in_github_user(
                 if deleted_at is not None:
                     db.rollback()  # the same: a deleted account is not touched
                     return Refused.DELETED
+                if allowlisted is not None:
+                    db.exec(
+                        update(SignupAllowlist)
+                        .where(
+                            col(SignupAllowlist.id) == allowlisted,
+                            col(SignupAllowlist.used_at).is_(None),
+                        )
+                        .values(used_at=_iso(_now()))
+                    )
                 redeemed = redeem_invitations(db, github_id=user.id, user_id=user_id)
                 # Read before step 1 ends any of them, so the caller still
                 # learns that the cookie names another user's session.
@@ -1481,9 +1574,13 @@ def get_slug_check(
     Answers ``{slug, available, reason}`` with ``reason`` one of ``null``,
     ``"invalid"`` (the format), ``"reserved"`` or ``"taken"`` (a live org
     or a retired slug - one word, so a deletion is not disclosed). Base
-    host only; 60 checks a minute per user (``429 throttled``).
+    host only; 60 checks a minute per user (``429 throttled``). ``403
+    org_creation_restricted`` when only platform administrators may create
+    organizations and the caller is not one (plan 59 section 4.13).
     """
-    retry_after = portal_state(request).slug_check.hit(principal.user_id)
+    state = portal_state(request)
+    _require_org_creation(state, principal)
+    retry_after = state.slug_check.hit(principal.user_id)
     if retry_after is not None:
         raise ApiError(
             429,
@@ -1520,9 +1617,15 @@ def post_org(
     ``422 bad_slug`` (with the rule) for a malformed, reserved or ``xn--``
     style slug, ``409 slug_taken`` when it exists or a deleted org retired
     it (one answer, so a deletion is not disclosed), ``409 user_deleted``
-    when the caller's account was soft-deleted meanwhile.
+    when the caller's account was soft-deleted meanwhile. Plan 59 section
+    4.13: ``403 org_creation_restricted`` when only platform administrators
+    may create organizations and the caller is not one; ``409
+    org_quota_reached`` (with ``limit`` and ``current``) when the caller
+    already owns ``max_orgs_per_user`` live orgs (instance admins too, D43).
     """
-    base = _base(portal_state(request))
+    state = portal_state(request)
+    _require_org_creation(state, principal)
+    base = _base(state)
     slug = body.slug
     try:
         validate_org_slug(slug)
@@ -1535,15 +1638,39 @@ def post_org(
         409, f"the organization {slug!r} already exists", code="slug_taken"
     )
     with get_session() as db:
-        # The caller's own row, FOR SHARE and first (plan 59 section 4.3.1):
-        # it waits for a running soft delete of the caller, then refuses.
+        # The caller's own row, FOR UPDATE and first (plan 59 sections 4.3.1
+        # and 4.13): it waits for a running soft delete of the caller, then
+        # refuses, and serializes this user's creates so the quota count
+        # below holds. One lock only: a FOR SHARE read first and an upgrade
+        # here would deadlock two concurrent creates.
         caller = db.exec(
             select(User.id, User.deleted_at)
             .where(User.id == principal.user_id)
-            .with_for_update(read=True)
+            .with_for_update()
         ).first()
         if caller is not None and caller[1] is not None:
             raise user_deleted_error()
+        limit = state.instance_settings.max_orgs_per_user
+        if limit is not None:
+            owned = db.exec(
+                select(func.count())
+                .select_from(Membership)
+                .join(Organization, col(Organization.id) == col(Membership.org_id))
+                .where(
+                    Membership.user_id == principal.user_id,
+                    Membership.role == Role.OWNER.value,
+                    col(Organization.deleted_at).is_(None),
+                )
+            ).one()
+            if owned >= limit:
+                raise ApiError(
+                    409,
+                    f"you already own {owned} organizations, the most this "
+                    f"platform allows ({limit})",
+                    code="org_quota_reached",
+                    limit=limit,
+                    current=owned,
+                )
         if (
             db.exec(select(Organization.id).where(Organization.slug == slug)).first()
             is not None

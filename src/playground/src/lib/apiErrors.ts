@@ -102,6 +102,12 @@ function providerOf(err: ApiError): string | null {
   return PROVIDER_NAMES[raw] ?? raw;
 }
 
+/** A quota refusal's `{limit, current}` (plan 59 section 4.13), each `null` when missing. */
+function quota(err: ApiError): [number | null, number | null] {
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  return [num(err.extra.limit), num(err.extra.current)];
+}
+
 /** "Try again in N minutes." from the `Retry-After` the transport kept, else a few minutes. */
 function retryLine(err: ApiError): string {
   const seconds = typeof err.extra.retry_after === "number" ? err.extra.retry_after : null;
@@ -178,6 +184,14 @@ export const MESSAGES: Record<string, Resolver> = {
     title: "Account deleted",
     message: "This account was deleted. Ask a platform administrator to restore it.",
   },
+  signups_closed: (err) =>
+    err.status === 409
+      ? "Sign-up is closed on this platform, so only people who already have a WhyGraph account can be added."
+      : {
+          title: "Sign-up is closed",
+          message:
+            "This WhyGraph platform only admits new accounts it expects. Ask the person who asked you to join, or the platform's administrator, for access.",
+        },
   no_password: "This account signs in with GitHub, so it has no password.",
   login_required: { title: "Signed out", message: "Your session has ended. Sign in again." },
   admin_login_required: { title: "Signed out", message: "Your admin session has ended. Sign in again." },
@@ -241,6 +255,20 @@ export const MESSAGES: Record<string, Resolver> = {
         ? "Remove the control characters from the name."
         : "Enter an organization name.",
   confirm_slug: "Type the organization's slug exactly to confirm.",
+  org_creation_restricted:
+    "Only platform administrators can create organizations here. Ask an organization owner to add you.",
+  org_quota_reached: (err) => {
+    const [limit, current] = quota(err);
+    return limit === null || current === null
+      ? "You already own the most organizations this platform allows. Delete one first, or ask a platform administrator."
+      : `You already own ${current} organizations, the most this platform allows (${limit}). Delete one first, or ask a platform administrator.`;
+  },
+  project_quota_reached: (err) => {
+    const [limit, current] = quota(err);
+    return limit === null || current === null
+      ? "This organization has the most projects this platform allows. Remove one first, or ask a platform administrator to raise the limit."
+      : `This organization has ${current} projects, the most this platform allows (${limit}). Remove one first, or ask a platform administrator to raise the limit.`;
+  },
   self_transfer: "You already own this organization. Pick another member.",
   already_owner: "They are already an owner.",
 

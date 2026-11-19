@@ -693,7 +693,7 @@ plus these GitHub, member, project and organization events:
 | Event | When |
 |---|---|
 | `github_signin` | A GitHub sign-in succeeded (and whether the account is new). |
-| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required`, `disabled` or `deleted` (a deleted account). A refusal on the admin sign-in page also carries `surface` `admin`. |
+| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required`, `disabled`, `deleted` (a deleted account) or `signups_closed` (a new account the sign-up policy does not admit). A refusal on the admin sign-in page also carries `surface` `admin`. |
 | `admin_signin` | Someone signed in to [platform administration](administration.md) (with the `method`, `password` or `github`). |
 | `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin`, `disabled` or `deleted`. It writes nothing else: no account, no session. |
 | `admin_signout` | An admin session ended by sign-out, from the admin panel or (with `reason` `signout`) because the everyday session it was started beside signed out. |

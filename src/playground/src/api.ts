@@ -398,6 +398,10 @@ export interface PortalOrg {
   role: "owner" | "admin" | "member" | "reader" | (string & {});
   // What a member without a project grant gets on an unrestricted project (M2f-1).
   default_project_role?: "admin" | "contributor" | "viewer" | "none";
+  // Production: set while a platform administrator suspends the org (plan 59, D6).
+  suspended?: { at: string; reason: string } | null;
+  // Only on a reader: when the platform administrator's read-only grant ends (D59).
+  reader_until?: string;
 }
 
 // ---- port change (portal/port_change.py) ----------------------------------------
@@ -474,7 +478,7 @@ export interface ProjectSummary {
   link?: ProjectLink | null;
   // Why the caller cannot spend LLM tokens here (M2f-2): their role, or an exhausted
   // hard-stopped budget (`llm_block_scope` names it); the role wins when both apply.
-  llm_block?: "role" | "budget_exceeded" | null;
+  llm_block?: "role" | "budget_exceeded" | "org_suspended" | null;
   llm_block_scope?: BudgetScope | null;
   // This month's spend on the project: `project.usage` callers only.
   usage?: ProjectUsageBlock | null;
@@ -942,6 +946,8 @@ export interface DeleteProjectResult {
   token_revoked?: boolean;
   // Why the token was or was not revoked (M2f-3); `token_revoked` stays for older readers.
   token_revoke_result?: string;
+  // Production (plan 59): the removal only hid the project; an administrator can restore it.
+  soft?: boolean;
 }
 
 export interface ScanRunRow {
@@ -1271,6 +1277,52 @@ export interface AdminUser {
   disabled: boolean;
   created_at: string;
   org_count: number;
+  // Phase 2 (plan 59, §4.6).
+  owner_of: number;
+  session_last_seen_at: string | null;
+  deleted_at: string | null;
+  // The uid of the administrator who deleted the account.
+  deleted_by: string | null;
+  erased: boolean;
+}
+
+/** One membership of a user (a deleted user's is the snapshot). */
+export interface AdminMembership {
+  org: string;
+  name: string;
+  role: MemberRole;
+  owner: boolean;
+  // Present on a deleted user's snapshot: the org itself is deleted.
+  deleted?: boolean;
+}
+
+export interface AdminSession {
+  id: string;
+  kind: "user" | "admin";
+  created_at: string;
+  last_seen_at: string;
+  user_agent: string | null;
+}
+
+export interface AdminToken {
+  uid: string;
+  org: string;
+  project: string;
+  project_name: string | null;
+  client_name: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  revoked_reason: string | null;
+}
+
+/** `GET /api/admin/users/{uid}`. */
+export interface AdminUserDetail extends AdminUser {
+  memberships: AdminMembership[];
+  sessions: AdminSession[];
+  tokens: AdminToken[];
+  spend: { org: string; spent_usd: number }[];
+  events: AuditEventRow[];
 }
 
 export type MemberRole = "owner" | "admin" | "member";
@@ -1304,6 +1356,66 @@ export interface AdminOrg {
   url: string;
   member_count: number;
   created_at: string;
+  // Phase 2 (plan 59, §4.7).
+  project_count: number;
+  owners: string[];
+  suspended: { at: string; reason: string } | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  spend_mtd: number;
+  // Null until the storage sampler exists (Phase 3), and for an org with no sample.
+  storage_bytes: number | null;
+  last_activity_day: string | null;
+}
+
+/** One member row of an organization's detail. */
+export interface AdminOrgMember {
+  uid: string;
+  display_name: string;
+  github_login: string | null;
+  avatar_url?: string | null;
+  role: MemberRole;
+  joined_at: string;
+  has_password: boolean;
+  disabled: boolean;
+}
+
+export interface AdminOrgProject {
+  slug: string;
+  name: string;
+  source: string;
+  last_scan_at: string | null;
+  last_run_status: string | null;
+  access_lost_reason: string | null;
+  storage_bytes: number | null;
+  deleted_at: string | null;
+}
+
+export interface AdminOrgBudget {
+  scope: string;
+  monthly_usd: number;
+  hard_stop: boolean;
+  spent_usd: number;
+  project: string | null;
+  member: string | null;
+}
+
+/** `GET /api/admin/orgs/{slug}`. */
+export interface AdminOrgDetail {
+  slug: string;
+  name: string;
+  url: string;
+  created_at: string;
+  default_project_role: string;
+  suspended: { at: string; reason: string } | null;
+  deleted_at: string | null;
+  deleted_by: string | null;
+  members: AdminOrgMember[];
+  open_invitations: number;
+  projects: AdminOrgProject[];
+  budgets: AdminOrgBudget[];
+  spend_mtd: number;
+  rows: { usage_events: number; audit_events: number; agent_call_days: number };
 }
 
 export interface AdminSettings {
@@ -1521,6 +1633,8 @@ export interface GitHubRepo {
   default_branch: string;
   /** Already a project in this org. */
   imported: boolean;
+  /** Its project was removed (soft-deleted); an administrator can restore it. Check before `imported` (D47). */
+  deleted?: boolean;
 }
 
 /** Query of `GET /api/github/installations/{id}/repos`. */
@@ -1575,8 +1689,16 @@ export interface AdminMe {
   avatar_url: string | null;
   has_password: boolean;
   session: { created_at: string; expires_at: string };
-  // Live per-org reader grants (Phase 2, step 14).
-  reader_grants: unknown[];
+  // Live per-org reader grants, soonest first (plan 59, §4.4).
+  reader_grants: AdminReaderGrant[];
+}
+
+export interface AdminReaderGrant {
+  id: number;
+  org_slug: string;
+  org_name: string;
+  org_url: string;
+  expires_at: string;
 }
 
 export const adminApi = {
@@ -1587,7 +1709,73 @@ export const adminApi = {
   settings: () => get<AdminSettings>("/admin/settings"),
   update: () => get<UpdateInfo>("/admin/update"),
   orgs: () => get<AdminOrg[]>("/admin/orgs"),
+  org: (slug: string) => get<AdminOrgDetail>(`/admin/orgs/${encodeURIComponent(slug)}`),
+  createOrg: (body: { slug: string; name: string; owner_uid: string }) =>
+    send<{ slug: string; name: string; url: string }>("POST", "/admin/orgs", body),
+  renameOrg: (slug: string, name: string) =>
+    send<{ slug: string; name: string }>("PATCH", `/admin/orgs/${encodeURIComponent(slug)}`, { name }),
+  suspendOrg: (slug: string, reason: string) =>
+    send<unknown>("POST", `/admin/orgs/${encodeURIComponent(slug)}/suspend`, { reason }),
+  unsuspendOrg: (slug: string) => send<unknown>("POST", `/admin/orgs/${encodeURIComponent(slug)}/unsuspend`),
+  deleteOrg: (slug: string) =>
+    send<unknown>("DELETE", `/admin/orgs/${encodeURIComponent(slug)}`, { confirm_slug: slug }),
+  restoreOrg: (slug: string) => send<unknown>("POST", `/admin/orgs/${encodeURIComponent(slug)}/restore`),
+  purgeOrg: (slug: string) =>
+    send<unknown>("POST", `/admin/orgs/${encodeURIComponent(slug)}/purge`, { confirm_slug: slug }),
+  readerGrant: (slug: string) =>
+    send<{ id: number; org_url: string; expires_at: string }>(
+      "POST",
+      `/admin/orgs/${encodeURIComponent(slug)}/reader-grant`,
+    ),
+  revokeReaderGrant: (id: number) => sendEmpty("DELETE", `/admin/reader-grants/${id}`),
+  addOrgMember: (slug: string, body: { uid: string; role: MemberRole }) =>
+    send<AdminOrgMember>("POST", `/admin/orgs/${encodeURIComponent(slug)}/members`, body),
+  setOrgMemberRole: (slug: string, uid: string, role: MemberRole) =>
+    send<AdminOrgMember>(
+      "PATCH",
+      `/admin/orgs/${encodeURIComponent(slug)}/members/${encodeURIComponent(uid)}`,
+      { role },
+    ),
+  removeOrgMember: (slug: string, uid: string) =>
+    sendEmpty("DELETE", `/admin/orgs/${encodeURIComponent(slug)}/members/${encodeURIComponent(uid)}`),
+  deleteProject: (org: string, slug: string, confirm_name: string) =>
+    send<DeleteProjectResult>(
+      "DELETE",
+      `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}`,
+      { confirm_name },
+    ),
+  restoreProject: (org: string, slug: string) =>
+    send<unknown>("POST", `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/restore`),
+  purgeProject: (org: string, slug: string, confirm_name: string) =>
+    send<DeleteProjectResult>(
+      "POST",
+      `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/purge`,
+      { confirm_name },
+    ),
   users: () => get<AdminUser[]>("/admin/users"),
+  user: (uid: string) => get<AdminUserDetail>(`/admin/users/${encodeURIComponent(uid)}`),
+  deleteUser: (uid: string, confirm: string) =>
+    send<{ deleted: string; orgs: string[] }>("DELETE", `/admin/users/${encodeURIComponent(uid)}`, { confirm }),
+  restoreUser: (uid: string) =>
+    send<{ restored: { org: string; role: string; deleted?: boolean }[]; skipped: unknown[] }>(
+      "POST",
+      `/admin/users/${encodeURIComponent(uid)}/restore`,
+    ),
+  eraseUser: (uid: string, confirm: string) =>
+    send<{ erased: string }>("POST", `/admin/users/${encodeURIComponent(uid)}/erase`, { confirm }),
+  revokeSessions: (uid: string, kind?: "user" | "admin") =>
+    send<{ revoked: number }>(
+      "DELETE",
+      `/admin/users/${encodeURIComponent(uid)}/sessions`,
+      kind ? { kind } : undefined,
+    ),
+  revokeSession: (uid: string, id: string) =>
+    send<{ revoked: number }>(
+      "DELETE",
+      `/admin/users/${encodeURIComponent(uid)}/sessions/${encodeURIComponent(id)}`,
+    ),
+  revokeToken: (uid: string, tokenUid: string) =>
+    sendEmpty("DELETE", `/admin/users/${encodeURIComponent(uid)}/tokens/${encodeURIComponent(tokenUid)}`),
   setAdmin: (uid: string, is_instance_admin: boolean) =>
     send<unknown>("PATCH", `/admin/users/${encodeURIComponent(uid)}`, { is_instance_admin }),
   setDisabled: (uid: string, disabled: boolean) =>
@@ -1697,6 +1885,9 @@ export interface AuditEventRow {
 export interface AuditFilters {
   event?: string;
   actor?: string;
+  // The admin log only: an org slug, and `orgless` for events that belong to no org (§4.9).
+  org?: string;
+  scope?: "all" | "orgless";
   from?: string;
   to?: string;
   before?: number;
@@ -1714,6 +1905,12 @@ export const auditApi = {
     get<{ events: AuditEventRow[]; next: number | null }>(`/org/audit${auditQuery(f)}`),
   admin: (f: AuditFilters = {}) =>
     get<{ events: AuditEventRow[]; next: number | null }>(`/admin/audit${auditQuery(f)}`),
+  adminCsv: async (f: AuditFilters = {}): Promise<Blob> => {
+    const { before: _before, ...rest } = f;
+    const res = await request(`/api/admin/audit.csv${auditQuery(rest)}`, init("GET"));
+    if (!res.ok) throw await failure(res);
+    return res.blob();
+  },
   // A fetch (the `X-WhyGraph-Client` header is required, so a plain link would be refused).
   csv: async (f: AuditFilters = {}): Promise<Blob> => {
     const { before: _before, ...rest } = f;

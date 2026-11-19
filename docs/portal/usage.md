@@ -124,7 +124,7 @@ and the top budget is called the **Portal budget** (the **Organization budget** 
     organization's **Members** tab lists each person, with a drill-down page per person: cost over
     time, and by project, task and machine, with their most expensive calls. The **Members** page
     shows a "this month" figure per person, and a project's Access section shows what each person
-    spent on it. Instance admins reading an organization see the same, read-only.
+    spent on it. Platform administrators reading an organization through a grant see the same, read-only.
 
     **A member sees only their own usage**, on **My usage**: the **Usage & cost** item in the sidebar,
     and a summary of each organization on the **Account** page. The server forces the view to the
@@ -263,9 +263,10 @@ Neither tool records a usage row: proposing and reading notes never call a model
 ## Retention and deletion
 
 Calls are kept for **400 days** and then deleted, like the audit log. Budget crossings are kept for
-13 months. **Deleting an organization removes its usage history, budgets and price overrides at
-once**, regardless of retention. Removing a project or a member does not: their rows stay,
-labelled with the name they had, until retention deletes them.
+13 months. **Deleting an organization permanently removes its usage history, budgets and price
+overrides at once**, regardless of retention (an owner's delete only hides the organization, and a
+platform administrator can restore it with its usage). Removing a project or a member does not: their
+rows stay, labelled with the name they had, until retention deletes them.
 
 ## Under the hood: the API
 

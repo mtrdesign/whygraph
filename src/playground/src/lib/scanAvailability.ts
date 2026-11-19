@@ -48,13 +48,21 @@ export function scanAvailability(
   else if (linkStatus === "revoked") blocked = no("Reconnect the project to its platform first");
   else if (linkStatus === "removed") blocked = no("The project was removed on the platform");
 
-  const role = can(p, "project.scan") ? OK : no("Needs the project Contributor role");
+  // Suspension drops `project.scan`, so it is named before the role check: an owner's disabled
+  // Rescan must not read "Needs the project Contributor role" (plan 59, §4.5).
+  const suspended = p.llm_block === "org_suspended";
+  const role = suspended
+    ? no("The organization is suspended")
+    : can(p, "project.scan")
+      ? OK
+      : no("Needs the project Contributor role");
   const quick = blocked ?? role;
 
   let full: Avail;
   if (retryImport) full = no("Finish the import first");
   else if (blocked) full = blocked;
   else if (linked) full = no("Descriptions run on the platform");
+  else if (suspended) full = no("The organization is suspended");
   else if (!can(p, "project.scan_full") || p.llm_block === "role") full = no("Needs the project Admin role");
   else if (p.llm_block === "budget_exceeded") full = no("Monthly budget reached");
   else if (analyzeMissingKey) full = no(`No ${providerLabel(analyzeMissingKey)} key`);

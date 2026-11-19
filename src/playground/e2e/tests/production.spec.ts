@@ -20,7 +20,7 @@ import {
 // Who is who (plan 59, D4): Ada is the bootstrap password account. It is for
 // administration only: she signs in at /admin/login and promotes the GitHub user
 // eve to administrator. Eve creates and owns acme, does its member management and,
-// as an administrator who is not a member of bravo, reads it. Ben owns bravo (and
+// as an administrator who is not a member of bravo, opens it as a reader and suspends it. Ben owns bravo (and
 // rocket in the second test), so he never joins acme for good.
 const PASSWORD = "correct horse battery staple";
 
@@ -96,10 +96,12 @@ test("bootstrap, admin sign-in, organizations on their own hosts, sign-in hand-o
   await expect(eve.getByRole("link", { name: "Back to sign in" })).toHaveAttribute("href", "/admin/login");
 
   // Ada promotes her on the Users module; Eve then signs in to administration with GitHub.
+  // The actions are on the user's detail page; the list row opens it.
   await page.goto("/admin/users");
-  const eveRow = page.getByTestId(/^admin-user-/).filter({ hasText: "@eve" });
-  await eveRow.getByRole("button", { name: "Make admin" }).click();
-  await expect(eveRow.getByRole("button", { name: "Remove admin" })).toBeVisible();
+  await page.getByTestId(/^admin-user-/).filter({ hasText: "@eve" }).getByRole("link").first().click();
+  await expect(page.getByTestId("admin-user")).toContainText("@eve");
+  await page.getByRole("button", { name: "Make admin" }).click();
+  await expect(page.getByRole("button", { name: "Remove admin" })).toBeVisible();
   await adminGithubSignIn(eve, "eve");
   await expect(eve.getByRole("heading", { name: "Dashboard", level: 1 })).toBeVisible();
 
@@ -190,12 +192,71 @@ test("bootstrap, admin sign-in, organizations on their own hosts, sign-in hand-o
   await expect(eve).toHaveURL(new RegExp(`^${orgUrl("acme")}/`));
   await expect(eve.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
 
-  // bravo's host needs no new sign-in (the cookie covers the subdomains); as an
-  // instance admin who is not a member, Eve reads it behind the banner.
+  // bravo's host needs no new sign-in (the cookie covers the subdomains), but Eve is not a
+  // member and has opened no read-only grant, so it answers as for any non-member, and the
+  // no-access page gives an administrator her way in (D3, D59).
   await eve.goto(`${orgUrl("bravo")}/`);
-  await expect(eve.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
-  await expect(eve.getByTestId("reader-banner")).toBeVisible();
+  await expect(eve.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
+  await expect(eve.getByRole("link", { name: "Open in the admin panel" })).toHaveAttribute(
+    "href",
+    `${base.origin}/admin/orgs/bravo`,
+  );
   await expect(eve).not.toHaveURL(/\/signin/);
+
+  // "Open as reader" on the organization's admin page makes a 60-minute grant and shows a link
+  // (never a popup); the link opens bravo read-only behind a banner with the end time.
+  await adminGithubSignIn(eve, "eve", `${base.origin}/admin/orgs/bravo`);
+  await expect(eve.getByRole("heading", { name: "Bravo", level: 1 })).toBeVisible();
+  await eve.getByRole("tab", { name: "Members" }).click();
+  await expect(eve.getByTestId("org-members")).toContainText("@ben");
+  await eve.getByRole("button", { name: "Open as reader" }).click();
+  const readerLink = eve.getByTestId("reader-link");
+  await expect(readerLink).toContainText("read-only until");
+  const readerHref = await readerLink.getAttribute("href");
+  expect(readerHref).toContain(orgUrl("bravo"));
+  await eve.goto(`${readerHref}/`);
+  await expect(eve.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await expect(eve.getByTestId("reader-banner")).toContainText(/Viewing as a platform administrator, read-only until/);
+  await expect(eve).not.toHaveURL(/\/signin/);
+
+  // Revoking the grant on the Account page ends the access at once.
+  await eve.goto(`${base.origin}/admin/account`);
+  await eve.getByTestId("reader-grant-bravo").getByRole("button", { name: "Revoke" }).click();
+  await expect(eve.getByTestId("reader-grants")).toContainText("No open read-only access.");
+  await eve.goto(`${orgUrl("bravo")}/`);
+  await expect(eve.getByRole("heading", { name: "No access to this organization" })).toBeVisible();
+
+  // Suspension: Eve suspends bravo with a reason; its owner Ben reads the banner and the reason,
+  // and everything is read-only; lifting it brings the controls back.
+  await eve.goto(`${base.origin}/admin/orgs/bravo`);
+  await eve.getByRole("button", { name: "Suspend", exact: true }).click();
+  const suspend = eve.getByTestId("suspend-org-dialog");
+  await expect(suspend.getByRole("button", { name: "Suspend" })).toBeDisabled();
+  await suspend.getByLabel("Reason (members see it)").fill("Unpaid invoice");
+  await suspend.getByRole("button", { name: "Suspend" }).click();
+  await expect(eve.getByTestId("suspended-alert")).toContainText("Unpaid invoice");
+  const owner2Context = await browser.newContext({ baseURL: env.prodUrl });
+  const owner2 = await owner2Context.newPage();
+  await githubSignIn(owner2, "ben");
+  await signedIn(owner2);
+  await owner2.goto(`${orgUrl("bravo")}/members`);
+  await expect(owner2.getByTestId("suspended-banner")).toContainText("This organization is suspended: Unpaid invoice");
+  await expect(owner2.getByTestId("members-heading")).toBeVisible();
+  await expect(owner2.getByText("Invite someone")).toHaveCount(0);
+  await eve.getByRole("button", { name: "Unsuspend" }).click();
+  await expect(eve.getByTestId("suspended-alert")).toHaveCount(0);
+  await owner2.reload();
+  await expect(owner2.getByTestId("suspended-banner")).toHaveCount(0);
+  await expect(owner2.getByText("Invite someone")).toBeVisible();
+  await owner2Context.close();
+
+  // The cross-org audit names the organization and carries the grant and suspension events.
+  // (Rows are written in the background, so the page is reloaded until they are there.)
+  await expect(async () => {
+    await eve.goto(`${base.origin}/admin/audit?org=bravo`);
+    await expect(eve.getByTestId("audit-table")).toContainText("Organization suspended", { timeout: 3_000 });
+    await expect(eve.getByTestId("audit-table")).toContainText("Read-only access granted", { timeout: 3_000 });
+  }).toPass({ timeout: 30_000 });
   await eveContext.close();
 });
 
@@ -258,7 +319,8 @@ test("projects from GitHub: connect, import, scan, members, a push, deleting the
     .poll(async () => (await runs(ben, "demo")).find((r) => r.trigger === "push")?.status, { timeout: 30_000 })
     .toBe("ok");
 
-  // Ben, the owner, deletes rocket; its slug can never be created again.
+  // Ben, the owner, deletes rocket: the project and the organization only disappear (a platform
+  // administrator can restore them), and the slug stays taken.
   await ben.goto(`${orgUrl("rocket")}/settings`);
   await ben.getByTestId("org-danger-zone").getByRole("button", { name: "Delete organization" }).click();
   const dialog = ben.getByTestId("delete-org-dialog");

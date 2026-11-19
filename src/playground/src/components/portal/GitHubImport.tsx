@@ -229,7 +229,7 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
   const cap = importsLeft === undefined ? Infinity : Math.max(0, importsLeft);
   const full = selected.size >= cap;
   const unfiltered = q === "";
-  const allImported = unfiltered && total > 0 && !repos.hasNextPage && list.every((r) => r.imported);
+  const allImported = unfiltered && total > 0 && !repos.hasNextPage && list.every((r) => r.imported && !r.deleted);
 
   const toggle = (repo: GitHubRepo, on: boolean) =>
     setSelected((prev) => {
@@ -379,7 +379,7 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
                       on && "bg-primary-soft text-primary-text",
                     )}
                   >
-                    {repo.imported ? (
+                    {repo.imported || repo.deleted ? (
                       <span className="size-4 shrink-0" aria-hidden="true" />
                     ) : blocked ? (
                       <DisabledReason reason={note ?? "You can't import more repositories right now."}>
@@ -389,7 +389,7 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
                       box
                     )}
                     <span className="flex min-w-0 flex-1 items-center gap-2">
-                      {repo.imported && slug ? (
+                      {repo.imported && !repo.deleted && slug ? (
                         <Link
                           to="/p/$slug"
                           params={{ slug }}
@@ -398,7 +398,12 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
                           {repo.full_name}
                         </Link>
                       ) : (
-                        <span className={cn("truncate font-medium", repo.imported && "text-muted-foreground")}>
+                        <span
+                          className={cn(
+                            "truncate font-medium",
+                            (repo.imported || repo.deleted) && "text-muted-foreground",
+                          )}
+                        >
                           {repo.full_name}
                         </span>
                       )}
@@ -409,7 +414,13 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
                         </Badge>
                       )}
                     </span>
-                    {repo.imported && <Badge variant="outline">Imported</Badge>}
+                    {repo.deleted ? (
+                      <span className="text-xs text-muted-foreground" data-testid="repo-removed">
+                        Removed - ask a platform administrator to restore it.
+                      </span>
+                    ) : (
+                      repo.imported && <Badge variant="outline">Imported</Badge>
+                    )}
                   </li>
                 );
               })}

@@ -185,5 +185,38 @@ test.describe("platform administration at 390px", () => {
         await check(page, name, url);
       });
     }
+
+    // The detail pages, opened at 390 px with the dialogs that hold the long copy: Suspend (a
+    // textarea) and Erase (a typed confirmation) must not scroll sideways either.
+    test("admin organization detail, with the Suspend dialog", async () => {
+      await check(page, "admin organization detail", `${base.origin}/admin/orgs/comet`);
+      await page.getByRole("button", { name: "Suspend", exact: true }).click();
+      await expect(page.getByTestId("suspend-org-dialog")).toBeVisible();
+      await page.waitForTimeout(300); // the dialog's zoom-in
+      expect(await horizontalOverflow(page), "suspend dialog").toEqual([]);
+      await page.keyboard.press("Escape");
+    });
+
+    test("admin user detail, with the Erase dialog", async () => {
+      await page.goto(`${base.origin}/admin/users`);
+      await page.getByLabel("Search").fill("ben");
+      await page.getByRole("link", { name: /ben/i }).first().click();
+      await expect(page.getByTestId("admin-user")).toBeVisible();
+      expect(await problems(page), "admin user detail").toEqual([]);
+      // Erase exists only on a deleted account. Nothing is deleted for real here (other specs
+      // use this account): the detail answer is rewritten in the browser to a deleted one.
+      await page.route(/\/api\/admin\/users\/[^/]+$/, async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as { uid: string };
+        await route.fulfill({ response: res, json: { ...body, deleted_at: "2026-11-01T00:00:00Z", deleted_by: body.uid } });
+      });
+      await page.reload();
+      await page.getByRole("button", { name: "Erase permanently" }).click();
+      await expect(page.getByTestId("erase-user-dialog")).toBeVisible();
+      await page.waitForTimeout(300); // the dialog's zoom-in
+      expect(await horizontalOverflow(page), "erase dialog").toEqual([]);
+      await page.keyboard.press("Escape");
+      await page.unroute(/\/api\/admin\/users\/[^/]+$/);
+    });
   });
 });

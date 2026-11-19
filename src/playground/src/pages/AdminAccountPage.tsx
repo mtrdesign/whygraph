@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ApiError, adminApi } from "../api";
+import { ApiError, adminApi, type AdminReaderGrant } from "../api";
+import { toastError } from "../components/admin/adminParts";
 import { UserAvatar } from "../components/auth/UserAvatar";
 import { PageContainer } from "../components/layout/PageContainer";
 import { Field } from "../components/portal/Field";
@@ -100,9 +101,48 @@ function PasswordForm() {
   );
 }
 
+/** Live per-org reader grants with Revoke (plan 59, §4.4): the read-only access this administrator opened. */
+function ReaderGrants({ grants }: { grants: AdminReaderGrant[] }) {
+  const queryClient = useQueryClient();
+  const revoke = useMutation({
+    mutationFn: (id: number) => adminApi.revokeReaderGrant(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["@admin"] }),
+    onError: toastError,
+  });
+  return (
+    <section className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card" data-testid="reader-grants">
+      <h2 className="text-sm font-semibold">Read-only access</h2>
+      {grants.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No open read-only access.</p>
+      ) : (
+        <ul className="divide-y divide-border">
+          {grants.map((g) => (
+            <li key={g.id} className="row-wrap py-2" data-testid={`reader-grant-${g.org_slug}`}>
+              <span className="flex min-w-0 flex-1 flex-col leading-tight">
+                <a
+                  href={g.org_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="truncate font-medium text-primary-text hover:underline"
+                >
+                  {g.org_name}
+                </a>
+                <span className="text-xs text-muted-foreground">Until {formatDateTime(g.expires_at)}</span>
+              </span>
+              <Button size="sm" variant="outline" disabled={revoke.isPending} onClick={() => revoke.mutate(g.id)}>
+                Revoke
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /**
  * `/admin/account` (D48): this admin session's start and end, and for a password
- * account the password form. Live reader grants with Revoke arrive in a later release.
+ * account the password form; the live reader grants come between, with Revoke.
  */
 export function AdminAccountPage() {
   const me = useQuery({ queryKey: ["@admin", "me"], queryFn: adminApi.me });
@@ -136,6 +176,7 @@ export function AdminAccountPage() {
                 Administration sessions last 8 hours and end when you sign out.
               </p>
             </section>
+            <ReaderGrants grants={m.reader_grants} />
             {m.has_password && <PasswordForm />}
           </>
         )}

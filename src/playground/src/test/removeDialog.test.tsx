@@ -16,7 +16,7 @@ const json = (b: unknown) => new Response(JSON.stringify(b), { headers: { "conte
 const project = (over: Partial<ProjectDetails> = {}) =>
   ({ slug: "alpha", name: "Alpha", source: "local", agents: [], running_scan: null, root: "/r/alpha", ...over }) as ProjectDetails;
 
-function mount(p: ProjectDetails, state: Promise<Response> | Response) {
+function mount(p: ProjectDetails, state: Promise<Response> | Response, extra: Record<string, unknown> = {}) {
   const bodies: unknown[] = [];
   vi.stubGlobal(
     "fetch",
@@ -26,7 +26,7 @@ function mount(p: ProjectDetails, state: Promise<Response> | Response) {
       if (init?.method === "DELETE") {
         bodies.push(JSON.parse(String(init.body)));
         return Promise.resolve(
-          json({ removed: p.slug, hooks: null, agent_files: [], checkout_deleted: false, history_deleted: false, warnings: [] }),
+          json({ removed: p.slug, hooks: null, agent_files: [], checkout_deleted: false, history_deleted: false, warnings: [], ...extra }),
         );
       }
       return Promise.resolve(json({}));
@@ -58,12 +58,25 @@ describe("RemoveProjectDialog history option", () => {
     expect(screen.getByLabelText(/to confirm deleting the history/)).toBeInTheDocument();
   });
 
-  it("production wording: Keep history, unticked", async () => {
+  it("production wording: no history box at all, and the soft copy", async () => {
     mount(project({ source: "github" }), json(PROD));
-    const box = await screen.findByRole("checkbox", { name: /Keep history/ });
-    expect(box).not.toBeChecked();
-    expect(screen.getByTestId("remove-dialog")).toHaveTextContent(/add the repository again to get it back/i);
-    expect(screen.queryByRole("checkbox", { name: /Also delete history/ })).toBeNull();
+    const dialog = await screen.findByTestId("remove-dialog");
+    await screen.findByTestId("remove-production-note");
+    expect(screen.queryByRole("checkbox", { name: /history/i })).toBeNull();
+    expect(dialog).toHaveTextContent(/A platform administrator can restore it/);
+    expect(dialog).not.toHaveTextContent(/Keep history|add the repository again/i);
+  });
+
+  it("production sends no delete_history and ends on the removed-not-deleted copy", async () => {
+    const bodies = mount(project({ source: "github" }), json(PROD), { soft: true });
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText(/to confirm/), "Alpha");
+    await user.click(screen.getByRole("button", { name: "Remove project" }));
+    await waitFor(() => expect(bodies).toHaveLength(1));
+    expect(bodies[0]).not.toHaveProperty("delete_history");
+    expect(await screen.findByTestId("remove-done")).toHaveTextContent(
+      "The project was removed. A platform administrator can restore it.",
+    );
   });
 
   it("is hidden for a linked project", async () => {

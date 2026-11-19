@@ -726,7 +726,7 @@ describe("org and global settings", () => {
     handlers["GET /api/portal/defaults"] = () => ({ config: {}, secrets: secrets(), no_provider_key: false, read_only: true });
     mount("/settings");
     expect(await screen.findByTestId("settings-reader")).toHaveTextContent(
-      "You're viewing this organization as an instance administrator. Everything here is read-only.",
+      "You're viewing this organization as a platform administrator. Everything here is read-only.",
     );
     expect(screen.queryByTestId("settings-owner-only")).toBeNull();
   });

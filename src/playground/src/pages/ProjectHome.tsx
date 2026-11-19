@@ -774,7 +774,7 @@ export function ProjectHome() {
           <EstimateBody
             slug={slug}
             estimate={estimate.data}
-            canDescribe={can(p, "project.scan_full") && p.llm_block !== "budget_exceeded"}
+            canDescribe={can(p, "project.scan_full") && p.llm_block !== "budget_exceeded" && p.llm_block !== "org_suspended"}
             canConfigure={can(p, "project.configure")}
             busy={scanPending}
             onDescribe={(scope) => scanNow({ trigger: "describe", scope })}

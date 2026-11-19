@@ -203,11 +203,77 @@ export function validateAdminLoginSearch(search: Record<string, unknown>): Admin
   };
 }
 
-/** `/admin/users?q=` and `/admin/orgs?q=`: the search box (filtered on the client). */
-export interface AdminListSearch {
+export const ADMIN_USER_STATUSES = ["admins", "disabled", "deleted", "password"] as const;
+/** The Users list's "Show" filter (All is the default, so it is never in the URL). */
+export type AdminUserStatus = (typeof ADMIN_USER_STATUSES)[number];
+
+/** `/admin/users?status=&q=`: the "Show" filter and the search box (filtered on the client). */
+export interface AdminUsersSearch {
+  status?: AdminUserStatus;
   q?: string;
 }
 
-export function validateAdminListSearch(search: Record<string, unknown>): AdminListSearch {
-  return { q: text(search.q, 200) };
+export function validateAdminUsersSearch(search: Record<string, unknown>): AdminUsersSearch {
+  return { status: oneOf(ADMIN_USER_STATUSES, search.status), q: text(search.q) };
+}
+
+export const ADMIN_ORG_STATUSES = ["suspended", "deleted"] as const;
+/** The Organizations list's "Show" filter. */
+export type AdminOrgStatus = (typeof ADMIN_ORG_STATUSES)[number];
+
+/** `/admin/orgs?status=&q=`. */
+export interface AdminOrgsSearch {
+  status?: AdminOrgStatus;
+  q?: string;
+}
+
+export function validateAdminOrgsSearch(search: Record<string, unknown>): AdminOrgsSearch {
+  return { status: oneOf(ADMIN_ORG_STATUSES, search.status), q: text(search.q) };
+}
+
+/** The filters of the admin audit log, in the URL (plan 59, §4.15). `org` is a slug; `scope=orgless` is "no organization". */
+export interface AdminAuditSearch {
+  org?: string;
+  scope?: "orgless";
+  event?: string;
+  actor?: string;
+  from?: string;
+  to?: string;
+}
+
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function auditSearch(search: Record<string, unknown>): AdminAuditSearch {
+  const org = text(search.org, 63);
+  const day = (v: unknown) => {
+    const t = text(v, 10);
+    return t && DAY.test(t) ? t : undefined;
+  };
+  const scope = oneOf(["orgless"] as const, search.scope);
+  return {
+    org: org && ORG_SLUG.test(org) && !scope ? org : undefined,
+    scope,
+    event: text(search.event, 64),
+    actor: text(search.actor, 100),
+    from: day(search.from),
+    to: day(search.to),
+  };
+}
+
+export function validateAdminAuditSearch(search: Record<string, unknown>): AdminAuditSearch {
+  return auditSearch(search);
+}
+
+export const ADMIN_ORG_TABS = ["overview", "members", "projects", "usage", "audit"] as const;
+/** An org detail's section. */
+export type AdminOrgTab = (typeof ADMIN_ORG_TABS)[number];
+
+/** `/admin/orgs/$slug?tab=`: the section, plus the audit filters of its Audit tab. */
+export interface AdminOrgSearch extends Omit<AdminAuditSearch, "org" | "scope"> {
+  tab?: AdminOrgTab;
+}
+
+export function validateAdminOrgSearch(search: Record<string, unknown>): AdminOrgSearch {
+  const { event, actor, from, to } = auditSearch(search);
+  return { tab: oneOf(ADMIN_ORG_TABS, search.tab), event, actor, from, to };
 }

@@ -21,6 +21,7 @@ export type StatusKey =
   | "folder_missing"
   | "needs_setup"
   | "scanning"
+  | "suspended"
   | "stopped"
   | "failed"
   | "behind"
@@ -43,6 +44,7 @@ export const STATUS_ORDER: readonly StatusKey[] = [
   "import_failed",
   "folder_missing",
   "failed",
+  "suspended",
   "stopped",
   "behind",
   "needs_setup",
@@ -272,6 +274,11 @@ export function projectHealth(
   const usable =
     p.initialized && p.root_status === "ok" && !p.importing && !p.access_lost && p.source_supported !== false;
   if (usable && scanning) pill({ key: "scanning", label: "Scanning", tone: "busy" });
+
+  // A suspended organization: a pill and no item, because the banner says it (plan 59, §4.5).
+  if (p.llm_block === "org_suspended") {
+    pill({ key: "suspended", label: "Suspended", tone: "warn", tooltip: "Organization suspended" });
+  }
 
   // 7. A hard-stopped budget: the role block wins (the caller cannot spend anyway).
   const usageStop = !!p.usage?.budget?.hard_stop && (p.usage.pct ?? 0) >= 100;

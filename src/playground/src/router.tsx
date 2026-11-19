@@ -28,7 +28,7 @@ import { projectProblem } from "./lib/errors";
 import { can } from "./lib/permissions";
 import { getLastProject, setLastProject } from "./lib/lastProject";
 import { ProjectProvider } from "./lib/project";
-import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState, useReadOnly } from "./lib/identity";
+import { canAdmin, canOwn, isProduction, isSafeNext, signInUrl, usePortalState, useReadOnly, useSuspended } from "./lib/identity";
 import { hardNavigate } from "./lib/navigation";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert";
 import { safeLinkNext } from "./lib/linkNext";
@@ -62,8 +62,10 @@ import { AdminAccountPage } from "./pages/AdminAccountPage";
 import { AdminAuditPage } from "./pages/AdminAuditPage";
 import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { AdminLoginPage } from "./pages/AdminLoginPage";
+import { AdminOrgPage } from "./pages/AdminOrgPage";
 import { AdminOrgsPage } from "./pages/AdminOrgsPage";
 import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
+import { AdminUserPage } from "./pages/AdminUserPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { BootstrapPage } from "./pages/BootstrapPage";
 import { GitHubAppCallbackPage, type GitHubAppCallbackParams } from "./pages/GitHubAppCallbackPage";
@@ -89,7 +91,10 @@ import { PageContainer } from "./components/layout/PageContainer";
 import { PageSkeleton } from "./components/state/Skeletons";
 import {
   type BaseSearch,
-  validateAdminListSearch,
+  validateAdminAuditSearch,
+  validateAdminOrgSearch,
+  validateAdminOrgsSearch,
+  validateAdminUsersSearch,
   validateAdminLoginSearch,
   validateBaseSearch,
   validateInitSearch,
@@ -651,6 +656,7 @@ const PAGE_WIDTH: Record<string, React.ComponentProps<typeof PageContainer>["wid
 function ProjectLayout() {
   const { slug } = useParams({ strict: false }) as { slug: string };
   const readOnly = useReadOnly();
+  const suspended = useSuspended();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const page = pathname.split("/")[3];
   const project = useQuery({
@@ -702,13 +708,18 @@ function ProjectLayout() {
     if (page === "chat" && !can(data, "project.chat")) {
       // ChatView never mounts, so no chat request fires for a viewer (SET-5: the
       // instance-admin reader is not a member, so there is no role to ask for).
+      // Suspension is named before the role: an owner would otherwise read "needs the Contributor role".
       return notice(
         <Alert data-testid="chat-read-only">
-          <AlertTitle>{readOnly ? "Chat is not available" : "Chat needs the Contributor role"}</AlertTitle>
+          <AlertTitle>
+            {suspended ? "Chat is paused" : readOnly ? "Chat is not available" : "Chat needs the Contributor role"}
+          </AlertTitle>
           <AlertDescription>
-            {readOnly
-              ? "You're viewing this organization as an instance administrator. Chat is read-only access, so it is not available."
-              : "Chat needs the Contributor role. Ask a project admin to change your role."}
+            {suspended
+              ? "This organization is suspended. Chat comes back when a platform administrator lifts the suspension."
+              : readOnly
+                ? "You're viewing this organization as a platform administrator. Chat is read-only access, so it is not available."
+                : "Chat needs the Contributor role. Ask a project admin to change your role."}
           </AlertDescription>
         </Alert>,
       );
@@ -855,13 +866,14 @@ const adminIndexRoute = createRoute({ getParentRoute: () => adminLayout, path: "
 const adminOrgsRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "orgs",
-  validateSearch: validateAdminListSearch,
+  validateSearch: validateAdminOrgsSearch,
   component: AdminOrgsPage,
 });
 const adminOrgRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "orgs/$slug",
-  component: () => <AdminPlaceholderPage heading={adminOrgRoute.useParams().slug} />,
+  validateSearch: validateAdminOrgSearch,
+  component: AdminOrgPage,
 });
 const adminProjectsRoute = createRoute({
   getParentRoute: () => adminLayout,
@@ -876,15 +888,20 @@ const adminProjectRoute = createRoute({
 const adminUsersRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "users",
-  validateSearch: validateAdminListSearch,
+  validateSearch: validateAdminUsersSearch,
   component: AdminUsersPage,
 });
 const adminUserRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "users/$uid",
-  component: () => <AdminPlaceholderPage heading={adminUserRoute.useParams().uid} />,
+  component: AdminUserPage,
 });
-const adminAuditRoute = createRoute({ getParentRoute: () => adminLayout, path: "audit", component: AdminAuditPage });
+const adminAuditRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "audit",
+  validateSearch: validateAdminAuditSearch,
+  component: AdminAuditPage,
+});
 const adminConfigRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "config",

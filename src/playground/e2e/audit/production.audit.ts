@@ -105,9 +105,12 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await ada.goto(`${base.origin}/admin/users`);
     await settle(ada, 1000);
     await snap(ada, "admin", "users", "before-promote", "Users module with Eve, a GitHub user who is not an administrator yet");
-    const row = ada.getByTestId(/^admin-user-/).filter({ hasText: "@eve" });
-    await row.getByRole("button", { name: "Make admin" }).click();
-    await expect(row.getByRole("button", { name: "Remove admin" })).toBeVisible();
+    // The row actions moved to the user's detail page (plan 59, §4.15).
+    await ada.getByRole("link", { name: /eve/i }).first().click();
+    await expect(ada.getByTestId("admin-user")).toBeVisible();
+    await snap(ada, "admin", "users", "detail", "A user's detail page: profile, memberships, sessions, connections, spend and events");
+    await ada.getByRole("button", { name: "Make admin" }).click();
+    await expect(ada.getByRole("button", { name: "Remove admin" })).toBeVisible();
   });
   await adminGithubSignIn(eve, "eve");
   await attempt(eve, at("orgs", "create-org"), async () => {
@@ -725,6 +728,12 @@ test("production mode: every screen", async ({ page: ada, browser }) => {
     await snap(eve, "account", "account", "instance-admin", "Account page of Eve (GitHub account, instance admin)");
   });
   await attempt(eve, at("reader", "projects"), async () => {
+    // Read-only access is a grant now (plan 59, D3): "Open as reader" on the org's admin page.
+    await eve.goto(`${base.origin}/admin/orgs/rocket`);
+    await settle(eve, 1200);
+    await snap(eve, "admin", "org-detail", "default", "Admin organization detail (/admin/orgs/rocket): actions, tabs, Overview");
+    await eve.getByRole("button", { name: "Open as reader" }).click();
+    await expect(eve.getByTestId("reader-link")).toBeVisible();
     await eve.goto(`${ROCKET}/`);
     await expect(eve.getByTestId("reader-banner")).toBeVisible();
     await settle(eve, 1200);

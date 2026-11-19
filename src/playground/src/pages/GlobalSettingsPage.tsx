@@ -21,7 +21,7 @@ import { timeAgo } from "../lib/format";
 import { errorLabel, sourceLabel } from "../lib/updates";
 import { providerLabel } from "../lib/labels";
 import type { OrgSettingsSearch } from "../lib/routeSearch";
-import { canOwn, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
+import { canOwn, isProduction, usePortalState, useReadOnly, useRole, useSuspended } from "../lib/identity";
 import { hardNavigate } from "../lib/navigation";
 
 type Cleared = { slug: string; provider: string }[];
@@ -34,8 +34,6 @@ type Cleared = { slug: string; provider: string }[];
  */
 function DeleteOrganization({ slug, name, baseUrl }: { slug: string; name: string; baseUrl: string }) {
   const [open, setOpen] = useState(false);
-  const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
-  const count = projects.data?.projects.length;
   const remove = useMutation({
     mutationFn: () => orgsApi.remove(slug),
     onSuccess: () => void hardNavigate(`${new URL(baseUrl).origin}/orgs`),
@@ -49,8 +47,8 @@ function DeleteOrganization({ slug, name, baseUrl }: { slug: string; name: strin
       testId="org-danger-zone"
       description={
         <>
-          Deletes this organization with its projects, scans, members' access, settings and keys. There is no
-          undo, and the name <span className="font-mono">{slug}</span> cannot be used again.
+          Deletes this organization for everyone at once. Nothing is erased: a platform administrator can
+          restore it. The name <span className="font-mono">{slug}</span> stays taken.
         </>
       }
     >
@@ -74,11 +72,7 @@ function DeleteOrganization({ slug, name, baseUrl }: { slug: string; name: strin
         title={`Delete ${name}?`}
         description={
           <>
-            {count === undefined
-              ? "Every project of this organization is deleted with it."
-              : count === 1
-                ? "Its 1 project is deleted with it."
-                : `Its ${count} projects are deleted with it.`}{" "}
+            It disappears for everyone at once. Nothing is deleted. A platform administrator can restore it.{" "}
             Running scans are cancelled. The repositories on GitHub are not changed.
           </>
         }
@@ -344,11 +338,12 @@ export function GlobalSettingsPage() {
   const [cleared, setCleared] = useState<Cleared>([]);
   const role = useRole();
   const reader = useReadOnly();
+  const suspended = useSuspended();
   const defaults = useQuery({ queryKey: portalKey("defaults"), queryFn: portalApi.defaults });
   const state = usePortalState().data;
   const production = isProduction(state);
   const org = state?.org;
-  const readOnly = reader || (defaults.data?.read_only ?? !canOwn(role));
+  const readOnly = reader || suspended || (defaults.data?.read_only ?? !canOwn(role));
   const editable = !readOnly;
   const ownerTools = production && editable && !!org;
 
@@ -363,6 +358,8 @@ export function GlobalSettingsPage() {
     <>
       {reader ? (
         <ReadOnlyNotice audience={{ kind: "reader" }} />
+      ) : suspended ? (
+        <ReadOnlyNotice audience={{ kind: "suspended" }} />
       ) : (
         readOnly && defaults.data && <ReadOnlyNotice audience={{ kind: "org" }} />
       )}

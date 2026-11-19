@@ -4,12 +4,13 @@ import { useQuery } from "@tanstack/react-query";
 import { adminApi, type AdminOrg, type AdminUser } from "../../api";
 import { useUi } from "../../store";
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "../ui/command";
+import { Badge } from "../ui/badge";
 import { ADMIN_NAV } from "./adminNav";
 
 // Cmd-K inside the admin app (plan 59, §4.14). It runs its own queries for the
 // lists it searches, while it is open, rather than relying on a list page having
-// cached them. Phase 1 has no detail pages, so a result opens its list with `?q=`
-// set to the login or slug. Project results arrive with the Projects module.
+// cached them. A result opens its detail page, a deleted one marked with a "Deleted"
+// badge. Project results arrive with the Projects module.
 
 const MAX = 8;
 
@@ -82,13 +83,14 @@ export function AdminCommandPalette() {
                 <CommandItem
                   key={u.uid}
                   value={`user:${u.uid}`}
-                  onSelect={go(() => void navigate({ to: "/admin/users", search: { q: userLabel(u).replace(/^@/, "") } }))}
+                  onSelect={go(() => void navigate({ to: "/admin/users/$uid", params: { uid: u.uid } }))}
                   className="gap-2"
                 >
                   <span className="font-medium">{u.display_name}</span>
                   <span className="truncate font-mono text-xs text-muted-foreground">{userLabel(u)}</span>
                   {u.is_instance_admin && <span className="text-xs text-muted-foreground">admin</span>}
                   {u.disabled && <span className="text-xs text-muted-foreground">disabled</span>}
+                  {u.deleted_at && <Badge variant="destructive">Deleted</Badge>}
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -100,11 +102,12 @@ export function AdminCommandPalette() {
                 <CommandItem
                   key={o.slug}
                   value={`org:${o.slug}`}
-                  onSelect={go(() => void navigate({ to: "/admin/orgs", search: { q: o.slug } }))}
+                  onSelect={go(() => void navigate({ to: "/admin/orgs/$slug", params: { slug: o.slug } }))}
                   className="gap-2"
                 >
                   <span className="font-medium">{o.name}</span>
                   <span className="truncate font-mono text-xs text-muted-foreground">{o.slug}</span>
+                  {o.deleted_at && <Badge variant="destructive">Deleted</Badge>}
                 </CommandItem>
               ))}
             </CommandGroup>

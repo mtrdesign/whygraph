@@ -112,6 +112,8 @@ export function signedInAdmin() {
   fake.routes["/api/admin/me"] = () => json(ME);
   fake.routes["/api/admin/users"] = () => json(USERS);
   fake.routes["/api/admin/orgs"] = () => json(ORGS);
+  fake.routes["/api/admin/orgs/acme"] = () => json(ORG_DETAIL);
+  fake.routes["/api/admin/users/u2"] = () => json(USER_DETAIL);
   fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: [] });
   fake.routes["/api/admin/update"] = () =>
     json({
@@ -128,6 +130,9 @@ export function signedInAdmin() {
   fake.routes["/api/admin/audit"] = () => json({ events: [], next: null });
 }
 
+/** The Phase 2 user fields of a live account. */
+const GONE = { owner_of: 0, session_last_seen_at: null, deleted_at: null, deleted_by: null, erased: false };
+
 export const USERS = [
   {
     uid: "u1",
@@ -139,6 +144,8 @@ export const USERS = [
     disabled: false,
     created_at: "2026-10-01T00:00:00Z",
     org_count: 1,
+    ...GONE,
+    owner_of: 1,
   },
   {
     uid: "u2",
@@ -150,6 +157,8 @@ export const USERS = [
     disabled: false,
     created_at: "2026-10-02T00:00:00Z",
     org_count: 2,
+    ...GONE,
+    session_last_seen_at: "2026-11-18T07:00:00Z",
   },
   {
     uid: "u3",
@@ -161,6 +170,7 @@ export const USERS = [
     disabled: false,
     created_at: "2026-09-01T00:00:00Z",
     org_count: 0,
+    ...GONE,
   },
 ];
 
@@ -171,5 +181,48 @@ export const ORGS = [
     url: "http://acme.whygraph.localhost:8765",
     member_count: 3,
     created_at: "2026-10-01T00:00:00Z",
+    project_count: 2,
+    owners: ["ada"],
+    suspended: null,
+    deleted_at: null,
+    deleted_by: null,
+    spend_mtd: 1.5,
+    storage_bytes: null,
+    last_activity_day: "2026-11-17",
   },
 ];
+
+export const ORG_DETAIL = {
+  slug: "acme",
+  name: "Acme",
+  url: "http://acme.whygraph.localhost:8765",
+  created_at: "2026-10-01T00:00:00Z",
+  default_project_role: "contributor",
+  suspended: null,
+  deleted_at: null,
+  deleted_by: null,
+  members: [
+    { uid: "u1", display_name: "Ada", github_login: "ada", role: "owner", joined_at: "2026-10-01T00:00:00Z", has_password: false, disabled: false },
+    { uid: "u2", display_name: "Ben", github_login: "ben", role: "member", joined_at: "2026-10-02T00:00:00Z", has_password: false, disabled: false },
+    { uid: "u3", display_name: "Root", github_login: null, role: "admin", joined_at: "2026-10-03T00:00:00Z", has_password: true, disabled: false },
+  ],
+  open_invitations: 1,
+  projects: [
+    { slug: "api", name: "Api", source: "github", last_scan_at: "2026-11-17T10:00:00Z", last_run_status: "ok", access_lost_reason: null, storage_bytes: null, deleted_at: null },
+    { slug: "old", name: "Old", source: "github", last_scan_at: null, last_run_status: null, access_lost_reason: null, storage_bytes: null, deleted_at: "2026-11-10T00:00:00Z" },
+  ],
+  budgets: [{ scope: "org", monthly_usd: 50, hard_stop: true, spent_usd: 1.5, project: null, member: null }],
+  spend_mtd: 1.5,
+  rows: { usage_events: 12, audit_events: 40, agent_call_days: 3 },
+};
+
+export const USER_DETAIL = {
+  ...USERS[1],
+  memberships: [{ org: "acme", name: "Acme", role: "member", owner: false }],
+  sessions: [{ id: "s1", kind: "user", created_at: "2026-11-18T06:00:00Z", last_seen_at: "2026-11-18T07:00:00Z", user_agent: "Firefox" }],
+  tokens: [
+    { uid: "t1", org: "acme", project: "api", project_name: "Api", client_name: "ben-laptop", created_at: "2026-11-01T00:00:00Z", last_used_at: null, revoked_at: null, revoked_reason: null },
+  ],
+  spend: [{ org: "acme", spent_usd: 0.5 }],
+  events: [],
+};

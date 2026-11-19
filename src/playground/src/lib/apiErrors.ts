@@ -173,7 +173,7 @@ export const MESSAGES: Record<string, Resolver> = {
   github_unavailable: { message: "GitHub could not be reached. Try again in a moment.", action: RETRY },
   github_2fa_required:
     "Your GitHub account needs two-factor authentication turned on before you can sign in to WhyGraph.",
-  account_disabled: "This account is disabled. Ask an instance administrator to enable it.",
+  account_disabled: "This account is disabled. Ask a platform administrator to enable it.",
   account_deleted: {
     title: "Account deleted",
     message: "This account was deleted. Ask a platform administrator to restore it.",
@@ -255,7 +255,7 @@ export const MESSAGES: Record<string, Resolver> = {
   already_invited: "They already have an open invitation. Revoke it first to send a new one.",
   org_admin: "Org admins and owners already have every project role.",
   already_member: "They are already a member of this organization.",
-  user_disabled: "This account is disabled. An instance administrator must enable it first.",
+  user_disabled: "This account is disabled. A platform administrator must enable it first.",
   last_owner: (err) => {
     const orgs = Array.isArray(err.extra.orgs) ? (err.extra.orgs as LastOwnedOrg[]) : null;
     if (!orgs) return "This is the organization's last owner. Make someone else an owner first.";
@@ -265,7 +265,7 @@ export const MESSAGES: Record<string, Resolver> = {
   not_member: "That person is no longer a member of this organization.",
   owner_required: "Only an owner can make someone an owner, or change or remove an owner.",
   self_disable: "You cannot disable your own account.",
-  last_admin: "This is the last enabled instance administrator. Make someone else an administrator first.",
+  last_admin: "This is the last enabled platform administrator. Make someone else an administrator first.",
   bad_role: "That role doesn't exist here.",
   duplicate_grant: "A project is listed twice. Keep one access entry per project.",
   no_grant: "That person has no specific access to this project.",
@@ -305,7 +305,7 @@ export const MESSAGES: Record<string, Resolver> = {
   github_account_mismatch:
     "You authorized a different GitHub account than the one you signed in with. Switch accounts on GitHub and try again.",
   github_required: "Importing from GitHub needs an account that signs in with GitHub.",
-  github_app_not_configured: "This portal has no GitHub App configured. Ask an instance administrator.",
+  github_app_not_configured: "This portal has no GitHub App configured. Ask a platform administrator.",
   start_from_portal: "Open your organization in WhyGraph and choose Import from GitHub.",
   busy: (_err, ctx) =>
     ctx === "codegraph"

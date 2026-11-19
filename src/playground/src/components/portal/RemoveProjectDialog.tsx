@@ -58,9 +58,10 @@ export function RemoveProjectDialog({
   const production = isProduction(portalState.data);
   // `isProduction` is false while the state loads, which would send the local default.
   const stateLoaded = portalState.data !== undefined;
-  // Local: tick to delete the history. Production: tick to keep it (deleting is the default).
+  // Local: tick to delete the history. Production never deletes: the removal only hides the
+  // project and a platform administrator can restore it (plan 59, §4.3.3), so no box and no flag.
   const [historyBox, setHistoryBox] = useState(false);
-  const deleteHistory = !linked && (production ? !historyBox : historyBox);
+  const deleteHistory = !linked && !production && historyBox;
   const needsName = github || deleteHistory;
   const [strip, setStrip] = useState(false);
   const [typed, setTyped] = useState("");
@@ -75,7 +76,7 @@ export function RemoveProjectDialog({
       projectApi(project.slug).remove({
         strip_agent_entries: strip,
         confirm_tracked: [...confirmed],
-        ...(!linked && { delete_history: deleteHistory }),
+        ...(!linked && !production && { delete_history: deleteHistory }),
         ...(needsName && { confirm_name: typed }),
       }),
     onSuccess: (r) => {
@@ -117,23 +118,25 @@ export function RemoveProjectDialog({
           <DialogHeader>
             <DialogTitle>{project.name} was removed</DialogTitle>
             <DialogDescription>
-              {linked
-                ? "This machine no longer answers for the project. Your repository was left as it was."
-                : result.checkout_deleted
-                ? production
-                  ? "The server copy was deleted. The repository on GitHub was not changed."
-                  : "The checkout was deleted."
-                : "Your repository was left as it was."}{" "}
-              {!linked &&
+              {production
+                ? "The project was removed. A platform administrator can restore it."
+                : linked
+                  ? "This machine no longer answers for the project. Your repository was left as it was."
+                  : result.checkout_deleted
+                    ? "The checkout was deleted."
+                    : "Your repository was left as it was."}{" "}
+              {!production &&
+                !linked &&
                 deleteHistory &&
                 result.history_deleted &&
                 "The project's history was deleted."}
-              {!linked &&
+              {!production &&
+                !linked &&
                 !deleteHistory &&
                 "The project's history was kept; add the repository again to get it back."}
             </DialogDescription>
           </DialogHeader>
-          {!linked && deleteHistory && !result.history_deleted && (
+          {!production && !linked && deleteHistory && !result.history_deleted && (
             <Alert variant="destructive" data-testid="history-not-deleted">
               <AlertTitle>The project's history was not deleted</AlertTitle>
               <AlertDescription>
@@ -185,7 +188,7 @@ export function RemoveProjectDialog({
           <DialogTitle>{linked ? `Remove ${project.name} from this machine?` : `Remove ${project.name}?`}</DialogTitle>
           <DialogDescription>
             {production
-              ? "This removes the server copy and the project's scans."
+              ? "It disappears for everyone at once. Nothing is deleted. A platform administrator can restore it."
               : linked
                 ? "This unlinks the checkout from the platform project."
                 : "This unregisters the project from the portal."}
@@ -208,22 +211,10 @@ export function RemoveProjectDialog({
             </p>
           )}
           {production ? (
-            <>
-              <div>
-                <p className="font-medium">Removed</p>
-                <ul className="list-disc pl-5 text-muted-foreground">
-                  <li>The project's settings, keys and scan runs.</li>
-                  <li>The server copy of the repository.</li>
-                  <li>The project's history (commit descriptions, rationale cards and chats), unless you keep it.</li>
-                </ul>
-              </div>
-              <div>
-                <p className="font-medium">Kept</p>
-                <ul className="list-disc pl-5 text-muted-foreground">
-                  <li>The repository on GitHub; nothing is changed there.</li>
-                </ul>
-              </div>
-            </>
+            <p className="text-muted-foreground" data-testid="remove-production-note">
+              Its scans stop and the connections of its machines are revoked. The repository on GitHub is not
+              changed.
+            </p>
           ) : (
             <>
               <div>
@@ -282,15 +273,13 @@ export function RemoveProjectDialog({
             </>
           )}
 
-          {!linked && (
+          {!linked && !production && (
             <label className="flex cursor-pointer items-start gap-2">
               <Checkbox checked={historyBox} onCheckedChange={setHistoryBox} className="mt-0.5" />
               <span>
-                {production ? "Keep history" : "Also delete history"}
+                Also delete history
                 <span className="block text-xs text-muted-foreground">
-                  {production
-                    ? "Add the repository again to get it back."
-                    : "Commit descriptions, rationale cards and chats; this cannot be undone."}
+                  Commit descriptions, rationale cards and chats; this cannot be undone.
                 </span>
               </span>
             </label>
@@ -299,16 +288,14 @@ export function RemoveProjectDialog({
           {needsName && (
             <div className="flex flex-col gap-1.5">
               <label htmlFor="confirm-name" className="text-sm">
-                Type <span className="font-mono font-medium">{project.name}</span> to confirm deleting the{" "}
-                {github && deleteHistory
-                  ? production
-                    ? "server copy and history"
-                    : "checkout and history"
-                  : github
-                    ? production
-                      ? "server copy"
-                      : "checkout"
-                    : "history"}
+                Type <span className="font-mono font-medium">{project.name}</span> to confirm
+                {production
+                  ? ""
+                  : github && deleteHistory
+                    ? " deleting the checkout and history"
+                    : github
+                      ? " deleting the checkout"
+                      : " deleting the history"}
               </label>
               <Input id="confirm-name" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
             </div>

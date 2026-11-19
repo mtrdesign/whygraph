@@ -47,7 +47,7 @@ export function ResetPasswordPage() {
       <AuthLayout title="Reset your password">
         <Alert variant="destructive">
           <AlertDescription>
-            This reset link is incomplete. Ask an instance administrator for a new one.
+            This reset link is incomplete. Ask a platform administrator for a new one.
           </AlertDescription>
         </Alert>
         <Link to="/admin/login" className="text-sm text-primary-text hover:underline">

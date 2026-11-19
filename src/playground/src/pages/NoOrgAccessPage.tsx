@@ -12,6 +12,30 @@ export function NoOrgAccessPage() {
   const host = window.location.host;
   const org = baseHost && host.endsWith(`.${baseHost}`) ? host.slice(0, -baseHost.length - 1) : null;
   const login = state.data?.user?.github_login;
+  const orgName = org ? <strong>{org}</strong> : "this organization";
+  // A platform administrator is not a member: their read-only access is a grant that lapses (D59).
+  if (state.data?.user?.is_instance_admin) {
+    return (
+      <AuthLayout
+        title="No access to this organization"
+        description={
+          <>
+            You have no read-only access to {orgName} right now. It lasts 60 minutes from Open as reader, and ends
+            when you revoke it.
+          </>
+        }
+      >
+        <div className="flex flex-wrap gap-2">
+          <Button render={<a href={`${base}/admin${org ? `/orgs/${encodeURIComponent(org)}` : ""}`} />}>
+            Open in the admin panel
+          </Button>
+          <Button variant="outline" onClick={() => void signOut()}>
+            Sign out
+          </Button>
+        </div>
+      </AuthLayout>
+    );
+  }
   return (
     <AuthLayout
       title="No access to this organization"

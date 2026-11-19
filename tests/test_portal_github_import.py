@@ -50,6 +50,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     PROD_BASE,
     PROD_DOMAIN,
     GitServer,
+    admin_request,
     at,
     claim_instance,
     env,
@@ -706,6 +707,7 @@ def test_the_listings_show_what_the_user_sees(world: World) -> None:
         "private": True,
         "default_branch": "main",
         "imported": False,
+        "deleted": False,  # plan 59 D47
     }
     assert body["per_page"] == 100 and body["truncated"] is False
     assert body["imports_left"] == 30
@@ -1132,30 +1134,57 @@ def test_production_config_fixes_the_branch_remote_and_hooks(world: World) -> No
     assert response.json()["config"] == {"scan": {"forge": "off"}}
 
 
+def purge_project(
+    w: World, slug: str = "api", name: str | None = None
+) -> httpx.Response:
+    """Remove ``slug`` (a soft delete since plan 59 D12), then purge it as an admin."""
+    removed = w.client.request(
+        "DELETE",
+        at("acme") + f"/api/projects/{slug}",
+        json={"confirm_name": name or slug},
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["soft"] is True
+    return admin_request(
+        w.client,
+        "POST",
+        f"/api/admin/projects/acme/{slug}/purge",
+        {"confirm_name": name or slug},
+    )
+
+
 def test_removing_an_imported_project_deletes_its_clone(
     world: World, audit_log: pytest.LogCaptureFixture
 ) -> None:
+    """The org admin's removal hides it; the platform administrator's purge deletes."""
     w = world
     connected(w)
     imported_ok(w)
     history = history_db("api", "acme")
     assert history.is_file()
-    response = w.client.request(
-        "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
-    )
+    response = purge_project(w)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["checkout_deleted"] is True
     assert clone_dirs(w) == [] and (w.repos / "acme").is_dir()
-    # delete_history omitted: production deletes the history too (D9).
+    # A purge always deletes the history too (D9, plan 59 section 4.3.3).
     assert body["history_deleted"] is True and body["warnings"] == []
     assert not history.parent.exists() and history.parent.parent.is_dir()
-    (event,) = [e for e in events(audit_log) if e["event"] == "project_removed"]
+    (event,) = [e for e in events(audit_log) if e["event"] == "project_purged"]
     assert (event["checkout_deleted"], event["history_deleted"]) == (True, True)
+    (event,) = [e for e in events(audit_log) if e["event"] == "project_removed"]
+    assert (event["checkout_deleted"], event["history_deleted"]) == (False, False)
+    assert event["soft"] is True
 
 
 def test_keep_history_on_a_production_remove(world: World) -> None:
-    """**Keep history**: the clone goes, the history stays and re-attaches."""
+    """A production removal keeps the clone and the history (plan 59 D12, D23).
+
+    "Keep history" is gone in production: every removal is soft, so the
+    clone and the history stay, ``delete_history`` is ignored, and the
+    repository cannot be imported again until a platform administrator
+    restores or purges the project.
+    """
     w = world
     connected(w)
     imported_ok(w)
@@ -1163,7 +1192,7 @@ def test_keep_history_on_a_production_remove(world: World) -> None:
     refused = w.client.request(
         "DELETE", at("acme") + "/api/projects/api", json={"delete_history": False}
     )
-    # The server copy still needs the typed name.
+    # The removal still needs the typed name.
     assert (refused.status_code, refused.json()["code"]) == (409, "confirm_name")
     response = w.client.request(
         "DELETE",
@@ -1171,12 +1200,12 @@ def test_keep_history_on_a_production_remove(world: World) -> None:
         json={"confirm_name": "api", "delete_history": False},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["checkout_deleted"] is True
+    assert response.json()["checkout_deleted"] is False
     assert response.json()["history_deleted"] is False
-    assert history.is_file()
+    assert history.is_file() and clone_dirs(w) == ["api"]
 
-    again = imported_ok(w)
-    assert again.json()["project"]["slug"] == "api"
+    again = import_repo(w, API_REPO)
+    assert (again.status_code, again.json()["code"]) == (409, "project_deleted")
     assert history_db("api", "acme") == history and history.is_file()
 
 
@@ -1185,9 +1214,7 @@ def test_a_reimport_after_a_history_delete_creates_the_db_again(world: World) ->
     connected(w)
     imported_ok(w)
     history = history_db("api", "acme")
-    response = w.client.request(
-        "DELETE", at("acme") + "/api/projects/api", json={"confirm_name": "api"}
-    )
+    response = purge_project(w)
     assert response.json()["history_deleted"] is True
     assert not history.parent.exists()
 
@@ -1317,11 +1344,7 @@ def test_a_failed_import_is_removed_without_a_path_warning(world: World) -> None
     w = world
     connected(w)
     assert wait_import(w, import_repo(w, POISONED))["status"] == "failed"
-    response = w.client.request(
-        "DELETE",
-        at("acme") + "/api/projects/poisoned",
-        json={"confirm_name": "poisoned"},
-    )
+    response = purge_project(w, "poisoned")
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["warnings"] == [] and body["checkout_deleted"] is False

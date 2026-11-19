@@ -11,34 +11,45 @@ M2f-1 plan sections 4.8 and 4.9 add, beside the deletion below:
   ``org.audit``): the org's persisted security events
   (:mod:`~whygraph.portal.audit_store`), keyset-paged or as escaped CSV.
 
-Deleting a production organization: ``DELETE /api/org`` (M2d-2 plan section 4.8).
+Deleting a production organization: ``DELETE /api/org`` (M2d-2 plan section
+4.8), a **soft** delete since plan 59 (section 4.3.2, D12).
 
 Production-only - the router's :func:`~whygraph.portal.deps.require_production`
 runs before the route's :func:`~whygraph.portal.deps.org_access`, so local
 mode answers ``404`` and its built-in org can never be deleted - and
 org-scoped: the org is the one ``Host`` names. Owner only
 (:attr:`~whygraph.portal.authz.Action.ORG_OWN`); an instance admin who is not
-an owner is refused like anyone else.
+an owner is refused like anyone else. A platform administrator deletes,
+restores and purges from the admin panel
+(:mod:`~whygraph.portal.auth_routes`), through the same two functions:
 
-The deletion is immediate and confirmed by typing the org's slug:
+* :func:`soft_delete_org` hides the org for everyone, at once: under
+  :meth:`~whygraph.portal.runner.ScanRunner.reserve_projects` (new run
+  requests refused, runs cancelled; ``409 busy`` when a sync is still
+  fetching, everything released), one transaction locks the org row ``FOR
+  UPDATE`` (an import holds it ``FOR SHARE`` while it inserts), sets
+  ``deleted_at`` / ``deleted_by`` and revokes the org's connection tokens
+  (``org_deleted``); after the commit each project's engine, migration
+  memo and context are dropped. No file is removed, the slug stays taken,
+  invitations and memberships are kept.
+* :func:`purge_org` is the hard delete, for a soft-deleted org only:
 
-1. :meth:`~whygraph.portal.runner.ScanRunner.reserve_projects` refuses
-   every new run request for the org's projects and cancels its runs
-   (``409 busy`` when a sync is still fetching, everything released);
-2. one transaction takes the slug's advisory lock
-   (:func:`~whygraph.portal.orgs.lock_org_slug`), locks the org row ``FOR
-   UPDATE`` (an import holds it ``FOR SHARE`` while it inserts), revokes
-   the org's connection tokens (``org_deleted``), deletes the org's
-   projects (cascading to their agents, config, secrets and runs), retires
-   the slug and deletes the org (cascading to its memberships, org config
-   and org secrets);
-3. after the commit: project engines disposed and forgotten, contexts
-   invalidated, run files deleted, ``<data>/repos/<org>/`` removed
-   (including an in-flight import's ``.clone-*``);
-4. audit ``org_deleted``.
+  1. the same reservation;
+  2. one transaction takes the slug's advisory lock
+     (:func:`~whygraph.portal.orgs.lock_org_slug`), locks the org row and
+     checks it is still soft-deleted (``409 not_deleted``: a Restore won),
+     revokes what is left of the org's connection tokens, deletes the
+     org's projects (cascading to their agents, config, secrets and runs),
+     retires the slug and deletes the org (cascading to its memberships,
+     org config and org secrets);
+  3. after the commit: project engines disposed and forgotten, contexts
+     invalidated, run files deleted, ``<data>/repos/<org>/`` and
+     ``<data>/projects/<org>/`` removed (including an in-flight import's
+     ``.clone-*``).
 
 Members keep their accounts and sessions; the org's host answers ``404``
-from then on, and the slug can never be created again.
+from the soft delete on, and once purged the slug can never be created
+again.
 """
 
 from __future__ import annotations
@@ -46,13 +57,14 @@ from __future__ import annotations
 import logging
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio.to_thread
 from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlmodel import col, select
 
 from whygraph.db.engine import dispose_engine
@@ -136,6 +148,10 @@ def _confirm_slug(access: OrgAccess, typed: str, doing: str) -> None:
         )
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _checked_name(raw: str) -> str:
     """The stripped org name; ``422 bad_name`` when blank, too long or with control characters."""
     name = raw.strip()
@@ -173,15 +189,21 @@ def _delete_rows(org_id: int, slug: str) -> _Deleted:
     Raises
     ------
     ApiError
-        ``404`` when the org is already gone (a concurrent deletion).
+        ``404`` when the org is already gone (a concurrent purge); ``409
+        not_deleted`` when it is not soft-deleted, checked under the row
+        lock, so a purge cannot race a Restore (plan 59 section 4.3.2).
     """
     with get_session() as session:
         lock_org_slug(session, slug)
         org = session.exec(
-            select(Organization.id).where(Organization.id == org_id).with_for_update()
+            select(Organization.id, Organization.deleted_at)
+            .where(Organization.id == org_id)
+            .with_for_update()
         ).first()
         if org is None:
             raise ApiError(404, "not found")
+        if org[1] is None:
+            raise not_deleted_error()
         # By org, under the lock: an import that committed first is
         # included, and one that commits later finds no org.
         projects = session.exec(select(Project).where(Project.org_id == org_id)).all()
@@ -238,6 +260,149 @@ def _clean_up(state: PortalState, slug: str, deleted: _Deleted) -> None:
         state.migrations.forget(db_path)
 
 
+def not_deleted_error() -> ApiError:
+    """The ``409 not_deleted`` of a restore or purge of a live org or project (plan 59)."""
+    return ApiError(
+        409,
+        "this is not deleted any more; reload to see its current state",
+        code="not_deleted",
+    )
+
+
+def org_deleted_error() -> ApiError:
+    """The ``409 org_deleted`` of an admin write on a soft-deleted org (plan 59 D34)."""
+    return ApiError(
+        409, "this organization is deleted: restore it first", code="org_deleted"
+    )
+
+
+@dataclass(frozen=True)
+class _SoftDeleted:
+    """The projects a soft delete hid, for the clean-up after the commit."""
+
+    project_ids: list[int]
+    project_dbs: list[Path]
+    live: int
+
+
+def _soft_delete_rows(org_id: int, slug: str, by: int) -> _SoftDeleted:
+    """Lock the org row, set ``deleted_at`` / ``deleted_by``, revoke its tokens (one transaction).
+
+    Raises
+    ------
+    ApiError
+        ``404`` when the org is gone; ``409 org_deleted`` when it is
+        already soft-deleted (a concurrent delete committed first).
+    """
+    with get_session() as session:
+        org = session.exec(
+            select(Organization.id, Organization.deleted_at)
+            .where(Organization.id == org_id)
+            .with_for_update()
+        ).first()
+        if org is None:
+            raise ApiError(404, "not found")
+        if org[1] is not None:
+            raise org_deleted_error()
+        session.exec(
+            update(Organization)
+            .where(col(Organization.id) == org_id)
+            .values(deleted_at=_now(), deleted_by=by)
+        )
+        connections.revoke_for_org(session, org_id, "org_deleted")
+        projects = session.exec(
+            select(Project.id, Project.slug, Project.deleted_at).where(
+                Project.org_id == org_id
+            )
+        ).all()
+    return _SoftDeleted(
+        project_ids=[pid for pid, _, _ in projects],
+        project_dbs=[project_db_path(data_dir(), slug, ps) for _, ps, _ in projects],
+        live=sum(1 for _, _, gone in projects if gone is None),
+    )
+
+
+async def soft_delete_org(state: PortalState, org_id: int, slug: str, by: int) -> int:
+    """Hide an org for everyone, keeping every row and file (plan 59 section 4.3.2, D12).
+
+    Under :meth:`~whygraph.portal.runner.ScanRunner.reserve_projects` (new
+    requests refused, queued runs dropped, running ones ended), one
+    transaction locks the org row ``FOR UPDATE``, sets ``deleted_at`` /
+    ``deleted_by`` and revokes the org's connection tokens
+    (``org_deleted``). After the commit, for each project: describes
+    stopped, engine disposed, migration memo and context dropped; then the
+    org's budgets leave the in-memory map (a restart reloads them, which is
+    harmless: every gate hides the org). No file is removed, the slug stays
+    taken and invitations are kept.
+
+    Parameters
+    ----------
+    state : PortalState
+        The portal.
+    org_id : int
+        ``organizations.id``.
+    slug : str
+        The org's slug.
+    by : int
+        ``users.id`` of the deleter, stored as ``deleted_by``.
+
+    Returns
+    -------
+    int
+        How many live projects it hid (not counting ones soft-deleted
+        before).
+
+    Raises
+    ------
+    ApiError
+        ``409 busy`` while a run cannot be stopped yet or the org is held;
+        ``409 org_deleted`` when it is already soft-deleted; ``404`` when it
+        is gone.
+    """
+    try:
+        async with state.runner.reserve_projects(org_id):
+            hidden = await anyio.to_thread.run_sync(_soft_delete_rows, org_id, slug, by)
+            for project_id, db_path in zip(hidden.project_ids, hidden.project_dbs):
+                # Before the dispose, which a later describe write would undo.
+                stop_describes(db_path)
+                dispose_engine(db_path)
+                state.migrations.forget(db_path)
+                state.contexts.invalidate(project_id)
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc), code="busy") from exc
+    state.budgets.set_org(org_id, None)
+    return hidden.live
+
+
+async def purge_org(state: PortalState, org_id: int, slug: str) -> int:
+    """Delete a soft-deleted org for good: rows, clones, history, run files (plan 59 D14).
+
+    The hard delete ``DELETE /api/org`` ran before plan 59, moved here: under
+    :meth:`~whygraph.portal.runner.ScanRunner.reserve_projects` (with its
+    own wording, ``purged``), :func:`_delete_rows` (which refuses an org
+    that is not soft-deleted, under its row lock) and :func:`_clean_up`;
+    then the org's budgets leave the in-memory map.
+
+    Returns
+    -------
+    int
+        How many projects were deleted with it.
+
+    Raises
+    ------
+    ApiError
+        ``409 busy``; ``409 not_deleted``; ``404`` when it is already gone.
+    """
+    try:
+        async with state.runner.reserve_projects(org_id, reason="purged"):
+            deleted = await anyio.to_thread.run_sync(_delete_rows, org_id, slug)
+            await anyio.to_thread.run_sync(_clean_up, state, slug, deleted)
+    except ProjectBusy as exc:
+        raise ApiError(409, str(exc), code="busy") from exc
+    state.budgets.set_org(org_id, None)  # its budgets went with the org
+    return len(deleted.project_ids)
+
+
 @org_router.delete("/api/org")
 async def delete_org(
     request: Request,
@@ -245,11 +410,12 @@ async def delete_org(
     principal: Principal = Depends(current_user),
     body: DeleteOrgBody | None = Body(default=None),
 ) -> dict:
-    """Delete the org, its projects, clones, history, run files, members, config and keys.
+    """Delete the org for everyone (a soft delete: :func:`soft_delete_org`).
 
     ``409 confirm_slug`` unless ``confirm_slug`` equals the org's slug;
     ``409 busy`` while a run cannot be stopped yet (a sync still fetching)
-    or the org is already being deleted - nothing is deleted then.
+    or the org is already held - nothing changes then. Only a platform
+    administrator restores or purges it.
 
     Returns
     -------
@@ -264,24 +430,19 @@ async def delete_org(
             f"type the organization's slug ({access.org_slug}) to delete it",
             code="confirm_slug",
         )
-    try:
-        async with state.runner.reserve_projects(access.org_id):
-            deleted = await anyio.to_thread.run_sync(
-                _delete_rows, access.org_id, access.org_slug
-            )
-            await anyio.to_thread.run_sync(_clean_up, state, access.org_slug, deleted)
-    except ProjectBusy as exc:
-        raise ApiError(409, str(exc), code="busy") from exc
-    state.budgets.set_org(access.org_id, None)  # its budgets went with the org
+    count = await soft_delete_org(
+        state, access.org_id, access.org_slug, principal.user_id
+    )
     audit(
         "org_deleted",
         request,
         uid=principal.uid,
         org_id=access.org_id,
         org=access.org_slug,
-        projects=len(deleted.project_ids),
+        projects=count,
+        soft=True,
     )
-    return {"deleted": access.org_slug, "projects": len(deleted.project_ids)}
+    return {"deleted": access.org_slug, "projects": count}
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +640,9 @@ def get_org_audit(
         ``{"events": [...], "next": <id or null>}``.
     """
     f = org_audit_filter(access, event, actor, since, until)
-    events, next_before = audit_store.query_events(f, before=before, limit=limit)
+    events, next_before = audit_store.query_events(
+        f, before=before, limit=limit, mask_deleted=True
+    )
     return {"events": events, "next": next_before}
 
 
@@ -498,7 +661,7 @@ def get_org_audit_csv(
     """
     f = org_audit_filter(access, event, actor, since, until)
     return StreamingResponse(
-        audit_store.iter_csv(f),
+        audit_store.iter_csv(f, mask_deleted=True),
         media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": (
@@ -515,7 +678,11 @@ __all__ = [
     "delete_org",
     "get_org_audit",
     "get_org_audit_csv",
+    "not_deleted_error",
+    "org_deleted_error",
     "org_router",
     "patch_org",
     "post_transfer",
+    "purge_org",
+    "soft_delete_org",
 ]

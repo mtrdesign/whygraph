@@ -306,6 +306,18 @@ describe("router gate - production org host", () => {
     expect(screen.getByRole("link", { name: "Your organizations" })).toHaveAttribute("href", `${BASE}/orgs`);
   });
 
+  it("tells a platform administrator with no grant how access works, and links to the admin panel", async () => {
+    fake.state = orgState(null, { user: adminAda });
+    vi.stubGlobal("location", { ...window.location, host: "acme.whygraph.localhost:8765" });
+    mount("/");
+    await screen.findByRole("heading", { name: "No access to this organization" });
+    expect(document.body.textContent).toMatch(
+      /You have no read-only access to acme right now\. It lasts 60 minutes from Open as reader, and ends when you revoke it\./,
+    );
+    expect(screen.getByRole("link", { name: "Open in the admin panel" })).toHaveAttribute("href", `${BASE}/admin/orgs/acme`);
+    expect(screen.queryByTestId("join-hint")).toBeNull();
+  });
+
   it("hands base-only paths to the base host", async () => {
     fake.state = orgState("owner");
     mount("/account");
@@ -578,16 +590,25 @@ describe("reset page", () => {
 
 // ---- reader --------------------------------------------------------------------------
 
-describe("reader role (instance admin in a foreign org)", () => {
+describe("reader role (platform administrator in a foreign org)", () => {
   it("shows the banner and hides scan, Chat and Add controls", async () => {
     fake.state = orgState("reader", { user: adminAda });
     mount("/p/alpha");
     await screen.findByTestId("reader-banner");
-    expect(screen.getByText("Viewing as instance admin (read-only)")).toBeInTheDocument();
+    expect(screen.getByTestId("reader-banner")).toHaveTextContent(/^Viewing as a platform administrator, read-only/);
     await screen.findByRole("heading", { name: "Project alpha" });
     expect(screen.queryByRole("button", { name: "Rescan" })).toBeNull();
     expect(screen.queryByTestId("chats-section")).toBeNull();
     expect(fake.calls.some((c) => c.path.includes("/chat/sessions"))).toBe(false);
+  });
+
+  it("the reader banner says when the grant ends", async () => {
+    fake.state = orgState("reader", { user: adminAda });
+    (fake.state.org as Record<string, unknown>).reader_until = "2026-11-18T09:30:00Z";
+    mount("/p/alpha");
+    const banner = await screen.findByTestId("reader-banner");
+    expect(banner).toHaveTextContent(/^Viewing as a platform administrator, read-only until \d/);
+    expect(banner).not.toHaveTextContent(/instance admin/i);
   });
 
   it("a member sees one Rescan button and the Chats section", async () => {
@@ -605,7 +626,7 @@ describe("reader role (instance admin in a foreign org)", () => {
     mount("/p/alpha/chat");
     const notice = await screen.findByTestId("chat-read-only");
     expect(notice).toHaveTextContent(
-      "You're viewing this organization as an instance administrator. Chat is read-only access, so it is not available.",
+      "You're viewing this organization as a platform administrator. Chat is read-only access, so it is not available.",
     );
     expect(notice).not.toHaveTextContent("Contributor");
   });

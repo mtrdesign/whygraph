@@ -36,6 +36,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     at,
     claim_instance,
     env,
+    grant_reader,
     portal_client,
     prod_portal,
     production_env,
@@ -88,7 +89,8 @@ def cn(production_env: SimpleNamespace, tmp_path: Path) -> Iterator[SimpleNamesp
     """Ada (instance admin), Ben / Fay / Cy in ``acme``, Dee in ``bravo``.
 
     Ada is a password account, so admin-only (plan 59 D4); Ivy is a GitHub
-    instance admin in no org, the always-on ``reader`` of plan 59 Phase 1.
+    instance admin in no org, who reads ``acme`` through a reader grant
+    (:func:`be`; plan 59 D3).
     """
     with prod_portal() as client:
         claim_instance(client)
@@ -147,10 +149,15 @@ def cn(production_env: SimpleNamespace, tmp_path: Path) -> Iterator[SimpleNamesp
 
 
 def be(n: SimpleNamespace, who: str | None) -> None:
-    """Make the next requests ``who``'s (``None``: no cookie at all)."""
+    """Make the next requests ``who``'s (``None``: no cookie at all).
+
+    ``"ivy"``, the instance admin, also holds a live reader grant on ``acme``.
+    """
     n.client.cookies.clear()
     if who is not None:
         signed_in(n.client, n.ids[who])
+    if who == "ivy":
+        grant_reader(n.client, n.uids["ivy"], "acme")
 
 
 def consent(**over) -> dict:

@@ -134,6 +134,7 @@ describe("projectHealth precedence (plan section 4.10)", () => {
     ["folder missing", { root_status: "missing" }, "folder_missing", "Folder missing"],
     ["not set up", { initialized: false, last_scan_at: null }, "needs_setup", "Needs setup"],
     ["scanning over failed", { last_scan_status: "failed", running_scan: { id: 2, status: "running", trigger: "manual" } }, "scanning", "Scanning"],
+    ["a suspended organization", { llm_block: "org_suspended" }, "suspended", "Suspended"],
     ["a project budget stop", { llm_block: "budget_exceeded", llm_block_scope: "project" }, "stopped", "Stopped"],
     ["failed", { last_scan_status: "failed" }, "failed", "Scan failed"],
     ["behind", { stale: { commits_behind: 4 } }, "behind", "Behind"],

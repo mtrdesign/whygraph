@@ -92,6 +92,7 @@ PORTAL_TABLES = {
     "budget_alerts",
     "price_overrides",
     "agent_call_days",
+    "reader_grants",
 }
 
 
@@ -248,7 +249,8 @@ FORGE_TRIGGER = "c9d4e2f7a815"
 TOOL_OUTCOME = "b5e1a7d93c42"
 UPDATE_CHECK = "496953df26b4"
 ADMIN_SESSION = "df854cdd4f03"
-HEAD = ADMIN_SESSION
+ADMIN_ORGS = "7a2e5c9d1b48"
+HEAD = ADMIN_ORGS
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001

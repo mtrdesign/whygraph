@@ -747,7 +747,13 @@ def _runs_check(body: dict, w: World, o: OrgWorld) -> None:
 
 def _deleted_check(body: dict, w: World, o: OrgWorld) -> None:
     with portal_db.get_session() as session:
-        assert session.get(Project, o.project_id) is None
+        row = session.get(Project, o.project_id)
+        if w.client.app.state.portal.mode == "production":
+            # A soft delete in production (plan 59 D12): hidden, kept.
+            assert row is not None and row.deleted_at is not None
+            assert body["soft"] is True
+        else:
+            assert row is None
 
 
 def _qn(o: OrgWorld) -> dict:

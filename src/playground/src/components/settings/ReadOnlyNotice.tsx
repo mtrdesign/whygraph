@@ -7,6 +7,7 @@ export type ReadOnlyAudience =
   | { kind: "project" }
   | { kind: "org" }
   | { kind: "reader" }
+  | { kind: "suspended" }
   | { kind: "linked"; platformOrigin: string | null | undefined };
 
 const TEST_ID: Record<ReadOnlyAudience["kind"], string> = {
@@ -14,6 +15,7 @@ const TEST_ID: Record<ReadOnlyAudience["kind"], string> = {
   // The org wording keeps the id the page has always had.
   org: "settings-owner-only",
   reader: "settings-reader",
+  suspended: "settings-suspended",
   linked: "settings-managed",
 };
 
@@ -25,7 +27,9 @@ export function readOnlyText(audience: ReadOnlyAudience): string {
       return `This project is managed on ${host}. Change its settings there.`;
     }
     case "reader":
-      return "You're viewing this organization as an instance administrator. Everything here is read-only.";
+      return "You're viewing this organization as a platform administrator. Everything here is read-only.";
+    case "suspended":
+      return "This organization is suspended, so everything here is read-only. A platform administrator can lift the suspension.";
     case "org":
       return "Only owners can change organization settings.";
     default:

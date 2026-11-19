@@ -158,6 +158,12 @@ class OrgAccess:
     welcome_pending : bool
         Whether the caller's membership still carries the welcome flag
         (``False`` for an instance admin's synthesized ``reader`` access).
+    reader_until : str or None
+        For an instance admin's ``reader`` access, the live reader grant's
+        ``expires_at`` (ISO-8601 UTC); ``None`` for a member.
+    suspended : bool
+        Whether the org is suspended (``organizations.suspended_at`` set,
+        plan 59 D6): its members only read.
     """
 
     org_id: int
@@ -167,6 +173,8 @@ class OrgAccess:
     user_id: int
     default_project_role: str
     welcome_pending: bool = False
+    reader_until: str | None = None
+    suspended: bool = False
 
 
 def allowed(role: Role, action: Action) -> bool:

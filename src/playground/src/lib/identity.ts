@@ -11,7 +11,7 @@ export function usePortalState() {
 }
 
 /**
- * True for an instance admin looking at an org they are not a member of. The
+ * True for a platform administrator looking at an org they are not a member of. The
  * backend answers every non-GET with 403 for them; the UI hides the controls.
  */
 export function useReadOnly(): boolean {
@@ -19,12 +19,24 @@ export function useReadOnly(): boolean {
 }
 
 /**
+ * True while a platform administrator has suspended the request's org (plan 59, D6):
+ * the pages stay readable, every write answers `403 org_suspended`, and the UI hides
+ * the controls. It is separate from {@link useReadOnly}, which stays reader-only.
+ */
+export function useSuspended(): boolean {
+  return !!usePortalState().data?.org?.suspended;
+}
+
+/**
  * The caller's role in the request's org (`owner` / `admin` / `member`, or
- * `reader` for an instance admin outside it), or `undefined` without one. Local
- * mode's single user is the built-in org's owner.
+ * `reader` for a platform administrator outside it), or `undefined` without one. Local
+ * mode's single user is the built-in org's owner. This is the role that gates write
+ * controls, so a suspended org reads as `reader` for everyone: no owner or admin
+ * control shows while the suspension lasts (§4.5).
  */
 export function useRole(): string | undefined {
   const data = usePortalState().data;
+  if (data?.org?.suspended) return "reader";
   return data?.org?.role ?? data?.user?.role ?? undefined;
 }
 

@@ -36,9 +36,12 @@ const MODULES: Record<string, string> = {
 /**
  * The page's `h1`, its crumbs and the document-title page name, from the path
  * (§4.14 "Headings, crumbs and titles"). A detail page is named by its slug or
- * uid until a later phase loads its real name.
+ * uid until its own query has loaded: `names` carries the loaded org or user name.
  */
-export function adminCrumbs(pathname: string): { heading: string; crumbs: AdminCrumb[] } {
+export function adminCrumbs(
+  pathname: string,
+  names: { org?: string; user?: string } = {},
+): { heading: string; crumbs: AdminCrumb[] } {
   const parts = pathname.replace(/\/+$/, "").split("/").filter(Boolean).slice(1).map(decodeURIComponent);
   const root: AdminCrumb = { label: "Administration", to: "/admin" };
   if (parts.length === 0) return { heading: "Dashboard", crumbs: [{ label: "Administration" }] };
@@ -52,8 +55,9 @@ export function adminCrumbs(pathname: string): { heading: string; crumbs: AdminC
       crumbs: [root, { label: heading, to: "/admin/projects" }, { label: `${parts[1]} / ${parts[2]}` }],
     };
   }
+  const name = (module === "orgs" ? names.org : module === "users" ? names.user : undefined) ?? parts[1];
   return {
-    heading: parts[1],
-    crumbs: [root, { label: heading, to: `/admin/${module}` }, { label: parts[1] }],
+    heading: name,
+    crumbs: [root, { label: heading, to: `/admin/${module}` }, { label: name }],
   };
 }

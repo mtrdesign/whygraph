@@ -40,7 +40,7 @@ from fastapi import Depends
 from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlmodel import select
+from sqlmodel import col, select
 
 from conftest import HeaderIdentity, build_fake_codegraph_db, builtin_org_id
 from github_fake import (
@@ -553,6 +553,38 @@ def admin_signed_in(client: TestClient, user_id: int) -> str:
     return token
 
 
+def admin_request(
+    client: TestClient,
+    method: str,
+    path: str,
+    body: dict | None = None,
+    *,
+    user_id: int | None = None,
+) -> httpx.Response:
+    """Call an ``/api/admin`` route on the base host with a fresh admin session.
+
+    ``user_id`` defaults to the first instance admin (the one who claimed
+    the instance). The admin cookie is dropped afterwards, so whatever
+    everyday session ``client`` held is all that is left.
+    """
+    from whygraph.portal import sessions
+
+    if user_id is None:
+        with portal_db.get_session() as session:
+            user_id = session.exec(
+                select(User.id)
+                .where(col(User.is_instance_admin).is_(True))
+                .order_by(col(User.id))
+            ).first()
+        assert user_id is not None, "no instance admin"
+    base = client.app.state.portal.base_url
+    admin_signed_in(client, user_id)
+    try:
+        return client.request(method, at() + path, json=body)
+    finally:
+        client.cookies.delete(sessions.admin_cookie_name(base), domain=base.host)
+
+
 PROD_PASSWORD = "correct horse battery staple"
 """A password that passes production's rules (15+ chars, not blocklisted)."""
 
@@ -651,6 +683,34 @@ def github_admin(client: TestClient, login: str) -> str:
         user.is_instance_admin = True
         session.add(user)
         return user.uid
+
+
+def grant_reader(client: TestClient, admin: str, org_slug: str) -> dict:
+    """Open ``org_slug`` read-only for the instance admin ``admin`` (a uid).
+
+    Calls the real ``POST /api/admin/orgs/{slug}/reader-grant`` (asserted
+    ``200``) with a fresh admin session of ``admin`` (plan 59 section 4.4):
+    the grant then lets ``admin``'s **everyday** session read the org for
+    60 minutes. Whatever admin cookie ``client`` held before is put back,
+    so the helper never changes who the client is in the admin panel.
+    Returns the grant (``{"id", "org_url", "expires_at"}``).
+    """
+    from whygraph.portal import sessions
+
+    base = client.app.state.portal.base_url
+    name = sessions.admin_cookie_name(base)
+    before = client.cookies.get(name, domain=base.host)
+    with portal_db.get_session() as session:
+        user_id = session.exec(select(User.id).where(User.uid == admin)).one()
+    admin_signed_in(client, user_id)
+    try:
+        response = client.post(at() + f"/api/admin/orgs/{org_slug}/reader-grant")
+    finally:
+        client.cookies.delete(name, domain=base.host)
+        if before is not None:
+            client.cookies.set(name, before, domain=base.host)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def uid_of_login(login: str) -> str:
@@ -1598,14 +1658,40 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/settings", "GET"): "instance.admin",
     ("/api/admin/update", "GET"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
+    ("/api/admin/orgs", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}", "GET"): "instance.admin",
+    ("/api/admin/orgs/{slug}", "PATCH"): "instance.admin",
+    ("/api/admin/orgs/{slug}/members", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/members/{uid}", "PATCH"): "instance.admin",
+    ("/api/admin/orgs/{slug}/members/{uid}", "DELETE"): "instance.admin",
+    ("/api/admin/audit.csv", "GET"): "instance.admin",
     ("/api/admin/users", "GET"): "instance.admin",
+    ("/api/admin/users/{uid}", "GET"): "instance.admin",
     ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
+    ("/api/admin/users/{uid}/sessions", "DELETE"): "instance.admin",
+    ("/api/admin/users/{uid}/sessions/{id}", "DELETE"): "instance.admin",
+    ("/api/admin/users/{uid}/tokens/{token_uid}", "DELETE"): "instance.admin",
     ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
+    ("/api/admin/users/{uid}", "DELETE"): "instance.admin",
+    ("/api/admin/users/{uid}/restore", "POST"): "instance.admin",
+    ("/api/admin/users/{uid}/erase", "POST"): "instance.admin",
     ("/api/admin/audit", "GET"): "instance.admin",
     # The admin panel's own account (plan 59 section 4.2)
     ("/api/admin/me", "GET"): "instance.admin",
     ("/api/admin/me/logout", "POST"): "instance.admin",
     ("/api/admin/me/password", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/reader-grant", "POST"): "instance.admin",
+    ("/api/admin/reader-grants/{id}", "DELETE"): "instance.admin",
+    # Org suspension (plan 59 section 4.5)
+    ("/api/admin/orgs/{slug}/suspend", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/unsuspend", "POST"): "instance.admin",
+    # Soft delete, restore and purge (plan 59 sections 4.3.2, 4.3.3)
+    ("/api/admin/orgs/{slug}", "DELETE"): "instance.admin",
+    ("/api/admin/orgs/{slug}/restore", "POST"): "instance.admin",
+    ("/api/admin/orgs/{slug}/purge", "POST"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}", "DELETE"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/restore", "POST"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/purge", "POST"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 

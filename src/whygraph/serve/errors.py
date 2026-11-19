@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from whygraph.core.usage import BUDGET_EXCEEDED
 from whygraph.mcp.errors import WhyGraphError
-from whygraph.mcp.rationale import GenerationNotPermitted
+from whygraph.mcp.rationale import ORG_SUSPENDED, GenerationNotPermitted
 
 
 class ServeError(WhyGraphError):
@@ -60,8 +60,9 @@ def whygraph_error_handler(_: Request, exc: WhyGraphError) -> JSONResponse:
     A :class:`~whygraph.mcp.rationale.GenerationNotPermitted` for an
     exhausted hard-stopped budget is the one exception: ``403
     {"error", "code": "budget_exceeded", "scope"}``, the refusal every
-    spending surface shares (M2f-2 plan section 4.7). A viewer's refusal
-    keeps its ``400``.
+    spending surface shares (M2f-2 plan section 4.7) - and one for a
+    suspended org, ``403 {"error", "code": "org_suspended"}`` (plan 59
+    section 4.5). A viewer's refusal keeps its ``400``.
 
     Parameters
     ----------
@@ -83,6 +84,10 @@ def whygraph_error_handler(_: Request, exc: WhyGraphError) -> JSONResponse:
         return JSONResponse(
             status_code=403,
             content={"error": str(exc), "code": BUDGET_EXCEEDED, "scope": exc.scope},
+        )
+    if isinstance(exc, GenerationNotPermitted) and exc.reason == ORG_SUSPENDED:
+        return JSONResponse(
+            status_code=403, content={"error": str(exc), "code": ORG_SUSPENDED}
         )
     if isinstance(exc, ServeError):
         status = exc.status

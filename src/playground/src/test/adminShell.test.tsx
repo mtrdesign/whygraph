@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { adminCrumbs } from "../components/admin/adminNav";
-import { BASE, ME, fake, hard, json, mountAdmin, resetAdminFake, signedInAdmin, strays } from "./adminHarness";
+import { BASE, ME, ORGS, USERS, fake, hard, json, mountAdmin, resetAdminFake, signedInAdmin, strays } from "./adminHarness";
 
 beforeEach(() => resetAdminFake());
 afterEach(() => {
@@ -127,8 +127,8 @@ describe("admin shell: navigation", () => {
       ["Administration", "Platform configuration"],
       "Platform configuration · Administration · WhyGraph",
     ],
-    ["/admin/orgs/acme", "acme", ["Administration", "Organizations", "acme"], "acme · Administration · WhyGraph"],
-    ["/admin/users/u2", "u2", ["Administration", "Users", "u2"], "u2 · Administration · WhyGraph"],
+    ["/admin/orgs/acme", "Acme", ["Administration", "Organizations", "Acme"], "Acme · Administration · WhyGraph"],
+    ["/admin/users/u2", "Ben", ["Administration", "Users", "Ben"], "Ben · Administration · WhyGraph"],
     [
       "/admin/projects/acme/api",
       "api",
@@ -186,24 +186,36 @@ describe("admin shell: command palette", () => {
     expect(screen.getByPlaceholderText("Go to a page, user, organization or project...")).toBeInTheDocument();
   });
 
-  it("finds a user and opens the Users list with ?q= set to the login (Phase 1 has no detail page)", async () => {
+  it("finds a user and opens their detail page", async () => {
     const router = mountAdmin("/admin");
     const { user, box } = await openWithKeys();
     await user.type(box, "ben");
     const dialog = screen.getByRole("dialog");
     await user.click(await within(dialog).findByText("@ben"));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/admin/users"));
-    expect((router.state.location.search as { q?: string }).q).toBe("ben");
-    expect(await screen.findByLabelText("Search")).toHaveValue("ben");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/admin/users/u2"));
   });
 
-  it("finds an organization by slug and goes to the list with ?q=", async () => {
+  it("finds an organization by slug and opens its detail page", async () => {
     const router = mountAdmin("/admin");
     const { user, box } = await openWithKeys();
     await user.type(box, "acme");
     await user.click(await within(screen.getByRole("dialog")).findByText("Acme"));
-    await waitFor(() => expect(router.state.location.pathname).toBe("/admin/orgs"));
-    expect((router.state.location.search as { q?: string }).q).toBe("acme");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/admin/orgs/acme"));
+  });
+
+  it("marks a deleted user and a deleted organization with a Deleted badge", async () => {
+    fake.routes["/api/admin/users"] = () => json(USERS.map((u) => (u.uid === "u2" ? { ...u, deleted_at: "2026-11-10T00:00:00Z" } : u)));
+    fake.routes["/api/admin/orgs"] = () => json(ORGS.map((o) => ({ ...o, deleted_at: "2026-11-10T00:00:00Z" })));
+    mountAdmin("/admin");
+    const { user, box } = await openWithKeys();
+    await user.type(box, "b");
+    const dialog = screen.getByRole("dialog");
+    await within(dialog).findByText("@ben");
+    expect(within(dialog).getAllByText("Deleted").length).toBeGreaterThanOrEqual(1);
+    await user.clear(box);
+    await user.type(box, "acme");
+    await within(dialog).findByText("Acme");
+    expect(within(dialog).getAllByText("Deleted").length).toBeGreaterThanOrEqual(1);
   });
 
   it("says 'No results.' for a query nothing matches", async () => {

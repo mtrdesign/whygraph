@@ -51,7 +51,7 @@ export function useProjectCan(action: ProjectAction): boolean {
  * Why the caller cannot spend LLM tokens on the current project (`llm_block`, M2f-2): their
  * role, or an exhausted hard-stopped budget (`scope` names it). `block` is `null` when they can.
  */
-export function useLlmBlock(): { block: "role" | "budget_exceeded" | null; scope: BudgetScope | null } {
+export function useLlmBlock(): { block: "role" | "budget_exceeded" | "org_suspended" | null; scope: BudgetScope | null } {
   const slug = useSlug();
   const project = useQuery({
     queryKey: projectKey(slug, "project"),

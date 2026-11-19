@@ -253,7 +253,7 @@ that cannot run says why instead (for example "Monthly budget reached", "No Anth
 setting up this project first").
 
 With no projects yet, owners and admins (and the local user) see how to add the first one; a member
-sees that nobody has shared a project with them yet, and an instance administrator viewing an
+sees that nobody has shared a project with them yet, and a platform administrator reading an
 organization sees that it has none.
 
 ## The Overview
@@ -360,12 +360,14 @@ What happens to the project's history depends on the mode:
 
 - **Local mode keeps it.** The history stays in the data directory unless you tick **Also delete
   history** (you then type the project's name to confirm).
-- **Production deletes it,** with the server copy of the repository, unless an owner or admin ticks
-  **Keep history**.
+- **Production only hides the project.** An owner or admin removes it by typing its name; the server
+  copy and the history stay, and a platform administrator can restore it or delete it permanently (see
+  [Deleting, restoring and erasing](../deploy/administration.md#deleting-restoring-and-erasing)).
 - **A [linked project](platform-projects.md)** has no local history, so there is nothing to keep and
   removing it never deletes any.
 
-Adding the same repository again **re-attaches** the history that was kept. The match is made by the
+Adding the same repository again **re-attaches** the history that was kept (in production the removed
+project is refused until an administrator restores it, so there is nothing to re-attach). The match is made by the
 repository's identity, written beside the history in `project.json`: in local mode the `origin` remote
 (or the folder's path when there is no `origin`, so a repository without one that you moved starts
 empty), in production the GitHub repository id. An unrelated repository that happens to have the same

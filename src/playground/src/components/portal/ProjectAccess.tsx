@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { accessApi, portalKey, projectKey, type AccessPerson, type ProjectRole } from "../../api";
 import { authMessage } from "../../lib/authErrors";
 import { formatUsd } from "../../lib/format";
+import { useSuspended } from "../../lib/identity";
 import { projectRoleLabel } from "../../lib/labels";
 import { UserAvatar } from "../auth/UserAvatar";
 import { Badge } from "../ui/badge";
@@ -35,6 +36,8 @@ export function ProjectAccess({ slug }: { slug: string }) {
   const queryClient = useQueryClient();
   const key = projectKey(slug, "access");
   const api = accessApi(slug);
+  // A suspended organization is read-only: the section stays visible, its edit controls are off (§4.5).
+  const suspended = useSuspended();
   const data = useQuery({ queryKey: key, queryFn: api.get });
   const [addUid, setAddUid] = useState("");
   const [addRole, setAddRole] = useState<ProjectRole>("viewer");
@@ -89,7 +92,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
             <Switch
               aria-label="Restricted"
               checked={restricted}
-              disabled={restrict.isPending}
+              disabled={restrict.isPending || suspended}
               onCheckedChange={(v) => restrict.mutate(v)}
             />
             <span className="flex flex-col leading-tight">
@@ -127,7 +130,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
                       aria-label={`Role for ${personName(p)}`}
                       className={nativeSelect("w-36")}
                       value={p.project_role ?? "viewer"}
-                      disabled={setGrant.isPending}
+                      disabled={setGrant.isPending || suspended}
                       onChange={(e) => setGrant.mutate({ uid: p.uid, role: e.target.value as ProjectRole })}
                     >
                       {ROLES.map((r) => (
@@ -139,7 +142,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
                     <Button
                       size="sm"
                       variant="outline"
-                      disabled={removeGrant.isPending}
+                      disabled={removeGrant.isPending || suspended}
                       onClick={() => {
                         removeGrant.reset();
                         setRemoving(p);
@@ -166,6 +169,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
               <select
                 aria-label="Add person"
                 className={nativeSelectClass}
+                disabled={suspended}
                 value={addUid}
                 onChange={(e) => setAddUid(e.target.value)}
               >
@@ -179,6 +183,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
               <select
                 aria-label="Role for the new person"
                 className={nativeSelect("sm:w-36")}
+                disabled={suspended}
                 value={addRole}
                 onChange={(e) => setAddRole(e.target.value as ProjectRole)}
               >
@@ -189,7 +194,7 @@ export function ProjectAccess({ slug }: { slug: string }) {
                 ))}
               </select>
               <Button
-                disabled={!addUid || setGrant.isPending}
+                disabled={!addUid || setGrant.isPending || suspended}
                 onClick={() => setGrant.mutate({ uid: addUid, role: addRole })}
               >
                 Add

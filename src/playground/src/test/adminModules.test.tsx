@@ -48,48 +48,12 @@ describe("Users", () => {
     };
   });
 
-  it("lists @login or email by uid, reset links only for password accounts", async () => {
+  it("lists @login or email by uid and links each row to its detail page", async () => {
     mountAdmin("/admin/users");
     const ben = within(await screen.findByTestId("admin-user-u2"));
     expect(ben.getByText("@ben")).toBeInTheDocument();
-    expect(ben.queryByRole("button", { name: "Copy reset link" })).toBeNull();
-    const root = within(screen.getByTestId("admin-user-u3"));
-    expect(root.getByText("root@example.com")).toBeInTheDocument();
-    expect(root.getByRole("button", { name: "Copy reset link" })).toBeInTheDocument();
-  });
-
-  it("takes 'me' from /api/admin/me: your own account has no Disable, another admin has", async () => {
-    mountAdmin("/admin/users");
-    const ada = within(await screen.findByTestId("admin-user-u1"));
-    expect(ada.queryByRole("button", { name: "Disable" })).toBeNull();
-    const root = within(screen.getByTestId("admin-user-u3"));
-    expect(root.getByRole("button", { name: "Disable" })).toBeInTheDocument();
-    expect(fake.calls.some((c) => c.path === "/api/admin/me")).toBe(true);
-  });
-
-  it("makes an admin with a secondary button", async () => {
-    mountAdmin("/admin/users");
-    const ben = within(await screen.findByTestId("admin-user-u2"));
-    expect(ben.getByRole("button", { name: "Make admin" }).className).toContain("bg-secondary");
-  });
-
-  it("disables only after a confirmation, and enables at once", async () => {
-    mountAdmin("/admin/users");
-    const u = userEvent.setup();
-    const ben = within(await screen.findByTestId("admin-user-u2"));
-    await u.click(ben.getByRole("button", { name: "Disable" }));
-    expect(fake.calls.some((c) => c.path === "/api/admin/users/u2" && c.method === "PATCH")).toBe(false);
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent("Disable Ben?");
-    await u.click(within(dialog).getByRole("button", { name: "Disable" }));
-    await waitFor(() =>
-      expect(fake.calls.find((c) => c.path === "/api/admin/users/u2")?.body).toEqual({ disabled: true }),
-    );
-    expect(await ben.findByText("disabled")).toBeInTheDocument();
-    await u.click(ben.getByRole("button", { name: "Enable" }));
-    await waitFor(() =>
-      expect(fake.calls.filter((c) => c.path === "/api/admin/users/u2").at(-1)?.body).toEqual({ disabled: false }),
-    );
+    expect(ben.getByRole("link", { name: /Ben/ })).toHaveAttribute("href", "/admin/users/u2");
+    expect(within(screen.getByTestId("admin-user-u3")).getByText("root@example.com")).toBeInTheDocument();
   });
 
   it("filters on name, login and email as you type, and keeps the search in the URL", async () => {
@@ -111,27 +75,38 @@ describe("Users", () => {
 });
 
 describe("Organizations", () => {
-  it("lists name, slug, address, members and created", async () => {
+  it("lists name, slug, members, projects, owners and spend, the address as no link", async () => {
     mountAdmin("/admin/orgs");
     const row = within(await screen.findByTestId("admin-org-acme"));
     expect(row.getByText("Acme")).toBeInTheDocument();
     expect(row.getByText("acme")).toBeInTheDocument();
-    expect(row.getByRole("link", { name: "http://acme.whygraph.localhost:8765" })).toBeInTheDocument();
     expect(row.getByText("3 members")).toBeInTheDocument();
+    expect(row.getByText("2 projects")).toBeInTheDocument();
+    expect(row.getByText("@ada")).toBeInTheDocument();
+    expect(row.getByText("$1.50")).toBeInTheDocument();
+    expect(row.queryByRole("link", { name: /whygraph\.localhost/ })).toBeNull();
   });
 
-  it("says what a search found nothing for, and what an empty platform needs", async () => {
+  it("says what a search found nothing for", async () => {
     mountAdmin("/admin/orgs?q=zzz");
-    expect(await screen.findByText("No organization matches that search.")).toBeInTheDocument();
+    expect(await screen.findByText("No organization matches.")).toBeInTheDocument();
+  });
+
+  it("says what an empty platform needs", async () => {
+    fake.routes["/api/admin/orgs"] = () => json([]);
+    mountAdmin("/admin/orgs");
+    expect(await screen.findByText("No organizations yet")).toBeInTheDocument();
+    expect(screen.getByText(/or use Create organization/)).toBeInTheDocument();
   });
 });
 
 describe("Audit", () => {
-  it("lists the orgless events", async () => {
+  it("lists the cross-org events with an Organization column, and offers the CSV", async () => {
     fake.routes["/api/admin/audit"] = () =>
       json({
         events: [
           { id: 5, created_at: "2026-10-05T10:00:00Z", org: null, actor: null, event: "github_signin", target: null, ip: null, fields: {} },
+          { id: 6, created_at: "2026-10-05T11:00:00Z", org: "acme", actor: null, event: "member_added", target: null, ip: null, fields: {} },
         ],
         next: null,
       });
@@ -139,7 +114,10 @@ describe("Audit", () => {
     const box = within(await screen.findByTestId("admin-audit"));
     expect(await box.findByText("Signed in with GitHub")).toBeInTheDocument();
     expect(box.getAllByText("System").length).toBeGreaterThan(0);
-    expect(box.queryByRole("button", { name: "Download CSV" })).toBeNull();
+    expect(box.getByRole("columnheader", { name: "Organization" })).toBeInTheDocument();
+    expect(box.getAllByText("Acme").length).toBeGreaterThan(0);
+    expect(box.getByRole("button", { name: "Download CSV" })).toBeInTheDocument();
+    expect(fake.calls.find((c) => c.path === "/api/admin/audit")?.search).toBe("?scope=all");
   });
 });
 

@@ -77,8 +77,8 @@ calls no LLM), the last panel follows it and names what was linked (organization
 Configure step: the project's models and keys are the platform's.
 
 The slug is the platform's slug. If a project with that slug already exists on your portal, linking
-is refused with `slug_taken`. Only members of the organization can link: an instance admin's
-read-only access to an organization cannot.
+is refused with `slug_taken`. Only members of the organization can link: a platform administrator's
+read-only grant to an organization cannot.
 
 ## What runs where
 

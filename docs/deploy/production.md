@@ -421,6 +421,10 @@ Invitations that closed in the last 30 days (accepted or revoked) are listed too
   the account restores access. You cannot disable your own account, and the last enabled admin can be
   neither demoted nor disabled. A scan-event stream a person is following ends when their access is
   removed.
+- **Deleting.** An administrator can also delete a user, which signs them out everywhere, revokes their
+  connection tokens and removes them from their organizations (where they read as `[Deleted User]`);
+  the account can be restored, or erased permanently. A user who is the last owner of an organization
+  cannot be deleted. See [Deleting, restoring and erasing](administration.md#deleting-restoring-and-erasing).
 
 ## Upgrading { #upgrading }
 
@@ -450,11 +454,14 @@ page - is on its own page: [Platform administration](administration.md).
 
 - **Keep two admins.** The last admin can't be demoted, and there is no recovery path for a locked-out
   admin in this release.
-- **Read access to every organization.** An admin who is not a member of an organization can still
-  open it, **read-only** (GET requests only), under a "Viewing as instance admin" banner. Each such
-  request is written to the security event log. These reads never trigger the lazy description
-  backfill, so an admin's reading spends none of the organization's LLM keys. This uses the admin's
-  everyday GitHub session, so a password account, which has none, cannot do it.
+- **Reading an organization is a grant.** An admin who is not a member of an organization has no access
+  to it until they use **Open as reader** on its page in the panel: a **60-minute**, read-only (GET
+  requests only) grant for that administrator and that organization, shown to the people there by a
+  "Viewing as a platform administrator, read-only until ..." banner. The grant is revoked from the
+  Account page, and ends if the admin is demoted, disabled or deleted. Opening and revoking it, and
+  each read, are written to the security event log. These reads never trigger the lazy description
+  backfill, so an admin's reading spends none of the organization's LLM keys. A grant rides on the
+  admin's everyday GitHub session, so a password account, which has none, cannot open one.
 - **Admin mode.** Administration itself needs the separate admin session, which lasts 8 hours and is
   never sent to an organization host. A stolen everyday cookie cannot open an admin page. Protect admin
   accounts all the same: a long unique passphrase for the password account, a trusted device, and the
@@ -565,12 +572,14 @@ repository and push; the next fetch checks again and clears the mark.
 
 ### Removing a project
 
-Only organization admins and owners remove a project (a project admin who is only a project role holder cannot), from its settings, by typing the project's name. That deletes the
-server copy, the project's history (descriptions, rationale cards and chat sessions) and every scan of
-it. The repository on GitHub is not touched. To keep the history, tick **Keep history** in the dialog:
-only the server copy and the scans go, and importing the same repository again (matched by its GitHub
-repository id, not its name) re-attaches the history. A re-import does not restore the project's
-access restrictions; set them again.
+Only organization admins and owners remove a project (a project admin who is only a project role holder cannot), from its settings, by typing the project's name. In production that
+**hides** the project for everyone at once and stops its scans; **nothing is deleted**. The server
+copy, the history (descriptions, rationale cards and chat sessions) and the scan files stay until a
+platform administrator either restores the project or
+[deletes it permanently](administration.md#deleting-restoring-and-erasing). The repository on GitHub
+is never touched. The same repository cannot be imported again while its project is removed (matched
+by its GitHub repository id): the import picker shows it as removed and asks you to ask a platform
+administrator to restore it. A restored project keeps its history and its access restrictions.
 
 ## Connected machines { #connected-portals }
 
@@ -662,14 +671,17 @@ bounded amount of `git` work.
 ## Deleting an organization
 
 An **owner** deletes an organization from its **Settings** page (the danger zone), by typing the
-organization's slug. It is **immediate**, with no grace period and no undo: running scans are
-cancelled, then the projects, their server copies and scan files, the memberships, the settings, the
-keys and the [usage history and budgets](../portal/usage.md#retention-and-deletion) go in one operation. **The slug is retired forever** - nobody can create an organization
-with it again. Members keep their accounts and sessions, and the organization's address stops
-answering.
+organization's slug. It **disappears for everyone at once**: running scans are cancelled and its
+connection tokens are revoked, but **nothing is erased**. The projects, their server copies and
+history, the memberships, the settings, the keys and the [usage history and budgets](../portal/usage.md#retention-and-deletion) stay, the slug stays taken, and a platform
+administrator can restore the organization, or delete it permanently from the
+[admin panel](administration.md#deleting-restoring-and-erasing). Only a permanent delete erases the
+data in one operation and **retires the slug forever**: nobody can create an organization with it
+again. Members keep their accounts and sessions, and the organization's address stops answering.
 
 If a fetch is still running, the deletion stops with "A sync is finishing - try again in a minute"
-and nothing is deleted. An instance admin who is not an owner cannot delete an organization.
+and nothing changes. A platform administrator who is not an owner can delete an organization from the
+panel, not from its Settings page.
 
 ## The security event log
 
@@ -681,22 +693,26 @@ plus these GitHub, member, project and organization events:
 | Event | When |
 |---|---|
 | `github_signin` | A GitHub sign-in succeeded (and whether the account is new). |
-| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required` or `disabled`. A refusal on the admin sign-in page also carries `surface` `admin`. |
+| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required`, `disabled` or `deleted` (a deleted account). A refusal on the admin sign-in page also carries `surface` `admin`. |
 | `admin_signin` | Someone signed in to [platform administration](administration.md) (with the `method`, `password` or `github`). |
-| `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin` or `disabled`. It writes nothing else: no account, no session. |
+| `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin`, `disabled` or `deleted`. It writes nothing else: no account, no session. |
 | `admin_signout` | An admin session ended by sign-out, from the admin panel or (with `reason` `signout`) because the everyday session it was started beside signed out. |
+| `reader_grant_created`, `reader_grant_revoked` | A platform administrator opened an organization read-only for 60 minutes ("Open as reader"), or that access ended early: revoked by the administrator, or (with the `reason` `demoted`, `disabled` or `user_deleted`) because they stopped being an administrator, were disabled or were deleted. Both are in the organization's own log. |
 | `github_token_revoke_failed` | GitHub's one-time token could not be revoked. |
 | `github_login_released` | A username moved to another account and was taken from the older one. |
-| `member_added`, `member_add_refused` | A member was added, or the attempt was refused (with the reason and the username tried). |
-| `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed or left. |
+| `member_added`, `member_add_refused` | A member was added (with the `reason` `user_restored` when a platform administrator restored their account), or the attempt was refused (with the reason and the username tried). |
+| `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed (with the `reason` `user_deleted` when a platform administrator deleted their account) or left. |
 | `invitation_created`, `invitation_revoked`, `member_joined_by_invite` | An invitation was made or revoked, or redeemed at sign-in. |
 | `project_grant_added`, `project_grant_changed`, `project_grant_removed` | A project grant changed. |
 | `project_restricted_changed` | A project was marked or unmarked Restricted. |
 | `org_renamed`, `org_default_role_changed`, `org_ownership_transferred` | An owner renamed the organization, changed its default project role or transferred ownership. |
 | `user_disabled`, `user_enabled` | An instance admin disabled or enabled an account. |
+| `user_deleted`, `user_restored`, `user_erased` | A platform administrator deleted an account (it is hidden as `[Deleted User]`, its memberships, sessions and connection tokens end, and it can be restored), restored one (its memberships come back), or erased a deleted one's personal data for good (the event carries only the account's id). |
+| `sessions_revoked` | A platform administrator ended a user's sessions: all of them or one kind (`kind` is `all`, `user` or `admin`), or a single session, with how many (`count`). Ending everyday sessions also ends the admin sessions started beside them. |
 | `github_app_authorized` | Someone authorized the GitHub App, or installed it, from the import page. |
 | `github_account_mismatch` | That authorization was for a different GitHub account than the signed-in one, and was refused. |
-| `project_imported`, `project_removed` | A repository was imported, or a project was removed. |
+| `project_imported`, `project_removed` | A repository was imported, or a project was removed (`soft` is true when it was only hidden, as every removal in production is; `via` is `instance_admin` from the admin panel). |
+| `project_restored`, `project_purged` | A platform administrator restored a removed project, or deleted it permanently (its clone, history and run files go). |
 | `connection_authorized`, `connection_token_issued`, `connection_token_refused`, `connection_revoked` | A member allowed a connected machine (`pre_approved` is true when the platform's own card started the link and Allow was skipped), its token was issued, a token exchange was refused, or a token was revoked (with the reason). |
 | `project_access_lost`, `project_access_restored` | A project lost its GitHub access (with the reason), or got it back. |
 | `note_confirmed`, `note_reconfirmed`, `note_retired` | A member confirmed a project note, marked it still true, or retired it (with the note id, its source and anchor kind, and whether the confirmer was also the proposer; never the note text). |
@@ -705,7 +721,9 @@ plus these GitHub, member, project and organization events:
 | `project_bundle_exported`, `project_bundle_imported` | A project admin exported a project bundle (with whether their chats were included, the file's size and sha256, and the rows per kind), or applied one (with the bundle's sha256, the mode that exported it, whether its settings were applied, the counts of notes, purpose runs, rationale cards, descriptions and chats added, and whether the rationale cards or descriptions were only partly imported; never any text). A dry run is not recorded. |
 | `imported_rationale_removed` | A project admin removed the rationale cards imports had added (with the count). |
 | `webhook_rejected` | A webhook delivery had a missing or wrong signature. |
-| `org_deleted` | An owner deleted an organization (with its project count). |
+| `org_deleted` | An owner, or a platform administrator (`via` is `instance_admin`), deleted an organization (with its project count). `soft` is true: it is hidden, not erased, until it is restored or deleted permanently. |
+| `org_restored`, `org_purged` | A platform administrator restored a deleted organization, or deleted it permanently (with its project count): its projects, clones, history and members go, and its name is retired. |
+| `org_suspended`, `org_unsuspended` | A platform administrator suspended an organization (its members can only read; changes, scans, chat and agent calls stop), or lifted the suspension. Both are in the organization's own log. |
 | `budget_threshold_crossed` | A budget passed 50, 75 or 100% of its month, once per threshold per month (with the `scope` - `org`, `project` or `member` - the `threshold`, the spend and the budget, and the member or project it names). |
 | `budget_hard_stop_engaged` | A budget with the hard stop reached 100% (same fields): LLM spend it covers is off until the month resets or the budget is raised. |
 | `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |
@@ -726,8 +744,9 @@ portal's database**, where they are kept for **400 days** and then deleted.
   "System" where no one acted (a sign-in refusal, a webhook, a budget threshold). The event names in
   the table above are what the log lines and the CSV carry. **Download CSV** exports the same filter (at most 50,000 rows). A cell
   that starts with `=`, `+`, `-` or `@` is prefixed with `'` so a spreadsheet does not run it.
-- **Instance admins** have the same list in the [Audit module](administration.md#the-modules) of the admin
-  panel for events that belong to no organization and for organizations that were deleted.
+- **Platform administrators** have the same list in the [Audit module](administration.md#audit) of the admin
+  panel for **every** organization, deleted ones included, and for events that belong to none, with an
+  **Organization** filter and column and a CSV download.
 - Rows record **attempts**, so a refused action is there too. A busy portal drops rows rather than
   slowing requests (and logs a warning); the log line is always written.
 - An instance admin's reads are recorded at most once per hour per organization.
@@ -745,7 +764,7 @@ portal's database**, where they are kept for **400 days** and then deleted.
 - **Other sign-in providers.** GitHub is the only one, and its two-factor authentication is required;
   there is no GitHub-less sign-in for end users and no multi-factor step for the bootstrap password
   account.
-- **Recovery of a locked-out admin**, **deleting** a user, and a list of your sessions.
+- **Recovery of a locked-out admin.**
 
 ## Trusted proxies
 

@@ -65,6 +65,12 @@ interface BudgetChild {
   label?: string;
 }
 
+/** One entry of a user delete's `409 last_owner` `orgs` (plan 59 section 4.3.1). */
+interface LastOwnedOrg {
+  slug: string;
+  deleted: boolean;
+}
+
 function childName(child: BudgetChild): string {
   const who =
     child.name ?? child.label ?? (child.scope === "member_default" ? "the member default" : (child.slug ?? child.uid));
@@ -167,7 +173,11 @@ export const MESSAGES: Record<string, Resolver> = {
   github_unavailable: { message: "GitHub could not be reached. Try again in a moment.", action: RETRY },
   github_2fa_required:
     "Your GitHub account needs two-factor authentication turned on before you can sign in to WhyGraph.",
-  account_disabled: "This account is disabled. Ask an instance administrator to enable it.",
+  account_disabled: "This account is disabled. Ask a platform administrator to enable it.",
+  account_deleted: {
+    title: "Account deleted",
+    message: "This account was deleted. Ask a platform administrator to restore it.",
+  },
   no_password: "This account signs in with GitHub, so it has no password.",
   login_required: { title: "Signed out", message: "Your session has ended. Sign in again." },
   admin_login_required: { title: "Signed out", message: "Your admin session has ended. Sign in again." },
@@ -179,6 +189,37 @@ export const MESSAGES: Record<string, Resolver> = {
           message:
             "This account is not a platform administrator. Sign in with an administrator's GitHub account, or ask another administrator to make you one.",
         },
+  github_account_required:
+    "This needs a GitHub account. Sign in to the admin panel with GitHub to use Open as reader; an organization's owner must be a GitHub account.",
+  org_deleted: "This organization is deleted. Restore it before changing it.",
+  not_deleted: { message: "This isn't deleted any more. Reload the page to see its current state.", action: RETRY },
+  project_deleted: (_err, ctx) =>
+    ctx === "github" || ctx === "add-project"
+      ? "This repository's project was removed. Ask a platform administrator to restore it."
+      : "This project is deleted. Restore it before changing it.",
+  self_session: "That would end the admin session you are using. Use Sign out instead.",
+  user_deleted: "This account was deleted. A platform administrator must restore it first.",
+  erased: "This account was erased. Nothing about it can be changed any more.",
+  self_delete: "You can't delete your own account. Another administrator can.",
+  confirm_user: "Type the account's GitHub login, email or ID exactly as shown to confirm.",
+  erase_blocked: (err) => {
+    const projects = Array.isArray(err.extra.projects)
+      ? (err.extra.projects as unknown[]).filter((p): p is string => typeof p === "string")
+      : [];
+    const named = projects.length > 0 ? projects.join(", ") : "a project";
+    return {
+      title: "Erase stopped",
+      message: `Nothing was erased: WhyGraph couldn't open the chat history of ${named}. Fix or permanently delete ${
+        projects.length > 1 ? "those projects" : "that project"
+      }, then erase again.`,
+    };
+  },
+  org_suspended: {
+    title: "Organization suspended",
+    tone: "warn",
+    message:
+      "This organization is suspended. Its data stays readable, but changes, scans and AI features are paused until a platform administrator lifts the suspension.",
+  },
   setup_required: "WhyGraph isn't set up yet. Finish the setup page first.",
   bootstrap_required: "This WhyGraph instance isn't set up yet. Finish the setup page first.",
   throttled: (err) => ({ title: "Too many attempts", tone: "warn", message: `Too many attempts. ${retryLine(err)}` }),
@@ -214,12 +255,17 @@ export const MESSAGES: Record<string, Resolver> = {
   already_invited: "They already have an open invitation. Revoke it first to send a new one.",
   org_admin: "Org admins and owners already have every project role.",
   already_member: "They are already a member of this organization.",
-  user_disabled: "This account is disabled. An instance administrator must enable it first.",
-  last_owner: "This is the organization's last owner. Make someone else an owner first.",
+  user_disabled: "This account is disabled. A platform administrator must enable it first.",
+  last_owner: (err) => {
+    const orgs = Array.isArray(err.extra.orgs) ? (err.extra.orgs as LastOwnedOrg[]) : null;
+    if (!orgs) return "This is the organization's last owner. Make someone else an owner first.";
+    const named = orgs.map((o) => (o.deleted ? `${o.slug} (deleted)` : o.slug)).join(", ");
+    return `They are the last owner of ${named}. Make someone else an owner of each first. A deleted organization needs Restore and a second owner, or Delete permanently.`;
+  },
   not_member: "That person is no longer a member of this organization.",
   owner_required: "Only an owner can make someone an owner, or change or remove an owner.",
   self_disable: "You cannot disable your own account.",
-  last_admin: "This is the last enabled instance administrator. Make someone else an administrator first.",
+  last_admin: "This is the last enabled platform administrator. Make someone else an administrator first.",
   bad_role: "That role doesn't exist here.",
   duplicate_grant: "A project is listed twice. Keep one access entry per project.",
   no_grant: "That person has no specific access to this project.",
@@ -259,7 +305,7 @@ export const MESSAGES: Record<string, Resolver> = {
   github_account_mismatch:
     "You authorized a different GitHub account than the one you signed in with. Switch accounts on GitHub and try again.",
   github_required: "Importing from GitHub needs an account that signs in with GitHub.",
-  github_app_not_configured: "This portal has no GitHub App configured. Ask an instance administrator.",
+  github_app_not_configured: "This portal has no GitHub App configured. Ask a platform administrator.",
   start_from_portal: "Open your organization in WhyGraph and choose Import from GitHub.",
   busy: (_err, ctx) =>
     ctx === "codegraph"

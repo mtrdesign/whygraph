@@ -245,11 +245,11 @@ def lookup(token: str, kind: str = "user") -> SessionRow | None:
     SessionRow or None
         ``None`` for an unknown token, a session of another kind, one past
         its absolute lifetime (or, for the user kind, its idle lifetime), or
-        one whose user is disabled (so a disabled user's surviving session
-        simply resolves to signed out). A user-kind session of a password
-        account is refused (plan 59 D4), and an admin-kind session of a
-        user who is no longer an instance admin is refused, so a demotion
-        ends it on the next request.
+        one whose user is disabled or soft-deleted (so such a user's
+        surviving session simply resolves to signed out). A user-kind
+        session of a password account is refused (plan 59 D4), and an
+        admin-kind session of a user who is no longer an instance admin is
+        refused, so a demotion ends it on the next request.
 
     Raises
     ------
@@ -265,6 +265,7 @@ def lookup(token: str, kind: str = "user") -> SessionRow | None:
         col(UserSession.kind) == kind,
         col(UserSession.expires_at) > _iso(now),
         col(User.disabled_at).is_(None),
+        col(User.deleted_at).is_(None),
     ]
     if idle is not None:
         conditions.append(col(UserSession.last_seen_at) > _iso(now - idle))

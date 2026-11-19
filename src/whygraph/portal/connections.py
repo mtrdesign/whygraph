@@ -45,6 +45,7 @@ from sqlmodel import Session, col, select
 
 from .authz import ProjectRole, Role, effective_project_role
 from .db import get_session
+from .people import user_label
 from .models import (
     ConnectionToken,
     Membership,
@@ -539,6 +540,10 @@ def member_access_select(*columns, user_id: int):  # noqa: ANN002, ANN201
     columns - ``memberships.role``, ``organizations.default_project_role``,
     ``projects.restricted`` and ``project_grants.role`` - in the order
     :func:`member_project_role` takes them. The caller adds its ``WHERE``.
+    A soft-deleted org or project is never selected (plan 59 section
+    4.3.2): this is the gate for the connect routes, :func:`lookup` and
+    the ``/api/v1`` status. A suspended org is (its tokens stay valid,
+    section 4.5).
 
     Parameters
     ----------
@@ -566,12 +571,17 @@ def member_access_select(*columns, user_id: int):  # noqa: ANN002, ANN201
             (col(Membership.org_id) == col(Project.org_id))
             & (col(Membership.user_id) == user_id),
         )
-        .join(Organization, col(Organization.id) == col(Project.org_id))
+        .join(
+            Organization,
+            (col(Organization.id) == col(Project.org_id))
+            & col(Organization.deleted_at).is_(None),
+        )
         .outerjoin(
             ProjectGrant,
             (col(ProjectGrant.project_id) == col(Project.id))
             & (col(ProjectGrant.user_id) == user_id),
         )
+        .where(col(Project.deleted_at).is_(None))
     )
 
 
@@ -957,6 +967,7 @@ def _infos(db: Session, *conditions) -> list[TokenInfo]:  # noqa: ANN002
             ConnectionToken,
             User.github_login,
             User.display_name,
+            User.deleted_at,
             Project.slug,
             Project.name,
         )
@@ -967,6 +978,11 @@ def _infos(db: Session, *conditions) -> list[TokenInfo]:  # noqa: ANN002
             col(ConnectionToken.created_at).desc(), col(ConnectionToken.id).desc()
         )
     ).all()
+    # A soft-deleted user is [Deleted User] (plan 59 section 4.3.1).
+    labelled = [
+        (token, *user_label(name, login, deleted_at), slug, project_name)
+        for token, login, name, deleted_at, slug, project_name in rows
+    ]
     return [
         TokenInfo(
             uid=token.uid,
@@ -983,7 +999,7 @@ def _infos(db: Session, *conditions) -> list[TokenInfo]:  # noqa: ANN002
             revoked_at=token.revoked_at,
             revoked_reason=token.revoked_reason,
         )
-        for token, login, user_name, slug, project_name in rows
+        for token, user_name, login, slug, project_name in labelled
     ]
 
 

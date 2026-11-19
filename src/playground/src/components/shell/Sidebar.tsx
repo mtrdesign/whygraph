@@ -19,7 +19,7 @@ import {
   UsersIcon,
 } from "lucide-react";
 import { ApiError, portalApi, portalKey, projectApi, projectKey, type PortalState, type ProjectSummary } from "../../api";
-import { canAdmin, canOwn, isProduction, signedInAs, useSignOut } from "../../lib/identity";
+import { canAdmin, canOwn, isProduction, signedInAs, useRole, useSignOut } from "../../lib/identity";
 import { projectStatus, type StatusTone } from "../../lib/projectStatus";
 import { hardNavigate } from "../../lib/navigation";
 import { can } from "../../lib/permissions";
@@ -183,7 +183,8 @@ function ProjectSwitcher({ slug, name }: { slug?: string; name?: string }) {
   const state = useQuery({ queryKey: portalKey("state"), queryFn: portalApi.state }).data;
   const production = isProduction(state);
   // Local mode's user may always add; in production `org.add_project` is the org's owners and admins.
-  const canAdd = (!production || canAdmin(state?.org?.role ?? undefined));
+  const role = useRole();
+  const canAdd = (!production || canAdmin(role));
   const projects = useQuery({ queryKey: portalKey("projects"), queryFn: portalApi.projects });
   const label = slug ? (name ?? slug) : "All projects";
   return (

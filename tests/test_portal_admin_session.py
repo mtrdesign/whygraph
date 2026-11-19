@@ -752,7 +752,7 @@ def test_the_migration_ends_password_accounts_sessions_and_tokens(
         ids = _seed_pre_admin_session(conn)
     portal_db._reset_engine()
     started = _iso(datetime.now(timezone.utc))
-    command.upgrade(portal_db.alembic_config(), "head")
+    command.upgrade(portal_db.alembic_config(), ADMIN_SESSION)
     portal_db._reset_engine()
     with portal_db.get_engine().connect() as conn:
         assert (

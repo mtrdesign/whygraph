@@ -1,7 +1,7 @@
 import { errorMessage } from "../../lib/apiErrors";
-import { Fragment, useState, type FormEvent } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
-import { auditApi, type AuditEventRow, type AuditFilters } from "../../api";
+import { Fragment, useEffect, useState, type FormEvent } from "react";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { adminApi, auditApi, type AuditEventRow, type AuditFilters } from "../../api";
 import {
   AUDIT_GROUPS,
   auditDetails,
@@ -45,41 +45,20 @@ function DetailValue({ detail }: { detail: Omit<AuditDetail, "label"> }) {
 }
 
 /**
- * Security events, newest first, with a grouped event select and actor / date filters and "Load more"
- * (keyset paging on the server's `next`). `scope` picks the endpoint: the org's log
- * (with a CSV download) or the instance admin's log of events that belong to no org.
+ * The audit columns over rows already loaded (Event, Organization, When, Actor, Target, Details).
+ * `showOrg` adds the Organization column, first after Event, naming each event's org from `orgNames`.
  */
-export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: "org" | "admin"; filename?: string }) {
-  const [draft, setDraft] = useState({ event: "", actor: "", from: "", to: "" });
-  const [applied, setApplied] = useState<AuditFilters>({});
-  const [csvError, setCsvError] = useState<string | null>(null);
-  const [downloading, setDownloading] = useState(false);
-
-  const fetchPage = scope === "org" ? auditApi.org : auditApi.admin;
-  const events = useInfiniteQuery<Page, Error, { pages: Page[] }, readonly unknown[], number | undefined>({
-    queryKey: ["@audit", scope, applied],
-    queryFn: ({ pageParam }) => fetchPage({ ...applied, before: pageParam }),
-    initialPageParam: undefined,
-    getNextPageParam: (last) => last.next ?? undefined,
-  });
-
-  const apply = (e: FormEvent) => {
-    e.preventDefault();
-    setApplied(Object.fromEntries(Object.entries(draft).filter(([, v]) => v.trim() !== "")) as AuditFilters);
-  };
-  const download = async () => {
-    setCsvError(null);
-    setDownloading(true);
-    try {
-      saveBlob(await auditApi.csv(applied), filename);
-    } catch (err) {
-      setCsvError(errorMessage(err));
-    } finally {
-      setDownloading(false);
-    }
-  };
-
-  const rows = events.data?.pages.flatMap((p) => p.events) ?? [];
+export function AuditRows({
+  rows,
+  admin,
+  showOrg = false,
+  orgNames,
+}: {
+  rows: AuditEventRow[];
+  admin: boolean;
+  showOrg?: boolean;
+  orgNames?: Map<string, string>;
+}) {
   const columns: Column<AuditEventRow>[] = [
     {
       key: "event",
@@ -87,6 +66,15 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
       primary: true,
       cell: (r) => <span title={r.event}>{auditLabel(r.event)}</span>,
     },
+    ...(showOrg
+      ? [
+          {
+            key: "org",
+            header: "Organization",
+            cell: (r: AuditEventRow) => (r.org ? (orgNames?.get(r.org) ?? r.org) : "-"),
+          },
+        ]
+      : []),
     {
       key: "when",
       header: "When",
@@ -105,7 +93,7 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
       key: "details",
       header: "Details",
       cell: (r) => {
-        const pairs = auditDetails(r, scope === "admin");
+        const pairs = auditDetails(r, admin);
         if (pairs.length === 0) return null;
         return (
           <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs">
@@ -122,6 +110,94 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
       },
     },
   ];
+  return (
+    <ResponsiveTable columns={columns} rows={rows} rowKey={(r) => String(r.id)} rowTestId={(r) => `audit-${r.id}`} />
+  );
+}
+
+/** The admin log's filters as the URL holds them; the org is a slug, `scope: "orgless"` means no organization. */
+export type AuditUrlFilters = Pick<AuditFilters, "event" | "actor" | "from" | "to" | "org"> & { scope?: "orgless" };
+
+const ORGLESS = "@orgless";
+
+/**
+ * Security events, newest first, with a grouped event select and actor / date filters and "Load more"
+ * (keyset paging on the server's `next`). `scope` picks the endpoint: the org's log or the platform
+ * administrator's cross-org log (plan 59, §4.9). The admin log gains an Organization filter and column,
+ * unless `org` locks it to one org (the org detail's Audit tab). Both have a CSV download. With
+ * `filters` and `onFilters` the applied filters live in the caller's URL; without them they are local.
+ */
+export function AuditTable({
+  scope,
+  filename = "whygraph-audit.csv",
+  org,
+  filters,
+  onFilters,
+}: {
+  scope: "org" | "admin";
+  filename?: string;
+  org?: string;
+  filters?: AuditUrlFilters;
+  onFilters?: (next: AuditUrlFilters) => void;
+}) {
+  const [localApplied, setLocalApplied] = useState<AuditUrlFilters>({});
+  const applied = filters ?? localApplied;
+  const fromApplied = (f: AuditUrlFilters) => ({
+    event: f.event ?? "",
+    actor: f.actor ?? "",
+    from: f.from ?? "",
+    to: f.to ?? "",
+    org: f.scope === "orgless" ? ORGLESS : (f.org ?? ""),
+  });
+  const [draft, setDraft] = useState(fromApplied(applied));
+  const [csvError, setCsvError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  // The URL moved (a link such as "All events by this user"): the form follows it.
+  const appliedKey = JSON.stringify(applied);
+  useEffect(() => {
+    setDraft(fromApplied(JSON.parse(appliedKey) as AuditUrlFilters));
+  }, [appliedKey]);
+
+  const orgFilter = scope === "admin" && org === undefined;
+  const orgs = useQuery({ queryKey: ["@admin", "orgs"], queryFn: adminApi.orgs, enabled: scope === "admin" });
+  const orgNames = new Map((orgs.data ?? []).map((o) => [o.slug, o.deleted_at ? `${o.name} (deleted)` : o.name]));
+
+  const request: AuditFilters =
+    scope === "admin"
+      ? { ...applied, ...(org !== undefined ? { org } : {}), scope: applied.scope ?? "all" }
+      : applied;
+  const fetchPage = scope === "org" ? auditApi.org : auditApi.admin;
+  const events = useInfiniteQuery<Page, Error, { pages: Page[] }, readonly unknown[], number | undefined>({
+    queryKey: scope === "admin" ? ["@admin", "audit", request] : ["@audit", scope, request],
+    queryFn: ({ pageParam }) => fetchPage({ ...request, before: pageParam }),
+    initialPageParam: undefined,
+    getNextPageParam: (last) => last.next ?? undefined,
+  });
+
+  const apply = (e: FormEvent) => {
+    e.preventDefault();
+    const next: AuditUrlFilters = {};
+    for (const key of ["event", "actor", "from", "to"] as const) {
+      if (draft[key].trim() !== "") next[key] = draft[key].trim();
+    }
+    if (orgFilter && draft.org === ORGLESS) next.scope = "orgless";
+    else if (orgFilter && draft.org !== "") next.org = draft.org;
+    if (onFilters) onFilters(next);
+    else setLocalApplied(next);
+  };
+  const download = async () => {
+    setCsvError(null);
+    setDownloading(true);
+    try {
+      saveBlob(await (scope === "admin" ? auditApi.adminCsv(request) : auditApi.csv(request)), filename);
+    } catch (err) {
+      setCsvError(errorMessage(err));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const rows = events.data?.pages.flatMap((p) => p.events) ?? [];
   return (
     <div className="flex flex-col gap-4" data-testid="audit-table">
       <form onSubmit={apply} className="flex flex-wrap items-end gap-3" data-testid="audit-filters">
@@ -146,6 +222,29 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
             </select>
           )}
         </Field>
+        {orgFilter && (
+          <Field label="Organization" className="w-full sm:w-56">
+            {(p) => (
+              <select
+                {...p}
+                className={nativeSelectClass}
+                value={draft.org}
+                onChange={(e) => setDraft({ ...draft, org: e.target.value })}
+              >
+                <option value="">All organizations</option>
+                <option value={ORGLESS}>Platform events (no organization)</option>
+                {draft.org !== "" && draft.org !== ORGLESS && !orgNames.has(draft.org) && (
+                  <option value={draft.org}>{draft.org}</option>
+                )}
+                {[...orgNames].map(([slug, label]) => (
+                  <option key={slug} value={slug}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+        )}
         <Field label="Actor" className="w-full sm:w-40">
           {(p) => <Input {...p} placeholder="@ben" value={draft.actor} onChange={(e) => setDraft({ ...draft, actor: e.target.value })} />}
         </Field>
@@ -158,11 +257,9 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
         <Button type="submit" variant="outline">
           Filter
         </Button>
-        {scope === "org" && (
-          <Button type="button" variant="outline" disabled={downloading} onClick={() => void download()}>
-            Download CSV
-          </Button>
-        )}
+        <Button type="button" variant="outline" disabled={downloading} onClick={() => void download()}>
+          Download CSV
+        </Button>
       </form>
       {csvError && (
         <p className="text-sm text-destructive" role="alert" data-testid="audit-csv-error">
@@ -175,7 +272,7 @@ export function AuditTable({ scope, filename = "whygraph-audit.csv" }: { scope: 
       )}
       {events.data && rows.length === 0 && <p className="text-sm text-muted-foreground">No events match.</p>}
       {rows.length > 0 && (
-        <ResponsiveTable columns={columns} rows={rows} rowKey={(r) => String(r.id)} rowTestId={(r) => `audit-${r.id}`} />
+        <AuditRows rows={rows} admin={scope === "admin"} showOrg={orgFilter} orgNames={orgNames} />
       )}
       {events.hasNextPage && (
         <div>

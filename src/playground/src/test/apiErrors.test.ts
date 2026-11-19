@@ -39,6 +39,39 @@ describe("the registry and the backend's code inventory", () => {
     }
   });
 
+  it("says platform administrator, never instance administrator", () => {
+    for (const code of [...(codes as string[]), ...SYNTHETIC_CODES]) {
+      expect(errorInfo(new ApiError(400, "x", code)).message, code).not.toMatch(/instance admin/i);
+    }
+  });
+
+  it("words the Phase 2 admin codes as the plan's table says", () => {
+    const msg = (code: string, status = 409, extra: Record<string, unknown> = {}) =>
+      errorInfo(new ApiError(status, "x", code, extra));
+    expect(msg("self_session").message).toBe("That would end the admin session you are using. Use Sign out instead.");
+    expect(msg("user_deleted").message).toBe("This account was deleted. A platform administrator must restore it first.");
+    expect(msg("erased").message).toBe("This account was erased. Nothing about it can be changed any more.");
+    expect(msg("self_delete").message).toBe("You can't delete your own account. Another administrator can.");
+    expect(msg("org_deleted").message).toBe("This organization is deleted. Restore it before changing it.");
+    expect(msg("not_deleted").message).toBe("This isn't deleted any more. Reload the page to see its current state.");
+    expect(msg("org_suspended", 403)).toMatchObject({ title: "Organization suspended", tone: "warn" });
+    expect(msg("erase_blocked", 409, { projects: ["acme/api"] })).toMatchObject({
+      title: "Erase stopped",
+      message:
+        "Nothing was erased: WhyGraph couldn't open the chat history of acme/api. Fix or permanently delete that project, then erase again.",
+    });
+    expect(msg("account_deleted", 403)).toMatchObject({
+      title: "Account deleted",
+      message: "This account was deleted. Ask a platform administrator to restore it.",
+    });
+  });
+
+  it("project_deleted reads one way on an import and another elsewhere", () => {
+    const e = new ApiError(409, "x", "project_deleted");
+    expect(errorMessage(e, "github")).toBe("This repository's project was removed. Ask a platform administrator to restore it.");
+    expect(errorMessage(e)).toBe("This project is deleted. Restore it before changing it.");
+  });
+
   it("dropped the codes no backend emits", () => {
     expect(hasMessage("no_such_user")).toBe(false);
     expect(hasMessage("invalid_url")).toBe(false);
@@ -102,6 +135,35 @@ describe("extras", () => {
     );
     expect(errorMessage(new ApiError(422, "x", "platform_address_mismatch"))).toBe(
       "This is not the platform's own address. Check the address with your admin.",
+    );
+  });
+
+  it("names every org a user delete is the last owner of", () => {
+    expect(
+      errorMessage(
+        new ApiError(409, "x", "last_owner", {
+          orgs: [
+            { slug: "acme", deleted: false },
+            { slug: "bravo", deleted: true },
+          ],
+        }),
+      ),
+    ).toBe(
+      "They are the last owner of acme, bravo (deleted). Make someone else an owner of each first. A deleted organization needs Restore and a second owner, or Delete permanently.",
+    );
+    expect(errorMessage(new ApiError(409, "x", "last_owner"))).toBe(
+      "This is the organization's last owner. Make someone else an owner first.",
+    );
+  });
+
+  it("names the projects an Erase could not open", () => {
+    const one = errorInfo(new ApiError(409, "x", "erase_blocked", { projects: ["acme/api"] }));
+    expect(one.title).toBe("Erase stopped");
+    expect(one.message).toBe(
+      "Nothing was erased: WhyGraph couldn't open the chat history of acme/api. Fix or permanently delete that project, then erase again.",
+    );
+    expect(errorMessage(new ApiError(409, "x", "erase_blocked", { projects: ["acme/api", "bravo/lib"] }))).toContain(
+      "acme/api, bravo/lib. Fix or permanently delete those projects",
     );
   });
 

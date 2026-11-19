@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Iterator
 
@@ -50,6 +51,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     LOCAL_ONLY_ROUTES,
     NON_ORG_ROUTES,
     PRODUCTION_ORG_ROUTES,
+    PROD_DOMAIN,
     PUBLIC_AUTH_ROUTES,
     ROUTE_ACTIONS,
     V1_ROUTES,
@@ -60,6 +62,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     admin_signed_in,
     github_admin,
     github_sign_in,
+    grant_reader,
     manual_ctx,
     portal_client,
     prod_portal,
@@ -100,6 +103,7 @@ from whygraph.core.context import use_project
 from whygraph.db import ensure_initialized
 from whygraph.db import get_session as project_session
 from whygraph.db.models import ChatSession as ChatSessionRow
+from whygraph.portal import audit as audit_mod
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
 from whygraph.portal import sessions
@@ -115,6 +119,7 @@ from whygraph.portal.models import (
     Organization,
     Project,
     ProjectGrant,
+    ReaderGrant,
     ScanRun,
     Secret,
     User,
@@ -144,7 +149,8 @@ ROOT_EMAIL = "root@example.com"
 
 ADMIN_LOGIN = "ada"
 """Ada, :func:`prod_world`'s instance admin: a GitHub account in no org, so
-she reads every org as ``reader`` (always on in plan 59 Phase 1)."""
+she reads an org as ``reader`` only while she holds a reader grant on it
+(:meth:`ProdWorld.read_as_reader`; plan 59 D3)."""
 
 GITHUB_LOGINS = ("ann", "bob")
 """The GitHub org owners of :func:`prod_world` (their short name is the login)."""
@@ -174,13 +180,37 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/settings", "GET"),
         ("/api/admin/update", "GET"),
         ("/api/admin/orgs", "GET"),
+        ("/api/admin/orgs", "POST"),
+        ("/api/admin/orgs/{slug}", "GET"),
+        ("/api/admin/orgs/{slug}", "PATCH"),
+        ("/api/admin/orgs/{slug}/members", "POST"),
+        ("/api/admin/orgs/{slug}/members/{uid}", "PATCH"),
+        ("/api/admin/orgs/{slug}/members/{uid}", "DELETE"),
+        ("/api/admin/audit.csv", "GET"),
         ("/api/admin/users", "GET"),
+        ("/api/admin/users/{uid}", "GET"),
         ("/api/admin/users/{uid}", "PATCH"),
+        ("/api/admin/users/{uid}/sessions", "DELETE"),
+        ("/api/admin/users/{uid}/sessions/{id}", "DELETE"),
+        ("/api/admin/users/{uid}/tokens/{token_uid}", "DELETE"),
         ("/api/admin/users/{uid}/reset-link", "POST"),
+        ("/api/admin/users/{uid}", "DELETE"),
+        ("/api/admin/users/{uid}/restore", "POST"),
+        ("/api/admin/users/{uid}/erase", "POST"),
         ("/api/admin/audit", "GET"),
         ("/api/admin/me", "GET"),
         ("/api/admin/me/logout", "POST"),
         ("/api/admin/me/password", "POST"),
+        ("/api/admin/orgs/{slug}/reader-grant", "POST"),
+        ("/api/admin/reader-grants/{id}", "DELETE"),
+        ("/api/admin/orgs/{slug}/suspend", "POST"),
+        ("/api/admin/orgs/{slug}/unsuspend", "POST"),
+        ("/api/admin/orgs/{slug}", "DELETE"),
+        ("/api/admin/orgs/{slug}/restore", "POST"),
+        ("/api/admin/orgs/{slug}/purge", "POST"),
+        ("/api/admin/projects/{org}/{slug}", "DELETE"),
+        ("/api/admin/projects/{org}/{slug}/restore", "POST"),
+        ("/api/admin/projects/{org}/{slug}/purge", "POST"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),
@@ -343,6 +373,16 @@ class ProdWorld:
     def admin_session(self) -> str:
         """Give Ada an admin session on top (the admin panel's cookie); its token."""
         return admin_signed_in(self.client, self.ids[ADMIN_LOGIN])
+
+    def read_as_reader(self, *orgs: str) -> list[dict]:
+        """Sign Ada in and open each of ``orgs`` to her as ``reader``.
+
+        Each grant goes through the admin panel's "Open as reader" route
+        (:func:`grant_reader`); the client is left with Ada's everyday
+        session only. Returns the grants.
+        """
+        self.sign_in(ADMIN_LOGIN)
+        return [grant_reader(self.client, self.uids[ADMIN_LOGIN], o) for o in orgs]
 
     def sign_out(self) -> None:
         """Drop the session cookie (the row stays; nothing is revoked)."""
@@ -1016,8 +1056,8 @@ def test_an_instance_admin_reads_every_org_and_writes_to_none(
 ) -> None:
     """Ada reads both orgs as ``reader``; every other action is ``403``."""
     w = prod_world
-    w.sign_in("ada")
-    for org in (w.quokka, w.narwhal):
+    grants = w.read_as_reader("quokka", "narwhal")
+    for org, grant in zip((w.quokka, w.narwhal), grants, strict=True):
         prefix = at(org.slug)
         state = _ok(w.client.get(prefix + "/api/portal/state"))
         assert state["org"] == {
@@ -1025,6 +1065,8 @@ def test_an_instance_admin_reads_every_org_and_writes_to_none(
             "name": org.slug.title(),
             "role": "reader",
             "default_project_role": "contributor",
+            "reader_until": grant["expires_at"],
+            "suspended": None,
         }
         for method, path in READ_ROUTES:
             response = w.client.request(method, prefix + _url(path, org))
@@ -1087,7 +1129,7 @@ def test_demoting_an_instance_admin_closes_the_org_on_the_next_request(
     prod_world: ProdWorld,
 ) -> None:
     w = prod_world
-    w.sign_in("ada")
+    w.read_as_reader("quokka")
     assert w.client.get(at("quokka") + "/api/projects/api").status_code == 200
     with portal_db.get_session() as session:
         session.get(User, w.ids["ada"]).is_instance_admin = False
@@ -1099,7 +1141,7 @@ def test_each_reader_request_writes_one_security_event(
     prod_world: ProdWorld, audit_log: pytest.LogCaptureFixture
 ) -> None:
     w = prod_world
-    w.sign_in("ada")
+    w.read_as_reader("quokka")
     audit_log.clear()
     paths = ["/api/projects", "/api/projects/api", "/api/projects/api/tree"]
     for path in paths:
@@ -1115,6 +1157,230 @@ def test_each_reader_request_writes_one_security_event(
     audit_log.clear()
     assert w.client.get(at("quokka") + "/api/projects").status_code == 200
     assert [r for r in events(audit_log) if r["event"] == "reader_request"] == []
+
+
+# ---------------------------------------------------------------------------
+# Per-org reader grants (plan 59 section 4.4, D3)
+# ---------------------------------------------------------------------------
+
+READER_GRANT = "/api/admin/orgs/{org}/reader-grant"
+
+
+def _grant_rows(user_id: int) -> list[ReaderGrant]:
+    with portal_db.get_session() as session:
+        rows = session.exec(
+            select(ReaderGrant)
+            .where(ReaderGrant.user_id == user_id)
+            .order_by(col(ReaderGrant.id))
+        ).all()
+        for row in rows:
+            session.expunge(row)
+        return list(rows)
+
+
+def _root_id() -> int:
+    with portal_db.get_session() as session:
+        return session.exec(select(User.id).where(User.email == ROOT_EMAIL)).one()
+
+
+def test_without_a_reader_grant_an_instance_admin_is_a_non_member(
+    prod_world: ProdWorld,
+) -> None:
+    """D3: no always-on reader; a ``404`` like any non-member, never a ``403``."""
+    w = prod_world
+    w.sign_in("ada")
+    for org in ("quokka", "narwhal"):
+        refused = w.client.get(at(org) + "/api/projects")
+        assert refused.status_code == 404 and refused.json() == NOT_FOUND, org
+        state = _ok(w.client.get(at(org) + "/api/portal/state"))
+        assert state["org"] is None, org
+        assert state["user"]["is_instance_admin"] is True, org
+
+
+def test_a_reader_grant_opens_its_own_org_only(prod_world: ProdWorld) -> None:
+    w = prod_world
+    (grant,) = w.read_as_reader("quokka")
+    assert grant["org_url"] == at("quokka")
+    created = _grant_rows(w.ids["ada"])[0].created_at
+    lasts = datetime.fromisoformat(grant["expires_at"]) - datetime.fromisoformat(
+        created
+    )
+    assert lasts == timedelta(minutes=60)
+    assert w.client.get(at("quokka") + "/api/projects").status_code == 200
+    refused = w.client.get(at("narwhal") + "/api/projects")
+    assert refused.status_code == 404 and refused.json() == NOT_FOUND
+    assert _ok(w.client.get(at("narwhal") + "/api/portal/state"))["org"] is None
+
+
+def test_an_expired_or_revoked_reader_grant_gives_404(prod_world: ProdWorld) -> None:
+    w = prod_world
+    (first,) = w.read_as_reader("quokka")
+    assert w.client.get(at("quokka") + "/api/projects").status_code == 200
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
+        timespec="seconds"
+    )
+    with portal_db.get_session() as session:
+        session.get(ReaderGrant, first["id"]).expires_at = past
+    expired = w.client.get(at("quokka") + "/api/projects")
+    assert expired.status_code == 404 and expired.json() == NOT_FOUND
+    # An ended grant is not renewed: a new request opens a new one.
+    (second,) = w.read_as_reader("quokka")
+    assert second["id"] != first["id"]
+    assert w.client.get(at("quokka") + "/api/projects").status_code == 200
+    w.admin_session()
+    revoked = w.client.delete(at() + f"/api/admin/reader-grants/{second['id']}")
+    assert revoked.status_code == 204, revoked.text
+    refused = w.client.get(at("quokka") + "/api/projects")
+    assert refused.status_code == 404 and refused.json() == NOT_FOUND
+    assert _ok(w.client.get(at("quokka") + "/api/portal/state"))["org"] is None
+
+
+def test_a_second_reader_grant_request_returns_the_live_grant(
+    prod_world: ProdWorld, audit_log: pytest.LogCaptureFixture
+) -> None:
+    """D17: no renewal; the live grant comes back unchanged and is not audited."""
+    w = prod_world
+    audit_log.clear()
+    (first,) = w.read_as_reader("quokka")
+    (again,) = w.read_as_reader("quokka")
+    assert again == first
+    assert len(_grant_rows(w.ids["ada"])) == 1
+    created = [r for r in events(audit_log) if r["event"] == "reader_grant_created"]
+    assert len(created) == 1
+    assert created[0]["uid"] == w.uids["ada"]
+    assert (created[0]["org_id"], created[0]["org"]) == (w.quokka.org_id, "quokka")
+
+
+def test_a_password_admin_gets_no_reader_grant(prod_world: ProdWorld) -> None:
+    """D4: a password account has no everyday session to carry a grant."""
+    w = prod_world
+    root = _root_id()
+    admin_signed_in(w.client, root)
+    refused = w.client.post(at() + READER_GRANT.format(org="quokka"))
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["code"] == "github_account_required"
+    assert _grant_rows(root) == []
+
+
+def test_the_reader_grant_routes_refuse_what_they_cannot_grant(
+    prod_world: ProdWorld,
+) -> None:
+    w = prod_world
+    w.sign_out()
+    w.admin_session()
+    unknown = w.client.post(at() + READER_GRANT.format(org="nosuchorg"))
+    assert unknown.status_code == 404, unknown.text
+    # A soft-deleted org is refused (D34); nothing reads deleted_at elsewhere yet.
+    with portal_db.get_session() as session:
+        session.get(
+            Organization, w.narwhal.org_id
+        ).deleted_at = "2026-11-18T00:00:00+00:00"
+    deleted = w.client.post(at() + READER_GRANT.format(org="narwhal"))
+    assert deleted.status_code == 409, deleted.text
+    assert deleted.json()["code"] == "org_deleted"
+    assert _grant_rows(w.ids["ada"]) == []
+    # Somebody else's grant is a plain 404, and stays live.
+    with portal_db.get_session() as session:
+        bobs = ReaderGrant(
+            user_id=w.ids["bob"],
+            org_id=w.quokka.org_id,
+            expires_at="2999-01-01T00:00:00+00:00",
+        )
+        session.add(bobs)
+        session.flush()
+        bobs_id = bobs.id
+    refused = w.client.delete(at() + f"/api/admin/reader-grants/{bobs_id}")
+    assert refused.status_code == 404, refused.text
+    assert _grant_rows(w.ids["bob"])[0].revoked_at is None
+    missing = w.client.delete(at() + "/api/admin/reader-grants/999999")
+    assert missing.status_code == 404
+
+
+def test_admin_me_lists_the_live_reader_grants(
+    prod_world: ProdWorld, audit_log: pytest.LogCaptureFixture
+) -> None:
+    w = prod_world
+    quokka, narwhal = w.read_as_reader("quokka", "narwhal")
+    w.admin_session()
+    listed = _ok(w.client.get(at() + "/api/admin/me"))["reader_grants"]
+    assert listed == [
+        {
+            "id": grant["id"],
+            "org_slug": slug,
+            "org_name": slug.title(),
+            "org_url": at(slug),
+            "expires_at": grant["expires_at"],
+        }
+        for grant, slug in ((quokka, "quokka"), (narwhal, "narwhal"))
+    ]
+    audit_log.clear()
+    url = at() + f"/api/admin/reader-grants/{quokka['id']}"
+    assert w.client.delete(url).status_code == 204
+    listed = _ok(w.client.get(at() + "/api/admin/me"))["reader_grants"]
+    assert [g["org_slug"] for g in listed] == ["narwhal"]
+    # Revoking an ended grant again changes nothing and audits nothing more.
+    assert w.client.delete(url).status_code == 204
+    revoked = [r for r in events(audit_log) if r["event"] == "reader_grant_revoked"]
+    assert len(revoked) == 1
+    assert revoked[0]["uid"] == w.uids["ada"]
+    assert (revoked[0]["org_id"], revoked[0]["org"]) == (w.quokka.org_id, "quokka")
+    assert "reason" not in revoked[0]
+
+
+def test_a_reader_grant_is_in_the_orgs_audit_log(prod_world: ProdWorld) -> None:
+    """D20: the org sees the grant as its audit event, and only that org."""
+    w = prod_world
+    w.read_as_reader("quokka")
+    writer = audit_mod.current_writer()
+    assert writer is not None and writer.flush()
+    w.sign_in("ann")  # quokka's owner
+    log = _ok(w.client.get(at("quokka") + "/api/org/audit"))["events"]
+    (granted,) = [e for e in log if e["event"] == "reader_grant_created"]
+    assert granted["actor"]["uid"] == w.uids["ada"]
+    assert granted["org"] == "quokka"
+    w.sign_in("bob")  # narwhal's owner
+    log = _ok(w.client.get(at("narwhal") + "/api/org/audit"))["events"]
+    assert [e for e in log if e["event"] == "reader_grant_created"] == []
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [({"is_instance_admin": False}, "demoted"), ({"disabled": True}, "disabled")],
+)
+def test_demoting_or_disabling_an_admin_revokes_their_reader_grants(
+    prod_world: ProdWorld,
+    audit_log: pytest.LogCaptureFixture,
+    change: dict,
+    reason: str,
+) -> None:
+    w = prod_world
+    w.read_as_reader("quokka", "narwhal")
+    everyday = _session_token(w.client)
+    w.sign_out()
+    admin_signed_in(w.client, _root_id())
+    audit_log.clear()
+    patched = w.client.patch(at() + f"/api/admin/users/{w.uids['ada']}", json=change)
+    assert patched.status_code == 200, patched.text
+    rows = _grant_rows(w.ids["ada"])
+    assert len(rows) == 2 and all(r.revoked_at is not None for r in rows)
+    revoked = [r for r in events(audit_log) if r["event"] == "reader_grant_revoked"]
+    assert sorted(r["org"] for r in revoked) == ["narwhal", "quokka"]
+    for record in revoked:
+        assert record["reason"] == reason
+        assert record["target"] == w.uids["ada"]
+        assert record["org_id"] in (w.quokka.org_id, w.narwhal.org_id)
+    # Made an admin (and enabled) again, Ada still reads nothing: the grants
+    # stay revoked.
+    with portal_db.get_session() as session:
+        ada = session.get(User, w.ids["ada"])
+        ada.is_instance_admin, ada.disabled_at = True, None
+    w.sign_out()
+    if reason == "demoted":
+        w.client.cookies.set("whygraph_session", everyday, domain=PROD_DOMAIN)
+    else:  # disabling ended every session
+        w.sign_in("ada")
+    refused = w.client.get(at("quokka") + "/api/projects")
+    assert refused.status_code == 404 and refused.json() == NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -1164,7 +1430,7 @@ def test_a_member_and_a_reader_get_no_grants_in_the_member_list(
     assert member and all("grants" not in m for m in member)
     assert "grants" not in w.client.get(at("quokka") + "/api/org/members").text
     w.client.cookies.clear()
-    w.sign_in("ada")  # an instance admin reads quokka as a reader
+    w.read_as_reader("quokka")  # an instance admin reads quokka as a reader
     reader = _ok(w.client.get(at("quokka") + "/api/org/members"))
     assert reader and all("grants" not in m for m in reader)
 
@@ -1302,7 +1568,7 @@ def test_each_member_sees_and_touches_only_their_own_chat_sessions(
 def test_a_reader_has_no_chat(prod_world: ProdWorld) -> None:
     """Ada reads quokka as ``reader``, which carries no ``project.chat``."""
     w = prod_world
-    w.sign_in("ada")
+    w.read_as_reader("quokka")
     chat = at("quokka") + "/api/projects/api/chat/sessions"
     for method, url, body in (
         ("GET", chat, None),

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { portalApi, portalKey, projectApi, projectKey, type ProjectDetails } from "../api";
-import { canAdmin, isProduction, usePortalState, useReadOnly, useRole } from "../lib/identity";
+import { canAdmin, isProduction, usePortalState, useReadOnly, useRole, useSuspended } from "../lib/identity";
 import { agentLabel, sourceLabel } from "../lib/labels";
 import { can } from "../lib/permissions";
 import { useSlug } from "../lib/project";
@@ -208,6 +208,7 @@ export function ProjectSettingsPage() {
   });
   const config = useQuery({ queryKey: projectKey(slug, "config"), queryFn: () => projectApi(slug).config() });
   const reader = useReadOnly();
+  const suspended = useSuspended();
   const state = usePortalState().data;
   const production = isProduction(state);
   const role = useRole();
@@ -218,7 +219,7 @@ export function ProjectSettingsPage() {
   const linked = p.source === "platform";
   const configurer = can(p, "project.configure");
   // The payload decides (Q9); before it lands, the project's permissions do.
-  const readOnly = reader || (linked ? true : (config.data?.read_only ?? !configurer));
+  const readOnly = reader || suspended || (linked ? true : (config.data?.read_only ?? !configurer));
   const showConnections = production && configurer;
   const showAccess = production && can(p, "project.access");
   const showUsage = can(p, "project.usage") && !linked;
@@ -252,6 +253,8 @@ export function ProjectSettingsPage() {
         <ReadOnlyNotice audience={{ kind: "linked", platformOrigin: p.link?.platform_origin }} />
       ) : reader ? (
         <ReadOnlyNotice audience={{ kind: "reader" }} />
+      ) : suspended ? (
+        <ReadOnlyNotice audience={{ kind: "suspended" }} />
       ) : (
         readOnly && config.data && <ReadOnlyNotice audience={{ kind: "project" }} />
       )}
@@ -301,7 +304,7 @@ export function ProjectSettingsPage() {
           danger
           description={
             production
-              ? "The server copy and the project's history are deleted unless you keep the history. The repository on GitHub is not changed."
+              ? "Removes the project for everyone at once. Nothing is deleted: a platform administrator can restore it. The repository on GitHub is not changed."
               : linked
                 ? "Revokes this machine's access to the platform project and removes its git hooks. The project on the platform and your repository are not changed."
                 : "Unregisters the project and removes its git hooks. Your repository is not deleted. Its history stays in the portal and comes back if you add the repository again."

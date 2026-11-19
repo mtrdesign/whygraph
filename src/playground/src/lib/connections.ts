@@ -12,6 +12,7 @@ const REASONS: Record<RevokedReason, string> = {
   org_deleted: "The organization was deleted",
   idle: "Unused for too long",
   project_access_removed: "Your access to the project was removed",
+  user_deleted: "The account was deleted",
 };
 
 export function revokedLabel(reason: RevokedReason | string | null): string {
@@ -31,6 +32,7 @@ const ADMIN_REASONS: Record<RevokedReason, string> = {
   org_deleted: "The organization was deleted",
   idle: "Unused for too long",
   project_access_removed: "The member's access to the project was removed",
+  user_deleted: "The account was deleted",
 };
 
 export function revokedLabelForAdmin(reason: RevokedReason | string | null): string {

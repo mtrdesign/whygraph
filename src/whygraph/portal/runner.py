@@ -126,7 +126,18 @@ process:
   :class:`ProjectBusy` - waits for the requests already past that check,
   cancels the org's queued runs and its running ones (SIGTERM, as a user
   cancel), and waits for them to end; a sync still fetching makes it give
-  up (:class:`ProjectBusy`) and release everything.
+  up (:class:`ProjectBusy`) and release everything. Suspending an org
+  (plan 59 section 4.5) takes the same reservation, with its own wording.
+* **Org suspension** (plan 59 D6). Every request for a project of a
+  suspended org raises :class:`OrgSuspended`; the background selectors
+  (reconcile, the webhook's targets, the start-up clone check) skip such
+  projects, a queued run of one is cancelled at start and refused when it
+  is dispatched.
+* **Soft delete** (plan 59 sections 4.3.2, 4.3.3). A soft-deleted project,
+  or a project of a soft-deleted org, is gone for the runner: every
+  request raises :class:`ProjectGone`, the background selectors skip it,
+  and a queued run of one is cancelled at start and refused when it is
+  dispatched.
 * **Source policy.** Every request - from a route or an internal caller -
   for a project whose source the mode does not accept
   (:func:`~whygraph.portal.policy.allowed_sources`, e.g. a local-mode
@@ -177,7 +188,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, NamedTuple
 
 import anyio
 import anyio.to_thread
@@ -217,7 +228,7 @@ from .context import resolve_root, resolved_layer
 from .db import data_dir, get_session
 from .github_app import GitHubAccessLost, GitHubRepo, InstallationToken
 from .github_auth import GitHubUnavailable
-from .models import Project, ScanRun, User
+from .models import Organization, Project, ScanRun, User
 from .paths import (
     TRACKED_STATE_PATHS,
     check_project_db,
@@ -464,6 +475,57 @@ class ScanBudgetExceeded(RuntimeError):
     def __init__(self, scope: str) -> None:
         super().__init__(budget_message(scope))
         self.scope = scope
+
+
+class OrgSuspended(RuntimeError):
+    """The project's org is suspended - HTTP 403 ``org_suspended`` (plan 59 D6).
+
+    Raised by every run request (route, webhook or reconcile) while the
+    org's ``suspended_at`` is set, an admin's rescan included (D33).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(SUSPENDED_MESSAGE)
+
+
+class ProjectGone(RuntimeError):
+    """The project, or its org, is soft-deleted (plan 59 sections 4.3.2, 4.3.3).
+
+    Routes answer it as ``404`` (the org never learns the project exists);
+    the admin rescan answers ``409`` with :attr:`code` (D34).
+
+    Parameters
+    ----------
+    code : str
+        ``"project_deleted"`` for a deleted project, ``"org_deleted"`` for a
+        project of a deleted org.
+
+    Attributes
+    ----------
+    code : str
+        As passed.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(
+            "this organization is deleted"
+            if code == "org_deleted"
+            else "this project is deleted"
+        )
+        self.code = code
+
+
+GONE_MESSAGE = "the project was deleted"
+"""Why a deleted project's (or deleted org's) queued run is refused."""
+
+HOLD_REASONS = frozenset({"deleted", "suspended", "restored", "purged"})
+"""What may hold an org's projects (:meth:`ScanRunner.reserve_projects`)."""
+
+SUSPENDED_MESSAGE = (
+    "this organization is suspended: scans are paused until a platform "
+    "administrator lifts the suspension"
+)
+"""Why a suspended org's run request (or queued run) is refused."""
 
 
 class ProjectAccessLost(RuntimeError):
@@ -1442,8 +1504,9 @@ class ScanRunner:
         self._claims = threading.Lock()
         self._removing: set[int] = set()
         self._requesting: dict[int, int] = {}
-        # Org deletion: orgs being deleted, and requests past the org check.
-        self._deleting_orgs: set[int] = set()
+        # Org deletion (and suspension): the orgs held, each with its
+        # reason word, and requests past the org check.
+        self._deleting_orgs: dict[int, str] = {}
         self._org_requests: dict[int, int] = {}
         # The projects list's `stale` block (M2f-3 plan section 0.3 #3).
         self.stale = StaleCache()
@@ -1597,7 +1660,9 @@ class ScanRunner:
                 self._removing.discard(project_id)
 
     @asynccontextmanager
-    async def reserve_projects(self, org_id: int) -> AsyncIterator[frozenset[int]]:
+    async def reserve_projects(
+        self, org_id: int, *, reason: str = "deleted"
+    ) -> AsyncIterator[frozenset[int]]:
         """Stop and hold off every run of an org's projects while the org is deleted.
 
         In order (M2d-2 plan section 4.8 step 1): mark the org as being
@@ -1612,6 +1677,12 @@ class ScanRunner:
         ----------
         org_id : int
             ``organizations.id``.
+        reason : str, optional
+            What holds the org, for the refusals others get meanwhile:
+            ``"deleted"`` (the default), ``"suspended"`` (plan 59 section
+            4.5), ``"restored"`` or ``"purged"`` (section 4.3.2): one of
+            :data:`HOLD_REASONS`, read as "the organization is being
+            <reason>".
 
         Yields
         ------
@@ -1627,10 +1698,13 @@ class ScanRunner:
             removed, or a run did not end within :attr:`org_delete_wait`
             seconds (a sync whose fetch cannot be interrupted).
         """
+        if reason not in HOLD_REASONS:
+            raise ValueError(f"unknown reservation reason {reason!r}")
         with self._claims:
-            if org_id in self._deleting_orgs:
-                raise ProjectBusy("the organization is already being deleted")
-            self._deleting_orgs.add(org_id)
+            held = self._deleting_orgs.get(org_id)
+            if held is not None:
+                raise ProjectBusy(f"the organization is already being {held}")
+            self._deleting_orgs[org_id] = reason
         reserved: set[int] = set()
         try:
             ids = await anyio.to_thread.run_sync(_org_project_ids, org_id)
@@ -1654,7 +1728,7 @@ class ScanRunner:
             yield frozenset(ids)
         finally:
             with self._claims:
-                self._deleting_orgs.discard(org_id)
+                self._deleting_orgs.pop(org_id, None)
                 self._removing -= reserved
 
     def _org_idle(self, org_id: int, ids: set[int]) -> bool:
@@ -1695,8 +1769,9 @@ class ScanRunner:
             yield
             return
         with self._claims:
-            if org_id in self._deleting_orgs:
-                raise ProjectBusy("the organization is being deleted")
+            held = self._deleting_orgs.get(org_id)
+            if held is not None:
+                raise ProjectBusy(f"the organization is being {held}")
             self._org_requests[org_id] = self._org_requests.get(org_id, 0) + 1
         try:
             yield
@@ -1797,7 +1872,7 @@ class ScanRunner:
 
         Raises
         ------
-        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost, OrgSuspended, ProjectGone
             As for :meth:`request_sync`.
         ManagedOnPlatform
             A linked project was asked to describe commits (explicit
@@ -1880,6 +1955,10 @@ class ScanRunner:
         ProjectAccessLost
             The project lost its GitHub access (``access_lost_at`` set,
             other than for :data:`REASON_TRACKED_STATE`).
+        OrgSuspended
+            The project's org is suspended (plan 59 section 4.5).
+        ProjectGone
+            The project, or its org, is soft-deleted (plan 59 section 4.3).
         """
         if trigger not in TRIGGER_PRECEDENCE:
             raise ValueError(f"unknown trigger {trigger!r}")
@@ -1919,7 +1998,7 @@ class ScanRunner:
 
         Raises
         ------
-        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost
+        RunnerUnavailable, ProjectBusy, SourceNotAllowed, ProjectAccessLost, OrgSuspended, ProjectGone
             As for :meth:`request_sync`.
         """
         return await self._request(
@@ -1950,9 +2029,17 @@ class ScanRunner:
         with self._claim_request(project_id):
             gate = await anyio.to_thread.run_sync(_project_gate, project_id)
             importing = False
-            with self._claim_org(None if gate is None else gate[3]):
+            with self._claim_org(None if gate is None else gate.org_id):
                 if gate is not None:
-                    source, lost, reason, _org_id, initialized = gate
+                    source, lost, reason = gate.source, gate.lost, gate.reason
+                    initialized = gate.initialized
+                    # Deleted wins over suspended (plan 59 section 4.3.2).
+                    if gate.org_deleted:
+                        raise ProjectGone("org_deleted")
+                    if gate.project_deleted:
+                        raise ProjectGone("project_deleted")
+                    if gate.org_suspended:
+                        raise OrgSuspended()
                     if source not in allowed_sources(self._mode()):
                         raise SourceNotAllowed(_unsupported_source(source))
                     if lost and reason != REASON_TRACKED_STATE:
@@ -1967,7 +2054,7 @@ class ScanRunner:
                     importing = github and not initialized
                 return await self._request_claimed(
                     project_id,
-                    org_id=None if gate is None else gate[3],
+                    org_id=None if gate is None else gate.org_id,
                     kind=kind,
                     trigger=trigger,
                     analyze=analyze,
@@ -2244,7 +2331,13 @@ class ScanRunner:
                 await self.request_sync(
                     p["id"], trigger="reconcile", scan_requested=True
                 )
-            except (ProjectBusy, ProjectAccessLost, SourceNotAllowed):
+            except (
+                ProjectBusy,
+                ProjectAccessLost,
+                SourceNotAllowed,
+                OrgSuspended,
+                ProjectGone,
+            ):
                 continue
 
     def _mode(self) -> str | None:
@@ -2327,7 +2420,13 @@ class ScanRunner:
                 continue
             try:
                 await self.request_sync(target.id, trigger="reconcile")
-            except (ProjectBusy, ProjectAccessLost, SourceNotAllowed):
+            except (
+                ProjectBusy,
+                ProjectAccessLost,
+                SourceNotAllowed,
+                OrgSuspended,
+                ProjectGone,
+            ):
                 continue
 
     def _remote_head(self, target: _ReconcileTarget) -> str | None:
@@ -2555,6 +2654,17 @@ class ScanRunner:
                     {"error": _unsupported_source(project.source)},
                     redactor([]),
                 )
+            org = session.get(Organization, project.org_id)
+            if project.deleted_at is not None or (
+                org is not None and org.deleted_at is not None
+            ):
+                # Queued before the soft delete (plan 59 section 4.3), as
+                # for an access loss below.
+                return "failed", {"error": GONE_MESSAGE}, redactor([])
+            if org is not None and org.suspended_at is not None:
+                # Queued before the suspension (plan 59 section 4.5), as for
+                # an access loss below.
+                return "failed", {"error": SUSPENDED_MESSAGE}, redactor([])
             if state.mode == "production" and project.source == "github":
                 reason = project.access_lost_reason
                 if (
@@ -3392,21 +3502,58 @@ def _error_chain(exc: BaseException) -> str:
     return ": ".join(p for p in parts if p)
 
 
-def _project_gate(
-    project_id: int,
-) -> tuple[str, bool, str | None, int, bool] | None:
-    """``(source, access lost?, access_lost_reason, org_id, initialized?)``, or ``None`` if missing."""
+class _Gate(NamedTuple):
+    """What :meth:`ScanRunner._request` checks about a project, from one query."""
+
+    source: str
+    lost: bool
+    reason: str | None
+    org_id: int
+    initialized: bool
+    org_suspended: bool
+    project_deleted: bool
+    org_deleted: bool
+
+
+def _project_gate(project_id: int) -> _Gate | None:
+    """The project's :class:`_Gate`, its org's state included, or ``None`` if missing."""
     with get_session() as session:
-        project = session.get(Project, project_id)
-        if project is None:
-            return None
-        return (
-            project.source,
-            project.access_lost_at is not None,
-            project.access_lost_reason,
-            project.org_id,
-            project.initialized_at is not None,
-        )
+        row = session.exec(
+            select(
+                Project.source,
+                Project.access_lost_at,
+                Project.access_lost_reason,
+                Project.org_id,
+                Project.initialized_at,
+                Organization.suspended_at,
+                Project.deleted_at,
+                Organization.deleted_at,
+            )
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .where(Project.id == project_id)
+        ).first()
+    if row is None:
+        return None
+    (
+        source,
+        lost_at,
+        reason,
+        org_id,
+        initialized_at,
+        suspended_at,
+        project_deleted_at,
+        org_deleted_at,
+    ) = row
+    return _Gate(
+        source=source,
+        lost=lost_at is not None,
+        reason=reason,
+        org_id=org_id,
+        initialized=initialized_at is not None,
+        org_suspended=suspended_at is not None,
+        project_deleted=project_deleted_at is not None,
+        org_deleted=org_deleted_at is not None,
+    )
 
 
 def _org_project_ids(org_id: int) -> set[int]:
@@ -3761,6 +3908,9 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
     A row whose project is gone, not initialized or without its root is
     cancelled - except a production import's (a GitHub project not
     initialized yet), whose run makes the clone (M2f-3 plan section 4.8).
+    So is every row of a suspended org's project (plan 59 section 4.5), of
+    a soft-deleted project and of a soft-deleted org's project (section
+    4.3).
     """
     specs: dict[int, _Pending] = {}
     kept: dict[int, ScanRun] = {}
@@ -3777,11 +3927,19 @@ def _recover_queued(production: bool = False) -> list[_Pending]:
                 and project.source == "github"
                 and project.initialized_at is None
             )
-            gone = project is None or (
-                not importing
-                and (
-                    project.initialized_at is None
-                    or root_status(resolve_root(project)) != "ok"
+            org = None if project is None else session.get(Organization, project.org_id)
+            gone = (
+                project is None
+                or org is None
+                or org.suspended_at is not None
+                or org.deleted_at is not None
+                or project.deleted_at is not None
+                or (
+                    not importing
+                    and (
+                        project.initialized_at is None
+                        or root_status(resolve_root(project)) != "ok"
+                    )
                 )
             )
             existing = specs.get(run.project_id)
@@ -3864,9 +4022,15 @@ def _purge_rewritten_links(
 
 
 def _initialized_projects() -> list[dict]:
+    """Every initialized project, but a suspended or deleted org's and a deleted one (plan 59)."""
     with get_session() as session:
         rows = session.exec(
-            select(Project).where(col(Project.initialized_at).is_not(None))
+            select(Project)
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .where(col(Project.initialized_at).is_not(None))
+            .where(col(Organization.suspended_at).is_(None))
+            .where(col(Organization.deleted_at).is_(None))
+            .where(col(Project.deleted_at).is_(None))
         ).all()
         out = []
         for project in rows:
@@ -3884,10 +4048,19 @@ def _initialized_projects() -> list[dict]:
 
 
 def _reconcile_targets() -> list[_ReconcileTarget]:
-    """Every initialized GitHub App project with a default branch, oldest first."""
+    """Every initialized GitHub App project with a default branch, oldest first.
+
+    A suspended org's projects are left out, so nothing is minted or probed
+    for them (plan 59 section 4.5), and so are soft-deleted projects and a
+    soft-deleted org's (section 4.3.2).
+    """
     with get_session() as session:
         rows = session.exec(
             select(Project)
+            .join(Organization, col(Organization.id) == col(Project.org_id))
+            .where(col(Organization.suspended_at).is_(None))
+            .where(col(Organization.deleted_at).is_(None))
+            .where(col(Project.deleted_at).is_(None))
             .where(Project.source == "github")
             .where(col(Project.initialized_at).is_not(None))
             .where(col(Project.github_repo_id).is_not(None))
@@ -4060,7 +4233,9 @@ __all__ = [
     "STALE_HEAD_TTL_SEC",
     "TOKEN_REFRESH_MARGIN_SEC",
     "TRIGGER_PRECEDENCE",
+    "OrgSuspended",
     "ProjectAccessLost",
+    "ProjectGone",
     "ProjectBusy",
     "Redactor",
     "RunNotFound",

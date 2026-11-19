@@ -281,6 +281,14 @@ _GENERATION_NOT_PERMITTED_MESSAGE = (
     "project (viewer) cannot generate one; ask a contributor or admin"
 )
 
+ORG_SUSPENDED = "org_suspended"
+"""The ``llm_block`` (and error code) of a suspended org's project (plan 59 D6)."""
+
+_ORG_SUSPENDED_MESSAGE = (
+    "no rationale card is cached for this target, and none can be generated "
+    "while this organization is suspended"
+)
+
 
 class GenerationNotPermitted(WhyGraphError):
     """A card is not cached and the caller may not generate one.
@@ -288,15 +296,17 @@ class GenerationNotPermitted(WhyGraphError):
     Raised by :func:`rationale_card` on a cache miss when the bound
     project context has ``llm_allowed`` false - a project viewer (M2f-1
     plan section 4.6) or an exhausted hard-stopped budget (M2f-2 plan
-    section 4.7) - or when the bound usage sink reports a budget exhausted
-    mid-request, before anything is spent or any budget is charged.
+    section 4.7) or a suspended org's project (plan 59 section 4.5) - or
+    when the bound usage sink reports a budget exhausted mid-request,
+    before anything is spent or any budget is charged.
 
     Parameters
     ----------
     message : str, optional
         The message; each ``reason`` has its own default.
     reason : str, optional
-        ``"role"`` (the default, a viewer) or ``"budget_exceeded"``.
+        ``"role"`` (the default, a viewer), ``"budget_exceeded"`` or
+        ``"org_suspended"``; the last two are also the error's ``code``.
     scope : str, optional
         With ``"budget_exceeded"``: ``"org"``, ``"project"`` or ``"member"``.
 
@@ -316,16 +326,19 @@ class GenerationNotPermitted(WhyGraphError):
         scope: str | None = None,
     ) -> None:
         if message is None:
-            message = (
-                "no rationale card is cached for this target, and "
-                + budget_message(scope)
-                if reason == BUDGET_EXCEEDED
-                else _GENERATION_NOT_PERMITTED_MESSAGE
-            )
+            if reason == BUDGET_EXCEEDED:
+                message = (
+                    "no rationale card is cached for this target, and "
+                    + budget_message(scope)
+                )
+            elif reason == ORG_SUSPENDED:
+                message = _ORG_SUSPENDED_MESSAGE
+            else:
+                message = _GENERATION_NOT_PERMITTED_MESSAGE
         super().__init__(
             message,
-            code=BUDGET_EXCEEDED
-            if reason == BUDGET_EXCEEDED
+            code=reason
+            if reason in (BUDGET_EXCEEDED, ORG_SUSPENDED)
             else "generation_not_permitted",
         )
         self.reason = reason

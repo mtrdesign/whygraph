@@ -29,9 +29,14 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   invitation_revoked: { label: "Invitation revoked", group: "Members" },
   user_disabled: { label: "Account disabled", group: "Members" },
   user_enabled: { label: "Account enabled", group: "Members" },
+  user_deleted: { label: "Account deleted", group: "Members" },
+  user_restored: { label: "Account restored", group: "Members" },
+  user_erased: { label: "Account erased", group: "Members" },
   // Projects
   project_imported: { label: "Project imported", group: "Projects" },
   project_removed: { label: "Project removed", group: "Projects" },
+  project_restored: { label: "Project restored", group: "Projects" },
+  project_purged: { label: "Project deleted permanently", group: "Projects" },
   project_grant_added: { label: "Project access given", group: "Projects" },
   project_grant_changed: { label: "Project access changed", group: "Projects" },
   project_grant_removed: { label: "Project access removed", group: "Projects" },
@@ -61,8 +66,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   password_changed: { label: "Password changed", group: "Security" },
   reset_link_issued: { label: "Reset link issued", group: "Security" },
   reset_link_used: { label: "Reset link used", group: "Security" },
-  admin_granted: { label: "Instance admin granted", group: "Security" },
-  admin_revoked: { label: "Instance admin revoked", group: "Security" },
+  admin_granted: { label: "Platform admin granted", group: "Security" },
+  admin_revoked: { label: "Platform admin revoked", group: "Security" },
   admin_signin: { label: "Signed in to the admin panel", group: "Security" },
   admin_signin_refused: { label: "Admin panel sign-in refused", group: "Security" },
   admin_signout: { label: "Signed out of the admin panel", group: "Security" },
@@ -77,7 +82,10 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   connection_token_refused: { label: "Connection token refused", group: "Security" },
   connection_revoked: { label: "Connection revoked", group: "Security" },
   webhook_rejected: { label: "Webhook rejected", group: "Security" },
-  reader_request: { label: "Instance admin read", group: "Security" },
+  reader_request: { label: "Platform admin read", group: "Security" },
+  reader_grant_created: { label: "Read-only access granted", group: "Security" },
+  reader_grant_revoked: { label: "Read-only access ended", group: "Security" },
+  sessions_revoked: { label: "Sessions ended", group: "Security" },
   key_tested: { label: "API key tested", group: "Security" },
   // Organization
   org_created: { label: "Organization created", group: "Organization" },
@@ -85,6 +93,10 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   org_default_role_changed: { label: "Default project role changed", group: "Organization" },
   org_ownership_transferred: { label: "Ownership transferred", group: "Organization" },
   org_deleted: { label: "Organization deleted", group: "Organization" },
+  org_restored: { label: "Organization restored", group: "Organization" },
+  org_purged: { label: "Organization deleted permanently", group: "Organization" },
+  org_suspended: { label: "Organization suspended", group: "Organization" },
+  org_unsuspended: { label: "Suspension lifted", group: "Organization" },
 };
 
 /** "Member added" for `member_added`; an unknown event reads as its name with spaces. */
@@ -148,7 +160,13 @@ const REASONS: Record<string, string> = {
   // Admin panel sign-in and sign-out
   unknown_user: "No account for this GitHub user",
   not_admin: "Not a platform administrator",
+  deleted: "The account was deleted",
   signout: "Signed out of the portal",
+  // Reader grants
+  demoted: "No longer a platform administrator",
+  // Deleting and restoring an account
+  user_deleted: "The account was deleted",
+  user_restored: "The account was restored",
   // Adding a member
   bad_login: "Not a valid GitHub username",
   owner_required: "Only an owner can add an owner",

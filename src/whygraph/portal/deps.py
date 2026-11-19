@@ -51,6 +51,7 @@ import contextlib
 import dataclasses
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import (
@@ -68,7 +69,7 @@ import anyio
 import anyio.to_thread
 from fastapi import Depends, Request
 from fastapi.responses import JSONResponse
-from sqlmodel import Session, select
+from sqlmodel import Session, col, func, select
 from starlette.datastructures import Headers
 from starlette.types import Scope
 
@@ -96,7 +97,14 @@ from .github_app import UserTokens
 from .hosts import BaseUrl, classify
 from .linked import LinkRefresh
 from .migrate import ProjectMigrations
-from .models import Membership, Organization, Project, ProjectGrant, User
+from .models import (
+    Membership,
+    Organization,
+    Project,
+    ProjectGrant,
+    ReaderGrant,
+    User,
+)
 from .orgs import is_valid_org_slug
 from .paths import check_project_db, check_project_paths
 from .platform_pending import PendingConnects, PendingLinks
@@ -848,18 +856,23 @@ def load_org_access(
         The organization slug the request addresses.
     instance_admin : bool, optional
         Whether the principal is an instance admin: without a membership
-        they get :attr:`~whygraph.portal.authz.Role.READER`. Passed by
-        :func:`current_org` and ``GET /api/portal/state``, never by the MCP
-        dispatcher.
+        they get :attr:`~whygraph.portal.authz.Role.READER`, but only while
+        they hold a live reader grant on the org (``revoked_at IS NULL AND
+        expires_at > now``; plan 59 D3). Passed by :func:`current_org`,
+        ``GET /api/portal/state`` and the scan-event stream's re-check,
+        never by the MCP dispatcher.
 
     Returns
     -------
     OrgAccess or None
-        ``None`` when the org does not exist (or the slug is malformed) or
-        the user is neither a member of it nor an instance admin - callers
-        answer both the same way. A real membership wins over ``READER``.
-        Carries ``user_id`` and the org's ``default_project_role`` (for the
-        project role :func:`bind_project` computes).
+        ``None`` when the org does not exist, is soft-deleted (plan 59
+        section 4.3.2) or the slug is malformed, or
+        the user is neither a member of it nor an instance admin with a
+        live reader grant on it - callers answer all of these the same
+        way. A real membership wins over ``READER``. Carries ``user_id``,
+        the org's ``default_project_role`` (for the project role
+        :func:`bind_project` computes), whether the org is ``suspended``
+        and, for ``READER``, the grant's ``expires_at`` as ``reader_until``.
     """
     if not is_valid_org_slug(org_slug):
         return None
@@ -870,26 +883,43 @@ def load_org_access(
                 Organization.slug,
                 Organization.name,
                 Organization.default_project_role,
+                Organization.suspended_at,
                 Membership.role,
                 Membership.welcome_pending,
             )
             .join(Membership, Membership.org_id == Organization.id)
             .where(Organization.slug == org_slug, Membership.user_id == user_id)
+            # A soft-deleted org is an unknown one (plan 59 section 4.3.2).
+            .where(col(Organization.deleted_at).is_(None))
         ).first()
+        reader_until = None
         if row is None and instance_admin:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
             org = session.exec(
                 select(
                     Organization.id,
                     Organization.slug,
                     Organization.name,
                     Organization.default_project_role,
-                ).where(Organization.slug == org_slug)
+                    Organization.suspended_at,
+                    func.max(ReaderGrant.expires_at),
+                )
+                .join(ReaderGrant, col(ReaderGrant.org_id) == col(Organization.id))
+                .where(
+                    Organization.slug == org_slug,
+                    col(Organization.deleted_at).is_(None),
+                    col(ReaderGrant.user_id) == user_id,
+                    col(ReaderGrant.revoked_at).is_(None),
+                    col(ReaderGrant.expires_at) > now,
+                )
+                .group_by(col(Organization.id))
             ).first()
             if org is not None:
-                row = (*org, Role.READER.value, False)
+                *org_columns, reader_until = org
+                row = (*org_columns, Role.READER.value, False)
     if row is None:
         return None
-    org_id, slug, name, default_project_role, role, welcome_pending = row
+    org_id, slug, name, default_project_role, suspended_at, role, welcome_pending = row
     return OrgAccess(
         org_id=org_id,
         org_slug=slug,
@@ -898,6 +928,8 @@ def load_org_access(
         user_id=user_id,
         default_project_role=default_project_role,
         welcome_pending=bool(welcome_pending),
+        reader_until=reader_until,
+        suspended=suspended_at is not None,
     )
 
 
@@ -908,8 +940,12 @@ async def current_org(
 
     FastAPI resolves it once per request, after :func:`current_user` (so
     ``409 setup required`` comes first). An instance admin without a
-    membership reads the org as ``reader``: only ``GET`` / ``HEAD``, and
-    each such request writes one security event record.
+    membership but with a live reader grant on the org reads it as
+    ``reader``: only ``GET`` / ``HEAD``, and each such request writes one
+    security event record. Without a grant they are a non-member (``404``).
+    A suspended org (plan 59 D6) is read-only for everyone: every other
+    method is refused here, whatever the route, so no route checks it
+    itself.
 
     Returns
     -------
@@ -922,7 +958,9 @@ async def current_org(
         ``404 {"error": "not found"}`` when the request names no org, the
         org does not exist or the caller is not a member - never saying
         which; ``403 {"code": "forbidden"}`` for a ``reader`` request with
-        another method.
+        another method; ``403 {"code": "org_suspended"}``
+        (:func:`org_suspended_error`) for any request but ``GET`` /
+        ``HEAD`` to a suspended org.
     """
     org_slug = request.scope.get("state", {}).get("org_slug")
     if org_slug is None:
@@ -954,7 +992,19 @@ async def current_org(
                 "member of",
                 code="forbidden",
             )
+    if access.suspended and request.method not in ("GET", "HEAD"):
+        raise org_suspended_error()
     return access
+
+
+def org_suspended_error() -> ApiError:
+    """The ``403 {"code": "org_suspended"}`` of every write to a suspended org (plan 59 D6)."""
+    return ApiError(
+        403,
+        "this organization is suspended: changes, scans and AI features are "
+        "paused until a platform administrator lifts the suspension",
+        code="org_suspended",
+    )
 
 
 @dataclass(frozen=True)
@@ -976,6 +1026,9 @@ class BoundProject:
     role : ProjectRole
         The caller's effective role on the project (never ``None``: a
         caller without access is refused before a project is bound).
+    org_suspended : bool
+        Whether the project's org was suspended when it was bound
+        (:attr:`~whygraph.portal.authz.OrgAccess.suspended`).
     """
 
     id: int
@@ -992,6 +1045,7 @@ class BoundProject:
     created_at: str
     ctx: ProjectContext
     role: ProjectRole
+    org_suspended: bool = False
 
     @property
     def db_path(self) -> Path:
@@ -1008,7 +1062,10 @@ def _grant_role(role: str | None) -> ProjectRole | None:
 def _lookup(
     org_id: int, slug: str, user_id: int
 ) -> tuple[Project, ProjectRole | None] | None:
-    """The project ``slug`` in ``org_id`` and ``user_id``'s grant on it (one query)."""
+    """The project ``slug`` in ``org_id`` and ``user_id``'s grant on it (one query).
+
+    A soft-deleted project is not found (plan 59 section 4.3.3).
+    """
     if not is_valid_slug(slug):
         return None
     with get_session() as session:
@@ -1020,6 +1077,7 @@ def _lookup(
                 & (ProjectGrant.user_id == user_id),
             )
             .where(Project.org_id == org_id, Project.slug == slug)
+            .where(col(Project.deleted_at).is_(None))
         ).first()
         if row is None:
             return None
@@ -1050,7 +1108,7 @@ def project_role_for(
     -------
     ProjectRole or None
         The effective role; ``None`` without access or when the project is
-        gone (or belongs to another org).
+        gone, soft-deleted (plan 59 section 4.3.3) or in another org.
     """
     row = db.exec(
         select(Project.restricted, ProjectGrant.role)
@@ -1060,6 +1118,7 @@ def project_role_for(
             & (ProjectGrant.user_id == access.user_id),
         )
         .where(Project.id == project_id, Project.org_id == access.org_id)
+        .where(col(Project.deleted_at).is_(None))
     ).first()
     if row is None:
         return None
@@ -1094,7 +1153,9 @@ async def bind_project(
     ``llm_allowed=False``, ``llm_block="budget_exceeded"`` and the budget's
     ``llm_block_scope`` (M2f-2 plan section 4.7; the role wins when both
     apply); everyone else gets the cached object itself, which is never
-    mutated.
+    mutated. A suspended org's project is bound with ``llm_allowed=False``
+    and ``llm_block="org_suspended"`` ahead of both rules (plan 59
+    section 4.5).
 
     Parameters
     ----------
@@ -1143,7 +1204,11 @@ async def bind_project(
         raise ApiError(404, f"project {slug!r} not found") from exc
     except ConfigError as exc:
         raise ApiError(400, f"invalid project config: {exc}") from exc
-    if role is ProjectRole.VIEWER:
+    if access.suspended:
+        # Ahead of the role and the budgets (plan 59 section 4.5): every
+        # spending surface reads llm_allowed, not llm_block.
+        ctx = dataclasses.replace(ctx, llm_allowed=False, llm_block="org_suspended")
+    elif role is ProjectRole.VIEWER:
         ctx = dataclasses.replace(ctx, llm_allowed=False, llm_block="role")
     else:
         # Re-read on every bind, so raising a budget (or a new month) lifts
@@ -1158,11 +1223,15 @@ async def bind_project(
                 llm_block="budget_exceeded",
                 llm_block_scope=blocked,
             )
-    return bound_from(project, ctx, role)
+    return bound_from(project, ctx, role, org_suspended=access.suspended)
 
 
 def bound_from(
-    project: Project, ctx: ProjectContext, role: ProjectRole
+    project: Project,
+    ctx: ProjectContext,
+    role: ProjectRole,
+    *,
+    org_suspended: bool = False,
 ) -> BoundProject:
     """Snapshot a loaded ``projects`` row with its context and the caller's role."""
     assert project.id is not None
@@ -1181,6 +1250,7 @@ def bound_from(
         created_at=project.created_at,
         ctx=ctx,
         role=role,
+        org_suspended=org_suspended,
     )
 
 
@@ -1409,13 +1479,16 @@ async def bind_v1_project(
     org_slug: str | None,
     slug: str,
     action: Action,
+    *,
+    allow_suspended: bool = False,
 ) -> BoundProject:
     """Bind the one project a connection token reaches (``/api/v1``).
 
-    :func:`bind_project` with two differences: the org access is loaded
+    :func:`bind_project` with three differences: the org access is loaded
     with ``instance_admin=False`` (the ``reader`` fallback never applies
-    to a token), and the project must be the token's by **id** - a project
-    deleted and re-created under the same slug is unreachable.
+    to a token), the project must be the token's by **id** - a project
+    deleted and re-created under the same slug is unreachable - and a
+    suspended org refuses every call (plan 59 D6), reads included.
 
     Parameters
     ----------
@@ -1429,6 +1502,9 @@ async def bind_v1_project(
         The URL slug.
     action : Action
         What the request does with the project.
+    allow_suspended : bool, optional
+        Bind a suspended org's project too: only a machine giving up its
+        own token (``DELETE /api/v1/projects/{slug}/token``, plan 59 D35).
 
     Returns
     -------
@@ -1439,7 +1515,8 @@ async def bind_v1_project(
     ------
     ApiError
         ``404`` outside the token's org or project (never saying which);
-        ``403`` / ``400`` as :func:`bind_project`.
+        ``403`` / ``400`` as :func:`bind_project`; ``403 org_suspended``
+        when the token's org is suspended (unless ``allow_suspended``).
     """
     if org_slug is None or principal.token_project_id is None:
         raise ApiError(404, "not found")
@@ -1448,9 +1525,12 @@ async def bind_v1_project(
     )
     if access is None:
         raise ApiError(404, "not found")
-    return await bind_project(
+    project = await bind_project(
         state, access, slug, action, project_id=principal.token_project_id
     )
+    if access.suspended and not allow_suspended:
+        raise org_suspended_error()
+    return project
 
 
 def _v1_usage(
@@ -1470,6 +1550,8 @@ def _v1_usage(
 
 def v1_project_access(
     action: Action,
+    *,
+    allow_suspended: bool = False,
 ) -> Callable[..., AsyncIterator[BoundProject]]:
     """Build the dependency that binds ``{slug}`` for an ``/api/v1`` route doing ``action``.
 
@@ -1477,6 +1559,9 @@ def v1_project_access(
     ----------
     action : Action
         The route's action (also stored as ``whygraph_action``).
+    allow_suspended : bool, optional
+        As for :func:`bind_v1_project`: only the token self-revoke passes
+        it (plan 59 D35).
 
     Returns
     -------
@@ -1494,7 +1579,12 @@ def v1_project_access(
     ) -> AsyncIterator[BoundProject]:
         org_slug = request.scope.get("state", {}).get("org_slug")
         project = await bind_v1_project(
-            portal_state(request), principal, org_slug, slug, action
+            portal_state(request),
+            principal,
+            org_slug,
+            slug,
+            action,
+            allow_suspended=allow_suspended,
         )
         with use_project(project.ctx), _v1_usage(request, project, principal):
             yield project

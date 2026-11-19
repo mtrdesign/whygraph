@@ -2,7 +2,8 @@ import { Fragment, type MouseEvent, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { MenuIcon } from "lucide-react";
 import { cn } from "cn";
-import type { AdminMe } from "../../api";
+import { useQuery } from "@tanstack/react-query";
+import { adminApi, type AdminMe } from "../../api";
 import { useDocumentTitle } from "../../lib/useDocumentTitle";
 import { useUi } from "../../store";
 import { LiveRegion } from "../shell/LiveRegion";
@@ -27,7 +28,23 @@ import { AdminSidebar } from "./AdminSidebar";
 function AdminHeader() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const setNavOpen = useUi((s) => s.setNavOpen);
-  const { heading, crumbs } = adminCrumbs(pathname);
+  // A detail page names itself once its query has loaded (this only reads the cache).
+  const [, , module, rawKey] = pathname.split("/");
+  const key = rawKey ? decodeURIComponent(rawKey) : "";
+  const org = useQuery({
+    queryKey: ["@admin", "org", key],
+    queryFn: () => adminApi.org(key),
+    enabled: false,
+  }).data?.name;
+  const user = useQuery({
+    queryKey: ["@admin", "user", key],
+    queryFn: () => adminApi.user(key),
+    enabled: false,
+  }).data?.display_name;
+  const { heading, crumbs } = adminCrumbs(pathname, {
+    org: module === "orgs" ? org : undefined,
+    user: module === "users" ? user : undefined,
+  });
   useDocumentTitle(heading, "Administration");
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-4">

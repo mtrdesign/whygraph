@@ -64,6 +64,7 @@ from .deps import (
     require_production,
 )
 from .models import USAGE_SOURCES, USAGE_TASKS, Project, UsageEvent, User
+from .people import DELETED_USER
 from .usage import SYSTEM_LABEL, actor_label
 from .usage_store import COUNTED_COST_SOURCES, current_month
 
@@ -428,7 +429,9 @@ def build_filter(
     elif params.project is not None:
         found = db.exec(
             select(Project.id).where(
-                Project.org_id == org_id, Project.slug == params.project
+                Project.org_id == org_id,
+                Project.slug == params.project,
+                col(Project.deleted_at).is_(None),  # plan 59 section 4.3.3
             )
         ).first()
         if found is not None:
@@ -879,21 +882,32 @@ def _query_calls(
     after: tuple[Any, int] | None,
     limit: int,
 ) -> tuple[list[tuple[UsageEvent, str | None]], bool]:
-    """One page of ``(event, user uid)``; whether more rows follow."""
+    """One page of ``(event, user uid)``; whether more rows follow.
+
+    A soft-deleted user's rows carry :data:`~whygraph.portal.people.DELETED_USER`
+    as their ``actor_label`` instead of the stored snapshot (plan 59
+    section 4.3.1), for the calls list and the CSV alike. The events are
+    detached first, so the label is never written back.
+    """
     conditions = list(f.conditions)
     if after is not None:
         conditions.append(_after(sort, *after))
     with get_session() as db:
         _timed(db)
         rows = db.exec(
-            select(UsageEvent, User.uid)
+            select(UsageEvent, User.uid, User.deleted_at)
             .outerjoin(User, col(User.id) == col(_E.user_id))
             .where(*conditions)
             .order_by(*_order(sort))
             .limit(limit + 1)
         ).all()
         db.expunge_all()
-    return [(e, uid) for e, uid in rows[:limit]], len(rows) > limit
+    page = []
+    for event, uid, deleted_at in rows[:limit]:
+        if deleted_at is not None:
+            event.actor_label = DELETED_USER
+        page.append((event, uid))
+    return page, len(rows) > limit
 
 
 def _calls_page(f: UsageFilter, params: UsageParams) -> dict[str, Any]:
@@ -1273,6 +1287,7 @@ def _projects_over(
                 select(Project).where(
                     Project.org_id == org_id,
                     col(Project.id).in_([pid for _, pid in over]),
+                    col(Project.deleted_at).is_(None),  # plan 59 section 4.3.3
                 )
             )
         }
@@ -1290,12 +1305,15 @@ def llm_block(
     project_id: int,
     role: ProjectRole,
     user_id: int,
+    *,
+    suspended: bool = False,
 ) -> tuple[str | None, str | None]:
     """A caller's ``(llm_block, llm_block_scope)`` on a project.
 
     The same rule as :func:`~whygraph.portal.deps.bind_project`, computed
-    without a context (the projects list binds none): a viewer is
-    ``"role"``; anyone an exhausted hard-stopped budget covers is
+    without a context (the projects list binds none): a suspended org's
+    project is ``"org_suspended"`` (plan 59 section 4.5); otherwise a
+    viewer is ``"role"``; anyone an exhausted hard-stopped budget covers is
     ``"budget_exceeded"`` with its scope; the role wins.
 
     Parameters
@@ -1308,13 +1326,17 @@ def llm_block(
         The caller's effective role on it.
     user_id : int
         The caller.
+    suspended : bool, optional
+        Whether the project's org is suspended (it wins over both rules).
 
     Returns
     -------
     tuple of (str or None, str or None)
-        ``("role", None)``, ``("budget_exceeded", scope)`` or
-        ``(None, None)``.
+        ``("org_suspended", None)``, ``("role", None)``,
+        ``("budget_exceeded", scope)`` or ``(None, None)``.
     """
+    if suspended:
+        return "org_suspended", None
     if role is ProjectRole.VIEWER:
         return "role", None
     blocked = state.budgets.blocked_scope(org_id, project_id, user_id)

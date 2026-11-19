@@ -101,7 +101,10 @@ the checks change:
   shared across them.
 - **A dedicated base host.** The cookie reaches every subdomain, so the base host must belong to
   WhyGraph alone. See [why](../deploy/production.md#why-a-dedicated-domain).
-- **Instance admins** can read every organization, read-only, and every such request is logged.
+- **Platform administrators** read an organization only through a 60-minute, read-only grant they open
+  on purpose ("Open as reader"), which they can revoke and which ends if they are demoted, disabled or
+  deleted. Opening and revoking it, and each read, are logged. A suspended organization is read-only
+  for everyone.
   Authentication events go to the `whygraph.portal.audit` log.
 - **Projects come only from GitHub, through the GitHub App.** The server refuses any other source.
   The app's private key never leaves the portal process: for each fetch and scan the portal mints

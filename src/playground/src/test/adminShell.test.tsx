@@ -11,6 +11,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const PALETTE_PLACEHOLDER = "Go to a page, user, organization or project...";
 const nav = () => screen.getByRole("navigation", { name: "Main" });
 
 describe("admin shell: session", () => {
@@ -94,7 +95,7 @@ describe("admin shell: navigation", () => {
     expect(links.map((l) => l.textContent)).toEqual(
       expect.arrayContaining(["Dashboard", "Organizations", "Users", "Audit"]),
     );
-    expect(within(nav()).queryByRole("link", { name: "Projects" })).toBeNull();
+    expect(within(nav()).getByRole("link", { name: "Projects" })).toBeInTheDocument();
     expect(within(nav()).queryByRole("link", { name: "Configuration" })).toBeNull();
     expect(within(nav()).getByRole("link", { name: "Users" })).toHaveAttribute("data-status", "active");
     expect(within(nav()).getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("data-status", "active");
@@ -131,9 +132,9 @@ describe("admin shell: navigation", () => {
     ["/admin/users/u2", "Ben", ["Administration", "Users", "Ben"], "Ben · Administration · WhyGraph"],
     [
       "/admin/projects/acme/api",
-      "api",
-      ["Administration", "Projects", "acme / api"],
-      "api · Administration · WhyGraph",
+      "Api",
+      ["Administration", "Projects", "acme / Api"],
+      "Api · Administration · WhyGraph",
     ],
   ])("%s has its h1, crumbs and title", async (path, h1, crumbs, title) => {
     mountAdmin(path);
@@ -145,7 +146,7 @@ describe("admin shell: navigation", () => {
   });
 
   it("a module a later release builds says 'Not available yet', not 'this release'", async () => {
-    mountAdmin("/admin/projects");
+    mountAdmin("/admin/config");
     expect(await screen.findByText("Not available yet")).toBeInTheDocument();
     expect(screen.getByText("This part of the admin panel comes in a later release.")).toBeInTheDocument();
     expect(screen.queryByText(/this release/i)).toBeNull();
@@ -170,7 +171,7 @@ describe("admin shell: command palette", () => {
     const user = userEvent.setup();
     await screen.findByRole("heading", { name: "Dashboard" });
     await user.keyboard("{Meta>}k{/Meta}");
-    return { user, box: await screen.findByRole("combobox") };
+    return { user, box: await screen.findByPlaceholderText(PALETTE_PLACEHOLDER) };
   }
 
   it("with an empty query shows only Go to, with the modules and Account", async () => {
@@ -178,10 +179,10 @@ describe("admin shell: command palette", () => {
     await openWithKeys();
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText("Go to")).toBeInTheDocument();
-    for (const label of ["Dashboard", "Organizations", "Users", "Audit", "Account"]) {
+    for (const label of ["Dashboard", "Organizations", "Projects", "Users", "Audit", "Account"]) {
       expect(within(dialog).getByText(label)).toBeInTheDocument();
     }
-    expect(within(dialog).queryByText("Projects")).toBeNull();
+    expect(within(dialog).queryByText("Projects", { selector: "[cmdk-group-heading]" })).toBeNull();
     expect(within(dialog).queryByText("Users", { selector: "[cmdk-group-heading]" })).toBeNull();
     expect(screen.getByPlaceholderText("Go to a page, user, organization or project...")).toBeInTheDocument();
   });
@@ -229,13 +230,13 @@ describe("admin shell: command palette", () => {
     mountAdmin("/admin");
     await screen.findByRole("heading", { name: "Dashboard" });
     await userEvent.setup().click(within(nav()).getByRole("button", { name: /Search/ }));
-    expect(await screen.findByRole("combobox")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText(PALETTE_PLACEHOLDER)).toBeInTheDocument();
   });
 
   it("is closed when the admin app mounts, even if it was left open", async () => {
     mountAdmin("/admin");
     await screen.findByRole("heading", { name: "Dashboard" });
-    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.queryByPlaceholderText(PALETTE_PLACEHOLDER)).toBeNull();
   });
 
   it("leaves 'g p' alone in the admin app", async () => {

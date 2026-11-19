@@ -14,7 +14,7 @@ import { QueryState } from "../components/state/QueryState";
 import { TableSkeleton } from "../components/state/Skeletons";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
-import { formatDate, formatUsd } from "../lib/format";
+import { formatBytes, formatDate, formatUsd } from "../lib/format";
 import { plural } from "../lib/plural";
 import type { AdminOrgStatus, AdminOrgsSearch } from "../lib/routeSearch";
 
@@ -55,6 +55,12 @@ const columns: Column<AdminOrg>[] = [
     cell: (o) => (o.owners.length > 0 ? o.owners.map((l) => `@${l}`).join(", ") : <span className="text-muted-foreground">-</span>),
   },
   { key: "spend", header: "Spend this month", align: "right", cell: (o) => formatUsd(o.spend_mtd) },
+  {
+    key: "storage",
+    header: "Storage",
+    align: "right",
+    cell: (o) => (o.storage_bytes === null ? <span className="text-muted-foreground">-</span> : formatBytes(o.storage_bytes)),
+  },
   {
     key: "activity",
     header: "Last activity",

@@ -64,6 +64,8 @@ import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { AdminLoginPage } from "./pages/AdminLoginPage";
 import { AdminOrgPage } from "./pages/AdminOrgPage";
 import { AdminOrgsPage } from "./pages/AdminOrgsPage";
+import { AdminProjectPage } from "./pages/AdminProjectPage";
+import { AdminProjectsPage } from "./pages/AdminProjectsPage";
 import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
 import { AdminUserPage } from "./pages/AdminUserPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
@@ -93,7 +95,9 @@ import {
   type BaseSearch,
   validateAdminAuditSearch,
   validateAdminOrgSearch,
+  validateAdminDashboardSearch,
   validateAdminOrgsSearch,
+  validateAdminProjectsSearch,
   validateAdminUsersSearch,
   validateAdminLoginSearch,
   validateBaseSearch,
@@ -862,7 +866,12 @@ const adminLoginRoute = createRoute({
   component: AdminLoginPage,
 });
 const adminLayout = createRoute({ getParentRoute: () => rootRoute, path: "/admin", component: AdminLayout });
-const adminIndexRoute = createRoute({ getParentRoute: () => adminLayout, path: "/", component: AdminDashboardPage });
+const adminIndexRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "/",
+  validateSearch: validateAdminDashboardSearch,
+  component: AdminDashboardPage,
+});
 const adminOrgsRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "orgs",
@@ -878,12 +887,13 @@ const adminOrgRoute = createRoute({
 const adminProjectsRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "projects",
-  component: () => <AdminPlaceholderPage heading="Projects" />,
+  validateSearch: validateAdminProjectsSearch,
+  component: AdminProjectsPage,
 });
 const adminProjectRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "projects/$org/$slug",
-  component: () => <AdminPlaceholderPage heading={adminProjectRoute.useParams().slug} />,
+  component: AdminProjectPage,
 });
 const adminUsersRoute = createRoute({
   getParentRoute: () => adminLayout,

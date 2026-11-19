@@ -54,14 +54,15 @@ there is no recovery path for a locked-out one in this release.
 
 ## The modules
 
-The nav on the left has four modules in this release. More arrive in later releases and appear in the
+The nav on the left has five modules in this release. More arrive in later releases and appear in the
 nav only when they exist. Press `Cmd-K` (or `Ctrl-K`), or use **Search**, to jump to a page, a user
 or an organization; a deleted one is marked **Deleted**.
 
 | Module | What it shows |
 |---|---|
-| **Dashboard** | The number of users and organizations, the settings check (the base URL and the DNS records the self-check found missing) and the Updates card, which tells administrators when a newer release is out and links its notes. |
+| **Dashboard** | What needs attention, seven figures and three charts for a date range, then the settings check (the base URL and the DNS records the self-check found missing) and the Updates card. See [Dashboard](#dashboard). |
 | **Organizations** | Every organization, with its detail page and **Create organization**. See [Organizations](#organizations). |
+| **Projects** | Every project of every organization, with its detail page. See [Projects](#projects). |
 | **Users** | Every account, with its detail page. See [Users](#users). |
 | **Audit** | The [security events](production.md#the-security-event-log) of every organization and the ones that belong to none. See [Audit](#audit). |
 
@@ -70,6 +71,65 @@ session shares its origin with pages that show user-supplied names.
 
 Every filter on a list is in the address, so a refresh, a shared link and the back button keep the
 view.
+
+### Dashboard
+
+The page opens on the last 30 days. The date range at the top (This month, Last month, 7 / 30 / 90
+days, 12 months or a custom range of at most 400 days) drives the three charts and the "since" figures
+on the tiles, and is kept in the address (`?from=&to=`).
+
+**Needs attention** lists what is broken or waits for an administrator, one line each, with a link
+to the item: a scan that failed in the last 24 hours, a project that lost its GitHub access, an
+organization, project or member that hit a hard-stopped budget, a problem the address check found, a
+newer WhyGraph release, a password account that owns organizations or cannot sign in, a suspended
+organization, and a deleted organization or project that still holds data. With nothing to report it
+says "Nothing needs your attention."
+
+The seven tiles count live organizations, projects and users (deleted ones are left out):
+
+| Tile | What it counts |
+|---|---|
+| Users, Organizations | The live total, and the change since the start of the range. |
+| Projects | The live total. |
+| LLM spend MTD | Estimated spend this month across every organization, and the same figure last month by the same day. |
+| Tokens MTD | Input and output tokens this month. |
+| Storage | The newest measurement of each project, deleted ones included, and the change since the start of the range. Purged projects are not counted. |
+| Agent calls (7 d) | Calls by agents in the last 7 days, and the change on the 7 days before. Chat tool calls are not agent calls. |
+
+The charts are LLM spend per day by provider (the five biggest providers, the rest as "other"), scans
+per day by status, and the top 10 organizations by spend, storage or agent calls (the **Rank by**
+select, kept in the address as `?rank=`). A figure that takes more than ten seconds to add up shows an
+error in its own tile or chart with **Retry**, and the rest of the page stays.
+
+### Projects
+
+The list has an **Organization** filter, a **Show** filter (All, OK, Failing, Access lost, Never
+scanned, Deleted) and a search on project name, project slug and organization slug, all kept in the
+address. **All** holds every project that is not deleted. The columns are the project, its state, the
+last scan, storage and spend this month.
+
+A project's page shows its state, spend this month (against its budget), agent calls, the last scan
+and the message of the last failure, then:
+
+- **Rescan** queues a scan as a platform administrator would from the organization, and works while
+  the organization is not suspended. **Measure now** measures its storage at once.
+- **Delete**, **Restore** and **Delete permanently**, as on the organization's Projects tab. A
+  deleted project shows only Restore and Delete permanently.
+- **Scans**: the last 20 runs, each with its status, who requested it and its duration, **Cancel** on
+  a queued or running one, and **Log**, the end of the run's log as plain text. The list refreshes
+  every five seconds while a run is queued or running.
+- **Storage**: the size of the history database, the Git data, the code index, the working tree and
+  the run logs, and the total over the last 90 days.
+
+#### Storage figures
+
+Sizes are measured by walking each GitHub project's server copy and history on the data volume,
+not by asking the database: the apparent size of the regular files, symbolic links not followed. The
+portal measures a project when it has no measurement, when the last one is over 24 hours old or older
+than its last scan, and checks every six hours. **Measure now** ignores those rules, and answers "Another
+storage measurement is running" while the portal walks another project. Measurements are kept for 400
+days, plus each project's newest one. Purging a project removes its measurements, so its bytes leave
+the totals and the history charts for past days too.
 
 ### Users
 
@@ -97,7 +157,7 @@ sessions, their connection tokens, what they spent this month, and their latest 
 ### Organizations
 
 The list has a **Show** filter (All, Suspended, Deleted) beside a search on name and slug, and
-columns for members, projects, owners, spend this month, last activity and creation date. A suspended
+columns for members, projects, owners, spend this month, storage, last activity and creation date. A suspended
 organization stays in **All** with a **Suspended** badge. The address of an organization is plain text:
 you are not a member, so its host answers "No access" until you [open it as a reader](#reading-an-organization).
 
@@ -112,8 +172,8 @@ An organization's page has these sections, kept in the address (`?tab=`):
 |---|---|
 | **Overview** | Members, projects, open invitations and spend this month, the address and the stored rows (usage events, audit events, agent-call days). |
 | **Members** | Every member with a role select that saves on change, **Remove**, and **Add member** by GitHub username. This is where you hand an organization over: promote a GitHub member to owner, then remove the password account. A password account cannot be made an owner. The last owner cannot be demoted or removed. |
-| **Projects** | Its projects, deleted ones included, with their state. A live project has **Delete**; a deleted one has **Restore** and **Delete permanently**. |
-| **Usage** | This month's spend and the budgets with their limits, hard stops and spend. |
+| **Projects** | Its projects, deleted ones included, each linking to its [project page](#projects), with their state, last scan and storage. A live project has **Delete**; a deleted one has **Restore** and **Delete permanently**. |
+| **Usage** | This month's spend, the budgets with their limits, hard stops and spend, and the storage of each project. |
 | **Audit** | The organization's events, with the same filters and CSV as the Audit module. |
 
 Under the heading, **Rename**, **Open as reader**, **Suspend** / **Unsuspend** and **Delete** act on

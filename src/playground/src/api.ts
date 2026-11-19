@@ -1701,6 +1701,115 @@ export interface AdminReaderGrant {
   expires_at: string;
 }
 
+/** One row of `GET /api/admin/projects` (plan 59, §4.8). */
+export interface AdminProjectRow {
+  org: string;
+  org_deleted_at: string | null;
+  slug: string;
+  name: string;
+  source: string;
+  created_at: string;
+  last_scan_at: string | null;
+  last_run: { status: string; finished_at: string | null } | null;
+  access_lost_reason: string | null;
+  restricted: boolean;
+  deleted_at: string | null;
+  storage_bytes: number | null;
+  spend_mtd: number;
+}
+
+/** A project's storage measurement, in bytes per part. */
+export interface AdminStorageSample {
+  day: string;
+  measured_at: string;
+  history_bytes: number;
+  git_bytes: number;
+  codegraph_bytes: number;
+  worktree_bytes: number;
+  runs_bytes: number;
+  total_bytes: number;
+}
+
+/** `GET /api/admin/projects/{org}/{slug}`. */
+export interface AdminProjectDetail {
+  org: string;
+  org_deleted_at: string | null;
+  slug: string;
+  name: string;
+  source: string;
+  created_at: string;
+  last_scan_at: string | null;
+  access_lost_reason: string | null;
+  restricted: boolean;
+  deleted_at: string | null;
+  overview: ProjectOverview;
+  runs: ScanRunRow[];
+  storage: {
+    latest: AdminStorageSample | null;
+    series: { from: string; to: string; columns: string[]; rows: [string, number][] };
+  };
+}
+
+/** One thing the dashboard says needs the administrator (`GET /api/admin/stats/overview`). */
+export interface AdminAttention {
+  kind:
+    | "scan_failed"
+    | "access_lost"
+    | "budget_stopped"
+    | "base_check"
+    | "update"
+    | "password_owner"
+    | "password_not_admin"
+    | "org_suspended"
+    | "deleted_with_data";
+  org?: { slug: string; name: string };
+  project?: { org: string; slug: string; name: string };
+  user?: { uid: string; label: string };
+  at?: string;
+  bytes?: number;
+  text?: string;
+  count?: number;
+  url?: string;
+}
+
+export interface AdminKpi {
+  value: number;
+  previous: number | null;
+}
+
+export interface AdminStatsOverview {
+  from: string;
+  to: string;
+  kpis: {
+    users: AdminKpi;
+    orgs: AdminKpi;
+    projects: AdminKpi;
+    llm_spend_mtd: AdminKpi;
+    tokens_mtd: AdminKpi;
+    storage_bytes: AdminKpi;
+    agent_calls_7d: AdminKpi;
+  };
+  attention: AdminAttention[];
+}
+
+/** A stacked series: the rows, and the server-built stack dict `readStack` turns into a chart's stack. */
+export interface AdminStatsSeries {
+  from: string;
+  to: string;
+  columns: string[];
+  rows: unknown[][];
+  stack: Record<string, unknown> | null;
+}
+
+export type AdminTopMetric = "spend" | "storage" | "agent_calls";
+
+export interface AdminStatsTop {
+  from: string;
+  to: string;
+  metric: AdminTopMetric;
+  items: { slug: string; name: string; value: number }[];
+}
+
 export const adminApi = {
   me: () => get<AdminMe>("/admin/me"),
   logout: () => send<Redirect>("POST", "/admin/me/logout"),
@@ -1752,6 +1861,34 @@ export const adminApi = {
       `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/purge`,
       { confirm_name },
     ),
+  projects: () => get<{ projects: AdminProjectRow[] }>("/admin/projects"),
+  project: (org: string, slug: string) =>
+    get<AdminProjectDetail>(`/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}`),
+  rescanProject: (org: string, slug: string) =>
+    send<{ run_id: number }>(
+      "POST",
+      `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/rescan`,
+    ),
+  cancelProjectRun: (org: string, slug: string, runId: number) =>
+    send<{ run_id: number; was?: string }>(
+      "POST",
+      `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/scans/${runId}/cancel`,
+    ),
+  projectRunLog: (org: string, slug: string, runId: number) =>
+    get<{ run_id: number; text: string; size: number; truncated: boolean }>(
+      `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/scans/${runId}/log`,
+    ),
+  measureProjectStorage: (org: string, slug: string) =>
+    send<{ measured: boolean; sample: AdminStorageSample | null }>(
+      "POST",
+      `/admin/projects/${encodeURIComponent(org)}/${encodeURIComponent(slug)}/storage`,
+    ),
+  statsOverview: (from: string, to: string) =>
+    get<AdminStatsOverview>(`/admin/stats/overview?${new URLSearchParams({ from, to })}`),
+  statsSeries: (metric: "spend" | "scans", from: string, to: string) =>
+    get<AdminStatsSeries>(`/admin/stats/series?${new URLSearchParams({ metric, from, to })}`),
+  statsTop: (metric: AdminTopMetric, from: string, to: string) =>
+    get<AdminStatsTop>(`/admin/stats/top?${new URLSearchParams({ metric, limit: "10", from, to })}`),
   users: () => get<AdminUser[]>("/admin/users"),
   user: (uid: string) => get<AdminUserDetail>(`/admin/users/${encodeURIComponent(uid)}`),
   deleteUser: (uid: string, confirm: string) =>

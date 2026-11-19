@@ -128,6 +128,11 @@ export function signedInAdmin() {
       manual_steps: false,
     });
   fake.routes["/api/admin/audit"] = () => json({ events: [], next: null });
+  fake.routes["/api/admin/projects"] = () => json({ projects: PROJECTS });
+  fake.routes["/api/admin/projects/acme/api"] = () => json(PROJECT_DETAIL);
+  fake.routes["/api/admin/stats/overview"] = () => json(STATS_OVERVIEW);
+  fake.routes["/api/admin/stats/series"] = () => json({ from: "", to: "", columns: [], rows: [], stack: null });
+  fake.routes["/api/admin/stats/top"] = () => json({ from: "", to: "", metric: "spend", items: [] });
 }
 
 /** The Phase 2 user fields of a live account. */
@@ -225,4 +230,94 @@ export const USER_DETAIL = {
   ],
   spend: [{ org: "acme", spent_usd: 0.5 }],
   events: [],
+};
+
+export const PROJECTS = [
+  {
+    org: "acme",
+    org_deleted_at: null,
+    slug: "api",
+    name: "Api",
+    source: "github",
+    created_at: "2026-10-05T00:00:00Z",
+    last_scan_at: "2026-11-17T10:00:00Z",
+    last_run: { status: "ok", finished_at: "2026-11-17T10:05:00Z" },
+    access_lost_reason: null,
+    restricted: false,
+    deleted_at: null,
+    storage_bytes: 1288490189,
+    spend_mtd: 0.75,
+  },
+  {
+    org: "acme",
+    org_deleted_at: null,
+    slug: "old",
+    name: "Old",
+    source: "github",
+    created_at: "2026-10-06T00:00:00Z",
+    last_scan_at: null,
+    last_run: null,
+    access_lost_reason: null,
+    restricted: false,
+    deleted_at: "2026-11-10T00:00:00Z",
+    storage_bytes: null,
+    spend_mtd: 0,
+  },
+  {
+    org: "zeta",
+    org_deleted_at: null,
+    slug: "web",
+    name: "Web",
+    source: "github",
+    created_at: "2026-10-07T00:00:00Z",
+    last_scan_at: "2026-11-16T10:00:00Z",
+    last_run: { status: "failed", finished_at: "2026-11-16T10:05:00Z" },
+    access_lost_reason: null,
+    restricted: false,
+    deleted_at: null,
+    storage_bytes: 524288,
+    spend_mtd: 0,
+  },
+];
+
+export const PROJECT_DETAIL = {
+  org: "acme",
+  org_deleted_at: null,
+  slug: "api",
+  name: "Api",
+  source: "github",
+  created_at: "2026-10-05T00:00:00Z",
+  last_scan_at: "2026-11-17T10:00:00Z",
+  access_lost_reason: null,
+  restricted: false,
+  deleted_at: null,
+  overview: {
+    coverage: { points: [] },
+    events: [],
+    last_failure: null,
+    usage: { month: "2026-11", spent_usd: 0.75, budget_usd: 5, pct: 15, by_task: [] },
+    agents: { days: [], total_calls: 42, llm_calls: 0, llm_cost_usd: 0, errors: 0, internal_errors: 0, by_kind: [], people: null, connections: null, last_call_day: null, chat_tools: { total_calls: 0, errors: 0, internal_errors: 0, by_kind: [] } },
+  },
+  runs: [
+    { id: 7, kind: "sync", trigger: "manual", analyze: false, status: "ok", queued_at: "2026-11-17T09:59:00Z", started_at: "2026-11-17T10:00:00Z", finished_at: "2026-11-17T10:05:00Z", requested_by: { uid: "u2", label: "Ben" }, summary: null },
+  ],
+  storage: {
+    latest: { day: "2026-11-18", measured_at: "2026-11-18T03:00:00Z", history_bytes: 1048576, git_bytes: 2097152, codegraph_bytes: 524288, worktree_bytes: 4194304, runs_bytes: 1024, total_bytes: 7864320 },
+    series: { from: "2026-08-21", to: "2026-11-18", columns: ["day", "bytes"], rows: [["2026-11-17", 7000000], ["2026-11-18", 7864320]] },
+  },
+};
+
+export const STATS_OVERVIEW = {
+  from: "2026-10-20",
+  to: "2026-11-19",
+  kpis: {
+    users: { value: 3, previous: 2 },
+    orgs: { value: 1, previous: 1 },
+    projects: { value: 2, previous: null },
+    llm_spend_mtd: { value: 12.5, previous: 8 },
+    tokens_mtd: { value: 1234567, previous: null },
+    storage_bytes: { value: 1288490189, previous: 1073741824 },
+    agent_calls_7d: { value: 150, previous: 100 },
+  },
+  attention: [] as Record<string, unknown>[],
 };

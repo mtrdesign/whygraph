@@ -81,7 +81,8 @@ function refOf(activity: ToolActivity): string | null {
   return typeof ref === "string" ? ref : null;
 }
 
-function readStack(chart: Record<string, unknown>): ChartStack | null {
+/** The server's stack dict (`series_index`, `series_values`, ...) as a {@link ChartStack}, or `null` when it is malformed. */
+export function readStack(chart: Record<string, unknown>): ChartStack | null {
   const seriesIndex = chart.series_index;
   const seriesValues = chart.series_values;
   const xValues = chart.x_values;

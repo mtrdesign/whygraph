@@ -14,7 +14,8 @@ Changes that are on `main` and not in a release yet.
 
 - **Platform administration.** Production instances get an admin panel at `/admin` on the base host,
   with its own sign-in (GitHub, or the bootstrap password) and its own 8-hour session that an
-  organization host never sees. This release has a Dashboard, Organizations, Users and Audit. See
+  organization host never sees. Its modules are the Dashboard, Projects, Organizations, Users, Audit
+  and Configuration. See
   [Platform administration](../deploy/administration.md).
 - **The password account is for administration only.** `POST /api/auth/login` and the sign-in page's
   "Administrator sign-in" are gone, and so is changing a password from the everyday Account page: it is
@@ -40,3 +41,13 @@ Changes that are on `main` and not in a release yet.
   and every project has a page with its scans, logs, Rescan and storage. Organizations and projects
   show how much disk they use, measured by the portal every six hours. See
   [Platform administration](../deploy/administration.md#dashboard).
+- **Decide who can sign up.** The admin panel's **Configuration** page sets the platform's policy
+  without a restart: who can sign up (anyone with a GitHub account, the default; invited people and a
+  **sign-up allowlist**; or nobody new), whether only administrators can create organizations, a limit
+  on the organizations one person may own and on the projects per organization, and an **announcement
+  banner** shown on every page, signed in or not. It also shows the instance's address check, version
+  and update status, and disk use. A new platform still starts open: close it if you do not want
+  strangers on it. See [Who can sign up](../deploy/production.md#sign-up) and
+  [Platform administration](../deploy/administration.md#configuration).
+- **Two more security events**, `instance_settings_changed` and `signup_allowlist_changed`. See
+  [the security event log](../deploy/production.md#the-security-event-log).

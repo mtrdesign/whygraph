@@ -1057,8 +1057,7 @@ def test_the_admin_routes_refuse_a_non_admin_and_an_org_host(
 ) -> None:
     client = world.client
     paths = [
-        ("GET", "/api/admin/settings"),
-        ("GET", "/api/admin/update"),
+        ("GET", "/api/admin/config"),
         ("GET", "/api/admin/orgs"),
         ("GET", "/api/admin/users"),
         ("PATCH", f"/api/admin/users/{world.ann}"),
@@ -1123,9 +1122,9 @@ def test_the_admin_lists_every_user_and_org(world: SimpleNamespace) -> None:
         "storage_bytes": None,
         "last_activity_day": None,
     }
-    settings = client.get(at() + "/api/admin/settings").json()
-    assert settings["base_url"] == PROD_BASE
-    assert settings["base_check"] in ([], None)  # skipped for *.localhost
+    instance = client.get(at() + "/api/admin/config").json()["instance"]
+    assert instance["base_url"] == PROD_BASE
+    assert instance["base_check"] in ([], None)  # skipped for *.localhost
 
 
 def test_the_last_instance_admin_cannot_be_demoted(world: SimpleNamespace) -> None:

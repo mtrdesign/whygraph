@@ -323,8 +323,22 @@ def _invitation_row(
     }
 
 
-def _open_invitation(github_id: int, now: str) -> list:
-    """``WHERE`` clauses of an open, unexpired invitation for ``github_id``."""
+def open_invitation(github_id: int, now: str) -> list:
+    """``WHERE`` clauses of an open, unexpired invitation for ``github_id``.
+
+    Parameters
+    ----------
+    github_id : int
+        The invited GitHub id.
+    now : str
+        The current time, ISO formatted (what ``expires_at`` is compared with).
+
+    Returns
+    -------
+    list
+        Clauses on :class:`~whygraph.portal.models.Invitation`; the caller
+        adds the org (and, for sign-up admission, the org's state).
+    """
     return [
         Invitation.github_id == github_id,
         col(Invitation.redeemed_at).is_(None),
@@ -414,7 +428,9 @@ def post_member(
     (with ``Retry-After``), ``404 no_such_project`` (a grant's project is
     not in the org), ``409 user_disabled``, ``409 user_deleted`` (a
     soft-deleted account, plan 59 section 4.3.1), ``409 already_member``,
-    ``409 already_invited``. Every refusal is audited with the tried login.
+    ``409 already_invited``, ``409 signups_closed`` (no account, and the
+    platform's sign-up policy is ``closed``: plan 59 D32). Every refusal is
+    audited with the tried login.
 
     Returns
     -------
@@ -555,6 +571,15 @@ def post_member(
                 db.flush()
                 row = _member_row(user, membership.role, membership.created_at)
             else:
+                if state.instance_settings.signup_policy == "closed":
+                    # Plan 59 D32: this person could never sign in to redeem it.
+                    refused("signups_closed", login)
+                    raise ApiError(
+                        409,
+                        "sign-up is closed: only people who already have an "
+                        "account can be added",
+                        code="signups_closed",
+                    )
                 conflict = invited
                 db.exec(
                     update(Invitation)
@@ -570,7 +595,7 @@ def post_member(
                 still_open = db.exec(
                     select(Invitation.id).where(
                         Invitation.org_id == access.org_id,
-                        *_open_invitation(found.id, _iso(now)),
+                        *open_invitation(found.id, _iso(now)),
                     )
                 ).first()
                 if still_open is not None:
@@ -944,7 +969,7 @@ def redeem_invitations(db: Session, *, github_id: int, user_id: int) -> list[Red
     """
     now = _iso(_now())
     org_ids = sorted(
-        set(db.exec(select(Invitation.org_id).where(*_open_invitation(github_id, now))))
+        set(db.exec(select(Invitation.org_id).where(*open_invitation(github_id, now))))
     )
     if not org_ids:
         return []
@@ -971,7 +996,7 @@ def redeem_invitations(db: Session, *, github_id: int, user_id: int) -> list[Red
             select(Invitation)
             .where(
                 col(Invitation.org_id).in_(list(orgs)),
-                *_open_invitation(github_id, now),
+                *open_invitation(github_id, now),
             )
             .order_by(col(Invitation.id))
             .with_for_update()

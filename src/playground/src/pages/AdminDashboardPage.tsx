@@ -12,8 +12,6 @@ import {
 } from "../api";
 import { AdminChart } from "../components/admin/AdminChart";
 import { AdminHeading } from "../components/admin/AdminHeading";
-import { SettingsCheck } from "../components/admin/SettingsCheck";
-import { UpdatesCard } from "../components/admin/UpdatesCard";
 import type { ChartPayload } from "../components/charts/chartSpec";
 import { readStack } from "../components/charts/chartSpec";
 import { PageContainer } from "../components/layout/PageContainer";
@@ -135,7 +133,11 @@ function attentionLine(item: AdminAttention): ReactNode {
     case "budget_stopped":
       return <>{toOrg(org, "usage")}: monthly budget reached</>;
     case "base_check":
-      return <>{item.text ?? ""}</>;
+      return (
+        <Link to="/admin/config" className="text-primary-text hover:underline">
+          {item.text ?? ""}
+        </Link>
+      );
     case "update":
       return item.url && item.url.startsWith("https://") ? (
             <a href={item.url} target="_blank" rel="noreferrer" className="text-primary-text hover:underline">
@@ -381,10 +383,6 @@ export function AdminDashboardPage() {
         to={range.to}
         onRank={(next) => go({ from: search.from, to: search.to, rank: next === "spend" ? undefined : next })}
       />
-      <div className="grid gap-6 lg:grid-cols-2">
-        <SettingsCheck />
-        <UpdatesCard />
-      </div>
     </PageContainer>
   );
 }

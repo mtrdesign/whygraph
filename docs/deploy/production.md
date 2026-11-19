@@ -227,17 +227,29 @@ organizations, sign in with GitHub. Later admins are GitHub users that an admin 
 **Users** module, so promote a GitHub account early (see
 [Platform administration](administration.md#signing-in)).
 
-## Open sign-up
+## Who can sign up { #sign-up }
 
-!!! warning "Anyone with a GitHub account that has two-factor authentication can sign in and create organizations"
-    Sign-up is always open in this release, and **it cannot be closed yet**. The first GitHub sign-in
-    creates the account, and any signed-in user can create an organization. Each organization reserves
-    a subdomain, and there is no cap. GitHub's own checks and the required two-factor authentication
-    are what stands in the way, and sign-in bursts are throttled. An instance admin can
-    [disable](#instance-admins) an abusive account.
+!!! warning "A new platform starts open: anyone with a GitHub account that has two-factor authentication can sign in and create organizations"
+    The first GitHub sign-in creates the account, and any signed-in user can create an organization.
+    Each organization reserves a subdomain, and there is no cap. GitHub's own checks and the required
+    two-factor authentication are what stand in the way, and sign-in bursts are throttled. Close it
+    the moment you do not want strangers on the platform.
 
-    Until a later release adds a way to close it, **restrict network access to the base host** - a
-    VPN, or an IP allowlist in Caddy - unless you want strangers on it.
+A [platform administrator](administration.md#configuration) sets the policy under **Configuration**, and
+it takes effect at once, without a restart:
+
+| Setting | Choices |
+|---|---|
+| **Who can sign up** | **Anyone with a GitHub account** (the default). **Invited people and the allowlist**: a new GitHub account is admitted only by an open invitation from an organization that is neither deleted nor suspended, or by an unused entry on the [sign-up allowlist](administration.md#the-sign-up-allowlist). **Nobody new**: only people who already have an account can sign in. |
+| **Who can create organizations** | **Everyone** (the default), or **Platform administrators only**. Administrators create organizations in the admin panel either way. |
+| **Organizations one person may own**, **Projects per organization** | A whole number of 1 or more, or empty for no limit. Only live organizations and projects count, and lowering a limit removes nothing. |
+| **Announcement** | A line of plain text shown at the top of every page, signed in or not. See [Platform administration](administration.md#announcement). |
+
+People who already have an account always sign in, whatever the policy, and a refused sign-in writes
+nothing: no account, no session. Under **Nobody new**, inviting a GitHub user who has no account is
+refused (`signups_closed`), so an invitation is never left open for someone who could not use it.
+The bootstrap administrator and the admin sign-in are not affected. An administrator can still
+[disable](#instance-admins) an abusive account.
 
 No email is sent or verified, because nobody signs in with one.
 
@@ -431,7 +443,7 @@ Invitations that closed in the last 30 days (accepted or revoked) are listed too
 The portal never updates itself, and `whygraph update` is for the local install. In production you
 update through your own deploy:
 
-1. Check the release's notes (the Updates card below links them; every release is also listed on
+1. Check the release's notes (the update notice below links them; every release is also listed on
    [GitHub](https://github.com/mtrdesign/whygraph/releases)) and [Upgrading](../portal/upgrading.md)
    for manual steps. A Postgres major bump needs a dump and a restore.
 2. [Back up](#backups) the database and `secret.key`.
@@ -439,7 +451,7 @@ update through your own deploy:
    with the release you are moving to.
 4. Run `docker compose pull && docker compose up -d`.
 
-The **Updates** card on the admin [Dashboard](administration.md#the-modules) tells instance admins when a newer release is
+The **Instance** card on the admin [Configuration](administration.md#configuration) page, and the Dashboard's attention list, tell instance admins when a newer release is
 out (an hour after it is published), whether it needs manual steps, and links its notes. It is
 shown to instance admins only. The portal checks once a day by asking `api.github.com` for the release
 list; see [The update check](../portal/security.md#update-check). To turn it off, uncomment
@@ -449,7 +461,7 @@ list; see [The update check](../portal/security.md#update-check). To turn it off
 
 An instance admin manages the instance from `/admin` on the base host, in an admin session that is
 separate from everyday sign-in. Everything about it - signing in, the modules (users, who is an
-admin, organizations, the self-check, the Updates card and the audit), reset links and the Account
+admin, organizations, the platform configuration with its self-check and update status, and the audit), reset links and the Account
 page - is on its own page: [Platform administration](administration.md).
 
 - **Keep two admins.** The last admin can't be demoted, and there is no recovery path for a locked-out
@@ -693,14 +705,14 @@ plus these GitHub, member, project and organization events:
 | Event | When |
 |---|---|
 | `github_signin` | A GitHub sign-in succeeded (and whether the account is new). |
-| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required`, `disabled` or `deleted` (a deleted account). A refusal on the admin sign-in page also carries `surface` `admin`. |
+| `github_signin_refused` | It was refused: the `reason` is `oauth_state`, `exchange_failed`, `scope`, `unavailable`, `2fa_required`, `disabled`, `deleted` (a deleted account) or `signups_closed` (a new account the sign-up policy does not admit). A refusal on the admin sign-in page also carries `surface` `admin`. |
 | `admin_signin` | Someone signed in to [platform administration](administration.md) (with the `method`, `password` or `github`). |
 | `admin_signin_refused` | The admin GitHub sign-in was refused after GitHub identified the account: the `reason` is `unknown_user` (no account for that GitHub user), `not_admin`, `disabled` or `deleted`. It writes nothing else: no account, no session. |
 | `admin_signout` | An admin session ended by sign-out, from the admin panel or (with `reason` `signout`) because the everyday session it was started beside signed out. |
 | `reader_grant_created`, `reader_grant_revoked` | A platform administrator opened an organization read-only for 60 minutes ("Open as reader"), or that access ended early: revoked by the administrator, or (with the `reason` `demoted`, `disabled` or `user_deleted`) because they stopped being an administrator, were disabled or were deleted. Both are in the organization's own log. |
 | `github_token_revoke_failed` | GitHub's one-time token could not be revoked. |
 | `github_login_released` | A username moved to another account and was taken from the older one. |
-| `member_added`, `member_add_refused` | A member was added (with the `reason` `user_restored` when a platform administrator restored their account), or the attempt was refused (with the reason and the username tried). |
+| `member_added`, `member_add_refused` | A member was added (with the `reason` `user_restored` when a platform administrator restored their account), or the attempt was refused (with the reason, `signups_closed` for a GitHub user with no account under the closed policy, and the username tried). |
 | `member_role_changed`, `member_removed`, `member_left` | A role changed, or someone was removed (with the `reason` `user_deleted` when a platform administrator deleted their account) or left. |
 | `invitation_created`, `invitation_revoked`, `member_joined_by_invite` | An invitation was made or revoked, or redeemed at sign-in. |
 | `project_grant_added`, `project_grant_changed`, `project_grant_removed` | A project grant changed. |
@@ -730,6 +742,8 @@ plus these GitHub, member, project and organization events:
 | `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |
 | `price_override_set`, `price_override_removed` | An owner or admin set or reverted an organization price for a provider and model. |
 | `key_tested` | Someone pressed **Test key** on an LLM key (with the `scope`, the `provider` and the `result`; never any key material). |
+| `instance_settings_changed` | A platform administrator changed the platform configuration (sign-up policy, who may create organizations, the quotas or the announcement banner), with `changes` as `{setting: [old, new]}` (banner text cut to 80 characters). |
+| `signup_allowlist_changed` | A platform administrator added a GitHub account to the sign-up allowlist (`added`, the login) or removed one (`removed`). |
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,
@@ -761,7 +775,6 @@ portal's database**, where they are kept for **400 days** and then deleted.
 - **Projects from anywhere but GitHub**: shared folders and local repositories are refused, and
   only the default branch is scanned. On GitHub Enterprise Server the pull request and issue crawl
   is skipped.
-- **Closing sign-up** (see above).
 - **Other sign-in providers.** GitHub is the only one, and its two-factor authentication is required;
   there is no GitHub-less sign-in for end users and no multi-factor step for the bootstrap password
   account.

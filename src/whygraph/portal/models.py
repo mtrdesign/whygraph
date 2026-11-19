@@ -1548,6 +1548,123 @@ class StorageSample(PortalBase, table=True):
     measured_at: str = Field(sa_type=Text)
 
 
+class InstanceSetting(PortalBase, table=True):
+    """The single ``instance_settings`` row (plan 59 section 4.13, D46).
+
+    No row is seeded: :mod:`whygraph.portal.instance_settings` answers the
+    defaults while it is missing and the first ``PUT`` inserts it.
+
+    Attributes
+    ----------
+    id : int
+        Always ``1``.
+    signup_policy : str
+        ``open``, ``invite_only`` or ``closed``.
+    org_creation : str
+        ``everyone`` or ``admins``.
+    max_orgs_per_user, max_projects_per_org : int or None
+        Quotas (``>= 1``); ``NULL`` means no limit.
+    banner_text : str or None
+        Plain-text announcement, at most 500 characters.
+    banner_level : str
+        ``info`` or ``warning``.
+    updated_at : str or None
+        ISO timestamp of the last change.
+    updated_by : int or None
+        ``users.id`` of the last writer.
+    """
+
+    __tablename__ = "instance_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_instance_settings_singleton"),
+        CheckConstraint(
+            _in("signup_policy", ("open", "invite_only", "closed")),
+            name="ck_instance_settings_signup_policy",
+        ),
+        CheckConstraint(
+            _in("org_creation", ("everyone", "admins")),
+            name="ck_instance_settings_org_creation",
+        ),
+        CheckConstraint("max_orgs_per_user >= 1", name="ck_instance_settings_max_orgs"),
+        CheckConstraint(
+            "max_projects_per_org >= 1", name="ck_instance_settings_max_projects"
+        ),
+        CheckConstraint(
+            "char_length(banner_text) <= 500", name="ck_instance_settings_banner_text"
+        ),
+        CheckConstraint(
+            _in("banner_level", ("info", "warning")),
+            name="ck_instance_settings_banner_level",
+        ),
+        ForeignKeyConstraint(
+            ["updated_by"],
+            ["users.id"],
+            name="fk_instance_settings_updated_by",
+            ondelete="SET NULL",
+        ),
+    )
+
+    id: int = Field(default=1, primary_key=True)
+    signup_policy: str = Field(
+        default="open", sa_type=Text, sa_column_kwargs={"server_default": "open"}
+    )
+    org_creation: str = Field(
+        default="everyone",
+        sa_type=Text,
+        sa_column_kwargs={"server_default": "everyone"},
+    )
+    max_orgs_per_user: int | None = Field(default=None)
+    max_projects_per_org: int | None = Field(default=None)
+    banner_text: str | None = Field(default=None, sa_type=Text)
+    banner_level: str = Field(
+        default="info", sa_type=Text, sa_column_kwargs={"server_default": "info"}
+    )
+    updated_at: str | None = Field(default=None, sa_type=Text)
+    updated_by: int | None = Field(default=None)
+
+
+class SignupAllowlist(PortalBase, table=True):
+    """One GitHub id admitted to sign up once (plan 59 D18, D31, P17).
+
+    Attributes
+    ----------
+    id : int
+        Serial primary key.
+    github_id : int
+        The identity (a login can be re-registered; the id cannot).
+    github_login : str
+        Display only: the login when the entry was added.
+    note : str or None
+        Free text, at most 200 characters.
+    created_at : str
+        ISO timestamp.
+    created_by : int or None
+        ``users.id`` of the administrator who added it.
+    used_at : str or None
+        The first sign-in the entry admitted; a used entry admits nobody.
+    """
+
+    __tablename__ = "signup_allowlist"
+    __table_args__ = (
+        CheckConstraint("char_length(note) <= 200", name="ck_signup_allowlist_note"),
+        ForeignKeyConstraint(
+            ["created_by"],
+            ["users.id"],
+            name="fk_signup_allowlist_created_by",
+            ondelete="SET NULL",
+        ),
+        UniqueConstraint("github_id", name="uq_signup_allowlist_github_id"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    github_id: int = Field(sa_type=BigInteger)
+    github_login: str = Field(sa_type=Text)
+    note: str | None = Field(default=None, sa_type=Text)
+    created_at: str = Field(default_factory=_now, sa_type=Text)
+    created_by: int | None = Field(default=None)
+    used_at: str | None = Field(default=None, sa_type=Text)
+
+
 class Budget(PortalBase, table=True):
     """A monthly LLM spend budget (M2f-2).
 
@@ -1783,6 +1900,7 @@ __all__ = [
     "REVOKED_REASONS",
     "SESSION_KINDS",
     "ConnectionToken",
+    "InstanceSetting",
     "Membership",
     "Organization",
     "PasswordReset",
@@ -1796,6 +1914,7 @@ __all__ = [
     "ScanRun",
     "Secret",
     "Setting",
+    "SignupAllowlist",
     "User",
     "UserSession",
 ]

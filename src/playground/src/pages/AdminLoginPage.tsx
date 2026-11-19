@@ -6,6 +6,7 @@ import { authApi } from "../api";
 import { AuthLayout } from "../components/auth/AuthLayout";
 import { GitHubMark } from "../components/auth/GitHubMark";
 import { Field } from "../components/portal/Field";
+import { AnnouncementBanner } from "../components/shell/AnnouncementBanner";
 import { LiveRegion } from "../components/shell/LiveRegion";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -101,6 +102,7 @@ export function AdminLoginPage() {
 
   return (
     <>
+      <AnnouncementBanner />
       <main id="main" tabIndex={-1} className="outline-none">
       <AuthLayout
         title="Sign in to administration"

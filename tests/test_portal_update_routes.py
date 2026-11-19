@@ -1,7 +1,7 @@
 """The update-notice routes (plan 43 section 4.5, cases 9-11).
 
 ``GET /api/portal/state``'s ``update`` block, ``PUT /api/portal/update-check``
-(local mode) and ``GET /api/admin/update`` (production, instance admin).
+(local mode) and the ``update`` block of ``GET /api/admin/config`` (production, instance admin).
 The loop is never relied on for the data: the switch and the releases are set
 on ``state.updates`` directly.
 """
@@ -148,8 +148,8 @@ def test_the_production_put_is_404_signed_in_or_not(claimed: TestClient) -> None
     assert (out.status_code, out.json()) == (404, NOT_FOUND)
 
 
-def test_the_admin_update_status_matrix(claimed: TestClient) -> None:
-    url = "/api/admin/update"
+def test_the_admin_config_update_status_matrix(claimed: TestClient) -> None:
+    url = "/api/admin/config"
     nobody = claimed.get(at() + url)
     assert nobody.status_code == 401
     assert nobody.json()["code"] == "admin_login_required"
@@ -167,7 +167,7 @@ def test_the_admin_update_status_matrix(claimed: TestClient) -> None:
     assert log_in(claimed, "ada@example.com").status_code == 200
     ok = claimed.get(at() + url)
     assert ok.status_code == 200, ok.text
-    body = ok.json()
+    body = ok.json()["instance"]["update"]
     assert set(body) == {
         "enabled",
         "source",
@@ -186,6 +186,6 @@ def test_the_admin_update_status_matrix(claimed: TestClient) -> None:
     assert claimed.get(at("quokka") + url).status_code == 404
 
 
-def test_the_admin_update_route_is_404_in_local_mode(ready: TestClient) -> None:
-    out = ready.get("/api/admin/update")
+def test_the_admin_config_route_is_404_in_local_mode(ready: TestClient) -> None:
+    out = ready.get("/api/admin/config")
     assert out.status_code == 404

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatBytes } from "../lib/format";
 import { monthRange, presetRange } from "../lib/usageRange";
-import { BASE, STATS_OVERVIEW, fake, json, mountAdmin, resetAdminFake, signedInAdmin, strays } from "./adminHarness";
+import { STATS_OVERVIEW, fake, json, mountAdmin, resetAdminFake, signedInAdmin, strays } from "./adminHarness";
 
 // The chart card draws to a canvas; these tests cover the page, not ECharts.
 vi.mock("echarts-for-react/esm/core", () => ({ default: () => <div data-testid="echart" /> }));
@@ -174,7 +174,7 @@ describe("Dashboard", () => {
     expect(line("budget_stopped")).toHaveTextContent("Acme: monthly budget reached");
     expect(within(line("budget_stopped")).getByRole("link")).toHaveAttribute("href", "/admin/orgs/acme?tab=usage");
     expect(line("base_check")).toHaveTextContent("*.whygraph.localhost does not resolve");
-    expect(within(line("base_check")).queryByRole("link")).toBeNull();
+    expect(within(line("base_check")).getByRole("link")).toHaveAttribute("href", "/admin/config");
     expect(line("update")).toHaveTextContent("WhyGraph 2.7.0 is available");
     expect(within(line("update")).getByRole("link")).toHaveAttribute("href", "https://example.com/notes");
     expect(line("password_owner")).toHaveTextContent("Root (password account) owns 2 organizations: hand them to a GitHub user");
@@ -256,16 +256,12 @@ describe("Dashboard", () => {
     expect(calls("/api/admin/stats/overview")[0].get("from")).toBe(range.from);
   });
 
-  it("keeps the settings check and the updates card until Phase 4", async () => {
+  it("no longer carries the settings check or the updates card (they moved to Configuration)", async () => {
     mountAdmin("/admin");
-    expect(await screen.findByTestId("base-check-ok")).toHaveTextContent("found no problems");
-    expect(await screen.findByTestId("admin-updates")).toHaveTextContent("Current version: 2.6.0");
-  });
-
-  it("lists the base URL problems in the settings check card", async () => {
-    fake.routes["/api/admin/settings"] = () => json({ base_url: BASE, base_check: ["*.whygraph.localhost does not resolve"] });
-    mountAdmin("/admin");
-    expect(await screen.findByTestId("base-check")).toHaveTextContent("does not resolve");
+    expect(await screen.findByText("Nothing needs your attention.")).toBeInTheDocument();
+    expect(screen.queryByTestId("base-check-ok")).toBeNull();
+    expect(screen.queryByTestId("admin-updates")).toBeNull();
+    expect(fake.calls.map((c) => c.path)).not.toContain("/api/admin/config");
   });
 });
 

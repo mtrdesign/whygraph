@@ -18,6 +18,7 @@ import { Input } from "../components/ui/input";
 import { formatNumber, formatUsd } from "../lib/format";
 import { formatResetsAt } from "../lib/usageRange";
 import { safeHref } from "../lib/platformLink";
+import { useCanCreateOrg } from "../lib/identity";
 
 /** My usage (production): what the caller spent this month in each org, against their budget there. */
 function MyUsage() {
@@ -77,6 +78,7 @@ function MyUsage() {
 /** Your organizations: the name opens the org (its own host), with your role there. */
 function MyOrganizations() {
   const orgs = useQuery({ queryKey: ACCOUNT_ORGS_KEY, queryFn: accountApi.orgs });
+  const canCreate = useCanCreateOrg();
   return (
     <section
       className="flex flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card"
@@ -89,11 +91,16 @@ function MyOrganizations() {
       )}
       {orgs.data && orgs.data.length === 0 && (
         <p className="text-sm text-muted-foreground">
-          You aren't in an organization yet.{" "}
-          <Link to="/orgs/new" className="text-primary-text hover:underline">
-            Create one
-          </Link>
-          .
+          You aren't in an organization yet.
+          {canCreate && (
+            <>
+              {" "}
+              <Link to="/orgs/new" className="text-primary-text hover:underline">
+                Create one
+              </Link>
+              .
+            </>
+          )}
         </p>
       )}
       {orgs.data && orgs.data.length > 0 && (

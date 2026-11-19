@@ -26,6 +26,30 @@ const block = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// `GET /api/admin/config`, with the update block the test cares about.
+const config = (update: unknown) => ({
+  settings: {
+    signup_policy: "open",
+    org_creation: "everyone",
+    max_orgs_per_user: null,
+    max_projects_per_org: null,
+    banner_text: null,
+    banner_level: "info",
+    updated_at: null,
+    updated_by: null,
+  },
+  instance: {
+    base_url: "http://whygraph.localhost:8765",
+    base_check: [],
+    version: "2.2.1",
+    update,
+    github_app: null,
+    oauth_app: null,
+    data_disk: null,
+    postgres_bytes: null,
+  },
+});
+
 const localState = (update: unknown) => ({
   mode: "local",
   setup_complete: true,
@@ -216,11 +240,10 @@ describe("Admin updates card", () => {
         session: { created_at: "2026-11-18T08:00:00Z", expires_at: "2026-11-18T16:00:00Z" },
         reader_grants: [],
       });
-    routes["GET /api/admin/update"] = () => json(block(over));
-    routes["GET /api/admin/settings"] = () => json({ base_url: "http://whygraph.localhost:8765", base_check: [] });
+    routes["GET /api/admin/config"] = () => json(config(block(over)));
     routes["GET /api/admin/users"] = () => json([]);
     routes["GET /api/admin/orgs"] = () => json([]);
-    mount("/admin");
+    mount("/admin/config");
     const card = await screen.findByTestId("admin-updates");
     await waitFor(() => expect(within(card).getByTestId("admin-updates-latest")).toBeInTheDocument());
     return card;
@@ -268,11 +291,10 @@ describe("Admin updates card", () => {
         session: { created_at: "2026-11-18T08:00:00Z", expires_at: "2026-11-18T16:00:00Z" },
         reader_grants: [],
       });
-    routes["GET /api/admin/update"] = () => json(block());
-    routes["GET /api/admin/settings"] = () => json({ base_url: "http://whygraph.localhost:8765", base_check: [] });
+    routes["GET /api/admin/config"] = () => json(config(block()));
     routes["GET /api/admin/users"] = () => json([]);
     routes["GET /api/admin/orgs"] = () => json([]);
-    mount("/admin");
+    mount("/admin/config");
     const card = await screen.findByTestId("admin-updates");
     await waitFor(() => expect(card).toHaveTextContent("Latest version: 2.3.0"));
     expect(card).toHaveTextContent("Current version: 2.2.1");

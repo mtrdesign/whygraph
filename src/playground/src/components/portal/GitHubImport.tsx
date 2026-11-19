@@ -270,6 +270,8 @@ function Repos({ installation, onInstallMore }: { installation: GitHubInstallati
       } catch (err) {
         set(repo.id, { state: "failed", message: importMessage(err) });
         if (err instanceof ApiError && err.status === 429) stopped = "the import limit was reached before this one.";
+        else if (err instanceof ApiError && err.code === "project_quota_reached")
+          stopped = "the organization reached its project limit before this one.";
         else if (needsConnect(err)) {
           stopped = "GitHub needs to be connected again.";
           setReconnect(true);

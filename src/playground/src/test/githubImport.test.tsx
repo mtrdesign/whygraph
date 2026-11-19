@@ -425,6 +425,32 @@ describe("Import from GitHub", () => {
     expect(here(router)).toBe("/projects/new");
   });
 
+  it("stops the queue on project_quota_reached and says why the rest did not start", async () => {
+    handlers["GET /api/github/installations/11/repos"] = () => ({
+      repos: [repo(1, "acme/a"), repo(2, "acme/b"), repo(3, "acme/c")],
+      total_count: 3,
+      page: 1,
+    });
+    let n = 0;
+    handlers["POST /api/projects"] = () => {
+      n += 1;
+      return n === 1
+        ? { status: 201, body: { project: project("a"), detected: null, import: {}, initial_run_id: 3 } }
+        : { status: 409, body: { error: "quota", code: "project_quota_reached", limit: 1, current: 1 } };
+    };
+    const user = userEvent.setup();
+    mount("/projects/new");
+    for (const name of ["a", "b", "c"]) await user.click(await screen.findByRole("checkbox", { name: `Select acme/${name}` }));
+    await user.click(screen.getByRole("button", { name: "Import 3 repositories" }));
+    const results = await screen.findByTestId("import-results");
+    await waitFor(() => expect(within(results).getByTestId("import-acme/c")).toHaveTextContent("Not started"));
+    expect(within(results).getByTestId("import-acme/b")).toHaveTextContent(/Failed.*the most this platform allows \(1\)/);
+    expect(within(results).getByTestId("import-acme/c")).toHaveTextContent(
+      "the organization reached its project limit before this one.",
+    );
+    expect(calls("POST", "/api/projects")).toHaveLength(2);
+  });
+
   it.each([
     ["no_access", 404, /not available to you through this installation/],
     ["duplicate", 409, /already a project in this organization/],

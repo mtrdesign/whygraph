@@ -109,6 +109,7 @@ from . import (
     audit_store,
     budgets,
     connections,
+    instance_settings,
     storage,
     updates,
     usage_store,
@@ -863,6 +864,14 @@ def _startup(state: PortalState) -> None:
     except Exception as exc:  # noqa: BLE001 -- fail closed: budgets need the book
         _log.exception("could not read this month's LLM spend")
         state.degraded = f"could not read this month's spend: {exc}"
+        return
+
+    try:
+        with portal_db.get_session() as session:
+            state.instance_settings = instance_settings.load(session)
+    except Exception as exc:  # noqa: BLE001 -- fail closed: the default is `open`
+        _log.exception("could not read the platform configuration")
+        state.degraded = f"could not read the platform configuration: {exc}"
         return
 
     requested = (os.environ.get(MODE_ENV) or "").strip().lower() or None

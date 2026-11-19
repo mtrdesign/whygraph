@@ -89,6 +89,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   reader_grant_revoked: { label: "Read-only access ended", group: "Security" },
   sessions_revoked: { label: "Sessions ended", group: "Security" },
   key_tested: { label: "API key tested", group: "Security" },
+  instance_settings_changed: { label: "Platform configuration changed", group: "Security" },
+  signup_allowlist_changed: { label: "Sign-up allowlist changed", group: "Security" },
   // Organization
   org_created: { label: "Organization created", group: "Organization" },
   org_renamed: { label: "Organization renamed", group: "Organization" },
@@ -145,6 +147,8 @@ const FIELD_LABELS: Record<string, string> = {
   output_per_mtok: "Output price",
   cache_read_per_mtok: "Cache read price",
   cache_write_per_mtok: "Cache write price",
+  added: "Added to the allowlist",
+  removed: "Removed from the allowlist",
 };
 
 const USD_FIELDS = new Set(["monthly_usd", "budget_usd", "spent_usd"]);
@@ -164,6 +168,8 @@ const REASONS: Record<string, string> = {
   not_admin: "Not a platform administrator",
   deleted: "The account was deleted",
   signout: "Signed out of the portal",
+  // Sign-up policy (closed, or invite-only without an invitation or allowlist entry)
+  signups_closed: "Sign-up is closed",
   // Reader grants
   demoted: "No longer a platform administrator",
   // Deleting and restoring an account
@@ -279,7 +285,7 @@ function fieldValue(key: string, value: unknown): Omit<AuditDetail, "label"> | n
   if (worded) return { value: worded, title: value };
   // A quoted name (`'Ada's laptop'`, as the backend logs it): the name itself.
   if (key === "client_name") return { value: value.replace(/^(['"])(.*)\1$/, "$2") };
-  if (key === "github_login") return { value: `@${value}` };
+  if (key === "github_login" || key === "added" || key === "removed") return { value: `@${value}` };
   if (key === "model" || key === "path" || key === "delivery") return { value, mono: true };
   if (key === "reason") {
     // An unknown reason word: its words, never the raw key.
@@ -287,6 +293,44 @@ function fieldValue(key: string, value: unknown): Omit<AuditDetail, "label"> | n
     return { value: spaced.charAt(0).toUpperCase() + spaced.slice(1), title: value };
   }
   return { value };
+}
+
+const CHANGE_LABELS: Record<string, string> = {
+  signup_policy: "Sign-up policy",
+  org_creation: "Who creates organizations",
+  max_orgs_per_user: "Organizations one person may own",
+  max_projects_per_org: "Projects per organization",
+  banner_text: "Banner text",
+  banner_level: "Banner style",
+};
+
+const CHANGE_WORDS: Record<string, Record<string, string>> = {
+  signup_policy: { open: "open", invite_only: "invite only", closed: "closed" },
+  org_creation: { everyone: "everyone", admins: "administrators only" },
+  banner_level: { info: "info", warning: "warning" },
+};
+
+/** One side of a `[old, new]` pair of `instance_settings_changed`, in words. */
+function changeWord(key: string, value: unknown): string {
+  if (value === null || value === undefined || value === "") return key.startsWith("max_") ? "no limit" : "empty";
+  const text = String(value);
+  const words = CHANGE_WORDS[key];
+  if (words && Object.prototype.hasOwnProperty.call(words, text)) return words[text];
+  return key === "banner_text" ? `"${text}"` : text;
+}
+
+/** `instance_settings_changed`'s `changes` (`{key: [old, new]}`) as one worded pair per setting. */
+function changeDetails(changes: unknown): AuditDetail[] | null {
+  if (typeof changes !== "object" || changes === null || Array.isArray(changes)) return null;
+  const pairs: AuditDetail[] = [];
+  for (const [key, value] of Object.entries(changes)) {
+    if (!Array.isArray(value) || value.length !== 2) return null;
+    pairs.push({
+      label: CHANGE_LABELS[key] ?? fieldLabel(key),
+      value: `${changeWord(key, value[0])} to ${changeWord(key, value[1])}`,
+    });
+  }
+  return pairs;
 }
 
 /**
@@ -297,6 +341,11 @@ function fieldValue(key: string, value: unknown): Omit<AuditDetail, "label"> | n
 export function auditDetails(row: AuditEventRow, withOrg = false): AuditDetail[] {
   const pairs: AuditDetail[] = [];
   for (const [key, value] of Object.entries(row.fields ?? {})) {
+    const worded = key === "changes" ? changeDetails(value) : null;
+    if (worded) {
+      pairs.push(...worded);
+      continue;
+    }
     const shown = fieldValue(key, value);
     if (shown) pairs.push({ label: fieldLabel(key), ...shown });
   }

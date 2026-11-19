@@ -93,10 +93,10 @@ describe("admin shell: navigation", () => {
     await screen.findByRole("heading", { name: "Users" });
     const links = within(nav()).getAllByRole("link");
     expect(links.map((l) => l.textContent)).toEqual(
-      expect.arrayContaining(["Dashboard", "Organizations", "Users", "Audit"]),
+      expect.arrayContaining(["Dashboard", "Organizations", "Users", "Audit", "Configuration"]),
     );
     expect(within(nav()).getByRole("link", { name: "Projects" })).toBeInTheDocument();
-    expect(within(nav()).queryByRole("link", { name: "Configuration" })).toBeNull();
+    expect(within(nav()).getByRole("link", { name: "Configuration" })).toHaveAttribute("href", "/admin/config");
     expect(within(nav()).getByRole("link", { name: "Users" })).toHaveAttribute("data-status", "active");
     expect(within(nav()).getByRole("link", { name: "Dashboard" })).not.toHaveAttribute("data-status", "active");
   });
@@ -143,13 +143,6 @@ describe("admin shell: navigation", () => {
     expect(document.title).not.toMatch(/Not found/);
     const trail = screen.getByTestId("breadcrumbs");
     for (const c of crumbs) expect(within(trail).getByText(c)).toBeInTheDocument();
-  });
-
-  it("a module a later release builds says 'Not available yet', not 'this release'", async () => {
-    mountAdmin("/admin/config");
-    expect(await screen.findByText("Not available yet")).toBeInTheDocument();
-    expect(screen.getByText("This part of the admin panel comes in a later release.")).toBeInTheDocument();
-    expect(screen.queryByText(/this release/i)).toBeNull();
   });
 
   it("an unknown address stays in the admin app and links back to the dashboard", async () => {

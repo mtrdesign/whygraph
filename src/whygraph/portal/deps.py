@@ -95,6 +95,7 @@ from . import connections, sessions
 from .db import InstanceLock, data_dir, get_session
 from .github_app import UserTokens
 from .hosts import BaseUrl, classify
+from .instance_settings import InstanceSettings
 from .linked import LinkRefresh
 from .migrate import ProjectMigrations
 from .models import (
@@ -614,6 +615,8 @@ class PortalState:
         self.origins: PortalOrigins | None = None
         self.mode: str | None = None
         self.degraded: str | None = None
+        # Platform configuration (plan 59 section 4.13); loaded by `_startup`.
+        self.instance_settings = InstanceSettings()
         self.shared_folders: tuple[Path, ...] = ()
         # Read lazily: `platform_transport` is set below, and tests replace
         # it after start-up.

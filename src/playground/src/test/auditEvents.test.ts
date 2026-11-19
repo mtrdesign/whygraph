@@ -65,7 +65,7 @@ describe("audit details (MEM-1)", () => {
       "redirect_uri", "project_deleted", "member_removed", "project_access_removed", "user_revoked",
       "admin_revoked", "removed_locally", "no_access", "git_access_denied", "repo_deleted",
       "tracked_whygraph_state", "missing_signature", "bad_signature", "unknown_user", "not_admin",
-      "signout", "demoted", "deleted", "user_deleted", "user_restored",
+      "signout", "demoted", "deleted", "user_deleted", "user_restored", "signups_closed",
     ];
     for (const word of words) expect(value({ reason: word })).not.toMatch(/_/);
     expect(value({ reason: "something_new" })).toBe("Something new");

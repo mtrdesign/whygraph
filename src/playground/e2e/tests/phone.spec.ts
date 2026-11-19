@@ -180,6 +180,7 @@ test.describe("platform administration at 390px", () => {
       ["admin project detail", `${base.origin}/admin/projects/comet/demo`],
       ["admin users", `${base.origin}/admin/users`],
       ["admin audit", `${base.origin}/admin/audit`],
+      ["admin configuration", `${base.origin}/admin/config`],
       ["admin account", `${base.origin}/admin/account`],
     ];
     for (const [name, url] of routes) {

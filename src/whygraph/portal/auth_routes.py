@@ -142,6 +142,7 @@ from .routes import (
 )
 from .runner import ProjectBusy, ProjectGone
 from .security import Principal
+from .storage import latest_project_bytes
 from .sessions import (
     admin_cookie_name,
     clear_admin_cookie,
@@ -1584,8 +1585,8 @@ def get_admin_orgs(
         ``created_at``, ``project_count`` (live projects), ``owners``
         (their GitHub logins, else display names), ``suspended`` (``{at,
         reason}`` or ``null``), ``deleted_at``, ``deleted_by`` (a user
-        uid), ``spend_mtd`` (USD), ``storage_bytes`` (``null`` until the
-        storage sampler exists) and ``last_activity_day``.
+        uid), ``spend_mtd`` (USD), ``storage_bytes`` (the latest
+        samples carried forward, else ``null``) and ``last_activity_day``.
     """
     state = portal_state(request)
     base = _base(state)
@@ -1606,6 +1607,9 @@ def get_admin_orgs(
             .group_by(col(Organization.id))
             .order_by(Organization.slug)
         ).all()
+        org_storage: dict[int, int] = {}
+        for owner, size in latest_project_bytes(db).values():
+            org_storage[owner] = org_storage.get(owner, 0) + size
         projects = dict(
             db.exec(
                 select(Project.org_id, func.count())
@@ -1645,7 +1649,7 @@ def get_admin_orgs(
             "deleted_at": deleted_at,
             "deleted_by": deleted_by.get(org_id),
             "spend_mtd": usd(state.spend.spent(org_id)),
-            "storage_bytes": None,
+            "storage_bytes": org_storage.get(org_id),
             "last_activity_day": last_day,
         }
         for (
@@ -1723,7 +1727,7 @@ def get_admin_org(
         ``disabled``); ``open_invitations`` (a count); ``projects``
         (``slug``, ``name``, ``source``, ``last_scan_at``,
         ``last_run_status``, ``access_lost_reason``, ``storage_bytes`` (``null``
-        until the sampler exists), ``deleted_at``), soft-deleted ones
+        with no sample), ``deleted_at``), soft-deleted ones
         included; ``budgets``; ``spend_mtd``; and ``rows`` (the Postgres row
         counts of ``usage_events``, ``audit_events`` and ``agent_call_days``).
         ``404`` for an unknown org.
@@ -1771,6 +1775,7 @@ def get_admin_org(
             .limit(1)
             .scalar_subquery()
         )
+        project_storage = latest_project_bytes(db, org_id=org_id)
         projects = [
             {
                 "slug": project.slug,
@@ -1779,7 +1784,9 @@ def get_admin_org(
                 "last_scan_at": project.last_scan_at,
                 "last_run_status": status,
                 "access_lost_reason": project.access_lost_reason,
-                "storage_bytes": None,
+                "storage_bytes": (
+                    stored[1] if (stored := project_storage.get(project.id)) else None
+                ),
                 "deleted_at": project.deleted_at,
             }
             for project, status in db.exec(

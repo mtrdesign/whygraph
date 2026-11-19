@@ -714,6 +714,15 @@ def test_orgs_detail_collects_members_projects_budgets_and_counts(
     body = response.json()
     assert (body["slug"], body["name"]) == ("acme", "Acme")
     assert body["suspended"] is None and body["deleted_at"] is None
+    now = _iso(datetime.now(timezone.utc))
+    set_org(
+        "acme", suspended_at=now, suspended_reason="abuse", suspended_by=cn.ids["ada"]
+    )
+    again = cn.client.get(url("/api/admin/orgs/acme")).json()
+    assert again["suspended"] == {"at": now, "reason": "abuse", "by": "Ada"}
+    set_org("acme", suspended_by=None)
+    assert cn.client.get(url("/api/admin/orgs/acme")).json()["suspended"]["by"] is None
+    set_org("acme", suspended_at=None, suspended_reason=None)
     members = {m["github_login"]: m for m in body["members"]}
     assert {k: v["role"] for k, v in members.items()} == {
         "ben": "owner",

@@ -229,11 +229,19 @@ describe("Organization actions", () => {
     await waitFor(() => expect(fake.calls.find((c) => c.path.endsWith("/suspend"))?.body).toEqual({ reason: "Unpaid invoice" }));
     const alert = await screen.findByTestId("suspended-alert");
     expect(alert).toHaveTextContent("Unpaid invoice");
+    expect(alert).not.toHaveTextContent(" by ");
     // Management stays on a suspended organization (D33).
     expect(screen.getByRole("button", { name: "Rename" })).toBeEnabled();
     await u.click(screen.getByRole("button", { name: "Unsuspend" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     await waitFor(() => expect(screen.queryByTestId("suspended-alert")).toBeNull());
+  });
+
+  it("A suspended organization names the admin who suspended it when known", async () => {
+    detail = { ...detail, suspended: { at: "2026-11-18T08:00:00Z", reason: "Unpaid invoice", by: "Ada Admin" } };
+    mountAdmin("/admin/orgs/acme");
+    const alert = await screen.findByTestId("suspended-alert");
+    expect(alert).toHaveTextContent(/Suspended .* by Ada Admin: Unpaid invoice/);
   });
 
   it("Delete types the slug, says what happens and nothing is erased", async () => {

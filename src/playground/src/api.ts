@@ -1407,7 +1407,7 @@ export interface AdminOrgDetail {
   url: string;
   created_at: string;
   default_project_role: string;
-  suspended: { at: string; reason: string } | null;
+  suspended: { at: string; reason: string; by?: string | null } | null;
   deleted_at: string | null;
   deleted_by: string | null;
   members: AdminOrgMember[];

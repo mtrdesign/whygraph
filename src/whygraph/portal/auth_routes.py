@@ -127,7 +127,7 @@ from .org_routes import (
     soft_delete_org,
 )
 from .paths import project_db_path
-from .people import DELETED_USER
+from .people import DELETED_USER, user_label
 from .passwords import (
     hash_password,
     normalize_email,
@@ -1716,7 +1716,8 @@ def get_admin_org(
     -------
     dict
         The org's fields (``slug``, ``name``, ``url``, ``created_at``,
-        ``default_project_role``, ``suspended``, ``deleted_at``,
+        ``default_project_role``, ``suspended`` (``at``, ``reason``, ``by``: the
+        suspending admin's name or ``null``), ``deleted_at``,
         ``deleted_by``); ``members`` (``uid``, ``display_name``,
         ``github_login``, ``role``, ``joined_at``, ``has_password``,
         ``disabled``); ``open_invitations`` (a count); ``projects``
@@ -1810,6 +1811,15 @@ def get_admin_org(
             else db.exec(select(User.uid).where(User.id == org.deleted_by)).first()
         )
         budgets = _budget_rows(state, db, org_id)
+        suspended_by = None
+        if org.suspended_by is not None:
+            who = db.exec(
+                select(User.display_name, User.github_login, User.deleted_at).where(
+                    User.id == org.suspended_by
+                )
+            ).first()
+            if who is not None:
+                suspended_by = user_label(*who)[0]
         body = {
             "slug": org.slug,
             "name": org.name,
@@ -1819,7 +1829,11 @@ def get_admin_org(
             "suspended": (
                 None
                 if org.suspended_at is None
-                else {"at": org.suspended_at, "reason": org.suspended_reason}
+                else {
+                    "at": org.suspended_at,
+                    "reason": org.suspended_reason,
+                    "by": suspended_by,
+                }
             ),
             "deleted_at": org.deleted_at,
             "deleted_by": deleted_by,

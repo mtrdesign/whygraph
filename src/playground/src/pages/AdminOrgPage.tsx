@@ -577,7 +577,8 @@ function Detail({ org }: { org: AdminOrgDetail }) {
         org.suspended && (
           <Alert variant="warning" data-testid="suspended-alert">
             <AlertDescription>
-              Suspended {formatDate(org.suspended.at)}: {org.suspended.reason}
+              Suspended {formatDate(org.suspended.at)}
+              {org.suspended.by ? ` by ${org.suspended.by}` : ""}: {org.suspended.reason}
             </AlertDescription>
           </Alert>
         )

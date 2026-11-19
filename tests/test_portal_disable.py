@@ -118,13 +118,18 @@ def test_a_disabled_password_account_is_refused_only_after_its_password(
     wrong = log_in(client, "pat@example.com", "not pat's passphrase at all")
     assert wrong.status_code == 401 and wrong.json()["code"] == "bad_credentials"
     right = log_in(client, "pat@example.com", PROD_PASSWORD)
-    assert right.status_code == 403 and right.json() == DISABLED
+    # The admin sign-in's refusals name their surface (plan 59 section 4.2).
+    assert right.status_code == 403 and right.json() == {**DISABLED, "surface": "admin"}
     assert "set-cookie" not in right.headers
     assert session_count("pat@example.com") == 0
 
 
 def test_a_reset_is_refused_for_a_disabled_account(world: SimpleNamespace) -> None:
     client = world.client
+    # Only an instance admin's password is reset (plan 59 D28), so Pat is
+    # made one: what is refused below is the disabled account.
+    promoted = admin_patch(signed_in_admin(client), world.pat, is_instance_admin=True)
+    assert promoted.status_code == 200, promoted.text
     # A link issued before the disable dies with it.
     killed = token_in(reset_link(signed_in_admin(client), world.pat).json()["url"])
     disable(world, world.pat)

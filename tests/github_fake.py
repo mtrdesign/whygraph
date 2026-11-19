@@ -280,7 +280,14 @@ class FakeGitHub:
         self._forced: dict[str, list[_Forced]] = {}
         self._lock = threading.RLock()
         for ident, (login, tfa) in enumerate(
-            [("ben", True), ("cy", True), ("dee", True), ("nofa", False)], start=1001
+            [
+                ("ben", True),
+                ("cy", True),
+                ("dee", True),
+                ("nofa", False),
+                ("eve", True),
+            ],
+            start=1001,
         ):
             self.add_user(login, id=ident, two_factor=tfa)
 

@@ -83,6 +83,9 @@ LINK_STATUSES: tuple[str, ...] = (
 )
 """What a local portal last saw of a linked project (``platform_links.status``)."""
 SECRET_KINDS: tuple[str, ...] = ("llm_api_key", "github_token")
+SESSION_KINDS: tuple[str, ...] = ("user", "admin")
+"""What a browser session opens (``sessions.kind``): the everyday portal or
+the admin panel."""
 SCAN_KINDS: tuple[str, ...] = ("scan", "sync")
 SCAN_TRIGGERS: tuple[str, ...] = (
     "initial",
@@ -362,18 +365,36 @@ class UserSession(PortalBase, table=True):
         ISO-8601 UTC timestamps (``expires_at`` is the absolute lifetime).
     user_agent : str or None
         The first 200 characters of the ``User-Agent`` header.
+    kind : str
+        One of :data:`SESSION_KINDS`: ``"user"`` (the everyday session, the
+        ``whygraph_session`` cookie) or ``"admin"`` (the admin panel's
+        session, its own host-only cookie on the base host).
+    paired_session_id : int or None
+        For an admin session, the everyday session of the same user and
+        browser it was started beside; ending that one ends this one.
+        ``NULL`` when there was none, and for every user-kind row. The
+        foreign key is ``ON DELETE SET NULL``: a sweep or a re-sign-in that
+        deletes the everyday row never ends the admin session by itself.
     """
 
     __tablename__ = "sessions"
     __table_args__ = (
         UniqueConstraint("token_hash", name="uq_sessions_token_hash"),
+        CheckConstraint(_in("kind", SESSION_KINDS), name="ck_sessions_kind"),
         ForeignKeyConstraint(
             ["user_id"],
             ["users.id"],
             name="fk_sessions_user",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["paired_session_id"],
+            ["sessions.id"],
+            name="fk_sessions_paired",
+            ondelete="SET NULL",
+        ),
         Index("ix_sessions_user_id", "user_id"),
+        Index("ix_sessions_paired_session_id", "paired_session_id"),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -383,6 +404,8 @@ class UserSession(PortalBase, table=True):
     last_seen_at: str = Field(default_factory=_now, sa_type=Text)
     expires_at: str = Field(sa_type=Text)
     user_agent: str | None = Field(default=None, sa_type=Text)
+    kind: str = Field(default="user", sa_type=Text)
+    paired_session_id: int | None = Field(default=None)
 
 
 class PasswordReset(PortalBase, table=True):
@@ -1592,6 +1615,7 @@ __all__ = [
     "LINK_STATUSES",
     "PROJECT_SOURCES",
     "REVOKED_REASONS",
+    "SESSION_KINDS",
     "ConnectionToken",
     "Membership",
     "Organization",

@@ -238,8 +238,25 @@ def test_pending_pop_is_single_use() -> None:
     entry = pending.pop("s")
     assert entry is not None
     assert (entry.verifier, entry.next) == ("verifier", "http://x/next")
+    assert entry.purpose == "user"  # the everyday sign-in by default
     assert pending.pop("s") is None
     assert pending.pop("never-started") is None
+
+
+def test_pending_keeps_the_purpose() -> None:
+    """Plan 59 section 4.2: the admin start's purpose reaches the callback."""
+    pending = PendingLogins(clock=Clock())
+    pending.put("s", "verifier", "http://x/admin", "admin")
+    entry = pending.pop("s")
+    assert entry is not None and entry.purpose == "admin"
+    github = _oauth()
+    try:
+        state, _ = github.begin("http://x/admin", "http://x/auth/github", "admin")
+        assert github.pending.pop(state).purpose == "admin"
+        state, _ = github.begin(None, "http://x/auth/github")
+        assert github.pending.pop(state).purpose == "user"
+    finally:
+        github.close()
 
 
 def test_pending_entries_expire_after_ten_minutes() -> None:
@@ -338,6 +355,8 @@ def _record(path: str) -> logging.LogRecord:
         ("/auth/github-app", "/auth/github-app"),
         # A consent that needs a sign-in carries its intent in `next`.
         ("/signin?next=/orgs", "/signin?<redacted>"),
+        # The admin panel's sign-in carries the same kind of `next` (plan 59).
+        ("/admin/login?next=/admin/users", "/admin/login?<redacted>"),
         ("/orgs?next=/x", "/orgs?next=/x"),
         ("/api/auth/github/callback", "/api/auth/github/callback"),
     ],
@@ -657,6 +676,7 @@ def test_pkce_challenge_is_unpadded_base64url_sha256() -> None:
 
 OAUTH = auth_routes.OAUTH_COOKIE
 SESSION = sessions.COOKIE_NAME
+ADMIN = sessions.admin_cookie_name(BaseUrl.parse(PROD_BASE))
 START = at() + "/api/auth/github/start"
 CALLBACK = at() + "/api/auth/github/callback"
 
@@ -777,6 +797,29 @@ def test_the_start_route_binds_state_pkce_and_the_cookie(
     assert github_fake.requests == []  # starting talks to nobody
 
 
+def test_the_admin_start_route_starts_an_admin_sign_in(portal: TestClient) -> None:
+    """Plan 59 section 4.2: the same cookie and URL, ``purpose="admin"`` kept."""
+    response = portal.post(
+        at() + "/api/auth/github/admin/start", json={"next": f"{PROD_BASE}/admin"}
+    )
+    assert response.status_code == 200, response.text
+    query = {
+        k: v[0]
+        for k, v in parse_qs(urlsplit(response.json()["authorize_url"]).query).items()
+    }
+    assert query["redirect_uri"] == f"{PROD_BASE}/auth/github"  # the one callback
+    (cookie,) = response.headers.get_list("set-cookie")
+    assert cookie.startswith(f"{OAUTH}={query['state']};")
+    assert "Path=/api/auth/github" in cookie
+    pending = portal.app.state.portal.github.pending.pop(query["state"])
+    assert pending is not None
+    assert (pending.purpose, pending.next) == ("admin", f"{PROD_BASE}/admin")
+    # The everyday start keeps the everyday purpose.
+    everyday = portal.post(START, json={})
+    state = parse_qs(urlsplit(everyday.json()["authorize_url"]).query)["state"][0]
+    assert portal.app.state.portal.github.pending.pop(state).purpose == "user"
+
+
 def test_the_oauth_cookie_is_secure_on_https() -> None:
     args = auth_routes._oauth_cookie_args(BaseUrl.parse("https://whygraph.example"))
     assert args["secure"] is True and args["path"] == "/api/auth/github"
@@ -866,10 +909,12 @@ def test_a_sign_in_over_an_existing_session_revokes_it(portal: TestClient) -> No
     cy_token = github_sign_in(portal, "cy").cookies[SESSION]
     assert sessions.lookup(ben_token) is None  # the browser's old session ended
     assert sessions.lookup(cy_token).uid == uid_of_login("cy")
-    # A password session carried into a GitHub sign-in ends too.
-    ada_token = log_in(portal, "ada@example.com").cookies[SESSION]
+    # A password account has only an admin session now (plan 59 D4); carried
+    # into a GitHub sign-in by another user, it ends too (D29).
+    portal.cookies.clear()  # Cy's session now belongs to another browser
+    ada_token = log_in(portal, "ada@example.com").cookies[ADMIN]
     assert github_sign_in(portal, "ben").status_code == 200
-    assert sessions.lookup(ada_token) is None
+    assert sessions.lookup(ada_token, "admin") is None
     assert sessions.lookup(cy_token) is not None  # another browser's: untouched
 
 
@@ -1241,7 +1286,11 @@ def test_both_github_routes_need_the_bootstrap_first(
 
 
 def test_the_github_routes_are_base_host_only(portal: TestClient) -> None:
-    for path in ("/api/auth/github/start", "/api/auth/github/callback"):
+    for path in (
+        "/api/auth/github/start",
+        "/api/auth/github/admin/start",
+        "/api/auth/github/callback",
+    ):
         response = portal.post(at("quokka") + path, json={"code": "c", "state": "s"})
         assert response.status_code == 404, path
 
@@ -1250,6 +1299,9 @@ def test_register_is_gone_and_the_password_admin_still_signs_in(
     portal: TestClient,
 ) -> None:
     assert log_in(portal, "ada@example.com").status_code == 200
+    # Signed in (a password account has only an admin session now, plan 59
+    # D4, so a GitHub account), the unknown route is a plain 404.
+    assert github_sign_in(portal, "ben").status_code == 200
     gone = portal.post(
         at() + "/api/auth/register",
         json={
@@ -1260,7 +1312,8 @@ def test_register_is_gone_and_the_password_admin_still_signs_in(
     )
     assert gone.status_code == 404, gone.text
     with portal_db.get_session() as session:
-        assert session.exec(select(User.email)).all() == ["ada@example.com"]
+        emails = session.exec(select(User.email).where(col(User.email).is_not(None)))
+        assert emails.all() == ["ada@example.com"]
 
 
 def test_a_github_account_has_no_password_to_use_change_or_reset(
@@ -1270,21 +1323,33 @@ def test_a_github_account_has_no_password_to_use_change_or_reset(
     ben = uid_of_login("ben")
     for email in ("ben", "ben@users.noreply.github.com", ""):
         refused = portal.post(
-            at() + "/api/auth/login", json={"email": email, "password": PROD_PASSWORD}
+            at() + "/api/auth/admin/login",
+            json={"email": email, "password": PROD_PASSWORD},
         )
         assert refused.status_code == 401, email
         assert refused.json()["code"] == "bad_credentials"
+    # The password form is the admin panel's (plan 59 D48): even a GitHub
+    # admin there has no password to change.
+    with portal_db.get_session() as session:
+        row = session.exec(select(User).where(User.uid == ben)).one()
+        row.is_instance_admin = True
+        session.add(row)
+    assert github_sign_in(portal, "ben", admin=True).status_code == 200
     change = portal.post(
-        at() + "/api/account/password",
+        at() + "/api/admin/me/password",
         json={"current": PROD_PASSWORD, "new": "a brand new passphrase"},
     )
     assert change.status_code == 409 and change.json()["code"] == "no_password"
     assert log_in(portal, "ada@example.com").status_code == 200
     link = portal.post(at() + f"/api/admin/users/{ben}/reset-link")
     assert link.status_code == 409 and link.json()["code"] == "no_password"
-    # A password account still gets its link.
+    # A password admin still gets its link; a password account that is no
+    # admin gets none (plan 59 D28).
+    pia = password_user("pia@example.com", admin=True)
+    assert portal.post(at() + f"/api/admin/users/{pia}/reset-link").status_code == 200
     pat = password_user("pat@example.com")
-    assert portal.post(at() + f"/api/admin/users/{pat}/reset-link").status_code == 200
+    refused = portal.post(at() + f"/api/admin/users/{pat}/reset-link")
+    assert refused.status_code == 409 and refused.json()["code"] == "not_an_admin"
 
 
 # ---------------------------------------------------------------------------

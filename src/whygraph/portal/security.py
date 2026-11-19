@@ -25,7 +25,8 @@ on any response that sets a cookie).
 
 On ``/api`` and ``/mcp`` only, the guard also resolves the request's
 :class:`Principal` once (in local mode, the single user, or ``None`` before
-first-run setup; in production, the session cookie's user), stores it in
+first-run setup; in production, the session cookie's user, or under
+``/api/admin`` only the admin cookie's), stores it in
 ``scope["state"]["principal"]`` and in a :class:`~contextvars.ContextVar`,
 so FastAPI routes, the MCP dispatcher (not a FastAPI route) and the hook
 ``POST .../scans`` all see the same one. :func:`whygraph.portal.deps.current_user`
@@ -53,7 +54,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .hosts import TRUSTED_PROXIES_ENV, BaseUrl, classify
-from .sessions import clearing_headers
+from .sessions import admin_clearing_headers, clearing_headers
 
 if TYPE_CHECKING:  # pragma: no cover
     from .deps import PortalState
@@ -210,6 +211,12 @@ class Principal:
     token_client_name : str or None
         That token's ``client_name`` (the machine a linked portal named at
         connect), copied for usage attribution (M2f-2).
+    session_kind : str
+        ``"user"`` (the everyday session, and every local or token
+        principal) or ``"admin"`` (an admin session, read only under
+        ``/api/admin``; plan 59 D2). Only an admin session opens an
+        instance-admin route; ``is_instance_admin`` on a user-kind principal
+        only shows the "Administration" link.
 
     Notes
     -----
@@ -228,6 +235,7 @@ class Principal:
     token_id: int | None = None
     token_project_id: int | None = None
     token_client_name: str | None = None
+    session_kind: str = "user"
 
 
 _principal: ContextVar[Principal | None] = ContextVar(
@@ -384,8 +392,10 @@ def _production_send(scope: Scope, send: Send, base: BaseUrl) -> Send:
 
     Also appends the two clearing ``Set-Cookie`` headers when the identity
     resolver set ``scope["state"]["clear_session_cookie"]`` (duplicate
-    session cookies), and adds ``Cache-Control: no-store`` on ``/api`` and on
-    any response that sets a cookie.
+    session cookies), the admin cookie's clearing header(s) when it set
+    ``scope["state"]["clear_admin_cookie"]`` (duplicate admin cookies), and
+    adds ``Cache-Control: no-store`` on ``/api`` and on any response that
+    sets a cookie.
     """
     is_api = _is_under(scope["path"], "/api")
 
@@ -396,8 +406,12 @@ def _production_send(scope: Scope, send: Send, base: BaseUrl) -> Send:
                 headers[name] = value
             if base.scheme == "https":
                 headers["strict-transport-security"] = HSTS
-            if scope.get("state", {}).get("clear_session_cookie"):
+            state = scope.get("state", {})
+            if state.get("clear_session_cookie"):
                 for name, value in clearing_headers(base):
+                    headers.append(name.decode("latin-1"), value.decode("latin-1"))
+            if state.get("clear_admin_cookie"):
+                for name, value in admin_clearing_headers(base):
                     headers.append(name.decode("latin-1"), value.decode("latin-1"))
             if is_api or "set-cookie" in headers:
                 headers["cache-control"] = "no-store"

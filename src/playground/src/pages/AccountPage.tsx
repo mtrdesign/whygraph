@@ -2,8 +2,7 @@ import { PageContainer } from "../components/layout/PageContainer";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { ApiError, accountApi, portalKey } from "../api";
+import { accountApi, portalKey } from "../api";
 import { ACCOUNT_ORGS_KEY } from "../components/shell/OrgSwitcher";
 import { ErrorState } from "../components/state/ErrorState";
 import { StatusPill } from "../components/ui/status-pill";
@@ -13,11 +12,9 @@ import { UserAvatar } from "../components/auth/UserAvatar";
 import { MyConnectedPortals } from "../components/portal/ConnectedPortals";
 import { SpendBar, UsageSection } from "../components/usage/parts";
 import { Field } from "../components/portal/Field";
-import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
-import { PASSWORD_HINT, authMessage } from "../lib/authErrors";
 import { formatNumber, formatUsd } from "../lib/format";
 import { formatResetsAt } from "../lib/usageRange";
 import { safeHref } from "../lib/platformLink";
@@ -119,17 +116,14 @@ function MyOrganizations() {
 }
 
 /**
- * `/account`: display name and password. Lives on the base host, in its chrome
+ * `/account`: display name. Lives on the base host, in its chrome
  * (which has the one Sign out, in the avatar menu). A GitHub account shows its
- * avatar and `@login` and has no password section.
+ * avatar and `@login`.
  */
 export function AccountPage() {
   const queryClient = useQueryClient();
   const account = useQuery({ queryKey: ["@account", "me"], queryFn: accountApi.get });
   const [name, setName] = useState("");
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [confirm, setConfirm] = useState("");
 
   useEffect(() => {
     if (account.data) setName(account.data.display_name);
@@ -142,27 +136,10 @@ export function AccountPage() {
       await queryClient.invalidateQueries({ queryKey: portalKey("state") });
     },
   });
-  const password = useMutation({
-    mutationFn: () => accountApi.password({ current, new: next }),
-    onSuccess: () => {
-      toast.success("Password changed. Your other sessions were signed out.");
-      setCurrent("");
-      setNext("");
-      setConfirm("");
-    },
-  });
-  const code = password.error instanceof ApiError ? password.error.code : undefined;
-  const mismatch = confirm !== "" && confirm !== next ? "The passwords do not match." : undefined;
-
   const onRename = (e: FormEvent) => {
     e.preventDefault();
     rename.mutate();
   };
-  const onPassword = (e: FormEvent) => {
-    e.preventDefault();
-    password.mutate();
-  };
-
   return (
     <PageContainer width="narrow" className="flex flex-col gap-6">
       <div className="flex items-center gap-3">
@@ -203,69 +180,6 @@ export function AccountPage() {
         </div>
         {rename.isError && <ErrorState error={rename.error} size="inline" context="auth" />}
       </form>
-
-      {account.data?.has_password && (
-        <form
-          noValidate
-          onSubmit={onPassword}
-          className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-card"
-        >
-          <h2 className="text-sm font-semibold">Change password</h2>
-          <Field
-            label="Current password"
-            error={code === "bad_credentials" ? "That is not your current password." : undefined}
-          >
-            {(p) => (
-              <Input
-                {...p}
-                type="password"
-                autoComplete="current-password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-              />
-            )}
-          </Field>
-          <Field
-            label="New password"
-            hint={PASSWORD_HINT}
-            error={code === "weak_password" || code === "common_password" ? authMessage(password.error) : undefined}
-          >
-            {(p) => (
-              <Input
-                {...p}
-                type="password"
-                autoComplete="new-password"
-                value={next}
-                onChange={(e) => setNext(e.target.value)}
-              />
-            )}
-          </Field>
-          <Field label="Confirm new password" error={mismatch}>
-            {(p) => (
-              <Input
-                {...p}
-                type="password"
-                autoComplete="new-password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-              />
-            )}
-          </Field>
-          {password.isError &&
-            code !== "bad_credentials" &&
-            code !== "weak_password" &&
-            code !== "common_password" && (
-              <Alert variant="destructive">
-                <AlertDescription>{authMessage(password.error)}</AlertDescription>
-              </Alert>
-            )}
-          <div>
-            <Button type="submit" disabled={password.isPending || !current || !next || next !== confirm}>
-              Change password
-            </Button>
-          </div>
-        </form>
-      )}
 
       <MyOrganizations />
 

@@ -65,13 +65,20 @@ the checks change:
   `/api` origin checks need no exception, and the access log redacts that query. The portal reads the
   user, then **revokes GitHub's token** at once and keeps none. It stores the GitHub id (the identity),
   username, display name and avatar, **never an email**. Only the bootstrap admin has a password
-  (argon2, 15 characters minimum, a common-password blocklist). A disabled account is refused at
+  (argon2, 15 characters minimum, a common-password blocklist), and it signs in to
+  [platform administration](../deploy/administration.md) only, never to an organization. A disabled account is refused at
   sign-in and its sessions end at once.
 - **Sessions.** The session is a random token whose hash only is stored in the database; the cookie is
   `HttpOnly`, `SameSite=Lax`, `Secure` over `https`, and set on the base host so it reaches every
-  organization. Sessions last 30 days at most and 7 days idle, a password change rotates the current
-  one and ends the others, and a reset ends all of them. Sign-in, setup and reset happen on the
-  base host only.
+  organization. Sessions last 30 days at most and 7 days idle, and a reset ends all of them. Sign-in,
+  setup and reset happen on the base host only.
+- **Admin sessions.** Platform administration uses a second session in its own cookie: host-only on
+  the base host (never sent to an organization host), `HttpOnly`, `SameSite=Strict`, named
+  `__Host-whygraph_admin` over `https`. It lasts 8 hours with no idle limit, it needs an account that
+  is still an administrator and enabled on every request, and an everyday session never opens an
+  admin route. Signing out of the everyday session it was started beside ends it. A password change
+  rotates the admin session and ends the account's others. Details in
+  [Platform administration](../deploy/administration.md#admin-mode).
 - **Hosts.** The `Host` must be the base host or exactly one valid label under it
   (`<org>.<base host>`); anything else, including `www.` and lookalike suffixes, gets `421`. An
   organization is served only on its own host, and membership is checked on every request.

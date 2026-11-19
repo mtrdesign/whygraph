@@ -88,11 +88,39 @@ every 24 hours (6 hours after a failed check). A failed check never shows a bann
   releases in between, and says the same.
 - **Switch it off in Settings.** The toggle is under the portal's global Settings. Turning it off and
   on again makes a check due within 15 minutes. `whygraph update --check` answers on demand.
-- **Production** shows the notice to instance admins only, as an Updates card on the Admin page; see
-  [Upgrading](../deploy/production.md#upgrading).
+- **Production** shows the notice to instance admins only, as an Updates card on the admin
+  Dashboard; see [Upgrading](../deploy/production.md#upgrading).
 
 What the check sends, and the other ways to turn it off, are in
 [The update check](security.md#update-check).
+
+## Platform administration and password accounts { #admin-mode }
+
+This section is for a **production** portal only; a local portal has no accounts to move. It applies
+when you upgrade to the first release with [platform administration](../deploy/administration.md). That
+release carries no manual-upgrade marker, so `whygraph update` and a normal deploy run as usual. The
+steps below are yours to do after it.
+
+What changes: a password account (the bootstrap administrator, and any password account carried over
+from an earlier build) can no longer sign in to an organization. It signs in at `/admin/login` and gets
+administration only. On upgrade its everyday sessions end, and its **connection tokens are revoked**
+(a linked portal that used one shows the link as revoked and needs a new connection from a GitHub
+account). A password account that is not an administrator cannot sign in anywhere and gets no reset
+link.
+
+If a password account owns an organization, hand it over to a GitHub user:
+
+1. Sign in at `/admin/login`, with the password or with a GitHub administrator.
+2. Open **Users**, choose **Show > Password accounts** and open the account, then its
+   **Memberships**. For each organization, open it and use its **Members** tab.
+3. If a GitHub user is already a member, change their role to **Owner**. If the password account is the
+   only member, have the person sign in with GitHub once (that creates their account), then add them
+   as **Owner**.
+4. Remove the password account from the organization.
+
+Then promote a GitHub account to administrator (**Users > Make admin**) so that day-to-day
+administration does not depend on the password account. A password account that is not an
+administrator and is no longer needed can be removed from its organizations once they are handed over.
 
 ## Postgres major versions { #postgres-major }
 

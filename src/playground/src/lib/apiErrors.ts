@@ -170,6 +170,15 @@ export const MESSAGES: Record<string, Resolver> = {
   account_disabled: "This account is disabled. Ask an instance administrator to enable it.",
   no_password: "This account signs in with GitHub, so it has no password.",
   login_required: { title: "Signed out", message: "Your session has ended. Sign in again." },
+  admin_login_required: { title: "Signed out", message: "Your admin session has ended. Sign in again." },
+  not_an_admin: (err) =>
+    err.status === 409
+      ? "This password account is not a platform administrator, so it gets no reset link. Make it an administrator first, or remove it."
+      : {
+          title: "Not an administrator",
+          message:
+            "This account is not a platform administrator. Sign in with an administrator's GitHub account, or ask another administrator to make you one.",
+        },
   setup_required: "WhyGraph isn't set up yet. Finish the setup page first.",
   bootstrap_required: "This WhyGraph instance isn't set up yet. Finish the setup page first.",
   throttled: (err) => ({ title: "Too many attempts", tone: "warn", message: `Too many attempts. ${retryLine(err)}` }),

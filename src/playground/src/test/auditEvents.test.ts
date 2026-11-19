@@ -64,7 +64,8 @@ describe("audit details (MEM-1)", () => {
       "no_such_project", "user_disabled", "already_member", "already_invited", "unknown_code", "pkce",
       "redirect_uri", "project_deleted", "member_removed", "project_access_removed", "user_revoked",
       "admin_revoked", "removed_locally", "no_access", "git_access_denied", "repo_deleted",
-      "tracked_whygraph_state", "missing_signature", "bad_signature",
+      "tracked_whygraph_state", "missing_signature", "bad_signature", "unknown_user", "not_admin",
+      "signout",
     ];
     for (const word of words) expect(value({ reason: word })).not.toMatch(/_/);
     expect(value({ reason: "something_new" })).toBe("Something new");
@@ -78,6 +79,7 @@ describe("audit details (MEM-1)", () => {
     expect(value({ monthly_usd: "25.00" })).toBe("$25");
     expect(value({ output_per_mtok: "15.000000" })).toBe("$15.00 per million tokens");
     expect(value({ threshold: 80 })).toBe("80%");
+    expect(auditDetails(row({ surface: "admin" }))[0]).toMatchObject({ label: "Sign-in page", value: "Admin panel" });
     // R5: a month in words (the viewer's locale), not "2026-10".
     expect(value({ month: "2026-10" })).toBe(new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 9, 1))));
     expect(value({ month: "2026-10" })).not.toContain("2026-10");

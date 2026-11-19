@@ -156,7 +156,7 @@ itself, not to your `dev-production`. Link from `make dev-local`. `make e2e` run
   (`pyproject.toml`, `uv.lock`, the Dockerfile, `package-lock.json`); everyday edits reach the
   container through the mount.
 - **`dev-production`** for anything that only exists in production mode: accounts, sessions,
-  organization hosts, the admin page, projects imported from GitHub and the webhook.
+  organization hosts, platform administration (`/admin`), projects imported from GitHub and the webhook.
 - **`make check-fast`** while working, and **`make check`** before pushing: its smoke test catches
   what `dev-local` cannot see.
 

@@ -22,6 +22,22 @@ export async function githubSignIn(page: Page, login: string): Promise<void> {
 }
 
 /**
+ * Sign in to platform administration with GitHub through the fake: `/admin/login`,
+ * "Continue with GitHub", then "Continue as <login>". The account must already
+ * exist and be an instance admin. Ends on the page `next` names (`/admin` by default).
+ */
+export async function adminGithubSignIn(page: Page, login: string, next?: string): Promise<void> {
+  await page.goto(next ? `/admin/login?next=${encodeURIComponent(next)}` : "/admin/login");
+  await page.getByRole("button", { name: "Continue with GitHub" }).click();
+  await page.getByRole("link", { name: `Continue as ${login}` }).click();
+  await expect(page).toHaveURL(
+    (url) => url.origin === base.origin && /^\/admin(\/|$)/.test(url.pathname) && !/^\/admin\/login/.test(url.pathname),
+  );
+  await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
+  await page.waitForLoadState("networkidle");
+}
+
+/**
  * Wait until a sign-in (GitHub or password) has landed back on WhyGraph and
  * rendered. The callback page navigates by itself once the exchange is done, and
  * a navigation of ours that races it is aborted - so nothing may `goto` before

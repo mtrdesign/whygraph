@@ -2,7 +2,7 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { env } from "../env";
 import { themeRepos } from "../lib/fixtures";
 import { horizontalOverflow } from "../lib/overflow";
-import { base, githubSignIn, orgUrl, signedIn } from "../lib/production";
+import { adminGithubSignIn, base, githubSignIn, orgUrl, signedIn } from "../lib/production";
 import { call, configureStubLlm, STUB_REPLY } from "../lib/usage";
 
 // The main routes of both portals at a phone's width (390x844, light): none may
@@ -142,4 +142,48 @@ test.describe("production portal at 390px", () => {
       await check(page, name, url);
     });
   }
+});
+
+// Platform administration (plan 59): `eve`, the GitHub user `production.spec.ts` made an
+// administrator, signs in at /admin/login with an admin session. The sign-in page is
+// checked signed out, in a context of its own.
+test.describe("platform administration at 390px", () => {
+  test("admin login", async ({ browser }) => {
+    const context = await browser.newContext({ baseURL: env.prodUrl, viewport: PHONE, colorScheme: "light" });
+    try {
+      const page = await context.newPage();
+      await check(page, "admin login", `${base.origin}/admin/login`);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test.describe("signed in", () => {
+    let context: BrowserContext;
+    let page: Page;
+
+    test.beforeAll(async ({ browser }) => {
+      context = await browser.newContext({ baseURL: env.prodUrl, viewport: PHONE, colorScheme: "light" });
+      page = await context.newPage();
+      await githubSignIn(page, "eve");
+      await signedIn(page);
+      await adminGithubSignIn(page, "eve");
+    });
+    test.afterAll(async () => {
+      await context.close();
+    });
+
+    const routes: [string, string][] = [
+      ["admin dashboard", `${base.origin}/admin`],
+      ["admin organizations", `${base.origin}/admin/orgs`],
+      ["admin users", `${base.origin}/admin/users`],
+      ["admin audit", `${base.origin}/admin/audit`],
+      ["admin account", `${base.origin}/admin/account`],
+    ];
+    for (const [name, url] of routes) {
+      test(name, async () => {
+        await check(page, name, url);
+      });
+    }
+  });
 });

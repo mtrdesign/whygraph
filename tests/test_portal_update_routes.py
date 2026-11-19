@@ -28,7 +28,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     production_env,
     ready,
 )
-from test_portal_app import at, claim_instance, log_in
+from test_portal_app import at, claim_instance, github_admin, log_in
 from whygraph.core.releases import Release
 from whygraph.portal import db as portal_db
 from whygraph.portal import updates
@@ -131,7 +131,9 @@ def test_production_state_is_null_even_for_an_instance_admin(
     claimed: TestClient,
 ) -> None:
     assert claimed.get(at() + "/api/portal/state").json()["update"] is None
-    assert log_in(claimed, "ada@example.com").status_code == 200
+    # A GitHub instance admin: the portal state reads the everyday session,
+    # which a password account no longer has (plan 59 D4).
+    github_admin(claimed, "ann")
     state = claimed.get(at() + "/api/portal/state").json()
     assert state["user"]["is_instance_admin"] is True
     assert state["update"] is None
@@ -141,7 +143,7 @@ def test_the_production_put_is_404_signed_in_or_not(claimed: TestClient) -> None
     body = {"enabled": False}
     out = claimed.put(at() + "/api/portal/update-check", json=body)
     assert (out.status_code, out.json()) == (404, NOT_FOUND)
-    log_in(claimed, "ada@example.com")
+    github_admin(claimed, "ann")  # an instance admin's everyday session
     out = claimed.put(at() + "/api/portal/update-check", json=body)
     assert (out.status_code, out.json()) == (404, NOT_FOUND)
 
@@ -150,9 +152,17 @@ def test_the_admin_update_status_matrix(claimed: TestClient) -> None:
     url = "/api/admin/update"
     nobody = claimed.get(at() + url)
     assert nobody.status_code == 401
-    assert nobody.json()["code"] == "login_required"
+    assert nobody.json()["code"] == "admin_login_required"
+    # An everyday session never opens the admin panel (plan 59 section 4.1),
+    # and a non-admin gets no admin session.
     assert github_sign_in(claimed, "ann").status_code == 200
-    assert claimed.get(at() + url).status_code == 403
+    everyday = claimed.get(at() + url)
+    assert (everyday.status_code, everyday.json()["code"]) == (
+        401,
+        "admin_login_required",
+    )
+    refused = github_sign_in(claimed, "ann", admin=True)
+    assert (refused.status_code, refused.json()["code"]) == (403, "not_an_admin")
     claimed.cookies.clear()
     assert log_in(claimed, "ada@example.com").status_code == 200
     ok = claimed.get(at() + url)

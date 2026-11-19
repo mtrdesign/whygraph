@@ -227,19 +227,40 @@ class SessionIdentity:
     async def principal(self, scope: Scope) -> Principal | None:
         """Return the session cookie's user, or ``None`` (signed out).
 
-        More than one ``whygraph_session`` cookie (another host under the
-        same parent domain tossed one in) counts as signed out, and sets
-        ``scope["state"]["clear_session_cookie"]`` so the guard clears both
-        cookie forms on the response. A live session last touched over
+        The path decides which cookie is read (plan 59 D2): under
+        ``/api/admin`` **only** the admin cookie
+        (:func:`~whygraph.portal.sessions.admin_cookie_name`), looked up as
+        an ``"admin"`` session; everywhere else only ``whygraph_session``,
+        looked up as a ``"user"`` session. The other cookie is never read,
+        so an everyday session opens no admin route and an admin session
+        acts on nothing else.
+
+        More than one value of the cookie read (another host under the same
+        parent domain tossed one in) counts as signed out, and sets
+        ``scope["state"]["clear_session_cookie"]`` (or
+        ``["clear_admin_cookie"]`` for the admin cookie) so the guard clears
+        that cookie on the response. A live session last touched over
         :data:`~whygraph.portal.sessions.TOUCH_EVERY` ago is touched.
         """
-        tokens = sessions.session_cookies(Headers(scope=scope).getlist("cookie"))
+        cookies = Headers(scope=scope).getlist("cookie")
+        base = self.state.base_url
+        if _is_under(scope["path"], "/api/admin"):
+            if base is None:  # never in production (the lifespan sets it first)
+                return None
+            kind = "admin"
+            name = sessions.admin_cookie_name(base)
+            clear_flag = "clear_admin_cookie"
+        else:
+            kind = "user"
+            name = sessions.COOKIE_NAME
+            clear_flag = "clear_session_cookie"
+        tokens = sessions.session_cookies(cookies, name=name)
         if not tokens:
             return None
         if len(tokens) > 1:
-            scope.setdefault("state", {})["clear_session_cookie"] = True
+            scope.setdefault("state", {})[clear_flag] = True
             return None
-        row = await anyio.to_thread.run_sync(_lookup_session, tokens[0])
+        row = await anyio.to_thread.run_sync(_lookup_session, tokens[0], kind)
         if row is None:
             return None
         return Principal(
@@ -252,6 +273,7 @@ class SessionIdentity:
             github_login=row.github_login,
             avatar_url=row.avatar_url,
             has_password=row.has_password,
+            session_kind=row.kind,
         )
 
     async def org_slug(self, scope: Scope) -> str | None:
@@ -263,8 +285,9 @@ class SessionIdentity:
         return None if kind is None else kind.slug
 
 
-def _lookup_session(token: str) -> sessions.SessionRow | None:
-    row = sessions.lookup(token)
+def _lookup_session(token: str, kind: str = "user") -> sessions.SessionRow | None:
+    # The user kind stays a positional call (a test spies on ``lookup(token)``).
+    row = sessions.lookup(token) if kind == "user" else sessions.lookup(token, kind)
     if row is not None and sessions.is_stale(row):
         sessions.touch(row.session_id)
     return row
@@ -730,13 +753,20 @@ async def current_user(request: Request) -> Principal:
         ``409 {"code": "setup_required"}`` when no user exists yet (local
         mode);
         ``401 {"code": "login_required"}`` without a session (production),
-        or for a token principal.
+        or for a token principal;
+        ``401 {"code": "admin_login_required"}`` instead without an admin
+        session on a path under ``/api/admin`` (production only; plan 59
+        D2), so an unknown admin path asks for the admin sign-in too.
     """
     principal = request.scope.get("state", {}).get("principal")
     if principal is not None and principal.token_id is not None:
         raise ApiError(401, "sign-in required", code="login_required")
     if principal is None:
         if portal_state(request).mode == "production":
+            if _is_under(request.scope["path"], "/api/admin"):
+                raise ApiError(
+                    401, "admin sign-in required", code="admin_login_required"
+                )
             raise ApiError(401, "sign-in required", code="login_required")
         raise ApiError(409, "setup required", code="setup_required")
     return principal
@@ -1649,15 +1679,19 @@ def instance_access() -> Callable[..., Awaitable[Principal]]:
     callable
         An ``async`` dependency returning the :class:`Principal`
         (``whygraph_action`` = ``instance.admin``): ``404`` outside
-        production or on an org host, ``401`` without a session, ``403
-        {"code": "forbidden"}`` unless this request's session belongs to an
-        instance admin.
+        production or on an org host, ``401 {"code":
+        "admin_login_required"}`` without an admin session (an everyday
+        session never opens an admin route; plan 59 D2), ``403 {"code":
+        "forbidden"}`` unless that session belongs to an instance admin
+        (defence in depth: an admin-kind lookup already requires the flag).
     """
 
     async def dependency(
         _gate: None = Depends(require_mode_and_host("base")),
         principal: Principal = Depends(current_user),
     ) -> Principal:
+        if principal.session_kind != "admin":
+            raise ApiError(401, "admin sign-in required", code="admin_login_required")
         if not principal.is_instance_admin:
             raise ApiError(
                 403,

@@ -1,0 +1,829 @@
+"""The admin session (plan 59 section 4.1): kind, lifetime, pairing, cookie.
+
+Step 1 covers the session layer and the migration: the admin cookie's
+attributes (asserted on the ``Set-Cookie`` header - httpx's cookie jar is
+liberal about domains, so what the jar sends proves nothing about
+host-only), the per-kind lifetimes (8 hours absolute and no idle limit for
+the admin kind, D50), pairing (D51), D4's refusal of a password account's
+everyday session and connection token, and the migration in both
+directions. Step 2 adds the request resolution and guard cases: which
+cookie a path reads, ``admin_login_required``, :func:`instance_access`'s
+checks, duplicate admin cookies, the Origin / fetch-metadata guard in front
+of an admin cookie (P1), and local mode.
+"""
+
+# ruff: noqa: F811 -- pytest fixtures (`env`, `production_env`) imported from test_portal_app
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+from alembic import command
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import select
+from starlette.responses import Response
+
+from test_portal_app import (  # noqa: F401 -- fixtures
+    PORT,
+    PROD_BASE,
+    admin_signed_in,
+    at,
+    env,
+    portal_client,
+    prod_portal,
+    production_env,
+    signed_in,
+)
+from whygraph.portal import connections
+from whygraph.portal import db as portal_db
+from whygraph.portal import sessions
+from whygraph.portal.hosts import BaseUrl
+from whygraph.portal.models import ConnectionToken, Project, User, UserSession
+from whygraph.portal.orgs import add_member, create_org
+from whygraph.portal.security import Principal
+
+DEV = BaseUrl.parse(PROD_BASE)
+HTTPS = BaseUrl.parse("https://whygraph.example.com")
+UPDATE_CHECK = "496953df26b4"
+ADMIN_SESSION = "df854cdd4f03"
+ADMIN_LOGIN_REQUIRED = {
+    "error": "admin sign-in required",
+    "code": "admin_login_required",
+}
+LOGIN_REQUIRED = {"error": "sign-in required", "code": "login_required"}
+
+
+def _iso(moment: datetime) -> str:
+    return moment.isoformat(timespec="seconds")
+
+
+def _user(
+    email: str, *, admin: bool = False, password: bool = False, github_id: int = 0
+) -> int:
+    with portal_db.get_session() as session:
+        user = User(display_name=email.split("@")[0].title(), email=email)
+        user.is_instance_admin = admin
+        if password:
+            user.password_hash = "argon2-placeholder"
+        if github_id:
+            user.github_id = github_id
+            user.github_login = email.split("@")[0]
+        session.add(user)
+        session.flush()
+        assert user.id is not None
+        return user.id
+
+
+def _start(user_id: int, kind: str = "user", paired: int | None = None) -> str:
+    with portal_db.get_session() as session:
+        return sessions.create_session(
+            session, user_id, None, kind=kind, paired_session_id=paired
+        )
+
+
+def _row(token: str) -> UserSession | None:
+    with portal_db.get_session() as session:
+        row = session.exec(
+            select(UserSession).where(
+                UserSession.token_hash == sessions.hash_token(token)
+            )
+        ).first()
+        if row is not None:
+            session.expunge(row)
+        return row
+
+
+def _set(token: str, **values: object) -> None:
+    with portal_db.get_session() as session:
+        row = session.exec(
+            select(UserSession).where(
+                UserSession.token_hash == sessions.hash_token(token)
+            )
+        ).one()
+        for name, value in values.items():
+            setattr(row, name, value)
+        session.add(row)
+
+
+def _cookie_parts(header: str) -> dict[str, str]:
+    return {p.strip().split("=")[0].lower(): p.strip() for p in header.split(";")}
+
+
+# ---------------------------------------------------------------------------
+# The admin cookie
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("base", "name", "secure"),
+    [(DEV, "whygraph_admin", False), (HTTPS, "__Host-whygraph_admin", True)],
+)
+def test_the_admin_cookie_attributes(base: BaseUrl, name: str, secure: bool) -> None:
+    assert sessions.admin_cookie_name(base) == name
+    response = Response()
+    sessions.set_admin_cookie(response, "tok", base)
+    (header,) = response.headers.getlist("set-cookie")
+    parts = _cookie_parts(header)
+    assert header.startswith(f"{name}=tok;")
+    assert "domain" not in parts  # host-only: never sent to an org host
+    assert parts["path"] == "Path=/"
+    assert parts["max-age"] == f"Max-Age={8 * 3600}"
+    assert "httponly" in parts
+    assert parts["samesite"].lower() == "samesite=strict"
+    assert ("secure" in parts) is secure
+
+
+def test_clearing_the_admin_cookie_on_https_is_one_host_only_header() -> None:
+    response = Response()
+    sessions.clear_admin_cookie(response, HTTPS)
+    (header,) = response.headers.getlist("set-cookie")
+    parts = _cookie_parts(header)
+    assert header.startswith("__Host-whygraph_admin=")
+    assert "Max-Age=0" in header
+    assert "domain" not in parts  # a __Host- cookie with a Domain is rejected
+    assert "secure" in parts and parts["path"] == "Path=/"
+    assert [header.encode()] == [v for _, v in sessions.admin_clearing_headers(HTTPS)]
+
+
+def test_clearing_the_admin_cookie_on_http_covers_both_forms() -> None:
+    response = Response()
+    sessions.clear_admin_cookie(response, DEV)
+    headers = response.headers.getlist("set-cookie")
+    assert len(headers) == 2
+    assert all(h.startswith("whygraph_admin=") and "Max-Age=0" in h for h in headers)
+    assert sum(f"Domain={DEV.host}" in h for h in headers) == 1
+    assert not any("secure" in _cookie_parts(h) for h in headers)
+    assert [h.encode() for h in headers] == [
+        v for _, v in sessions.admin_clearing_headers(DEV)
+    ]
+
+
+def test_session_cookies_reads_either_cookie_by_name() -> None:
+    headers = [
+        "whygraph_session=u; whygraph_admin=a1",
+        'whygraph_admin="a2"; __Host-whygraph_admin=h',
+    ]
+    assert sessions.session_cookies(headers) == ["u"]
+    assert sessions.session_cookies(headers, name="whygraph_admin") == ["a1", "a2"]
+    assert sessions.session_cookies(
+        headers, name=sessions.admin_cookie_name(HTTPS)
+    ) == ["h"]
+
+
+# ---------------------------------------------------------------------------
+# Kinds and lifetimes
+# ---------------------------------------------------------------------------
+
+
+def test_an_admin_session_is_its_own_kind(production_env: SimpleNamespace) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    admin = _start(ada, "admin")
+    user = _start(ada)
+    admin_row, user_row = _row(admin), _row(user)
+    assert admin_row is not None and user_row is not None
+    assert admin_row.kind == "admin" and user_row.kind == "user"
+    created = datetime.fromisoformat(admin_row.created_at)
+    assert datetime.fromisoformat(admin_row.expires_at) - created == timedelta(hours=8)
+    created = datetime.fromisoformat(user_row.created_at)
+    assert datetime.fromisoformat(user_row.expires_at) - created == timedelta(days=30)
+    # Each token is unknown to the other kind's lookup.
+    assert sessions.lookup(admin) is None
+    assert sessions.lookup(user, kind="admin") is None
+    found = sessions.lookup(admin, kind="admin")
+    assert found is not None and found.user_id == ada and found.kind == "admin"
+    assert found.created_at == admin_row.created_at
+    assert found.expires_at == admin_row.expires_at
+    everyday = sessions.lookup(user)
+    assert everyday is not None and everyday.kind == "user"
+    assert everyday.is_instance_admin is True  # shown, but opens no admin route
+    with pytest.raises(ValueError, match="session kind"):
+        sessions.lookup(admin, kind="root")
+    with pytest.raises(ValueError, match="session kind"):
+        _start(ada, "root")
+
+
+def test_the_database_refuses_an_unknown_kind(production_env: SimpleNamespace) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    token = _start(ada, "admin")
+    with pytest.raises(IntegrityError, match="ck_sessions_kind"):
+        _set(token, kind="root")
+
+
+def test_an_admin_session_expires_after_eight_hours(
+    production_env: SimpleNamespace,
+) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    expired, live = _start(ada, "admin"), _start(ada, "admin")
+    now = datetime.now(timezone.utc)
+    _set(
+        expired,
+        created_at=_iso(now - timedelta(hours=8, seconds=1)),
+        expires_at=_iso(now - timedelta(seconds=1)),
+    )
+    assert sessions.lookup(expired, kind="admin") is None
+    assert sessions.lookup(live, kind="admin") is not None
+    _start(ada)  # any sign-in sweeps an expired admin row
+    assert _row(expired) is None and _row(live) is not None
+
+
+def test_an_admin_session_has_no_idle_limit(production_env: SimpleNamespace) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    admin, user = _start(ada, "admin"), _start(ada)
+    idle = _iso(datetime.now(timezone.utc) - sessions.IDLE - timedelta(seconds=1))
+    for token in (admin, user):
+        _set(token, last_seen_at=idle)  # expires_at is still ahead
+    assert sessions.lookup(admin, kind="admin") is not None
+    assert sessions.lookup(user) is None
+    _start(ada)  # the sweep
+    assert _row(admin) is not None
+    assert _row(user) is None
+
+
+def test_demoting_or_disabling_the_admin_ends_the_admin_session(
+    production_env: SimpleNamespace,
+) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    admin, user = _start(ada, "admin"), _start(ada)
+    with portal_db.get_session() as session:
+        session.get(User, ada).is_instance_admin = False
+    assert sessions.lookup(admin, kind="admin") is None
+    assert sessions.lookup(user) is not None  # the everyday session stays
+    with portal_db.get_session() as session:
+        row = session.get(User, ada)
+        row.is_instance_admin = True
+        row.disabled_at = _iso(datetime.now(timezone.utc))
+    assert sessions.lookup(admin, kind="admin") is None
+
+
+def test_a_password_accounts_user_session_is_refused(
+    production_env: SimpleNamespace,
+) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, password=True)
+    user, admin = _start(ada), _start(ada, "admin")
+    assert sessions.lookup(user) is None
+    found = sessions.lookup(admin, kind="admin")
+    assert found is not None and found.has_password is True
+
+
+def test_revoke_user_ends_both_kinds_and_revoke_user_kind_one(
+    production_env: SimpleNamespace,
+) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    bob = _user("bob@example.com", admin=True, github_id=2)
+    admin, user = _start(ada, "admin"), _start(ada)
+    bob_admin = _start(bob, "admin")
+    sessions.revoke_user_kind(ada, "admin")
+    assert _row(admin) is None and _row(user) is not None
+    assert _row(bob_admin) is not None
+    admin = _start(ada, "admin")
+    with portal_db.get_session() as session:
+        sessions.revoke_user(ada, db=session)
+    assert _row(admin) is None and _row(user) is None
+    assert _row(bob_admin) is not None
+
+
+def test_rotate_keeps_the_kind_and_unpairs(production_env: SimpleNamespace) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, password=True)
+    bea = _user("bea@example.com", admin=True, github_id=2)
+    everyday = _start(bea)
+    paired = _start(bea, "admin", paired=_row(everyday).id)
+    with portal_db.get_session() as session:
+        rotated = sessions.rotate(session, _row(paired).id, bea, None)
+    assert _row(paired) is None
+    row = _row(rotated)
+    assert row.kind == "admin" and row.paired_session_id is None
+    admin = _start(ada, "admin")
+    with portal_db.get_session() as session:
+        rotated = sessions.rotate(session, _row(admin).id, ada, None)
+    assert sessions.lookup(rotated, kind="admin") is not None
+    assert sessions.lookup(admin, kind="admin") is None
+
+
+# ---------------------------------------------------------------------------
+# Pairing (D51)
+# ---------------------------------------------------------------------------
+
+
+def test_end_paired_admin_ends_only_the_admin_sessions_paired_with_it(
+    production_env: SimpleNamespace,
+) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    laptop, phone = _start(ada), _start(ada)
+    on_laptop = _start(ada, "admin", paired=_row(laptop).id)
+    on_phone = _start(ada, "admin", paired=_row(phone).id)
+    unpaired = _start(ada, "admin")
+    with portal_db.get_session() as session:
+        assert sessions.end_paired_admin(session, _row(laptop).id) == 1
+        assert sessions.end_paired_admin(session, _row(laptop).id) == 0
+    assert _row(on_laptop) is None
+    assert _row(on_phone) is not None and _row(unpaired) is not None
+    assert _row(laptop) is not None  # the everyday row is the caller's to end
+
+
+def test_repair_admin_moves_the_pairing(production_env: SimpleNamespace) -> None:
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    old, other = _start(ada), _start(ada)
+    admin = _start(ada, "admin", paired=_row(old).id)
+    elsewhere = _start(ada, "admin", paired=_row(other).id)
+    new = _start(ada)
+    with portal_db.get_session() as session:
+        sessions.repair_admin(session, _row(old).id, _row(new).id)
+        sessions.revoke(_row(old).id, db=session)
+    assert _row(admin).paired_session_id == _row(new).id
+    assert _row(elsewhere).paired_session_id == _row(other).id
+
+
+def test_deleting_the_everyday_row_unpairs_and_never_ends_the_admin_session(
+    production_env: SimpleNamespace,
+) -> None:
+    """``fk_sessions_paired`` is ``ON DELETE SET NULL``: a sweep or revoke
+    of the everyday row leaves the admin session alive, unpaired."""
+    portal_db.ensure_initialized()
+    ada = _user("ada@example.com", admin=True, github_id=1)
+    revoked, swept = _start(ada), _start(ada)
+    by_revoke = _start(ada, "admin", paired=_row(revoked).id)
+    by_sweep = _start(ada, "admin", paired=_row(swept).id)
+    sessions.revoke(_row(revoked).id)
+    _set(swept, expires_at=_iso(datetime.now(timezone.utc) - timedelta(seconds=1)))
+    _start(ada)  # the sweep deletes the expired everyday row
+    assert _row(swept) is None
+    for token in (by_revoke, by_sweep):
+        row = _row(token)
+        assert row is not None and row.paired_session_id is None
+        assert sessions.lookup(token, kind="admin") is not None
+
+
+def test_admin_signed_in_sets_the_admin_cookie(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        ada = _user("ada@example.com", admin=True, github_id=1)
+        token = admin_signed_in(client, ada)
+        assert client.cookies.get("whygraph_admin") == token
+        assert client.cookies.get("whygraph_session") is None
+        found = sessions.lookup(token, kind="admin")
+        assert found is not None and found.user_id == ada
+        assert _row(token).paired_session_id is None
+
+
+# ---------------------------------------------------------------------------
+# Resolution: which cookie a path reads (D2), and instance_access
+# ---------------------------------------------------------------------------
+
+ADMIN_ROUTE = "/api/admin/users"
+
+
+def _set_cookies(response) -> list[str]:  # noqa: ANN001
+    return response.headers.get_list("set-cookie")
+
+
+def test_an_admin_session_opens_admin_routes(production_env: SimpleNamespace) -> None:
+    with prod_portal() as client:
+        pat = _user("pat@example.com", admin=True, password=True)  # D4: admin-only
+        assert client.get(at() + ADMIN_ROUTE).json() == ADMIN_LOGIN_REQUIRED
+        admin_signed_in(client, pat)
+        response = client.get(at() + ADMIN_ROUTE)
+        assert response.status_code == 200, response.text
+        assert [u["email"] for u in response.json()] == ["pat@example.com"]
+
+
+def test_a_user_cookie_on_an_admin_route_is_admin_login_required(
+    production_env: SimpleNamespace,
+) -> None:
+    """An everyday session of an instance admin opens no admin route."""
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        signed_in(client, gil)
+        account = client.get(at() + "/api/account")
+        assert account.status_code == 200
+        assert account.json()["is_instance_admin"] is True  # shown, opens nothing
+        for path in (ADMIN_ROUTE, "/api/admin/orgs", "/api/admin/audit"):
+            response = client.get(at() + path)
+            assert response.status_code == 401, path
+            assert response.json() == ADMIN_LOGIN_REQUIRED
+
+
+def test_an_admin_cookie_is_ignored_on_non_admin_routes(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        admin_signed_in(client, gil)
+        assert client.get(at() + ADMIN_ROUTE).status_code == 200
+        account = client.get(at() + "/api/account")
+        assert account.status_code == 401
+        assert account.json() == LOGIN_REQUIRED
+        state = client.get(at() + "/api/portal/state").json()
+        assert state["user"] is None
+        # An unknown non-admin path still asks for the everyday sign-in.
+        assert client.get(at() + "/api/nope").json() == LOGIN_REQUIRED
+
+
+def test_both_cookies_resolve_by_path(production_env: SimpleNamespace) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        signed_in(client, gil)
+        admin_signed_in(client, gil)
+        assert client.get(at() + ADMIN_ROUTE).status_code == 200
+        assert client.get(at() + "/api/account").status_code == 200
+
+
+def test_demoting_the_admin_ends_the_admin_session_on_the_next_request(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        token = admin_signed_in(client, gil)
+        assert client.get(at() + ADMIN_ROUTE).status_code == 200
+        with portal_db.get_session() as session:
+            session.get(User, gil).is_instance_admin = False
+        response = client.get(at() + ADMIN_ROUTE)
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        assert _row(token) is not None  # refused by the lookup, not deleted
+
+
+class _FixedIdentity:
+    """An identity resolver that hands every request the same principal."""
+
+    def __init__(self, principal: Principal) -> None:
+        self._principal = principal
+
+    async def principal(self, scope) -> Principal:  # noqa: ANN001
+        return self._principal
+
+    async def org_slug(self, scope) -> None:  # noqa: ANN001
+        return None
+
+
+@pytest.mark.parametrize(
+    ("kind", "admin", "status", "code"),
+    [
+        ("user", True, 401, "admin_login_required"),
+        ("admin", False, 403, "forbidden"),
+    ],
+)
+def test_instance_access_needs_an_admin_kind_session_of_an_admin(
+    production_env: SimpleNamespace, kind: str, admin: bool, status: int, code: str
+) -> None:
+    """``instance_access`` checks the kind and the flag itself (defence in depth).
+
+    ``SessionIdentity`` never resolves either principal under ``/api/admin``
+    (it reads only the admin cookie, and an admin lookup needs the flag), so
+    an injected resolver hands them over.
+    """
+    principal = Principal(
+        user_id=1,
+        uid="u-x",
+        display_name="X",
+        session_id=1,
+        is_instance_admin=admin,
+        session_kind=kind,
+    )
+    with prod_portal(identity=_FixedIdentity(principal)) as client:
+        response = client.get(at() + ADMIN_ROUTE)
+    assert response.status_code == status, response.text
+    assert response.json()["code"] == code
+
+
+def test_unknown_admin_paths(production_env: SimpleNamespace) -> None:
+    """The ``/api`` catch-all depends on ``current_user`` (P12)."""
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        # Base host, no admin session.
+        response = client.get(at() + "/api/admin/nope")
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        # Org host with an everyday session: the host-only admin cookie never
+        # arrives there, so the catch-all finds no principal.
+        signed_in(client, gil)
+        response = client.get(at("acme") + "/api/admin/nope")
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        # With an admin session the unknown path is a plain 404.
+        admin_signed_in(client, gil)
+        response = client.get(at() + "/api/admin/nope")
+        assert response.status_code == 404
+        assert response.json() == {"error": "no API route /api/admin/nope"}
+        # A real admin route on an org host: its host gate runs first.
+        response = client.get(at("acme") + ADMIN_ROUTE)
+        assert response.status_code == 404
+        assert response.json() == {"error": "not found"}
+
+
+# ---------------------------------------------------------------------------
+# Duplicate admin cookies, and the guard in front of an admin cookie (P1)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_admin_cookies_give_no_session_and_are_cleared(
+    production_env: SimpleNamespace,
+) -> None:
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        with portal_db.get_session() as session:
+            token = sessions.create_session(session, gil, None, kind="admin")
+        cookie = {"Cookie": f"whygraph_admin={token}; whygraph_admin=other"}
+        response = client.get(at() + ADMIN_ROUTE, headers=cookie)
+        assert response.status_code == 401
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        cleared = _set_cookies(response)
+        assert cleared == [v.decode() for _, v in sessions.admin_clearing_headers(DEV)]
+        assert len(cleared) == 2  # http: host-only and Domain=<base host>
+        # One admin cookie is a session; the everyday cookie is never cleared.
+        ok = client.get(
+            at() + ADMIN_ROUTE, headers={"Cookie": f"whygraph_admin={token}"}
+        )
+        assert ok.status_code == 200 and _set_cookies(ok) == []
+        # Off /api/admin the admin cookie is not read, so nothing is cleared.
+        off = client.get(at() + "/api/account", headers=cookie)
+        assert off.json() == LOGIN_REQUIRED and _set_cookies(off) == []
+
+
+def test_duplicate_admin_cookies_on_https_are_cleared_with_one_header(
+    production_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = f"https://whygraph.localhost:{PORT}"
+    monkeypatch.setenv("WHYGRAPH_BASE_URL", base)
+    with prod_portal(base_url=base) as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        with portal_db.get_session() as session:
+            token = sessions.create_session(session, gil, None, kind="admin")
+        name = "__Host-whygraph_admin"
+        ok = client.get(base + ADMIN_ROUTE, headers={"Cookie": f"{name}={token}"})
+        assert ok.status_code == 200, ok.text
+        # The http name means nothing on https.
+        plain = client.get(
+            base + ADMIN_ROUTE, headers={"Cookie": f"whygraph_admin={token}"}
+        )
+        assert plain.json() == ADMIN_LOGIN_REQUIRED
+        response = client.get(
+            base + ADMIN_ROUTE, headers={"Cookie": f"{name}={token}; {name}=x"}
+        )
+        assert response.json() == ADMIN_LOGIN_REQUIRED
+        (header,) = _set_cookies(response)
+        assert header.startswith(f"{name}=") and "Max-Age=0" in header
+        assert "domain" not in _cookie_parts(header)
+        assert "secure" in _cookie_parts(header)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": at("acme")},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Origin": at("acme"), "Sec-Fetch-Site": "same-site"},
+    ],
+)
+@pytest.mark.parametrize("method", ["GET", "PATCH"])
+def test_an_admin_cookie_from_an_org_page_is_refused(
+    production_env: SimpleNamespace, headers: dict[str, str], method: str
+) -> None:
+    """P1: script on an org host cannot use the admin cookie."""
+    with prod_portal() as client:
+        gil = _user("gil@example.com", admin=True, github_id=7)
+        bob = _user("bob@example.com", github_id=8)
+        admin_signed_in(client, gil)
+        with portal_db.get_session() as session:
+            bob_uid = session.get(User, bob).uid
+        path = ADMIN_ROUTE if method == "GET" else f"{ADMIN_ROUTE}/{bob_uid}"
+        body = None if method == "GET" else {"is_instance_admin": True}
+        response = client.request(method, at() + path, json=body, headers=headers)
+        assert response.status_code == 403, response.text
+        assert response.json()["error"] in (
+            "origin not allowed",
+            "cross-site request refused",
+        )
+        with portal_db.get_session() as session:
+            assert session.get(User, bob).is_instance_admin is False
+        # The same request from the base host's own page passes.
+        own = client.get(at() + ADMIN_ROUTE, headers={"Origin": at()})
+        assert own.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Local mode (D7)
+# ---------------------------------------------------------------------------
+
+
+def test_local_mode_never_answers_admin_login_required(env: SimpleNamespace) -> None:
+    with portal_client() as client:
+        before = client.get("/api/admin/nope")
+        assert before.status_code == 409
+        assert before.json()["code"] == "setup_required"
+        assert (
+            client.post("/api/portal/setup", json={"display_name": "Tess"}).status_code
+            == 201
+        )
+        for path in ("/api/admin/nope", ADMIN_ROUTE):
+            response = client.get(path)
+            assert response.status_code == 404, path
+            assert response.json().get("code") != "admin_login_required"
+
+
+# ---------------------------------------------------------------------------
+# Connection tokens of password accounts (D4)
+# ---------------------------------------------------------------------------
+
+
+def _token_world() -> SimpleNamespace:
+    """Org ``acme`` with project ``api``; a password owner and a GitHub owner."""
+    pat = _user("pat@example.com", admin=True, password=True)
+    gil = _user("gil@example.com", github_id=7)
+    with portal_db.get_session() as session:
+        org = create_org(session, slug="acme", name="Acme")
+        for uid in (pat, gil):
+            add_member(session, org_id=org.id, user_id=uid, role="owner")
+        project = Project(
+            org_id=org.id, slug="api", name="API", source="local", root="/r/api"
+        )
+        session.add(project)
+        session.flush()
+        tokens = {
+            name: connections.issue(
+                session,
+                user=session.get(User, uid),
+                project=project,
+                client_name="laptop",
+            )
+            for name, uid in (("pat", pat), ("gil", gil))
+        }
+    return SimpleNamespace(tokens=tokens)
+
+
+def test_connections_lookup_refuses_a_password_accounts_token(
+    production_env: SimpleNamespace,
+) -> None:
+    portal_db.ensure_initialized()
+    world = _token_world()
+    with portal_db.get_session() as session:
+        refused = connections.lookup(session, world.tokens["pat"])
+        live = connections.lookup(session, world.tokens["gil"])
+    assert refused == connections.Refusal("token_revoked", "admin_revoked")
+    assert isinstance(live, connections.TokenPrincipal)
+    with portal_db.get_session() as session:  # the refusal writes nothing
+        row = session.exec(
+            select(ConnectionToken).where(
+                ConnectionToken.token_hash
+                == connections.hash_token(world.tokens["pat"])
+            )
+        ).one()
+        assert row.revoked_at is None and row.revoked_reason is None
+
+
+# ---------------------------------------------------------------------------
+# The migration
+# ---------------------------------------------------------------------------
+
+
+def _seed_pre_admin_session(conn) -> dict[str, int]:  # noqa: ANN001
+    """Rows as the update-check revision holds them: no ``sessions.kind``."""
+    org = conn.execute(
+        text(
+            "INSERT INTO organizations (uid, slug, name, created_at, "
+            "default_project_role) VALUES ('o-acme', 'acme', 'Acme', 'now', "
+            "'contributor') RETURNING id"
+        )
+    ).scalar_one()
+    project = conn.execute(
+        text(
+            "INSERT INTO projects (org_id, slug, name, source, root, created_at, "
+            "restricted) VALUES (:org, 'api', 'API', 'local', '/r/api', 'now', "
+            "false) RETURNING id"
+        ),
+        {"org": org},
+    ).scalar_one()
+    ids = {"org": org, "project": project}
+    for name, password in (("pat", "'hash'"), ("gil", "NULL")):
+        ids[name] = conn.execute(
+            text(
+                "INSERT INTO users (uid, display_name, email, password_hash, "
+                f"is_instance_admin, created_at) VALUES ('u-{name}', '{name}', "
+                f"'{name}@example.com', {password}, true, 'now') RETURNING id"
+            )
+        ).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO sessions (token_hash, user_id, created_at, "
+                "last_seen_at, expires_at) VALUES (:hash, :user, 'now', 'now', "
+                "'9999')"
+            ),
+            {"hash": f"session-{name}", "user": ids[name]},
+        )
+        for suffix, revoked in (("live", None), ("old", "member_left")):
+            conn.execute(
+                text(
+                    "INSERT INTO connection_tokens (uid, user_id, org_id, "
+                    "project_id, token_hash, client_name, created_at, "
+                    "revoked_at, revoked_reason) VALUES (:uid, :user, :org, "
+                    ":project, :hash, 'laptop', 'now', :at, :reason)"
+                ),
+                {
+                    "uid": f"t-{name}-{suffix}",
+                    "user": ids[name],
+                    "org": org,
+                    "project": project,
+                    "hash": f"token-{name}-{suffix}",
+                    "at": None if revoked is None else "then",
+                    "reason": revoked,
+                },
+            )
+    return ids
+
+
+def test_the_migration_ends_password_accounts_sessions_and_tokens(
+    empty_portal_database: str,
+) -> None:
+    command.upgrade(portal_db.alembic_config(), UPDATE_CHECK)
+    with portal_db.get_engine().begin() as conn:
+        ids = _seed_pre_admin_session(conn)
+    portal_db._reset_engine()
+    started = _iso(datetime.now(timezone.utc))
+    command.upgrade(portal_db.alembic_config(), "head")
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert (
+            conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            == ADMIN_SESSION
+        )
+        left = conn.execute(
+            text("SELECT user_id, kind, paired_session_id FROM sessions")
+        ).all()
+        assert left == [(ids["gil"], "user", None)]  # backfilled as user
+        tokens = {
+            uid: (at, reason)
+            for uid, at, reason in conn.execute(
+                text("SELECT uid, revoked_at, revoked_reason FROM connection_tokens")
+            )
+        }
+    at, reason = tokens["t-pat-live"]
+    assert reason == "admin_revoked" and at >= started  # the models._now() format
+    assert datetime.fromisoformat(at).tzinfo is not None
+    assert tokens["t-pat-old"] == ("then", "member_left")  # already revoked: kept
+    assert tokens["t-gil-live"] == (None, None)
+    assert tokens["t-gil-old"] == ("then", "member_left")
+
+
+def test_the_downgrade_deletes_admin_rows(empty_portal_database: str) -> None:
+    portal_db.ensure_initialized()
+    with portal_db.get_engine().begin() as conn:
+        user = conn.execute(
+            text(
+                "INSERT INTO users (uid, display_name, is_instance_admin, "
+                "github_id, created_at) VALUES ('u-ada', 'Ada', true, 1, 'now') "
+                "RETURNING id"
+            )
+        ).scalar_one()
+        everyday = conn.execute(
+            text(
+                "INSERT INTO sessions (token_hash, user_id, created_at, "
+                "last_seen_at, expires_at, kind) VALUES ('u', :user, 'now', "
+                "'now', '9999', 'user') RETURNING id"
+            ),
+            {"user": user},
+        ).scalar_one()
+        conn.execute(
+            text(
+                "INSERT INTO sessions (token_hash, user_id, created_at, "
+                "last_seen_at, expires_at, kind, paired_session_id) VALUES "
+                "('a', :user, 'now', 'now', '9999', 'admin', :paired)"
+            ),
+            {"user": user, "paired": everyday},
+        )
+    portal_db._reset_engine()
+    command.downgrade(portal_db.alembic_config(), UPDATE_CHECK)
+    portal_db._reset_engine()
+    with portal_db.get_engine().connect() as conn:
+        assert conn.execute(
+            text("SELECT token_hash FROM sessions")
+        ).scalars().all() == ["u"]
+        columns = {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'sessions'"
+                )
+            )
+        }
+        assert not columns & {"kind", "paired_session_id"}
+        indexes = set(
+            conn.execute(
+                text("SELECT indexname FROM pg_indexes WHERE tablename = 'sessions'")
+            ).scalars()
+        )
+        assert "ix_sessions_paired_session_id" not in indexes
+    command.upgrade(portal_db.alembic_config(), "head")

@@ -57,7 +57,14 @@ import { ConnectPage, type ConnectSearch } from "./pages/ConnectPage";
 import { ConnectCallbackPage, type CallbackSearch } from "./pages/ConnectCallbackPage";
 import { LinkPage, type LinkSearch } from "./pages/LinkPage";
 import { AccountPage } from "./pages/AccountPage";
-import { AdminPage } from "./pages/AdminPage";
+import { AdminLayout } from "./components/admin/AdminLayout";
+import { AdminAccountPage } from "./pages/AdminAccountPage";
+import { AdminAuditPage } from "./pages/AdminAuditPage";
+import { AdminDashboardPage } from "./pages/AdminDashboardPage";
+import { AdminLoginPage } from "./pages/AdminLoginPage";
+import { AdminOrgsPage } from "./pages/AdminOrgsPage";
+import { AdminPlaceholderPage } from "./pages/AdminPlaceholderPage";
+import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { BootstrapPage } from "./pages/BootstrapPage";
 import { GitHubAppCallbackPage, type GitHubAppCallbackParams } from "./pages/GitHubAppCallbackPage";
 import { GitHubCallbackPage } from "./pages/GitHubCallbackPage";
@@ -82,6 +89,8 @@ import { PageContainer } from "./components/layout/PageContainer";
 import { PageSkeleton } from "./components/state/Skeletons";
 import {
   type BaseSearch,
+  validateAdminListSearch,
+  validateAdminLoginSearch,
   validateBaseSearch,
   validateInitSearch,
   validateOrgSettingsSearch,
@@ -95,8 +104,9 @@ import {
 // exist yet when `tsc --noEmit` runs ahead of `vite build`).
 //
 //   /setup                               first run (no shell); production: the bootstrap
-//   /signin /auth/github /auth/github-app /reset /orgs /orgs/new /admin /account /connect
+//   /signin /auth/github /auth/github-app /reset /orgs /orgs/new /account /connect
 //                                        production base host only (no AppShell)
+//   /admin/login, /admin/...             the admin app (its own AdminShell), base host only
 //   /                                    Projects              ┐ portal layout
 //   /projects/new                        add-project wizard    │ (sidebar: Projects,
 //   /settings                            global settings       │  Settings, and
@@ -187,13 +197,17 @@ const BASE_PATHS = new Set([
   "/reset",
   "/orgs",
   "/orgs/new",
-  "/admin",
   "/account",
   "/connect",
 ]);
 const SIGNED_OUT_PATHS = new Set(["/signin", "/auth/github", "/reset"]);
 // The org tree's paths, which a base host hands to the org picker instead of a not-found page.
 const ORG_TREE = /^\/(p|explorer|chat|projects|link|connect\/callback|settings|members|audit|usage)(\/|$)/;
+
+/** `/admin` and everything under it: the admin app, served on the base host only. */
+function isAdminPath(path: string): boolean {
+  return path === "/admin" || path.startsWith("/admin/");
+}
 
 /** A redirect target that may carry a query (`/signin?next=...`) as TanStack's `to` + `search`. */
 function redirectTo(target: string) {
@@ -230,6 +244,9 @@ export function baseHostRedirect(portal: PortalState, pathname: string, href?: s
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
   if (portal.bootstrap_required) return path === "/setup" ? null : "/setup";
   if (path === "/setup") return "/";
+  // The admin app has its own session (the admin cookie), so a visitor with no
+  // everyday session still gets in: it must come before the signed-out check.
+  if (isAdminPath(path)) return null;
   if (!portal.user) {
     if (SIGNED_OUT_PATHS.has(path)) return null;
     // A consent request keeps its whole query across sign-in: `next` is the full
@@ -241,7 +258,6 @@ export function baseHostRedirect(portal: PortalState, pathname: string, href?: s
   // The org tree (and its legacy links) lives on an org host: the picker leads there.
   // Any other unknown address renders "Page not found" in the base chrome (NAV-7).
   if (ORG_TREE.test(path)) return "/";
-  if (path === "/admin" && !portal.user.is_instance_admin) return "/orgs";
   return null;
 }
 
@@ -298,7 +314,10 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
       if (to) throw redirect(redirectTo(to));
     } else if (!portal.error && kind === "org" && portal.base_url) {
       const base = new URL(portal.base_url);
-      if (!portal.user) {
+      if (isAdminPath(location.pathname)) {
+        // The admin app lives on the base host: hand over whatever the session.
+        await hardNavigate(`${base.origin}${location.pathname}${location.searchStr ?? ""}`);
+      } else if (!portal.user) {
         // `href` is the path and query; the org host's own origin completes it.
         const here = new URL(location.href, window.location.origin).href;
         await hardNavigate(signInUrl(portal.base_url, here));
@@ -434,7 +453,6 @@ const orgsRoute = createRoute({
   component: OrgPickerPage,
 });
 const newOrgRoute = createRoute({ getParentRoute: () => baseLayout, path: "/orgs/new", component: CreateOrgPage });
-const adminRoute = createRoute({ getParentRoute: () => baseLayout, path: "/admin", component: AdminPage });
 // Local mode has no account (one implicit user): its settings are the portal's (BUG-10).
 const accountRoute = createRoute({
   getParentRoute: () => baseLayout,
@@ -819,10 +837,87 @@ const legacyChatRoute = createRoute({
   },
 });
 
+
+// ---- admin app (plan 59, §4.14) -------------------------------------------------
+//
+// Its own layout, a sibling of `baseLayout`: the admin cookie is a different session,
+// and `BaseChrome` (the everyday session's header) must not wrap it. A module that a
+// later release builds renders "Not available yet" until then.
+
+const adminLoginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/login",
+  validateSearch: validateAdminLoginSearch,
+  component: AdminLoginPage,
+});
+const adminLayout = createRoute({ getParentRoute: () => rootRoute, path: "/admin", component: AdminLayout });
+const adminIndexRoute = createRoute({ getParentRoute: () => adminLayout, path: "/", component: AdminDashboardPage });
+const adminOrgsRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "orgs",
+  validateSearch: validateAdminListSearch,
+  component: AdminOrgsPage,
+});
+const adminOrgRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "orgs/$slug",
+  component: () => <AdminPlaceholderPage heading={adminOrgRoute.useParams().slug} />,
+});
+const adminProjectsRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "projects",
+  component: () => <AdminPlaceholderPage heading="Projects" />,
+});
+const adminProjectRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "projects/$org/$slug",
+  component: () => <AdminPlaceholderPage heading={adminProjectRoute.useParams().slug} />,
+});
+const adminUsersRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "users",
+  validateSearch: validateAdminListSearch,
+  component: AdminUsersPage,
+});
+const adminUserRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "users/$uid",
+  component: () => <AdminPlaceholderPage heading={adminUserRoute.useParams().uid} />,
+});
+const adminAuditRoute = createRoute({ getParentRoute: () => adminLayout, path: "audit", component: AdminAuditPage });
+const adminConfigRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "config",
+  component: () => <AdminPlaceholderPage heading="Platform configuration" />,
+});
+const adminAccountRoute = createRoute({ getParentRoute: () => adminLayout, path: "account", component: AdminAccountPage });
+// Any other address under /admin stays inside the admin app, with a way back into it.
+const adminNotFoundRoute = createRoute({
+  getParentRoute: () => adminLayout,
+  path: "$",
+  component: () => (
+    <NotFoundState kind="page" back={{ label: "Back to the dashboard", to: "/admin" }} />
+  ),
+});
+
 // ---- router -----------------------------------------------------------------
 
 const routeTree = rootRoute.addChildren([
   setupRoute,
+  adminLoginRoute,
+  adminLayout.addChildren([
+    adminIndexRoute,
+    adminOrgsRoute,
+    adminOrgRoute,
+    adminProjectsRoute,
+    adminProjectRoute,
+    adminUsersRoute,
+    adminUserRoute,
+    adminAuditRoute,
+    adminConfigRoute,
+    adminAccountRoute,
+    adminNotFoundRoute,
+  ]),
   baseLayout.addChildren([
     signInRoute,
     githubCallbackRoute,
@@ -830,7 +925,6 @@ const routeTree = rootRoute.addChildren([
     resetRoute,
     orgsRoute,
     newOrgRoute,
-    adminRoute,
     accountRoute,
     connectRoute,
   ]),

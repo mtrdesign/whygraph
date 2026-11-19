@@ -203,11 +203,15 @@ class PendingLogin:
         Where to land after sign-in, already validated.
     expires_at : float
         Clock reading after which the entry is dead.
+    purpose : str
+        ``"user"`` (the everyday sign-in) or ``"admin"`` (the admin panel's
+        sign-in, plan 59 section 4.2): what the callback does with it.
     """
 
     verifier: str
     next: str | None
     expires_at: float
+    purpose: str = "user"
 
 
 class PendingLogins:
@@ -239,7 +243,13 @@ class PendingLogins:
         self._entries: OrderedDict[str, PendingLogin] = OrderedDict()
         self._lock = threading.Lock()
 
-    def put(self, state: str, verifier: str, next: str | None) -> None:  # noqa: A002
+    def put(
+        self,
+        state: str,
+        verifier: str,
+        next: str | None,  # noqa: A002
+        purpose: str = "user",
+    ) -> None:
         """Remember a started sign-in.
 
         Parameters
@@ -250,8 +260,10 @@ class PendingLogins:
             The PKCE verifier.
         next : str or None
             The validated post-sign-in destination.
+        purpose : str, optional
+            ``"user"`` (the default) or ``"admin"``.
         """
-        entry = PendingLogin(verifier, next, self._clock() + self._ttl)
+        entry = PendingLogin(verifier, next, self._clock() + self._ttl, purpose)
         with self._lock:
             self._entries.pop(state, None)
             self._entries[state] = entry
@@ -295,7 +307,8 @@ class AccessLogRedactor(logging.Filter):
     (production-local-connect-ux plan section 7.5), so their queries are
     blanked too, and so is the platform's ``/signin?next=...``: a consent
     that needs a sign-in carries the whole ``/connect`` query, intent
-    included, in ``next``. uvicorn's access records carry the request line as
+    included, in ``next``; the admin panel's ``/admin/login?next=...`` is
+    blanked for the same reason (plan 59). uvicorn's access records carry the request line as
     ``args[2]``; this filter rewrites ``/auth/github?...`` to
     ``/auth/github?<redacted>`` (and the same for every path in
     :attr:`PATHS`) and always lets the record through.
@@ -309,6 +322,7 @@ class AccessLogRedactor(logging.Filter):
         "/link",
         "/setup",
         "/signin",
+        "/admin/login",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -593,7 +607,12 @@ class GitHubOAuth(GitHubHttp):
 
     # -- the sign-in protocol (part 2) ---------------------------------------
 
-    def begin(self, next: str | None, redirect_uri: str) -> tuple[str, str]:  # noqa: A002
+    def begin(
+        self,
+        next: str | None,  # noqa: A002
+        redirect_uri: str,
+        purpose: str = "user",
+    ) -> tuple[str, str]:
         """Start a sign-in: a fresh ``state`` and PKCE verifier, kept server-side.
 
         Parameters
@@ -603,6 +622,9 @@ class GitHubOAuth(GitHubHttp):
             :attr:`pending`, never through GitHub.
         redirect_uri : str
             The one registered callback URL (``<base origin>/auth/github``).
+        purpose : str, optional
+            ``"user"`` (the default, the everyday sign-in) or ``"admin"``
+            (the admin panel's); kept in :attr:`pending` for the callback.
 
         Returns
         -------
@@ -612,7 +634,7 @@ class GitHubOAuth(GitHubHttp):
         """
         state = secrets.token_urlsafe(32)
         verifier = secrets.token_urlsafe(64)
-        self.pending.put(state, verifier, next)
+        self.pending.put(state, verifier, next, purpose)
         return state, self.authorize_url(
             state=state, challenge=pkce_challenge(verifier), redirect_uri=redirect_uri
         )

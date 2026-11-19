@@ -63,6 +63,9 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   reset_link_used: { label: "Reset link used", group: "Security" },
   admin_granted: { label: "Instance admin granted", group: "Security" },
   admin_revoked: { label: "Instance admin revoked", group: "Security" },
+  admin_signin: { label: "Signed in to the admin panel", group: "Security" },
+  admin_signin_refused: { label: "Admin panel sign-in refused", group: "Security" },
+  admin_signout: { label: "Signed out of the admin panel", group: "Security" },
   github_signin: { label: "Signed in with GitHub", group: "Security" },
   github_signin_refused: { label: "GitHub sign-in refused", group: "Security" },
   github_token_revoke_failed: { label: "GitHub token not revoked", group: "Security" },
@@ -112,6 +115,7 @@ const FIELD_LABELS: Record<string, string> = {
   github_event: "GitHub event",
   email: "Email",
   invitation: "Invitation",
+  surface: "Sign-in page",
   token_uid: "Connection",
   client_name: "Portal name",
   repo_id: "Repository id",
@@ -141,6 +145,10 @@ const REASONS: Record<string, string> = {
   "2fa_required": "Two-factor authentication is required",
   disabled: "The account is disabled",
   password_change: "A password change is required",
+  // Admin panel sign-in and sign-out
+  unknown_user: "No account for this GitHub user",
+  not_admin: "Not a platform administrator",
+  signout: "Signed out of the portal",
   // Adding a member
   bad_login: "Not a valid GitHub username",
   owner_required: "Only an owner can add an owner",
@@ -189,6 +197,8 @@ const SCOPES: Record<string, string> = {
 };
 
 const ARRIVALS: Record<string, string> = { install: "Installed the app", authorize: "Authorized the app" };
+
+const SURFACES: Record<string, string> = { admin: "Admin panel" };
 
 const ROLES: Record<string, string> = {
   owner: "Owner",
@@ -244,6 +254,7 @@ function fieldValue(key: string, value: unknown): Omit<AuditDetail, "label"> | n
   else if (key === "provider") worded = providerLabel(value);
   else if (key === "source") worded = sourceLabel(value);
   else if (key === "arrival") worded = known(ARRIVALS);
+  else if (key === "surface") worded = known(SURFACES);
   else if (ROLE_FIELDS.has(key)) worded = known(ROLES);
   if (worded) return { value: worded, title: value };
   // A quoted name (`'Ada's laptop'`, as the backend logs it): the name itself.

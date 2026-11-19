@@ -26,7 +26,7 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     production_env,
 )
 from test_portal_hosts_isolation import _insert_project
-from test_portal_members import be, team, with_roles  # noqa: F401 -- `team`
+from test_portal_members import be, be_reader, team, with_roles  # noqa: F401
 from test_portal_identity_routes import audit_log, events  # noqa: F401 -- fixture
 from test_portal_members import set_role
 from whygraph.portal import connections
@@ -289,7 +289,7 @@ def test_an_instance_admin_reads_every_project_as_a_viewer(
     t = acme
     _restrict(t, "api")
     _default(t, "none")
-    be(t, "ada")
+    be_reader(t)
     listed = _listed(t)
     assert set(listed) == {"api", "notes"}
     assert {p["my_role"] for p in listed.values()} == {"viewer"}
@@ -405,7 +405,7 @@ def test_only_project_admins_manage_access(acme: SimpleNamespace) -> None:
     be(t, "cy")  # a project admin by grant, on that project only
     assert _put(t, "dee", "viewer").status_code == 200
     assert _put(t, "dee", "viewer", "notes").status_code == 403
-    be(t, "ada")  # an instance admin is a reader
+    be_reader(t)  # an instance admin is a reader
     assert t.client.get(_access(t)).status_code == 403
 
 

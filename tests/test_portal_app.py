@@ -534,6 +534,25 @@ def signed_in(client: TestClient, user_id: int, domain: str = PROD_DOMAIN) -> st
     return token
 
 
+def admin_signed_in(client: TestClient, user_id: int) -> str:
+    """Give ``client`` an admin session for ``user_id``; return the token.
+
+    Like :func:`signed_in`, the ``kind="admin"`` row is made directly and
+    unpaired. The cookie is set under the name the portal's base URL scheme
+    uses (``__Host-whygraph_admin`` on https, ``whygraph_admin`` on http) for
+    the base host. httpx's jar is liberal about host-only cookies, so it
+    also sends this one to org hosts: a test of host-only behaviour asserts
+    on the ``Set-Cookie`` header, not on what the jar sends.
+    """
+    from whygraph.portal import sessions
+
+    base = client.app.state.portal.base_url
+    with portal_db.get_session() as session:
+        token = sessions.create_session(session, user_id, "pytest", kind="admin")
+    client.cookies.set(sessions.admin_cookie_name(base), token, domain=base.host)
+    return token
+
+
 PROD_PASSWORD = "correct horse battery staple"
 """A password that passes production's rules (15+ chars, not blocklisted)."""
 
@@ -545,7 +564,11 @@ def claim_instance(
     display_name: str = "Ada",
     password: str = PROD_PASSWORD,
 ) -> dict:
-    """Claim a fresh production instance; ``client`` is left signed in as the admin."""
+    """Claim a fresh production instance; ``client`` is left signed in as the admin.
+
+    The bootstrap starts an **admin** session (the admin cookie), never an
+    everyday one: a password account has none (plan 59 D4).
+    """
     secret = client.app.state.portal.bootstrap_secret
     response = client.post(
         at() + "/api/auth/bootstrap",
@@ -563,14 +586,19 @@ def claim_instance(
 def log_in(
     client: TestClient, email: str, password: str = PROD_PASSWORD, **extra
 ) -> httpx.Response:
-    """Sign in through the real ``POST /api/auth/login`` on the base host."""
+    """Sign in through the real ``POST /api/auth/admin/login`` on the base host.
+
+    The only password sign-in (plan 59 D4): on success ``client`` holds an
+    **admin** session (the admin cookie), never an everyday one.
+    """
     return client.post(
-        at() + "/api/auth/login", json={"email": email, "password": password, **extra}
+        at() + "/api/auth/admin/login",
+        json={"email": email, "password": password, **extra},
     )
 
 
 def github_sign_in(
-    client: TestClient, login: str, *, next: str | None = None
+    client: TestClient, login: str, *, next: str | None = None, admin: bool = False
 ) -> httpx.Response:
     """Sign ``login`` in through the real GitHub routes and the fake GitHub.
 
@@ -579,7 +607,9 @@ def github_sign_in(
     portal's own :class:`GitHubOAuth`, so it reaches the ``github_fake``
     fixture, which the test must request - then ``POST
     /api/auth/github/callback`` with the redirect's ``code`` and ``state``
-    and the browser's ``whygraph_oauth`` cookie.
+    and the browser's ``whygraph_oauth`` cookie. With ``admin=True`` the
+    flow starts at ``POST /api/auth/github/admin/start``: the admin panel's
+    sign-in, which starts an admin session (plan 59 section 4.2).
 
     Returns
     -------
@@ -589,7 +619,8 @@ def github_sign_in(
         signed in as ``login``); a refusal (``nofa``, a disabled account,
         a forced GitHub failure) is the error response.
     """
-    start = client.post(at() + "/api/auth/github/start", json={"next": next})
+    path = "/api/auth/github/admin/start" if admin else "/api/auth/github/start"
+    start = client.post(at() + path, json={"next": next})
     assert start.status_code == 200, start.text
     github = client.app.state.portal.github
     authorize = github._request(
@@ -601,6 +632,25 @@ def github_sign_in(
         at() + "/api/auth/github/callback",
         json={"code": query["code"][0], "state": query["state"][0]},
     )
+
+
+def github_admin(client: TestClient, login: str) -> str:
+    """Make ``login`` a GitHub instance admin, signed in with an everyday session.
+
+    Signs ``login`` in through :func:`github_sign_in` (asserted ``200``; the
+    ``github_fake`` fixture must know the login), then sets
+    ``is_instance_admin`` on the row directly. The client holds the
+    everyday session, as a GitHub admin on an org host does (plan 59 D2);
+    the admin panel needs an admin session on top (:func:`admin_signed_in`
+    or ``github_sign_in(..., admin=True)``). Returns the uid.
+    """
+    response = github_sign_in(client, login)
+    assert response.status_code == 200, response.text
+    with portal_db.get_session() as session:
+        user = session.exec(select(User).where(User.github_login == login)).one()
+        user.is_instance_admin = True
+        session.add(user)
+        return user.uid
 
 
 def uid_of_login(login: str) -> str:
@@ -1287,7 +1337,9 @@ PUBLIC_AUTH_ROUTES = {
     ("/api/auth/bootstrap", "POST"),
     ("/api/auth/github/start", "POST"),
     ("/api/auth/github/callback", "POST"),
-    ("/api/auth/login", "POST"),
+    # The admin panel's sign-ins (plan 59 section 4.2)
+    ("/api/auth/admin/login", "POST"),
+    ("/api/auth/github/admin/start", "POST"),
     ("/api/auth/logout", "POST"),
     ("/api/auth/reset", "POST"),
     # A connected portal's version check and code exchange (M2e section 4.4)
@@ -1526,7 +1578,6 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     # Production's account and org creation: user_access(...) (M2c section 4.7)
     ("/api/account", "GET"): "user.self",
     ("/api/account", "PATCH"): "user.self",
-    ("/api/account/password", "POST"): "user.self",
     ("/api/account/orgs", "GET"): "user.self",
     ("/api/account/usage", "GET"): "user.self",
     ("/api/orgs", "POST"): "user.self",
@@ -1551,6 +1602,10 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/users/{uid}", "PATCH"): "instance.admin",
     ("/api/admin/users/{uid}/reset-link", "POST"): "instance.admin",
     ("/api/admin/audit", "GET"): "instance.admin",
+    # The admin panel's own account (plan 59 section 4.2)
+    ("/api/admin/me", "GET"): "instance.admin",
+    ("/api/admin/me/logout", "POST"): "instance.admin",
+    ("/api/admin/me/password", "POST"): "instance.admin",
 }
 """Plan section 4.5's route -> action table: a changed action is a visible diff."""
 
@@ -1661,6 +1716,9 @@ _FILL = {
     "{installation_id}": "7",
     "{link_id}": "nolink",
     "{provider}": "openrouter",
+    "{org}": "someorg",
+    "{id}": "1",
+    "{token_uid}": "sometoken",
 }
 
 

@@ -2,15 +2,15 @@
 
 Every test here drives a production portal with **no** injected identity, so
 ``SessionIdentity`` resolves each request from a real session cookie (set by
-the GitHub sign-in callback, or ``POST /api/auth/login`` for the password
-admin) and :func:`whygraph.portal.hosts.classify` resolves
-the organization from the ``Host`` header. The :func:`prod_world` fixture
-(plan section 5.1) builds Ada (instance admin, no memberships), Ann (owner of
-``quokka``), Bob (owner of ``narwhal`` and member of ``quokka``), and one
-project ``api`` per org - inserted directly with ``initialized_at`` set and
-its database created directly, because production makes projects only by a
-GitHub App import (``test_portal_github_import.py``), which this world has
-no app for.
+the GitHub sign-in callback, or an admin session for the admin panel) and
+:func:`whygraph.portal.hosts.classify` resolves the organization from the
+``Host`` header. The :func:`prod_world` fixture (plan section 5.1) builds Ada
+(a GitHub instance admin, no memberships; the password account that claimed
+the instance is admin-only, plan 59 D4), Ann (owner of ``quokka``), Bob
+(owner of ``narwhal`` and member of ``quokka``), and one project ``api`` per
+org - inserted directly with ``initialized_at`` set and its database created
+directly, because production makes projects only by a GitHub App import
+(``test_portal_github_import.py``), which this world has no app for.
 
 The route sweeps are generated from the live app and
 :data:`~test_portal_app.ROUTE_ACTIONS`, as M2b's ``test_portal_tenancy.py``
@@ -57,8 +57,9 @@ from test_portal_app import (  # noqa: F401 -- fixtures
     claim_instance,
     GitServer,
     env,
+    admin_signed_in,
+    github_admin,
     github_sign_in,
-    log_in,
     manual_ctx,
     portal_client,
     prod_portal,
@@ -101,6 +102,7 @@ from whygraph.db import get_session as project_session
 from whygraph.db.models import ChatSession as ChatSessionRow
 from whygraph.portal import db as portal_db
 from whygraph.portal import runner as runner_mod
+from whygraph.portal import sessions
 from whygraph.portal.authz import (
     PROJECT_ACTIONS,
     PROJECT_ROLE_ACTIONS,
@@ -136,11 +138,21 @@ READER_ONLY_READS = (
     "instance admins can only read an organization they are not a member of"
 )
 
-ADA_EMAIL = "ada@example.com"
-"""The password admin of :func:`prod_world`."""
+ROOT_EMAIL = "root@example.com"
+"""The password account that claims :func:`prod_world`'s instance: admin-only
+(plan 59 D4), so it never reaches an org host."""
+
+ADMIN_LOGIN = "ada"
+"""Ada, :func:`prod_world`'s instance admin: a GitHub account in no org, so
+she reads every org as ``reader`` (always on in plan 59 Phase 1)."""
 
 GITHUB_LOGINS = ("ann", "bob")
-"""The GitHub accounts of :func:`prod_world` (their short name is the login)."""
+"""The GitHub org owners of :func:`prod_world` (their short name is the login)."""
+
+ADMIN_LOGIN_REQUIRED = {
+    "error": "admin sign-in required",
+    "code": "admin_login_required",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +165,8 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/bootstrap", "POST"),
         ("/api/auth/github/start", "POST"),
         ("/api/auth/github/callback", "POST"),
-        ("/api/auth/login", "POST"),
+        ("/api/auth/admin/login", "POST"),
+        ("/api/auth/github/admin/start", "POST"),
         ("/api/auth/reset", "POST"),
         ("/api/orgs", "POST"),
         ("/api/orgs/slug-check", "GET"),  # M2f-3 section 4.12
@@ -165,6 +178,9 @@ BASE_ONLY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/admin/users/{uid}", "PATCH"),
         ("/api/admin/users/{uid}/reset-link", "POST"),
         ("/api/admin/audit", "GET"),
+        ("/api/admin/me", "GET"),
+        ("/api/admin/me/logout", "POST"),
+        ("/api/admin/me/password", "POST"),
         # The consent page, the code exchange and the caller's connected
         # portals (M2e section 4.4)
         ("/api/connect/validate", "POST"),
@@ -182,7 +198,6 @@ ANY_HOST_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("/api/auth/logout", "POST"),
         ("/api/account", "GET"),
         ("/api/account", "PATCH"),
-        ("/api/account/password", "POST"),
         ("/api/account/orgs", "GET"),
         ("/api/account/usage", "GET"),  # M2f-2 section 4.11
         ("/api/v1/meta", "GET"),  # public: a connected portal's version check
@@ -319,14 +334,15 @@ class ProdWorld:
         return "ann" if org is self.quokka else "bob"
 
     def sign_in(self, name: str) -> httpx.Response:
-        """Sign ``name`` in for real: GitHub for Ann and Bob, a password for Ada."""
-        if name in GITHUB_LOGINS:
-            response = github_sign_in(self.client, name)
-        else:
-            assert name == "ada", name
-            response = log_in(self.client, ADA_EMAIL)
+        """Sign ``name`` in for real with GitHub (an everyday session)."""
+        assert name in (ADMIN_LOGIN, *GITHUB_LOGINS), name
+        response = github_sign_in(self.client, name)
         assert response.status_code == 200, (name, response.text)
         return response
+
+    def admin_session(self) -> str:
+        """Give Ada an admin session on top (the admin panel's cookie); its token."""
+        return admin_signed_in(self.client, self.ids[ADMIN_LOGIN])
 
     def sign_out(self) -> None:
         """Drop the session cookie (the row stays; nothing is revoked)."""
@@ -463,9 +479,10 @@ def prod_world(
 
     Every account and org is made through the real routes (bootstrap, GitHub
     sign-in through the fake GitHub, create org, add member), so the
-    sessions the sweeps use are the ones a browser would hold. Ada is the
-    password admin; Ann and Bob are GitHub accounts. Bob's extra ``quokka``
-    membership is made by Ann through ``POST /api/org/members``. The portal
+    sessions the sweeps use are the ones a browser would hold. A password
+    account claims the instance (admin-only, plan 59 D4); Ada, Ann and Bob
+    are GitHub accounts, and Ada is made an instance admin. Bob's extra
+    ``quokka`` membership is made by Ann through ``POST /api/org/members``. The portal
     has the GitHub App (``app_env``), and each ``api`` is served by the
     fake's git server, so its scans sync the way an imported project's do.
     """
@@ -473,13 +490,15 @@ def prod_world(
     github_fake = app_env.fake
     scanner = _fake_scanner(env, monkeypatch)
     _offline_llms(monkeypatch)
-    for login in GITHUB_LOGINS:
+    for login in (ADMIN_LOGIN, *GITHUB_LOGINS):
         github_fake.add_user(login)
     for mark in ("quokka", "narwhal"):  # the sweep's `_newcomer` accounts
         login = f"{mark}-newcomer"
         github_fake.add_user(login, id=newcomer_github_id(login))
     with prod_portal() as client:
-        claim_instance(client, ADA_EMAIL, display_name="Ada")
+        claim_instance(client, ROOT_EMAIL, display_name="Root")
+        client.cookies.clear()
+        github_admin(client, ADMIN_LOGIN)
         client.cookies.clear()
         quokka = OrgWorld("quokka", "quokka", {})
         narwhal = OrgWorld("narwhal", "narwhal", {})
@@ -489,8 +508,9 @@ def prod_world(
         client.cookies.clear()
         uids, ids = {}, {}
         with portal_db.get_session() as session:
-            people = [("ada", User.email == ADA_EMAIL)] + [
-                (login, User.github_login == login) for login in GITHUB_LOGINS
+            people = [
+                (login, User.github_login == login)
+                for login in (ADMIN_LOGIN, *GITHUB_LOGINS)
             ]
             for name, where in people:
                 user = session.exec(select(User).where(where)).one()
@@ -681,7 +701,11 @@ def _fill_uid(path: str, uid: str) -> str:
 def test_every_base_only_route_is_404_on_an_org_host(prod_world: ProdWorld) -> None:
     """Credentials, org creation and the admin page live on the base host."""
     w = prod_world
-    w.sign_in("ada")  # an instance admin, so a 404 can only be the host gate
+    # An instance admin with both sessions, so a 404 can only be the host
+    # gate. httpx's jar sends the host-only admin cookie to org hosts too,
+    # which a browser never does: the admin routes see an admin there.
+    w.sign_in("ada")
+    w.admin_session()
     for path, method in sorted(BASE_ONLY_ROUTES):
         url = at("quokka") + _fill_uid(path, w.uids["ann"])
         response = w.client.request(method, url, json={})
@@ -713,9 +737,11 @@ def test_without_a_session_every_non_public_route_needs_one_on_its_own_host(
 ) -> None:
     """``401 login_required`` where the route exists; ``404`` on the wrong host.
 
-    The host gate of a ``user.self`` / ``instance.admin`` route is declared
-    before ``current_user`` (plan section 4.7), so on the wrong host it
-    stays a ``404``. An org-scoped route has no such gate: ``current_user``
+    An ``/api/admin`` route answers ``401 admin_login_required`` instead (plan
+    59 section 4.1): only an admin session opens it. The host gate of a
+    ``user.self`` / ``instance.admin`` route is declared before
+    ``current_user`` (plan section 4.7), so on the wrong host it stays a
+    ``404``. An org-scoped route has no such gate: ``current_user``
     runs before the org lookup, so on the base host it answers ``401`` too -
     the ``404`` of :func:`test_every_org_route_is_404_on_the_base_host`
     needs a session to reach the org check.
@@ -732,7 +758,10 @@ def test_without_a_session_every_non_public_route_needs_one_on_its_own_host(
         url = _fill_uid(path, w.uids["ann"])
         response = w.client.request(method, here + url, json={})
         assert response.status_code == 401, (method, path, response.text)
-        assert response.json() == LOGIN_REQUIRED, (method, path)
+        expected = (
+            ADMIN_LOGIN_REQUIRED if path.startswith("/api/admin/") else LOGIN_REQUIRED
+        )
+        assert response.json() == expected, (method, path)
         if (path, method) in BASE_ONLY_ROUTES:  # the wrong host stays a 404
             wrong = w.client.request(method, at("quokka") + url, json={})
             assert wrong.status_code == 404, (method, path, wrong.text)
@@ -1036,6 +1065,7 @@ def test_a_real_membership_wins_over_the_reader_role(prod_world: ProdWorld) -> N
     """Bob promoted to instance admin stays a member of quokka and owner of narwhal."""
     w = prod_world
     w.sign_in("ada")
+    w.admin_session()  # the admin panel reads only the admin cookie
     promoted = w.client.patch(
         at() + f"/api/admin/users/{w.uids['bob']}", json={"is_instance_admin": True}
     )
@@ -1387,8 +1417,8 @@ def test_an_open_scan_event_stream_ends_when_its_access_goes(
     }.get(revoke, "ann")
     tokens = {"ann": _session_token(w.client)}
     w.client.cookies.clear()
-    w.sign_in("ada")
-    tokens["ada"] = _session_token(w.client)
+    # Ada disables Bob from the admin panel, which reads only the admin cookie.
+    tokens["ada"] = w.admin_session()
     w.client.cookies.clear()
     w.sign_in("bob")
     tokens["bob"] = _session_token(w.client)
@@ -1439,12 +1469,18 @@ def test_an_open_scan_event_stream_ends_when_its_access_goes(
                 method,
                 url,
                 json=body,
-                headers={"cookie": f"whygraph_session={tokens[actor]}"},
+                headers={"cookie": f"{cookie_names[actor]}={tokens[actor]}"},
             )
         )
         if not done.wait(20):  # never hang: let the run end on its own
             w.scanner.hold.unlink(missing_ok=True)
 
+    admin_cookie = sessions.admin_cookie_name(w.client.app.state.portal.base_url)
+    cookie_names = {
+        "ada": admin_cookie,
+        "ann": sessions.COOKIE_NAME,
+        "bob": sessions.COOKIE_NAME,
+    }
     thread = threading.Thread(target=take_access_away)
     thread.start()
     try:

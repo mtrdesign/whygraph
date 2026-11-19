@@ -50,7 +50,7 @@ export function GitHubCallbackPage() {
     callback.mutate({ code: params.code, state: params.state });
   }, [params, callback]);
 
-  let problem: { message: string; fixUrl?: string } | null = null;
+  let problem: { message: string; fixUrl?: string; admin?: boolean } | null = null;
   if (params.error) {
     problem = { message: githubErrorMessage(params.error) };
   } else if (!params.code || !params.state) {
@@ -58,7 +58,10 @@ export function GitHubCallbackPage() {
   } else if (callback.isError) {
     const err = callback.error;
     const fix = err instanceof ApiError && typeof err.extra.fix_url === "string" ? err.extra.fix_url : undefined;
-    problem = { message: authMessage(err), fixUrl: fix };
+    // A refusal on the admin path carries `surface: "admin"` (a `not_an_admin` or a 2FA
+    // refusal): the way back is the admin sign-in.
+    const admin = err instanceof ApiError && err.extra.surface === "admin";
+    problem = { message: authMessage(err), fixUrl: fix, admin };
   }
 
   if (!problem) {
@@ -84,7 +87,7 @@ export function GitHubCallbackPage() {
           </AlertDescription>
         )}
       </Alert>
-      <Link to="/signin" className="text-sm text-primary-text hover:underline">
+      <Link to={problem.admin ? "/admin/login" : "/signin"} className="text-sm text-primary-text hover:underline">
         Back to sign in
       </Link>
     </AuthLayout>

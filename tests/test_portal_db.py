@@ -247,7 +247,8 @@ CHAT_TOOLS = "f2b8d4a60c13"
 FORGE_TRIGGER = "c9d4e2f7a815"
 TOOL_OUTCOME = "b5e1a7d93c42"
 UPDATE_CHECK = "496953df26b4"
-HEAD = UPDATE_CHECK
+ADMIN_SESSION = "df854cdd4f03"
+HEAD = ADMIN_SESSION
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001

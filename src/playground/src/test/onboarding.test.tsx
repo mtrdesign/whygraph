@@ -237,18 +237,6 @@ describe("FirstRunChecklist - production", () => {
     expect(screen.getByRole("link", { name: "Invite" })).toHaveAttribute("href", "/members");
   });
 
-  it("points a password account (the bootstrap owner) to how to import, and holds the other rows", async () => {
-    fake.state = prod("owner", { user: { ...ben, github_login: null, has_password: true } });
-    fake.items[0].can_act = false;
-    fake.items[1].can_act = false;
-    mount("/");
-    const github = await screen.findByTestId("first-run-github");
-    expect(within(github).getByRole("link", { name: "How to import" })).toHaveAttribute("href", "/projects/new");
-    expect(screen.getByTestId("first-run-project")).toHaveTextContent("Connect GitHub first");
-    expect(within(screen.getByTestId("first-run-project")).queryByRole("link")).toBeNull();
-    expect(screen.getByTestId("first-run-agent")).toHaveTextContent("Connect GitHub first");
-  });
-
   it("says 'Ask an owner' to an admin who cannot add the key", async () => {
     fake.state = prod("admin");
     fake.items[2].can_act = false;

@@ -65,6 +65,8 @@ you come from:
   needs nothing else. In production, hand over any organization a password account owns; see
   [Platform administration and password accounts](#admin-mode) and
   [WhyGraph 2.7.0](../releases/2.7.0.md).
+- **From 2.7.0**, `whygraph update`; 2.7.1 changes only the portal's UI. See
+  [WhyGraph 2.7.1](../releases/2.7.1.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

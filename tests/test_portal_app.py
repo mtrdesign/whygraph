@@ -1689,7 +1689,16 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     ("/api/admin/orgs/{slug}", "DELETE"): "instance.admin",
     ("/api/admin/orgs/{slug}/restore", "POST"): "instance.admin",
     ("/api/admin/orgs/{slug}/purge", "POST"): "instance.admin",
+    ("/api/admin/projects", "GET"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}", "GET"): "instance.admin",
     ("/api/admin/projects/{org}/{slug}", "DELETE"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/rescan", "POST"): "instance.admin",
+    (
+        "/api/admin/projects/{org}/{slug}/scans/{run_id}/cancel",
+        "POST",
+    ): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/scans/{run_id}/log", "GET"): "instance.admin",
+    ("/api/admin/projects/{org}/{slug}/storage", "POST"): "instance.admin",
     ("/api/admin/projects/{org}/{slug}/restore", "POST"): "instance.admin",
     ("/api/admin/projects/{org}/{slug}/purge", "POST"): "instance.admin",
 }

@@ -83,7 +83,8 @@ who (production only), what it was (**Chat**, **Describe** or **Rationale card**
 cost, and links to the **Scan** or **Chat** it belongs to. Another member's chat reads "Chat (another
 member)" and does not link. Every Calls filter applies as soon as you change it (the Model box waits
 until you stop typing), and a filter that came from a link shows as a chip: "This scan: Full rescan -
-9 Oct 2026, 14:02" or "This chat: <the chat's title>". Click the chip to clear it.
+9 Oct 2026, 14:02" or "This chat: <the chat's title>". Click the chip to clear it. **Clear filters**
+resets every filter, the chips and the sort at once; the range stays.
 
 On a phone the tab strip becomes a menu, and each table stacks into one card per row. A month with
 nothing in it draws no chart and says "No LLM usage this month yet".

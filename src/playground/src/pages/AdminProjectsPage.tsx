@@ -4,6 +4,7 @@ import { adminApi, type AdminProjectRow } from "../api";
 import { AdminHeading } from "../components/admin/AdminHeading";
 import { projectMatches } from "../components/admin/AdminCommandPalette";
 import { AdminSearchBox } from "../components/admin/AdminSearchBox";
+import { ClearFilters } from "../components/portal/ClearFilters";
 import { StatusFilter } from "../components/admin/adminParts";
 import { projectState } from "../components/admin/ProjectActions";
 import { PageContainer } from "../components/layout/PageContainer";
@@ -109,6 +110,7 @@ export function AdminProjectsPage() {
           </select>
         </label>
         <StatusFilter value={state} onChange={(next) => go({ org, state: next, q })} options={STATE_OPTIONS} />
+        {(q || org || state) && <ClearFilters onClear={() => go({})} />}
       </div>
       <QueryState query={projects} loading={<TableSkeleton />} errorTitle="Couldn't load the projects">
         {({ projects: all }) => (

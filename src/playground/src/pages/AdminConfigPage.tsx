@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearch } from "@tanstack/react-router";
 import { UserCheckIcon } from "lucide-react";
 import {
   adminApi,
@@ -30,6 +31,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { errorMessage } from "../lib/apiErrors";
 import { formatDate, formatDateTime } from "../lib/format";
+import type { AdminConfigSearch } from "../lib/routeSearch";
 
 type Save = (changes: AdminConfigChanges) => Promise<unknown>;
 
@@ -444,6 +446,7 @@ export function AdminConfigPage() {
   const queryClient = useQueryClient();
   const userName = useUserName();
   const config = useQuery({ queryKey: [...ADMIN, "config"], queryFn: adminApi.config });
+  const search = useSearch({ strict: false }) as AdminConfigSearch;
 
   // Each form sends only its own changed keys; a refetch then moves every form's saved values.
   const save: Save = async (changes) => {
@@ -488,6 +491,7 @@ export function AdminConfigPage() {
             ...(settings.signup_policy === "invite_only" ? [{ id: "allowlist", label: "Allowlist" }] : []),
             { id: "instance", label: "Instance" },
           ]}
+          initial={search.section}
         >
           <SignupSection settings={settings} save={save} />
           <OrganizationsSection settings={settings} save={save} />

@@ -70,7 +70,7 @@ The text on these pages is always shown as plain text, never rendered as markup,
 session shares its origin with pages that show user-supplied names.
 
 Every filter on a list is in the address, so a refresh, a shared link and the back button keep the
-view.
+view. While any filter is set, **Clear filters** at the end of the filter row puts them all back at once.
 
 ### Dashboard
 
@@ -255,7 +255,9 @@ it, then erase again. If recent events are still being written, wait a minute an
 
 **Configuration** (title "Platform configuration") sets the policy for the whole platform. Each form has
 its own **Save** and **Discard**, sends only the settings it holds, and takes effect at once without a
-restart; the page says when it was last changed and by whom. Every change is written to the
+restart; the page says when it was last changed and by whom. A section you pick in the list beside the
+page is kept in the address (`?section=signup`, `organizations`, `limits`, `announcement`, `allowlist`
+or `instance`), so a refresh opens it again. Every change is written to the
 [event log](production.md#the-security-event-log) (`instance_settings_changed`, with each setting's old
 and new value). Nothing here is enforced in local mode.
 

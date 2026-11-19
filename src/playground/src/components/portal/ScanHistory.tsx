@@ -14,6 +14,7 @@ import { TableSkeleton } from "../state/Skeletons";
 import { PageContainer } from "../layout/PageContainer";
 import { ResponsiveTable, type Column } from "../layout/ResponsiveTable";
 import { Button } from "../ui/button";
+import { ClearFilters } from "./ClearFilters";
 import { nativeSelect } from "./Field";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { ScanMenu } from "./ScanMenu";
@@ -281,14 +282,10 @@ export function ScanHistory({ slug }: { slug: string }) {
             options={SCAN_TYPES.map((t) => ({ value: t, label: TYPE_LABEL[t] }))}
           />
           {filtered && (
-            <Button
-              size="sm"
-              variant="ghost"
+            <ClearFilters
               className="justify-self-start"
-              onClick={() => setFilters({ status: undefined, trigger: undefined, type: undefined, requester: undefined })}
-            >
-              Clear filters
-            </Button>
+              onClear={() => setFilters({ status: undefined, trigger: undefined, type: undefined, requester: undefined })}
+            />
           )}
         </div>
       )}

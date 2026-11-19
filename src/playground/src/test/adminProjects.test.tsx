@@ -60,6 +60,16 @@ describe("Projects list", () => {
     expect(router.state.location.search).toEqual({ q: "api" });
   });
 
+  it("Clear filters empties the organization, the state and the search in one click", async () => {
+    const router = mountAdmin("/admin/projects?org=acme&state=ok&q=api");
+    await screen.findByTestId("admin-project-acme-api");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(rows()).toEqual(["admin-project-acme-api", "admin-project-zeta-web"]));
+    expect(router.state.location.search).toEqual({});
+    expect(screen.getByLabelText("Organization")).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
+  });
+
   it("opens the detail page from a row", async () => {
     const router = mountAdmin("/admin/projects");
     await userEvent.setup().click(await screen.findByTestId("admin-project-acme-api"));

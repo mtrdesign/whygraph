@@ -95,6 +95,7 @@ import {
   type BaseSearch,
   validateAdminAuditSearch,
   validateAdminOrgSearch,
+  validateAdminConfigSearch,
   validateAdminDashboardSearch,
   validateAdminOrgsSearch,
   validateAdminProjectsSearch,
@@ -915,6 +916,7 @@ const adminAuditRoute = createRoute({
 const adminConfigRoute = createRoute({
   getParentRoute: () => adminLayout,
   path: "config",
+  validateSearch: validateAdminConfigSearch,
   component: AdminConfigPage,
 });
 const adminAccountRoute = createRoute({ getParentRoute: () => adminLayout, path: "account", component: AdminAccountPage });

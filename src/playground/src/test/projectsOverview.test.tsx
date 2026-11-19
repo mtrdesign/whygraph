@@ -582,6 +582,14 @@ describe("Projects list", () => {
     await user.type(screen.getByRole("searchbox", { name: "Search projects" }), "mi");
     await waitFor(() => expect(here(router)).toBe("/?q=mi&sort=status"));
     expect(order()).toEqual(["project-mid"]);
+
+    // Clear filters empties the search box and puts the order back to Name.
+    await user.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(here(router)).toBe("/"));
+    expect(screen.getByRole("searchbox", { name: "Search projects" })).toHaveValue("");
+    expect(screen.getByRole("combobox", { name: "Sort projects" })).toHaveValue("name");
+    expect(order()).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
   });
 
   it("renders 60 cards, then Show more", async () => {

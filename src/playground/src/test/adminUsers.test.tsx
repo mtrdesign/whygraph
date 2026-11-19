@@ -59,6 +59,18 @@ describe("Users list", () => {
     await waitFor(() => expect(router.state.location.search).toEqual({ q: "ro" }));
   });
 
+  it("Clear filters shows only while a filter is set and puts the search and Show back to their defaults", async () => {
+    const router = mountAdmin("/admin/users?status=admins&q=ro");
+    const u = userEvent.setup();
+    await screen.findByTestId("admin-user-u3");
+    await u.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(router.state.location.search).toEqual({}));
+    expect(screen.getByLabelText("Search")).toHaveValue("");
+    expect(screen.getByLabelText("Show")).toHaveValue("");
+    expect(rows()).toHaveLength(4);
+    expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
+  });
+
   it("opens with ?status= applied, and an invalid one falls back to All", async () => {
     mountAdmin("/admin/users?status=password");
     await screen.findByTestId("admin-user-u3");

@@ -4,6 +4,7 @@ import { adminApi, type AdminUser } from "../api";
 import { AdminHeading } from "../components/admin/AdminHeading";
 import { userMatches } from "../components/admin/AdminCommandPalette";
 import { AdminSearchBox } from "../components/admin/AdminSearchBox";
+import { ClearFilters } from "../components/portal/ClearFilters";
 import { StatusFilter, userLabel } from "../components/admin/adminParts";
 import { PageContainer } from "../components/layout/PageContainer";
 import { ResponsiveTable, type Column } from "../components/layout/ResponsiveTable";
@@ -96,6 +97,7 @@ export function AdminUsersPage() {
       <div className="flex flex-wrap items-end gap-3">
         <AdminSearchBox q={q} onChange={(next) => go({ status, q: next })} />
         <StatusFilter value={status} onChange={(next) => go({ status: next, q })} options={STATUS_OPTIONS} />
+        {(q || status) && <ClearFilters onClear={() => go({})} />}
       </div>
       <QueryState query={users} loading={<TableSkeleton />} errorTitle="Couldn't load the users">
         {(all) => (

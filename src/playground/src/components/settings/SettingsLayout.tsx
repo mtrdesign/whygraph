@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useBlocker } from "@tanstack/react-router";
+import { useBlocker, useNavigate } from "@tanstack/react-router";
 import { cn } from "../../lib/utils";
 import { PageContainer } from "../layout/PageContainer";
 import { ConfirmDialog } from "../portal/ConfirmDialog";
@@ -58,7 +58,8 @@ export function useSettingsDirty(key: string, label: string, dirty: boolean) {
  * local global settings: a heading, then a sticky section list beside the
  * sections (a sticky, sideways-scrolling strip above them below `md`). The
  * active entry follows the scroll position (IntersectionObserver); `initial`
- * (the page's `?section=`) is scrolled into view once its section mounts.
+ * (the page's `?section=`) is scrolled into view once its section mounts, and
+ * choosing an entry writes it back to `?section=` (a replace), so a refresh stays there.
  * Leaving the page with an unsaved section form asks first (router blocker and
  * `beforeunload`); changing only the query string never does.
  */
@@ -152,10 +153,18 @@ export function SettingsLayout({
   });
 
   const ctx = useMemo(() => ({ mounted, setDirty }), [mounted, setDirty]);
+  const navigate = useNavigate();
   const go = (id: string) => {
     setActive(id);
     pausedUntil.current = Date.now() + 800;
     scrollToSection(id, true);
+    // The URL names the section (the first one is the default, so it is left out): a refresh returns
+    // here. This scroll is already under way, so neither the deep link nor the `?section=` effect repeats it.
+    const section = id === ids[0] ? undefined : id;
+    deepLinked.current = true;
+    lastInitial.current = section;
+    // `section` is one of this page's ids; each route's validator (`routeSearch.ts`) lists them.
+    void navigate({ to: ".", search: (prev) => ({ ...prev, section: section as never }), replace: true });
   };
 
   return (

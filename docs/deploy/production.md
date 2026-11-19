@@ -730,6 +730,8 @@ plus these GitHub, member, project and organization events:
 | `budget_set`, `budget_removed` | An owner or admin set or removed a budget (with its scope, amount and hard-stop flag, and the member or project). |
 | `price_override_set`, `price_override_removed` | An owner or admin set or reverted an organization price for a provider and model. |
 | `key_tested` | Someone pressed **Test key** on an LLM key (with the `scope`, the `provider` and the `result`; never any key material). |
+| `instance_settings_changed` | A platform administrator changed the platform configuration (sign-up policy, who may create organizations, the quotas or the announcement banner), with `changes` as `{setting: [old, new]}` (banner text cut to 80 characters). |
+| `signup_allowlist_changed` | A platform administrator added a GitHub account to the sign-up allowlist (`added`, the login) or removed one (`removed`). |
 
 Each carries the event, the user, the target user, the client address and the host. A password
 sign-in failure shows only the first 3 characters of the email and its domain. No token, code, state,

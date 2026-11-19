@@ -1657,6 +1657,12 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     # Production's admin page: instance_access()
     ("/api/admin/settings", "GET"): "instance.admin",
     ("/api/admin/update", "GET"): "instance.admin",
+    # Platform configuration (plan 59 section 4.13)
+    ("/api/admin/config", "GET"): "instance.admin",
+    ("/api/admin/config", "PUT"): "instance.admin",
+    ("/api/admin/config/signup-allowlist", "GET"): "instance.admin",
+    ("/api/admin/config/signup-allowlist", "POST"): "instance.admin",
+    ("/api/admin/config/signup-allowlist/{id}", "DELETE"): "instance.admin",
     ("/api/admin/orgs", "GET"): "instance.admin",
     ("/api/admin/orgs", "POST"): "instance.admin",
     ("/api/admin/orgs/{slug}", "GET"): "instance.admin",

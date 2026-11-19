@@ -32,6 +32,7 @@ import enum
 import hmac
 import json
 import secrets
+import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -43,7 +44,7 @@ import anyio.to_thread
 from alembic.util import CommandError as AlembicCommandError
 from fastapi import APIRouter, Body, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy import delete, literal_column, or_, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -59,7 +60,7 @@ from whygraph.db.models import ChatSession
 from whygraph.mcp.evidence import stop_describes
 from whygraph.serve.chat import delete_session_rows
 
-from . import audit_store, connections, updates
+from . import audit_store, connections, instance_settings, updates
 from .audit import audit, truncate_email
 from .audit import current_writer as current_audit_writer
 from .authz import Action, ProjectRole, Role
@@ -80,19 +81,23 @@ from .deps import (
 from .github_app_routes import end_user_tokens
 from .github_auth import (
     GitHubAuthFailed,
+    GitHubNoSuchUser,
     GitHubOAuth,
+    GitHubRateLimited,
     GitHubUnavailable,
     GitHubUser,
     PendingLogin,
 )
 from .hosts import BaseUrl, safe_admin_redirect, safe_redirect
 from .member_routes import (
+    GITHUB_LOOKUP_KEY,
     Redeemed,
     _checked_role,
     _last_owner,
     _lock_owners,
     _locked_target,
     _member_row,
+    normalize_login,
     redeem_invitations,
 )
 from .models import (
@@ -108,6 +113,7 @@ from .models import (
     ReaderGrant,
     RetiredOrgSlug,
     ScanRun,
+    SignupAllowlist,
     StorageSample,
     UsageEvent,
     User,
@@ -304,6 +310,29 @@ class AdminSessionsBody(_Strict):
     """``DELETE /api/admin/users/{uid}/sessions``: which kind to end (default both)."""
 
     kind: Literal["user", "admin"] | None = None
+
+
+class InstanceSettingsBody(_Strict):
+    """``PUT /api/admin/config``: a partial update.
+
+    Only the keys in ``model_fields_set`` apply, so ``max_orgs_per_user: null``
+    clears a quota while an absent key changes nothing. An explicit ``null``
+    on a non-nullable key is a validation error.
+    """
+
+    signup_policy: Literal["open", "invite_only", "closed"] = "open"
+    org_creation: Literal["everyone", "admins"] = "everyone"
+    max_orgs_per_user: StrictInt | None = Field(default=None, ge=1, le=2_147_483_647)
+    max_projects_per_org: StrictInt | None = Field(default=None, ge=1, le=2_147_483_647)
+    banner_text: str | None = Field(default=None, max_length=500)
+    banner_level: Literal["info", "warning"] = "info"
+
+
+class AllowlistBody(_Strict):
+    """``POST /api/admin/config/signup-allowlist``."""
+
+    github_login: str = Field(max_length=100)
+    note: str | None = Field(default=None, max_length=200)
 
 
 # ---------------------------------------------------------------------------
@@ -1547,12 +1576,9 @@ def get_admin_settings(
     return {"base_url": _base(state).origin, "base_check": state.base_check}
 
 
-@auth_router.get("/api/admin/update")
-def get_admin_update(
-    request: Request, _: Principal = Depends(instance_access())
-) -> dict:
+def update_block_or_fallback(state: PortalState) -> dict:
     """The update-notice block; before the loop's first tick only ``current``."""
-    block = updates.update_block(portal_state(request))
+    block = updates.update_block(state)
     if block is not None:
         return block
     current = running_version()
@@ -1568,6 +1594,261 @@ def get_admin_update(
         "checked_at": None,
         "error": None,
     }
+
+
+@auth_router.get("/api/admin/update")
+def get_admin_update(
+    request: Request, _: Principal = Depends(instance_access())
+) -> dict:
+    """The update-notice block; before the loop's first tick only ``current``."""
+    return update_block_or_fallback(portal_state(request))
+
+
+def _settings_answer(db: Session, values: instance_settings.InstanceSettings) -> dict:
+    """The settings columns, ``updated_by`` as a uid."""
+    answer = values.changeable()
+    answer["updated_at"] = values.updated_at
+    answer["updated_by"] = (
+        db.exec(select(User.uid).where(User.id == values.updated_by)).first()
+        if values.updated_by is not None
+        else None
+    )
+    return answer
+
+
+def _postgres_bytes(db: Session) -> int | None:
+    try:
+        return int(
+            db.exec(text("SELECT pg_database_size(current_database())")).scalar()
+        )  # type: ignore[call-overload]
+    except SQLAlchemyError:
+        db.rollback()
+        return None
+
+
+def _data_disk(state: PortalState) -> dict | None:
+    try:
+        usage = shutil.disk_usage(state.data_dir)
+    except OSError:
+        return None
+    return {"total": usage.total, "free": usage.free}
+
+
+@auth_router.get("/api/admin/config")
+def get_admin_config(
+    request: Request, _: Principal = Depends(instance_access())
+) -> dict:
+    """The platform configuration and the read-only instance facts (plan 59 section 4.13).
+
+    Returns
+    -------
+    dict
+        ``{settings, instance}``. ``instance`` holds the base URL and its
+        check, the version and update block, the GitHub App's slug and
+        client id, the OAuth App's client id, the data volume's total and
+        free bytes and the database size. Never a secret or a secret-file
+        path.
+    """
+    state = portal_state(request)
+    current = running_version()
+    app_config = state.github_app.config if state.github_app is not None else None
+    oauth_config = state.github.config if state.github is not None else None
+    with get_session() as db:
+        settings = _settings_answer(db, state.instance_settings)
+        postgres_bytes = _postgres_bytes(db)
+    return {
+        "settings": settings,
+        "instance": {
+            "base_url": _base(state).origin,
+            "base_check": state.base_check,
+            "version": format_version(current) if current is not None else None,
+            "update": update_block_or_fallback(state),
+            "github_app": (
+                {"slug": app_config.slug, "client_id": app_config.client_id}
+                if app_config is not None
+                else None
+            ),
+            "oauth_app": (
+                {"client_id": oauth_config.client_id}
+                if oauth_config is not None
+                else None
+            ),
+            "data_disk": _data_disk(state),
+            "postgres_bytes": postgres_bytes,
+        },
+    }
+
+
+@auth_router.put("/api/admin/config")
+def put_admin_config(
+    body: InstanceSettingsBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Change the platform configuration (a partial update).
+
+    Applies exactly ``body.model_fields_set``; an empty body is ``422``. The
+    module lock is held from the read of the old values through the commit
+    and the cache swap. Audits ``instance_settings_changed`` with
+    ``changes: {key: [old, new]}`` (banner text cut to 80 characters).
+
+    Returns
+    -------
+    dict
+        The same ``settings`` block ``GET`` answers.
+    """
+    state = portal_state(request)
+    sent = body.model_fields_set
+    if not sent:
+        raise ApiError(422, "nothing to change: send at least one setting")
+    changes = {key: getattr(body, key) for key in sent}
+    text_value = changes.get("banner_text")
+    if isinstance(text_value, str) and not text_value.strip():
+        changes["banner_text"] = None
+
+    def swap(new: instance_settings.InstanceSettings) -> None:
+        state.instance_settings = new
+
+    with get_session() as db:
+        old, new = instance_settings.save(db, changes, principal.user_id, publish=swap)
+        answer = _settings_answer(db, new)
+
+    def shown(key: str, value: object) -> object:
+        if key == "banner_text" and isinstance(value, str):
+            return value[:80]
+        return value
+
+    moved = {
+        key: [shown(key, getattr(old, key)), shown(key, getattr(new, key))]
+        for key in sorted(changes)
+        if getattr(old, key) != getattr(new, key)
+    }
+    if moved:
+        audit("instance_settings_changed", request, uid=principal.uid, changes=moved)
+    return answer
+
+
+def _allowlist_entry(row: SignupAllowlist, created_by: str | None) -> dict:
+    return {
+        "id": row.id,
+        "github_login": row.github_login,
+        "note": row.note,
+        "created_at": row.created_at,
+        "created_by": created_by,
+        "used_at": row.used_at,
+    }
+
+
+@auth_router.get("/api/admin/config/signup-allowlist")
+def get_signup_allowlist(
+    request: Request, _: Principal = Depends(instance_access())
+) -> list[dict]:
+    """Every allowlist entry, oldest first, ``created_by`` as a uid."""
+    with get_session() as db:
+        rows = db.exec(
+            select(SignupAllowlist, User.uid)
+            .join(User, col(User.id) == col(SignupAllowlist.created_by), isouter=True)
+            .order_by(col(SignupAllowlist.id))
+        ).all()
+        return [_allowlist_entry(row, uid) for row, uid in rows]
+
+
+@auth_router.post("/api/admin/config/signup-allowlist")
+def post_signup_allowlist(
+    body: AllowlistBody,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Admit one GitHub account to sign up once (D31).
+
+    The login is resolved to its id with one GitHub call under the
+    ``github_lookup`` throttle: ``404 no_such_github_user``, ``502
+    github_unavailable``, ``503 github_rate_limited``. An id already listed
+    returns the existing entry with ``added: false``.
+    """
+    state = portal_state(request)
+    login = normalize_login(body.github_login)
+    if login is None:
+        raise ApiError(422, "that is not a GitHub username", code="bad_login")
+    github = state.github
+    assert github is not None  # production start-up built it
+    try:
+        found = github.user_by_login(
+            login,
+            anonymous_budget=lambda: state.github_lookup.hit(GITHUB_LOOKUP_KEY),
+        )
+    except GitHubNoSuchUser:
+        raise ApiError(
+            404, "there is no GitHub user with that name", code="no_such_github_user"
+        ) from None
+    except GitHubRateLimited as exc:
+        raise ApiError(
+            503,
+            "GitHub's rate limit was reached: try again later",
+            code="github_rate_limited",
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from None
+    except GitHubUnavailable:
+        raise ApiError(
+            502,
+            "GitHub could not be reached: try again in a moment",
+            code="github_unavailable",
+        ) from None
+    note = (body.note or "").strip() or None
+    added = True
+    with get_session() as db:
+        row = db.exec(
+            select(SignupAllowlist).where(SignupAllowlist.github_id == found.id)
+        ).first()
+        if row is not None:
+            added = False
+        else:
+            row = SignupAllowlist(
+                github_id=found.id,
+                github_login=found.login,
+                note=note,
+                created_by=principal.user_id,
+            )
+            try:
+                with db.begin_nested():
+                    db.add(row)
+                    db.flush()
+            except IntegrityError:  # a concurrent add of the same id
+                added = False
+                row = db.exec(
+                    select(SignupAllowlist).where(SignupAllowlist.github_id == found.id)
+                ).one()
+        creator = (
+            db.exec(select(User.uid).where(User.id == row.created_by)).first()
+            if row.created_by is not None
+            else None
+        )
+        answer = _allowlist_entry(row, creator)
+    if added:
+        audit(
+            "signup_allowlist_changed",
+            request,
+            uid=principal.uid,
+            added=answer["github_login"],
+        )
+    return {**answer, "added": added}
+
+
+@auth_router.delete("/api/admin/config/signup-allowlist/{id}")
+def delete_signup_allowlist(
+    id: int,
+    request: Request,
+    principal: Principal = Depends(instance_access()),
+) -> dict:
+    """Remove one allowlist entry; ``404`` when it is not there."""
+    with get_session() as db:
+        row = db.get(SignupAllowlist, id)
+        if row is None:
+            raise ApiError(404, "no such allowlist entry")
+        login = row.github_login
+        db.delete(row)
+    audit("signup_allowlist_changed", request, uid=principal.uid, removed=login)
+    return {"removed": True}
 
 
 def _last_activity_day(org_id_column) -> object:
@@ -3339,6 +3620,12 @@ def _erase_portal_rows(uid: str) -> None:
             invited = or_(invited, col(Invitation.github_id) == github_id)
         db.exec(delete(Invitation).where(invited))
         db.exec(delete(ConnectionToken).where(col(ConnectionToken.user_id) == user_id))
+        if github_id is not None:
+            db.exec(
+                delete(SignupAllowlist).where(
+                    col(SignupAllowlist.github_id) == github_id
+                )
+            )
         db.exec(delete(ReaderGrant).where(col(ReaderGrant.user_id) == user_id))
         user.display_name = DELETED_USER
         user.email = None

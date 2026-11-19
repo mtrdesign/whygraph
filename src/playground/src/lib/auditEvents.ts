@@ -89,6 +89,8 @@ export const AUDIT_EVENTS: Record<string, EventInfo> = {
   reader_grant_revoked: { label: "Read-only access ended", group: "Security" },
   sessions_revoked: { label: "Sessions ended", group: "Security" },
   key_tested: { label: "API key tested", group: "Security" },
+  instance_settings_changed: { label: "Platform configuration changed", group: "Security" },
+  signup_allowlist_changed: { label: "Sign-up allowlist changed", group: "Security" },
   // Organization
   org_created: { label: "Organization created", group: "Organization" },
   org_renamed: { label: "Organization renamed", group: "Organization" },

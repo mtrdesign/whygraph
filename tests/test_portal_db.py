@@ -94,6 +94,8 @@ PORTAL_TABLES = {
     "agent_call_days",
     "reader_grants",
     "storage_samples",
+    "instance_settings",
+    "signup_allowlist",
 }
 
 
@@ -252,7 +254,8 @@ UPDATE_CHECK = "496953df26b4"
 ADMIN_SESSION = "df854cdd4f03"
 ADMIN_ORGS = "7a2e5c9d1b48"
 ADMIN_METRICS = "3c8f1b6d4e92"
-HEAD = ADMIN_METRICS
+ADMIN_CONFIG = "5d9e2a7c3f18"
+HEAD = ADMIN_CONFIG
 
 
 def _seed_m2a(conn) -> dict[str, int]:  # noqa: ANN001

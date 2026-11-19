@@ -283,6 +283,7 @@ export const PROJECTS = [
 export const PROJECT_DETAIL = {
   org: "acme",
   org_deleted_at: null,
+  org_suspended: null,
   slug: "api",
   name: "Api",
   source: "github",
@@ -291,6 +292,7 @@ export const PROJECT_DETAIL = {
   access_lost_reason: null,
   restricted: false,
   deleted_at: null,
+  deleted_by: null,
   overview: {
     coverage: { points: [] },
     events: [],

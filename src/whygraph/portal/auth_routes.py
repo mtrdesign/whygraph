@@ -4331,9 +4331,11 @@ def get_admin_project(
     Returns
     -------
     dict
-        ``org``, ``org_deleted_at``, ``slug``, ``name``, ``source``,
+        ``org``, ``org_deleted_at``, ``org_suspended`` (``{at, reason}`` or
+        ``null``), ``slug``, ``name``, ``source``,
         ``created_at``, ``last_scan_at``, ``access_lost_reason``,
-        ``restricted``, ``deleted_at``, ``overview`` (the Overview answer),
+        ``restricted``, ``deleted_at``, ``deleted_by`` (the deleting user's
+        display label, ``null`` when unknown), ``overview`` (the Overview answer),
         ``runs`` (the newest :data:`DETAIL_RUNS`, shaped as the org's scan
         list, requesters named plainly) and ``storage`` (``latest``: the
         newest sample's five parts and total, or ``null``; ``series``: the
@@ -4362,10 +4364,29 @@ def get_admin_project(
         ).first()
         latest_sample = _sample_dict(latest)
         series = _storage_series(db, project.id, _now())
+        suspension = db.exec(
+            select(Organization.suspended_at, Organization.suspended_reason).where(
+                Organization.id == found.org_id
+            )
+        ).first()
+        deleted_by = None
+        if project.deleted_by is not None:
+            who = db.exec(
+                select(User.display_name, User.github_login, User.deleted_at).where(
+                    User.id == project.deleted_by
+                )
+            ).first()
+            if who is not None:
+                deleted_by = user_label(*who)[0]
         run_rows = [_run_dict(run, people, show_cost=True) for run in runs]
     return {
         "org": found.org_slug,
         "org_deleted_at": found.org_deleted_at,
+        "org_suspended": (
+            None
+            if suspension is None or suspension[0] is None
+            else {"at": suspension[0], "reason": suspension[1]}
+        ),
         "slug": project.slug,
         "name": project.name,
         "source": project.source,
@@ -4374,6 +4395,7 @@ def get_admin_project(
         "access_lost_reason": project.access_lost_reason,
         "restricted": project.restricted,
         "deleted_at": project.deleted_at,
+        "deleted_by": deleted_by,
         "overview": overview,
         "runs": run_rows,
         "storage": {"latest": latest_sample, "series": series},

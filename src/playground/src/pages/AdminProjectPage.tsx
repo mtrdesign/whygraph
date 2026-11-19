@@ -206,7 +206,7 @@ function Detail({ project }: { project: AdminProjectDetail }) {
     },
   });
   const gone = !!project.deleted_at || !!project.org_deleted_at;
-  const suspended = !!org?.suspended;
+  const suspended = !!project.org_suspended;
   const { usage, agents, last_failure: failure } = project.overview;
   const rescanButton = (
     <Button disabled={rescan.isPending || suspended} onClick={() => rescan.mutate()}>
@@ -232,7 +232,7 @@ function Detail({ project }: { project: AdminProjectDetail }) {
           <Badge variant={state.variant}>{state.label}</Badge>
         </div>
       </div>
-      {project.deleted_at && <DeletedAlert deletedAt={project.deleted_at} deletedBy={null} />}
+      {project.deleted_at && <DeletedAlert deletedAt={project.deleted_at} deletedBy={null} deletedByName={project.deleted_by} />}
       {!project.deleted_at && project.org_deleted_at && (
         <Alert variant="warning" data-testid="org-deleted-alert">
           <AlertDescription>The organization is deleted. Restore it before changing this project.</AlertDescription>

@@ -206,6 +206,7 @@ describe("Project detail", () => {
     detail = { ...PROJECT_DETAIL, deleted_at: "2026-11-10T09:00:00Z" };
     mountAdmin("/admin/projects/acme/api");
     expect(await screen.findByTestId("deleted-alert")).toHaveTextContent("Deleted");
+    expect(screen.getByTestId("deleted-alert")).toHaveTextContent("by a platform administrator");
     expect(screen.getByRole("button", { name: "Restore" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Delete permanently" })).toBeInTheDocument();
     for (const name of ["Rescan", "Measure now", "Delete", "Cancel"]) {
@@ -213,8 +214,14 @@ describe("Project detail", () => {
     }
   });
 
+  it("a deleted project names who deleted it", async () => {
+    detail = { ...PROJECT_DETAIL, deleted_at: "2026-11-10T09:00:00Z", deleted_by: "Ada (@ada)" };
+    mountAdmin("/admin/projects/acme/api");
+    expect(await screen.findByTestId("deleted-alert")).toHaveTextContent("by Ada (@ada)");
+  });
+
   it("disables Rescan with its reason when the organization is suspended", async () => {
-    fake.routes["/api/admin/orgs"] = () => json([{ ...ORGS[0], suspended: { at: "2026-11-01T00:00:00Z", reason: "abuse" } }]);
+    detail = { ...PROJECT_DETAIL, org_suspended: { at: "2026-11-01T00:00:00Z", reason: "abuse" } };
     mountAdmin("/admin/projects/acme/api");
     await waitFor(() => expect(screen.getByRole("button", { name: "Rescan" })).toBeDisabled());
     expect(screen.getByText("The organization is suspended.")).toBeInTheDocument();

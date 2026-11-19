@@ -1734,6 +1734,7 @@ export interface AdminStorageSample {
 export interface AdminProjectDetail {
   org: string;
   org_deleted_at: string | null;
+  org_suspended: { at: string; reason: string | null } | null;
   slug: string;
   name: string;
   source: string;
@@ -1742,6 +1743,7 @@ export interface AdminProjectDetail {
   access_lost_reason: string | null;
   restricted: boolean;
   deleted_at: string | null;
+  deleted_by: string | null;
   overview: ProjectOverview;
   runs: ScanRunRow[];
   storage: {

@@ -1254,6 +1254,7 @@ def test_projects_detail_equals_the_orgs_own_overview(cn: SimpleNamespace) -> No
     body = response.json()
     assert body["overview"] == own.json()
     assert (body["org"], body["slug"], body["deleted_at"]) == ("acme", "api", None)
+    assert body["org_suspended"] is None and body["deleted_by"] is None
     assert [r["id"] for r in body["runs"]] == [run_id]
     assert body["runs"][0]["requested_by"]["label"] == "Ben (@ben)"
     latest = body["storage"]["latest"]
@@ -1268,8 +1269,14 @@ def test_projects_detail_equals_the_orgs_own_overview(cn: SimpleNamespace) -> No
     empty = cn.client.get(url("/api/admin/projects/acme/web")).json()["storage"]
     assert empty["latest"] is None and empty["series"]["rows"] == []
     # Soft-deleted projects and projects of deleted orgs still have a detail.
-    set_project("web", deleted_at=_iso(now))
-    assert cn.client.get(url("/api/admin/projects/acme/web")).status_code == 200
+    set_project("web", deleted_at=_iso(now), deleted_by=cn.ids["ada"])
+    deleted = cn.client.get(url("/api/admin/projects/acme/web"))
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted_by"] == "Ada"
+    set_project("web", deleted_by=None)
+    set_org("acme", suspended_at=_iso(now), suspended_reason="abuse")
+    suspended = cn.client.get(url("/api/admin/projects/acme/api")).json()
+    assert suspended["org_suspended"] == {"at": _iso(now), "reason": "abuse"}
     assert cn.client.get(url("/api/admin/projects/acme/nope")).status_code == 404
     assert cn.client.get(url("/api/admin/projects/nope/api")).status_code == 404
 

@@ -15,6 +15,7 @@ at any depth, each with an ``agent-*.meta.json`` that names its ``agentType``.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -2487,3 +2488,133 @@ def dryrun_record(stem: str, text: str) -> Check:
         return True, f"dry-run record {'holds' if text in record else 'lacks'} {text!r}"
 
     return Check(f"dry-run record has {text}", fn, record=True)
+
+
+# Plan 60 step 5: the /whygraph-claude-md cases.
+CLAUDE_MD_TOOL = "sh .claude/skills/whygraph-claude-md/claude-md-tool.sh"
+_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def claude_md_check(rel_path: str, kind: str) -> Check:
+    """Pass when ``claude-md-tool.sh check <rel_path> <kind>`` exits 0.
+
+    ``kind`` is ``root`` or ``nested``. The detail holds the tool's output.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        proc = subprocess.run(
+            [*CLAUDE_MD_TOOL.split(), "check", rel_path, kind],
+            cwd=ctx.workdir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        text = (proc.stdout + proc.stderr).strip()
+        return proc.returncode == 0, f"exit {proc.returncode}: {text[:300]}"
+
+    return Check(f"{rel_path} passes check {kind}", fn)
+
+
+def lines_without_comments(rel_path: str, maximum: int) -> Check:
+    """Pass when a file has at most ``maximum`` lines outside ``<!-- -->`` blocks.
+
+    A line that only holds a comment, or sits inside one, is not counted.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        text = _text(ctx.workdir / rel_path)
+        if not text:
+            return False, f"{rel_path} is missing or empty"
+        lines = _COMMENT_RE.sub("\0", text).split("\n")
+        lines = [
+            x for x in lines if not ("\0" in x and not x.replace("\0", "").strip())
+        ]
+        if lines and lines[-1] == "":
+            lines.pop()
+        return len(lines) <= maximum, f"{len(lines)} line(s), limit {maximum}"
+
+    return Check(f"{rel_path} has at most {maximum} lines", fn)
+
+
+def file_unchanged(rel_path: str, sha256: str) -> Check:
+    """Pass when a work-directory file exists and has this SHA-256."""
+
+    def fn(ctx: Context) -> Outcome:
+        path = ctx.workdir / rel_path
+        if not path.is_file():
+            return False, f"{rel_path} is missing"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return digest == sha256, f"{rel_path} sha256 {digest[:12]}, want {sha256[:12]}"
+
+    return Check(f"{rel_path} is unchanged", fn)
+
+
+def bash_only(prefix: str) -> Check:
+    """Pass when every ``Bash`` command of every session starts with ``prefix``."""
+
+    def fn(ctx: Context) -> Outcome:
+        commands = _bash_commands(ctx.all_transcripts())
+        bad = [c for c in commands if not c.startswith(prefix)]
+        if bad:
+            return False, f"{len(bad)} of {len(commands)} command(s) differ: {bad[:3]}"
+        return True, f"{len(commands)} Bash command(s), all start with the prefix"
+
+    return Check(f"Bash only {prefix}", fn)
+
+
+def writes_only_under(prefix: str) -> Check:
+    """Pass when every ``Write`` and ``Edit`` call targets a path under ``prefix``.
+
+    ``prefix`` is relative to the work directory, for example ``.whygraph/x/``.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        root = (ctx.workdir / prefix).resolve()
+        bad = []
+        count = 0
+        for transcript in ctx.all_transcripts():
+            for use in transcript.tool_uses():
+                if not _tool_matches(use.name, r"^(Write|Edit)$"):
+                    continue
+                count += 1
+                raw = str(use.input.get("file_path", ""))
+                target = Path(raw) if os.path.isabs(raw) else ctx.workdir / raw
+                if not (target.resolve() == root or root in target.resolve().parents):
+                    bad.append(raw)
+        if bad:
+            return False, f"{len(bad)} write(s) outside {prefix}: {bad[:3]}"
+        return True, f"{count} write(s), all under {prefix}"
+
+    return Check(f"writes only under {prefix}", fn)
+
+
+def file_absent(rel_path: str) -> Check:
+    """Pass when ``rel_path`` does not exist; it may lie outside the work directory."""
+
+    def fn(ctx: Context) -> Outcome:
+        path = ctx.workdir / rel_path
+        ok = not path.exists() and not path.is_symlink()
+        return ok, f"{rel_path} {'is absent' if ok else 'exists'}"
+
+    return Check(f"{rel_path} is absent", fn)
+
+
+def claude_md_files(expected: set[str]) -> Check:
+    """Pass when the nested ``CLAUDE.md`` files are exactly ``expected``.
+
+    The root file, ``.claude/`` and ``.whygraph/`` are not counted.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        found = set()
+        for path in ctx.workdir.rglob("CLAUDE.md"):
+            rel = path.relative_to(ctx.workdir)
+            if rel.parts[0] in (".claude", ".whygraph", ".git") or len(rel.parts) == 1:
+                continue
+            found.add(rel.as_posix())
+        return (
+            found == expected,
+            f"nested files {sorted(found)}, want {sorted(expected)}",
+        )
+
+    return Check("nested CLAUDE.md files are " + ", ".join(sorted(expected)), fn)

@@ -56,6 +56,7 @@ from .core_crawler import CORE_PHASE_WALL_SEC, CoreCrawler, index_file_exists
 from .git_crawler import GitCrawler, TagCrawler
 from .github_crawler import GitHubCrawler
 from .json_progress import JsonProgress, JsonUsageSink
+from .plans_crawler import PlansCrawler
 from .pr_origin_enricher import PROriginEnricher
 
 if TYPE_CHECKING:
@@ -277,11 +278,14 @@ def _scan(
     run_analyze = descriptor is not None
     # Author resolution always runs: local-only, no network, no token, so it
     # is valid under --no-remote and for the auto-rescan git hooks.
-    phase_total = 1 + int(run_pr_origins) + 1 + int(run_core) + int(run_analyze)
+    # The Plans phase always runs too: it reads HEAD's git objects only, and
+    # its "disabled" / "no HEAD" exits are cheap.
+    phase_total = 1 + int(run_pr_origins) + 1 + 1 + int(run_core) + int(run_analyze)
     phase_titles = [
         "Structural crawl",
         *(["PR-origin recovery"] if run_pr_origins else []),
         "Author identity",
+        "Plans",
         *(["Core commits"] if run_core else []),
         *(["LLM descriptions"] if run_analyze else []),
     ]
@@ -361,7 +365,20 @@ def _scan(
         resolver.join()
         phase_timings["Author identity"] = time.monotonic() - t0
 
-        # Phase 4 - Core commits: needs the commit rows and the code index.
+        # Phase 4 - Plans: index the committed plans at HEAD and link them to
+        # the commits and PRs that Phases 1 and 2 stored (plan 61).
+        n += 1
+        progress.phase(n, "Plans")
+        t0 = time.monotonic()
+        plans = PlansCrawler(
+            progress, repository=repository, plans_dir=config.plans.dir
+        )
+        ran.append(plans)
+        plans.start()
+        plans.join()
+        phase_timings["Plans"] = time.monotonic() - t0
+
+        # Phase 5 - Core commits: needs the commit rows and the code index.
         # With no index file at scan start (a first scan), wait for the
         # CodeGraph build first; the core task has no total meanwhile, and
         # its wall starts after the wait. An existing index is read as is.
@@ -382,7 +399,7 @@ def _scan(
             core.join()
             phase_timings["Core commits"] = time.monotonic() - t0
 
-        # Phase 5 - LLM descriptions: the slow, token-heavy long pole, run
+        # Phase 6 - LLM descriptions: the slow, token-heavy long pole, run
         # strictly last and alone. It describes commits reachable from the
         # current branch (reachability, not on_default_branch), so PR-origin
         # rows stay lazy because their objects are unreachable.

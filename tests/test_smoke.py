@@ -50,6 +50,8 @@ def test_mcp_server_registers_resources() -> None:
         "whygraph://pr/{number}",
         "whygraph://issue/{number}",
         "whygraph://note/{id}",
+        "whygraph://plan/{stem}",
+        "whygraph://plan/{stem}/section/{n}",
     }
 
 

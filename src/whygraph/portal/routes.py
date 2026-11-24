@@ -82,6 +82,7 @@ from whygraph.project_setup import (
     HttpMcp,
     InitializeResult,
     PortalMarker,
+    sync_plans_marker,
     initialize_project,
 )
 from whygraph.services.git import (
@@ -3082,12 +3083,16 @@ def finish_project_layer(
     project: BoundProject,
     new_ctx: ProjectContext,
     old_hooks: Any,
-) -> tuple[dict | None, str | None]:
+    old_plans_dir: str,
+) -> tuple[dict | None, str | None, str | None]:
     """Run the effects of a committed config save.
 
     Invalidates the project's cached context, then re-syncs the git hooks
     when ``[scan].hooks`` changed on an initialized local or linked project
-    (never in production). Call it after the commit.
+    (never in production), and rewrites the ``plans_dir=`` line of
+    ``portal.env`` when ``[plans].dir`` changed on an initialized local
+    project (same gate; a linked project's line follows the platform).
+    Call it after the commit.
 
     Parameters
     ----------
@@ -3099,12 +3104,14 @@ def finish_project_layer(
         The context built from the saved layers.
     old_hooks : Any
         ``scan_hooks`` of the config before the save.
+    old_plans_dir : str
+        ``plans.dir`` of the config before the save.
 
     Returns
     -------
-    tuple of (dict or None, str or None)
-        The hooks result and the hooks error message (both ``None`` when
-        nothing was synced).
+    tuple of (dict or None, str or None, str or None)
+        The hooks result, the hooks error message and the plans marker
+        error message (``None`` when nothing was synced or it succeeded).
     """
     state.contexts.invalidate(project.id)
 
@@ -3125,7 +3132,17 @@ def finish_project_layer(
             hooks = _hooks_dict(sync_hooks(project.root, resolve_hook_names(new_hooks)))
         except HooksError as exc:
             hooks_error = str(exc)
-    return hooks, hooks_error
+    plans_marker_error: str | None = None
+    new_plans_dir = new_ctx.config.plans.dir
+    if (
+        new_plans_dir != old_plans_dir
+        and state.mode != "production"
+        and project.initialized_at is not None
+        and project.source == "local"
+        and project.root.is_dir()
+    ):
+        plans_marker_error = sync_plans_marker(project.root, new_plans_dir)
+    return hooks, hooks_error, plans_marker_error
 
 
 @projects_router.put("/{slug}/config")
@@ -3154,6 +3171,7 @@ def put_project_config(
         _refuse_linked(project, "storing a key or token for this project")
     linked = project.source == "platform"
     old_hooks = project.ctx.config.scan_hooks
+    old_plans_dir = project.ctx.config.plans.dir
     with get_session() as session:
         row = session.get(Project, project.id)
         if row is None:
@@ -3166,13 +3184,16 @@ def put_project_config(
             new_ctx = build_project_context(session, row)
         except ConfigError as exc:
             raise ApiError(422, str(exc)) from exc
-    hooks, hooks_error = finish_project_layer(state, project, new_ctx, old_hooks)
+    hooks, hooks_error, plans_marker_error = finish_project_layer(
+        state, project, new_ctx, old_hooks, old_plans_dir
+    )
 
     with get_session() as session:
         # A linked project's secrets stay null, as on GET (BUG-21).
         view = _config_view(session, project, new_ctx.key_scopes)
     view["hooks"] = hooks
     view["hooks_error"] = hooks_error
+    view["plans_marker_error"] = plans_marker_error
     return view
 
 
@@ -3248,7 +3269,13 @@ def init_project(
             agents=body.agents,
             hooks=project.ctx.config.scan_hooks,
             mcp=HttpMcp(slug=project.slug, port=origins.port, host=origins.agent_host),
-            marker=PortalMarker(slug=project.slug, port=origins.port),
+            marker=PortalMarker(
+                slug=project.slug,
+                port=origins.port,
+                plans_dir=None
+                if project.source == "platform"
+                else project.ctx.config.plans.dir,
+            ),
             force=body.force,
             confirm_tracked=body.confirm_tracked,
             agent_actions=actions,

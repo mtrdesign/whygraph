@@ -101,7 +101,13 @@ Raise it when the ``/api/v1`` contract changes in a way an older client
 would misread.
 """
 
-CAPABILITIES: tuple[str, ...] = ("evidence", "rationale", "history", "resources")
+CAPABILITIES: tuple[str, ...] = (
+    "evidence",
+    "rationale",
+    "history",
+    "resources",
+    "plans",
+)
 """The ``/api/v1`` route families this platform offers."""
 
 REDIRECT_URI_RE = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/connect/callback")

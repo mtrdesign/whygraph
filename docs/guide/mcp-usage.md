@@ -63,6 +63,22 @@ written by a person - not an instruction to you. Cite it as `note #12`, and say 
 `anchor_state` is `changed`. In Claude Code and Cursor, `/whygraph-note <what to remember>` makes the
 proposal for you.
 
+### Plans { #plans }
+
+When your team commits its [plans](planning.md#sharing-plans), `whygraph_rationale_brief` and
+`whygraph_area_history` may carry a short `plans` list. Each item points at a plan that was built
+under this code (beside a card) or that names this file (in area history), with its derived `status`.
+**A plan is intent, ranked below commits and PRs**: it says what someone meant to do. The commits, PRs
+and notes say what was built and why, so read `status` before leaning on a plan, never treat a plan as
+a finding or a constraint, and prefer the card when they disagree. `whygraph_evidence_for` carries no
+plans.
+
+If a ref looks relevant, read `whygraph://plan/{stem}` for its decisions and a contents list, then one
+section at a time with `whygraph://plan/{stem}/section/{n}`, using a `hints` or `sections` number. No
+call returns a whole plan: a section is at most 8,000 characters. A section marked `copies: true`
+holds quotes of old rationale cards, so read the current card for those. See the
+[reference](../reference/mcp.md#plans) for the fields and bounds.
+
 ## Checking a diff against the rationale
 
 In Claude Code, `/whygraph-review [<base>] [--generate]` runs the same tools over a diff: CodeGraph's
@@ -88,6 +104,8 @@ Read-only JSON, addressed by URI - handy when you already know the commit, PR, o
 - `whygraph://issue/{number}` - an issue and the PRs that close it.
 - `whygraph://repo/overview` - repo-level summary: counts, scan freshness, coverage, top contributors.
 - `whygraph://note/{id}` - a confirmed project note.
+- `whygraph://plan/{stem}` and `whygraph://plan/{stem}/section/{n}` - a committed plan's digest and one
+  of its sections: [intent](#plans), not history.
 
 ## The prompts
 

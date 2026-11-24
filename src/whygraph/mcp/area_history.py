@@ -40,13 +40,19 @@ from .evidence import (
     shape_evidence,
 )
 from .path_history import area_history_commits
+from .plans import attach_linked_plans, guarded_plans_for
 from .targets import repo_root
 
 _log = logging.getLogger(__name__)
 
 
 def linked_area_history(
-    remote: RemoteProject, path: str, limit: int, include_renames: bool
+    remote: RemoteProject,
+    path: str,
+    limit: int,
+    include_renames: bool,
+    *,
+    detail: Detail = "compact",
 ) -> dict:
     """``whygraph_area_history``'s answer for a project linked to a platform.
 
@@ -62,13 +68,19 @@ def linked_area_history(
         The project's platform.
     path, limit, include_renames
         The tool's arguments, unchanged.
+    detail : {"compact", "full"}, optional
+        The form of the ``plans`` refs.
 
     Returns
     -------
     dict
         ``{"path", "include_renames", "evidence", "describing", "platform"}``
         with items in the nested shape; ``describing`` is always ``0``
-        (descriptions are the platform's).
+        (descriptions are the platform's). When the path was sent, the
+        platform is also asked for its plans (file scope) with only the
+        SHAs of its own answer and that path (plan 61 section 4.8):
+        ``plans`` when any, ``platform.plans = "unsupported"`` on an older
+        platform.
 
     Raises
     ------
@@ -77,18 +89,29 @@ def linked_area_history(
     """
     repo = Repository(repo_root())
     items: list[dict] = []
-    if path_tracked_at(repo, path, default_remote_refs(repo)):
+    sent = path_tracked_at(repo, path, default_remote_refs(repo))
+    if sent:
         try:
             items = remote.history(path, limit, include_renames)
         except RemoteError as exc:
             raise WhyGraphError(str(exc)) from exc
-    return {
+    result = {
         "path": path,
         "include_renames": include_renames,
         "evidence": items,
         "describing": 0,
         "platform": platform_block(remote),
     }
+    if sent:
+        # Only the platform's own SHAs and the path it was just sent.
+        shas = [
+            item["commit"]["sha"]
+            for item in items
+            if isinstance(item.get("commit"), dict)
+            and isinstance(item["commit"].get("sha"), str)
+        ]
+        attach_linked_plans(result, remote, shas, [path], scope="file", detail=detail)
+    return result
 
 
 class _AreaHistoryRequired(TypedDict):
@@ -105,12 +128,14 @@ class AreaHistoryResult(_AreaHistoryRequired, total=False):
     :func:`~whygraph.mcp.evidence.shape_evidence_item`; ``pull_requests``
     / ``issues`` are the ``detail="full"`` prose maps of
     :func:`~whygraph.mcp.evidence.shape_evidence`; ``platform`` is set for
-    a linked project.
+    a linked project; ``plans`` lists the committed plans that name this
+    file (file scope, omitted when empty).
     """
 
     pull_requests: dict[str, dict[str, Any]]
     issues: dict[str, dict[str, Any]]
     platform: dict[str, Any]
+    plans: list[dict[str, Any]]
 
 
 def area_history_payload(
@@ -118,6 +143,8 @@ def area_history_payload(
     limit: int = 20,
     include_renames: bool = True,
     describe: bool = True,
+    *,
+    detail: Detail = "compact",
 ) -> dict:
     """Area-history commits for a file path, items in the nested shape.
 
@@ -138,6 +165,9 @@ def area_history_payload(
     describe : bool, optional
         Backfill missing commit descriptions, bounded (default). ``False``
         never calls an LLM.
+    detail : {"compact", "full"}, optional
+        The form of a linked project's ``plans`` refs (only
+        :func:`linked_area_history` reads it).
 
     Returns
     -------
@@ -166,7 +196,9 @@ def area_history_payload(
 
     ctx = current_project()
     if ctx is not None and ctx.remote is not None:
-        return linked_area_history(ctx.remote, path, limit, include_renames)
+        return linked_area_history(
+            ctx.remote, path, limit, include_renames, detail=detail
+        )
 
     items = area_history_commits(path, limit=limit, include_renames=include_renames)
     describing = backfill_evidence_descriptions(
@@ -196,9 +228,20 @@ def whygraph_area_history(
     (``lines`` is ``null``: area items are not blame-derived).
     """
     result = area_history_payload(
-        path, limit=limit, include_renames=include_renames, describe=describe
+        path,
+        limit=limit,
+        include_renames=include_renames,
+        describe=describe,
+        detail=detail,
     )
-    return {**result, **shape_evidence(result["evidence"], detail)}
+    shaped = {**result, **shape_evidence(result["evidence"], detail)}
+    ctx = current_project()
+    if ctx is None or ctx.remote is None:
+        shas = list(dict.fromkeys(item["commit"]["sha"] for item in result["evidence"]))
+        plans = guarded_plans_for(shas, [path], scope="file", detail=detail)
+        if plans:
+            shaped["plans"] = plans
+    return shaped
 
 
 def register(mcp: FastMCP) -> None:

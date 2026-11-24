@@ -42,7 +42,15 @@ from test_portal_usage import local, stub_llm  # noqa: F401 -- fixtures
 from test_portal_v1 import V1World, call, target_body, v1  # noqa: F401
 from whygraph.core import usage as core_usage
 from whygraph.core.usage import UsageScope, count_agent_call, use_usage_sink
-from whygraph.mcp import area_history, evidence, notes, prompts, rationale, resources
+from whygraph.mcp import (
+    area_history,
+    evidence,
+    notes,
+    plans,
+    prompts,
+    rationale,
+    resources,
+)
 from whygraph.mcp import server as mcp_server
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.portal import agent_calls
@@ -69,6 +77,8 @@ MCP_KINDS = sorted(
         "whygraph_issue",
         "whygraph_repo_overview",
         "whygraph_note",
+        "whygraph_plan",
+        "whygraph_plan_section",
         # prompts
         "whygraph_pre_edit_brief",
         "whygraph_why_was_this_written",
@@ -166,7 +176,7 @@ def test_count_agent_call_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     assert logged == ["could not count an agent call of kind whygraph_issue"]
 
 
-def test_the_mcp_kinds_are_the_twelve_registered_names(
+def test_the_mcp_kinds_are_the_fourteen_registered_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[tuple[str, str]] = []
@@ -177,7 +187,15 @@ def test_the_mcp_kinds_are_the_twelve_registered_names(
 
     monkeypatch.setattr(mcp_server, "offload", capture)
     registrar = mcp_server.ThreadOffload(FastMCP("kinds"))
-    for module in (evidence, rationale, area_history, notes, resources, prompts):
+    for module in (
+        evidence,
+        rationale,
+        area_history,
+        notes,
+        plans,
+        resources,
+        prompts,
+    ):
         module.register(registrar)
     assert sorted(kind for kind, _ in seen) == MCP_KINDS
     # Resources and prompts register private functions: never their names.

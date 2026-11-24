@@ -121,6 +121,70 @@ export interface RationaleCard {
   partial?: boolean | null;
   describing?: number | null;
   completing?: boolean | null;
+  /** Plans linked to the symbol (symbol scope); the key is absent when there are none. */
+  plans?: PlanRef[];
+}
+
+export const PLAN_STATUS_VALUES = ["shipped", "in_flight", "not_implemented"] as const;
+export type PlanStatus = (typeof PLAN_STATUS_VALUES)[number];
+
+export interface PlanHint {
+  id: string;
+  title?: string;
+  n: number;
+}
+
+/** One committed plan, as the list and a rationale answer carry it. */
+export interface PlanRef {
+  stem: string;
+  title: string;
+  status: PlanStatus;
+  uri: string;
+  path?: string;
+  present?: boolean;
+  objective?: string | null;
+  updated_at?: string;
+  /** Beside a card only. */
+  link?: "commit" | "pr" | "declared" | "file";
+  hints?: PlanHint[];
+  /** File-level answers only. */
+  sections?: number[];
+}
+
+export interface PlanList {
+  plans: PlanRef[];
+  total: number;
+  dir: string;
+}
+
+export interface PlanOutlineEntry {
+  n: number;
+  level: number;
+  title: string;
+  part: [number, number] | null;
+  step: number | null;
+}
+
+export interface PlanRecord extends PlanRef {
+  kind: "plan";
+  reading?: string;
+  path: string;
+  present: boolean;
+  objective: string | null;
+  line_count: number;
+  redacted_lines: number;
+  updated_at: string;
+  publishing_links: unknown;
+  implementing_commits: { sha: string; subject: string; on_default_branch: boolean }[];
+  implementing_commits_total: number;
+  pull_requests: { number: number; title: string; state: string }[];
+  pull_requests_total: number;
+  paths: string[];
+  paths_total: number;
+  body: string;
+  truncated: boolean;
+  digest: string;
+  outline: PlanOutlineEntry[];
 }
 
 export interface CommitDict {
@@ -2745,6 +2809,18 @@ export function projectApi(slug: string) {
       onEvent: (event: ScanEvent, id: string | null) => void,
       opts: { signal?: AbortSignal; lastEventId?: string | null } = {},
     ) => streamScanEvents(`${base}/scans/${runId}/events`, onEvent, opts),
+
+    // ---- committed plans (portal/plans_routes.py) ----------------------------
+    plans: (f: { q?: string; status?: PlanStatus; limit?: number; offset?: number } = {}) => {
+      const params = new URLSearchParams();
+      if (f.q) params.set("q", f.q);
+      if (f.status) params.set("status", f.status);
+      if (f.limit !== undefined) params.set("limit", String(f.limit));
+      if (f.offset) params.set("offset", String(f.offset));
+      const qs = params.toString();
+      return get<PlanList>(`${base}/plans${qs ? `?${qs}` : ""}`);
+    },
+    plan: (stem: string) => get<PlanRecord>(`${base}/plans/${encodeURIComponent(stem)}`),
 
     // ---- project notes (portal/notes_routes.py) ------------------------------
     notes: (f: NoteFilters = {}) => {

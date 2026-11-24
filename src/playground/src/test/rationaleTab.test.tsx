@@ -48,6 +48,23 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+async function mountRaw() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const root = createRootRoute({
+    component: () => (
+      <QueryClientProvider client={client}>
+        <ProjectProvider slug="alpha">
+          <RationaleTab qualifiedName="pkg.fn" />
+        </ProjectProvider>
+      </QueryClientProvider>
+    ),
+  });
+  const router = createRouter({ routeTree: root, history: createMemoryHistory({ initialEntries: ["/"] }) });
+  await act(async () => {
+    render(<RouterProvider router={router} />);
+  });
+}
+
 async function mount() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const root = createRootRoute({
@@ -152,5 +169,79 @@ describe("RationaleTab item sources", () => {
     expect(screen.getByText("01234567")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "01234567" })).toBeNull();
     expect(screen.getByText("issue #7")).toBeInTheDocument();
+  });
+});
+
+describe("RationaleTab related plans", () => {
+  const plans = [
+    {
+      stem: "p-one",
+      title: "Plan one",
+      status: "shipped" as const,
+      uri: "whygraph://plan/p-one",
+      link: "commit" as const,
+      hints: [
+        { id: "step 4", title: "Notes page: add the Kind dropdown", n: 8 },
+        { id: "Q1", title: "What should the dropdown filter by?", n: 12 },
+        { id: "extra", title: "Third", n: 13 },
+      ],
+    },
+    { stem: "p-two", title: "Plan two", status: "in_flight" as const, uri: "u", link: "pr" as const, present: false },
+    { stem: "p-three", title: "Plan three", status: "not_implemented" as const, uri: "u", link: "declared" as const },
+  ];
+
+  it("lists plans under a cached card with phrases, hints (at most 2) and the intent line", async () => {
+    read = card({ plans });
+    await mount();
+    const block = await screen.findByTestId("related-plans");
+    expect(block).toHaveTextContent("Related plans");
+    expect(screen.getByRole("link", { name: "Plan one" })).toHaveAttribute("href", "/p/alpha/plans?stem=p-one");
+    expect(block).toHaveTextContent("built by commits that name this plan");
+    expect(block).toHaveTextContent("built in a PR that names this plan");
+    expect(block).toHaveTextContent("this plan declares a change to this code");
+    expect(block).toHaveTextContent("No longer in the repository");
+    expect(screen.getByRole("link", { name: "step 4: Notes page: add the Kind dropdown" })).toHaveAttribute(
+      "href",
+      "/p/alpha/plans?stem=p-one&section=8",
+    );
+    expect(screen.getByRole("link", { name: "Q1: What should the dropdown filter by?" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Third/ })).toBeNull();
+    expect(block).toHaveTextContent("See:");
+    expect(block).toHaveTextContent("Plans state what was intended, not what was built.");
+    // A plan without hints shows title, status and link kind only.
+    const three = screen.getByTestId("related-plan-p-three");
+    expect(three).not.toHaveTextContent("See:");
+    expect(three).toHaveTextContent("Not implemented");
+  });
+
+  it("shows under the not-generated and no-history messages", async () => {
+    read = { status: "not_generated", plans } as RationaleCard;
+    await act(async () => {
+      await mountRaw();
+    });
+    expect(await screen.findByTestId("related-plans")).toBeInTheDocument();
+  });
+
+  it("shows under no history", async () => {
+    read = { status: "no_evidence", plans } as RationaleCard;
+    await mountRaw();
+    expect(await screen.findByTestId("related-plans")).toBeInTheDocument();
+    expect(screen.getByTestId("rationale-no-evidence")).toBeInTheDocument();
+  });
+
+  it("shows the plans a Generate answer carries", async () => {
+    read = { status: "not_generated" } as RationaleCard;
+    posted = card({ plans });
+    const user = userEvent.setup();
+    await mountRaw();
+    expect(screen.queryByTestId("related-plans")).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Generate rationale" }));
+    expect(await screen.findByTestId("related-plans")).toBeInTheDocument();
+  });
+
+  it("renders nothing for an empty or absent list", async () => {
+    read = card({ plans: [] });
+    await mount();
+    expect(screen.queryByTestId("related-plans")).toBeNull();
   });
 });

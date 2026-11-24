@@ -8,9 +8,11 @@ disable-model-invocation: true
 
 Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Dispatches to the planner subagent, which researches the change with one researcher per knowledge source and a synthesizer, splits a large task into child plans only when needed, and returns the few plan-shaping questions for you to ask after research.
 
-**Argument shape:** `<task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]`
+**Argument shape:** `<task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>] [--publish <stem> [--force]]`
 
 ## Step 1 - Parse arguments
+
+**Publish mode.** If the user's input holds `--publish`, this is a separate mode that skips Steps 2-8; go to **Publish a plan** below. Otherwise:
 
 Strip and remember these flags if present (any order, anywhere in the user's input):
 
@@ -28,12 +30,24 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>] [--publish <stem> [--force]]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
 - If both `--review` and `--no-review` are passed, respond with `Pass --review OR --no-review, not both.` and stop.
 - If a `--sources` name does not match the pattern, respond with `Unknown source name: <name>` and stop.
+
+## Publish a plan
+
+`/whygraph-plan --publish <stem> [--force]` copies a finished plan into the repository's plans folder so a teammate can commit it. It plans nothing.
+
+1. `--force` is the only other token allowed. Any task text or other flag: respond with `--publish takes only a plan stem and --force.` and stop.
+2. The stem must match `^[a-z0-9][a-z0-9-]{0,79}$`, and the file `.whygraph/plans/<stem>.md` must exist. Otherwise respond with `No plan .whygraph/plans/<stem>.md.` and stop. Validate before the stem reaches Bash.
+3. Run `sh .cursor/skills/whygraph-plan/plan-tool.sh publish .whygraph/plans/<stem>.md` (with ` --force` appended when it was passed) **alone**, with no folder argument and nothing chained after it: one tool command per call.
+4. Print the tool's line(s) verbatim. A `skip:` line is the whole answer.
+5. After `published`, `republished` or `unchanged` with no `ignored:` line, print `To share it, commit it: git add <dest>`, with `<dest>` from the tool's line.
+
+Never run `git add` or commit. Stop after this; do not run Steps 2-8.
 
 ## Step 2 - Resolve the paths
 
@@ -41,7 +55,7 @@ Find the repo root with `git rev-parse --show-toplevel`. Resolve these absolute 
 
 - `OUT_PATH` - the plan goes there. The planner writes it in single-pass mode; in deep mode the synthesizer writes it.
   - If `--out <path>` was passed, use that path. Resolve a relative path against the current working directory. If the path does not end in `.md`, append `.md`.
-  - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<repo root>/.whygraph/plans/<slug>.md`. If that file exists, append `-2`, `-3`, ... until the name is unused. Never overwrite.
+  - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<repo root>/.whygraph/plans/<slug>.md`. If that file exists, append `-2`, `-3`, ... until the name is unused. A slug also counts as used when the file `<repo root>/<plans dir>/<slug>.md` exists, with `<plans dir>` the line `sh .cursor/skills/whygraph-plan/plan-tool.sh plans-dir` prints (run it once, alone); when it prints nothing, only `.whygraph/plans/` is checked. Never overwrite.
   - Create its parent directory with `mkdir -p <parent>`.
 - `SOURCES_DIR` - `<repo root>/.cursor/skills/whygraph-plan/sources/`.
 - `SPINE_PATH` - `<repo root>/.cursor/skills/whygraph-plan/plan-spine.md`.
@@ -177,4 +191,6 @@ ANSWERS:
 
 Print each planner reply **verbatim** to the user. The one exception: with `--no-questions`, do not print a plan reply whose `QUESTIONS:` block has questions, because its revise reply replaces it. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block - the planner wrote the file itself. Do not summarize, paraphrase, re-format or comment on it, and do not write the file yourself. The planner is the source of truth.
 
-This command's only job is: parse -> resolve paths -> consent -> dispatch -> clarify, split or questions -> print. Do not edit files, run other tools, or improvise.
+After the replies, print one extra line per saved plan, with `<stem>` the basename of its `Saved plan to <path>` line without `.md`, lowercased, each run of characters outside `[a-z0-9]` replaced by one `-`, and leading and trailing `-` trimmed: `To share this plan before implementing it: /whygraph-plan --publish <stem>. A successful /whygraph-implement run publishes it for you.` Never edit a planner reply to add it.
+
+This command's only job is: parse -> resolve paths -> consent -> dispatch -> clarify, split or questions -> print (or, with `--publish`, publish one plan). Do not edit files, run other tools (the `plan-tool.sh publish` and `plans-dir` calls above are the only ones), or improvise.

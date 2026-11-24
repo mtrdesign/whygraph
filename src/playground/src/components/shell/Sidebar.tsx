@@ -10,6 +10,7 @@ import {
   LayoutDashboardIcon,
   LayoutGridIcon,
   NetworkIcon,
+  ClipboardListIcon,
   NotebookPenIcon,
   PlusIcon,
   SearchIcon,
@@ -126,6 +127,7 @@ function projectItems(
     ...(linked
       ? []
       : [{ label: "Notes", icon: NotebookPenIcon, to: "/p/$slug/notes", params, badge: notesWaiting } as NavItem]),
+    ...(linked ? [] : [{ label: "Plans", icon: ClipboardListIcon, to: "/p/$slug/plans", params } as NavItem]),
     scans,
     settings,
   ];

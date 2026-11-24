@@ -2,7 +2,14 @@ import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { portalApi, projectKey, type RationaleCard, type RationaleItem, type RationaleItemRef } from "../api";
+import {
+  portalApi,
+  projectKey,
+  type PlanRef,
+  type RationaleCard,
+  type RationaleItem,
+  type RationaleItemRef,
+} from "../api";
 import { providerLabel } from "../lib/labels";
 import { formatDateTime } from "../lib/format";
 import { plural } from "../lib/plural";
@@ -10,6 +17,7 @@ import { useSlug } from "../lib/project";
 import { budgetNoticeText } from "../lib/budgetBanner";
 import { useLlmBlock, useProjectCan } from "../lib/permissions";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
+import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { ErrorState } from "./state/ErrorState";
 import { Loading } from "./Loading";
@@ -181,6 +189,65 @@ function RescanHint() {
   );
 }
 
+const STATUS_LABEL = { shipped: "Shipped", in_flight: "In flight", not_implemented: "Not implemented" } as const;
+const STATUS_VARIANT = { shipped: "success", in_flight: "info", not_implemented: "outline" } as const;
+const LINK_PHRASE: Record<string, string> = {
+  commit: "built by commits that name this plan",
+  pr: "built in a PR that names this plan",
+  declared: "this plan declares a change to this code",
+};
+const LINK_CLASS = "text-primary-text underline-offset-4 hover:underline";
+
+/** The plans linked to the symbol: links into the Plans page, never plan text (R19, R22). */
+function PlansBlock({ plans }: { plans?: PlanRef[] }) {
+  const slug = useSlug();
+  // A `file` link never reaches this block.
+  const rows = (plans ?? []).filter((p) => p.link !== "file");
+  if (rows.length === 0) return null;
+  return (
+    <div className="border-t border-border p-4" data-testid="related-plans">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Related plans</div>
+      <ul className="mt-2 flex flex-col gap-2 text-sm">
+        {rows.map((p) => (
+          <li key={p.stem} data-testid={`related-plan-${p.stem}`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link to="/p/$slug/plans" params={{ slug }} search={{ stem: p.stem }} className={LINK_CLASS}>
+                {p.title}
+              </Link>
+              <Badge variant={STATUS_VARIANT[p.status]}>{STATUS_LABEL[p.status]}</Badge>
+              {p.present === false && (
+                <span className="text-[13px] text-muted-foreground">No longer in the repository</span>
+              )}
+            </div>
+            {p.link && LINK_PHRASE[p.link] && (
+              <div className="text-[13px] text-muted-foreground">{LINK_PHRASE[p.link]}</div>
+            )}
+            {p.hints && p.hints.length > 0 && (
+              <div className="text-[13px] text-muted-foreground">
+                See:{" "}
+                {p.hints.slice(0, 2).map((h, i) => (
+                  <span key={`${h.id}-${h.n}`}>
+                    {i > 0 && ", "}
+                    <Link
+                      to="/p/$slug/plans"
+                      params={{ slug }}
+                      search={{ stem: p.stem, section: h.n }}
+                      className={LINK_CLASS}
+                    >
+                      {h.title ? `${h.id}: ${h.title}` : h.id}
+                    </Link>
+                  </span>
+                ))}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-[13px] text-muted-foreground">Plans state what was intended, not what was built.</p>
+    </div>
+  );
+}
+
 export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   const queryClient = useQueryClient();
   const api = useProjectApi();
@@ -216,6 +283,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
 
   if (data?.status === "cached")
     return (
+      <>
       <Card
         card={data}
         note={
@@ -230,12 +298,17 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
           ) : undefined
         }
       />
+      <PlansBlock plans={data.plans} />
+      </>
     );
   if (generate.isPending)
     return (
-      <div className="p-4">
-        <Loading label="Generating rationale (calling the model)…" />
-      </div>
+      <>
+        <div className="p-4">
+          <Loading label="Generating rationale (calling the model)…" />
+        </div>
+        <PlansBlock plans={data?.plans} />
+      </>
     );
 
   // One state at a time (EXC-1), in this order: no history, a viewer, a hard stop, no key, ready.
@@ -297,11 +370,14 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   }
 
   return (
-    <div className="p-4">
-      {state}
-      {generate.isError && (
-        <ErrorState className="mt-3" size="inline" context="chat" error={generate.error} />
-      )}
-    </div>
+    <>
+      <div className="p-4">
+        {state}
+        {generate.isError && (
+          <ErrorState className="mt-3" size="inline" context="chat" error={generate.error} />
+        )}
+      </div>
+      <PlansBlock plans={data?.plans} />
+    </>
   );
 }

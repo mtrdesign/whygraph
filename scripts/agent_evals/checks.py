@@ -56,6 +56,59 @@ class ToolUse:
 
 
 @dataclass
+class ToolResult:
+    """One ``tool_result`` block with the call that made it.
+
+    Attributes
+    ----------
+    name : str
+        The tool name of the call.
+    input : dict
+        The call's arguments.
+    text : str
+        The result's text.
+    """
+
+    name: str
+    input: dict[str, Any]
+    text: str
+
+
+PLAN_URI = "whygraph://plan/"
+
+
+def _plan_chars(value: Any) -> int:
+    """Count the characters of the ``digest``, ``contents`` and ``text`` fields.
+
+    A ``text`` string that is itself JSON (an MCP resource envelope) is opened
+    rather than counted, so the plan text is counted once.
+    """
+    if isinstance(value, list):
+        return sum(_plan_chars(v) for v in value)
+    if not isinstance(value, dict):
+        return 0
+    total = 0
+    for key, item in value.items():
+        if key in ("digest", "contents", "text") and isinstance(item, str):
+            inner = _json_or_none(item) if key == "text" else None
+            total += _plan_chars(inner) if inner is not None else len(item)
+        elif isinstance(item, list | dict):
+            total += _plan_chars(item)
+    return total
+
+
+def _json_or_none(text: str) -> Any:
+    """Return the parsed JSON object or list in ``text``, else ``None``."""
+    stripped = text.lstrip()
+    if not stripped.startswith(("{", "[")):
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+
+@dataclass
 class Transcript:
     """One session transcript, the main session or a subagent.
 
@@ -182,6 +235,74 @@ class Transcript:
                     )
                 results.append(_LINE_NUMBER_RE.sub("", str(result or "")))
         return results
+
+    def tool_results(self) -> list[ToolResult]:
+        """Return every ``tool_result`` with its call, in transcript order.
+
+        Returns
+        -------
+        list of ToolResult
+            One per result block whose call is in this transcript.
+        """
+        calls: dict[str, tuple[str, dict[str, Any]]] = {}
+        for record in self.assistant_records():
+            for block in (record.get("message") or {}).get("content") or []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    calls[str(block.get("id"))] = (
+                        str(block.get("name", "")),
+                        block.get("input") or {},
+                    )
+        results = []
+        for record in self.records:
+            if record.get("type") != "user":
+                continue
+            content = (record.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                name, tool_input = calls.get(str(block.get("tool_use_id")), ("", {}))
+                result = block.get("content")
+                if isinstance(result, list):
+                    result = "".join(
+                        str(b.get("text", "")) for b in result if isinstance(b, dict)
+                    )
+                results.append(ToolResult(name, tool_input, str(result or "")))
+        return results
+
+    def plan_results(self, stem: str | None = None) -> list[ToolResult]:
+        """Return the results of ``whygraph://plan/...`` reads.
+
+        Parameters
+        ----------
+        stem : str or None
+            Limits the reads to ``whygraph://plan/<stem>``.
+
+        Returns
+        -------
+        list of ToolResult
+            The results whose call named a plan resource URI.
+        """
+        wanted = PLAN_URI + (stem or "")
+        return [r for r in self.tool_results() if wanted in str(r.input)]
+
+    def plan_text_read(self) -> tuple[int, int]:
+        """Return how much plan text the ``whygraph://plan/...`` reads gave back.
+
+        Returns
+        -------
+        tuple of (int, int)
+            The characters of the ``digest``, ``contents`` and section ``text``
+            fields, and beside it the whole serialized size of those results.
+            A result that is not JSON counts whole in both.
+        """
+        chars = serialized = 0
+        for result in self.plan_results():
+            serialized += len(result.text)
+            parsed = _json_or_none(result.text)
+            chars += len(result.text) if parsed is None else _plan_chars(parsed)
+        return chars, serialized
 
     def first_timestamp(self) -> str:
         """Return the first timestamp in the file, for ordering agents."""
@@ -534,10 +655,14 @@ class StopBlock:
     text: str
 
 
-def _main_texts(ctx: Context) -> list[str]:
-    """Return the main sessions' text blocks, or the replies when none was read."""
+def _main_texts(ctx: Context, run: int | None = None) -> list[str]:
+    """Return the main sessions' text blocks, or the replies when none was read.
+
+    ``run`` is 1-based and limits both to that invocation of the case.
+    """
+    runs = ctx.runs if run is None else ctx.runs[run - 1 : run]
     texts = []
-    for transcript in ctx.of_type("main"):
+    for transcript in (t for r in runs for t in r.of_type("main")):
         for record in transcript.assistant_records():
             content = (record.get("message") or {}).get("content") or []
             if isinstance(content, str):
@@ -548,7 +673,7 @@ def _main_texts(ctx: Context) -> list[str]:
                 for b in content
                 if isinstance(b, dict) and b.get("type") == "text"
             )
-    return texts or [run.reply for run in ctx.runs]
+    return texts or [r.reply for r in runs]
 
 
 def stop_blocks(texts: list[str]) -> list[StopBlock]:
@@ -650,14 +775,17 @@ def stop_block(
     return Check(f"stop block at step {step}", fn)
 
 
-def no_stop_block() -> Check:
-    """Pass when the main session printed no ``Run stopped at step`` block."""
+def no_stop_block(run: int | None = None) -> Check:
+    """Pass when the main session printed no ``Run stopped at step`` block.
+
+    ``run`` is the 1-based invocation to read; ``None`` reads every run.
+    """
 
     def fn(ctx: Context) -> Outcome:
-        blocks = stop_blocks(_main_texts(ctx))
+        blocks = stop_blocks(_main_texts(ctx, run))
         return not blocks, f"{len(blocks)} stop block(s)"
 
-    return Check("no stop block", fn)
+    return Check(f"no stop block{f' (run {run})' if run else ''}", fn)
 
 
 def stop_cause_lacks(text: str) -> Check:
@@ -674,14 +802,72 @@ def stop_cause_lacks(text: str) -> Check:
     return Check(f"cause lacks {text}", fn)
 
 
-def printed(text: str) -> Check:
-    """Pass when any text block of the main session holds ``text``."""
+def printed(text: str, run: int | None = None) -> Check:
+    """Pass when any text block of the main session holds ``text``.
+
+    ``run`` is the 1-based invocation to read; ``None`` reads every run.
+    """
 
     def fn(ctx: Context) -> Outcome:
-        ok = any(text in t for t in _main_texts(ctx))
+        ok = any(text in t for t in _main_texts(ctx, run))
         return ok, f"session {'printed' if ok else 'did not print'} {text!r}"
 
-    return Check(f"session prints {text}", fn)
+    scope = f" (run {run})" if run else ""
+    return Check(f"session prints {text}{scope}", fn)
+
+
+def _publish_results(ctx: Context, run: int | None) -> list[ToolResult]:
+    """Return the main sessions' ``plan-tool.sh publish`` Bash results."""
+    runs = ctx.runs if run is None else ctx.runs[run - 1 : run]
+    return [
+        result
+        for transcript in (t for r in runs for t in r.of_type("main"))
+        for result in transcript.tool_results()
+        if result.name == "Bash"
+        and "plan-tool.sh publish" in str(result.input.get("command", ""))
+    ]
+
+
+def publish_output(text: str, run: int | None = None) -> Check:
+    """Pass when a ``plan-tool.sh publish`` call of the main session printed ``text``.
+
+    The tool's own output is the evidence: the session is told to echo it, but a
+    paraphrase must not decide the case. ``run`` is the 1-based invocation.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        results = _publish_results(ctx, run)
+        ok = any(text in r.text for r in results)
+        return (
+            ok,
+            f"{len(results)} publish call(s); output {'holds' if ok else 'lacks'} {text!r}",
+        )
+
+    scope = f" (run {run})" if run else ""
+    return Check(f"publish printed {text}{scope}", fn)
+
+
+def no_publish_call(run: int) -> Check:
+    """Pass when one run's main session never ran ``plan-tool.sh publish``."""
+
+    def fn(ctx: Context) -> Outcome:
+        results = _publish_results(ctx, run)
+        return not results, f"run {run} made {len(results)} publish call(s)"
+
+    return Check(f"run {run} makes no publish call", fn)
+
+
+def not_printed(text: str, run: int) -> Check:
+    """Pass when no text block of one run's main session holds ``text``.
+
+    ``run`` is the 1-based invocation, so a later run's lines never count.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        ok = not any(text in t for t in _main_texts(ctx, run))
+        return ok, f"run {run} {'did not print' if ok else 'printed'} {text!r}"
+
+    return Check(f"run {run} does not print {text}", fn)
 
 
 def verdicts_per_run(expected: list[str]) -> Check:
@@ -2618,3 +2804,322 @@ def claude_md_files(expected: set[str]) -> Check:
         )
 
     return Check("nested CLAUDE.md files are " + ", ".join(sorted(expected)), fn)
+
+
+# Plan 61 step 15: the shared-plans cases (P24 to P28). Each setup ends with
+# ``git update-ref refs/eval/setup HEAD``; "since the setup" means since that ref.
+SETUP_REF = "refs/eval/setup"
+_PLAN_FIELDS = ("Constraints to preserve", "Risks")
+
+
+def _git_text(ctx: Context, *args: str) -> tuple[int, str]:
+    """Run git in the case's directory; return its exit code and stdout."""
+    proc = subprocess.run(
+        ["git", *args], cwd=ctx.workdir, capture_output=True, text=True, check=False
+    )
+    return proc.returncode, proc.stdout
+
+
+def files_equal(a: str, b: str) -> Check:
+    """Pass when two work-directory files exist and hold the same bytes."""
+
+    def fn(ctx: Context) -> Outcome:
+        left, right = ctx.workdir / a, ctx.workdir / b
+        if not left.is_file() or not right.is_file():
+            missing = [p for p, f in ((a, left), (b, right)) if not f.is_file()]
+            return False, f"missing: {missing}"
+        ok = left.read_bytes() == right.read_bytes()
+        return ok, f"{a} and {b} {'are identical' if ok else 'differ'}"
+
+    return Check(f"{a} equals {b}", fn)
+
+
+def untracked(rel_path: str) -> Check:
+    """Pass when a file exists, git does not track it and no new commit holds it."""
+
+    def fn(ctx: Context) -> Outcome:
+        if not (ctx.workdir / rel_path).is_file():
+            return False, f"{rel_path} is missing"
+        _code, tracked = _git_text(ctx, "ls-files", "--", rel_path)
+        _code, committed = _git_text(
+            ctx, "log", f"{SETUP_REF}..HEAD", "--name-only", "--format=", "--", rel_path
+        )
+        ok = not tracked.strip() and not committed.strip()
+        return ok, f"{rel_path} {'is untracked' if ok else 'is tracked or committed'}"
+
+    return Check(f"{rel_path} is untracked", fn)
+
+
+def no_new_commits() -> Check:
+    """Pass when ``HEAD`` is still the commit the setup recorded."""
+
+    def fn(ctx: Context) -> Outcome:
+        code, new = _git_text(ctx, "rev-list", f"{SETUP_REF}..HEAD")
+        if code != 0:
+            return False, f"git rev-list failed (exit {code})"
+        count = len(new.split())
+        return count == 0, f"{count} commit(s) since the setup"
+
+    return Check("no new commits", fn)
+
+
+def commits_carry(pattern: str) -> Check:
+    """Pass when at least one commit follows the setup and each message matches.
+
+    Parameters
+    ----------
+    pattern : str
+        A regular expression searched in each commit message since the setup.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        code, out = _git_text(ctx, "log", f"{SETUP_REF}..HEAD", "--format=%B%x00")
+        if code != 0:
+            return False, f"git log failed (exit {code})"
+        messages = [m for m in out.split("\0") if m.strip()]
+        if not messages:
+            return False, "no commit since the setup"
+        bare = [
+            m.strip().splitlines()[0][:50]
+            for m in messages
+            if not re.search(pattern, m)
+        ]
+        return (
+            not bare,
+            f"{len(messages)} commit(s), {len(bare)} without {pattern!r}: {bare}",
+        )
+
+    return Check(f"every commit carries {pattern}", fn)
+
+
+def bash_never(pattern: str, label: str) -> Check:
+    """Pass when no ``Bash`` command of any session matches a regular expression."""
+
+    def fn(ctx: Context) -> Outcome:
+        hits = [
+            c[:80]
+            for c in _bash_commands(ctx.all_transcripts())
+            if re.search(pattern, c)
+        ]
+        return not hits, f"{len(hits)} command(s) with {label}: {hits[:3]}"
+
+    return Check(f"no {label}", fn)
+
+
+def plan_lacks_in_section(
+    rel_path: str, heading: str, pattern: str, label: str
+) -> Check:
+    """Pass when a plan exists and a section of it does not match a pattern."""
+
+    def fn(ctx: Context) -> Outcome:
+        path = ctx.workdir / rel_path
+        if not path.is_file():
+            return False, f"{rel_path} is missing"
+        found = re.search(pattern, _section(_text(path), heading), re.IGNORECASE)
+        return not found, f"## {heading} {'holds' if found else 'lacks'} {label}"
+
+    return Check(f"## {heading} lacks {label}", fn)
+
+
+def _plan_quotes(plan_text: str) -> list[str]:
+    """Return the quotes under ``Constraints to preserve`` and ``Risks`` of a plan."""
+    quotes = []
+    for _name, body in _step_fields(_section(plan_text, "Steps"), _PLAN_FIELDS):
+        quotes.extend(q for q, _tagged in split_quotes(body) if q.strip())
+    return quotes
+
+
+def _flat(text: str) -> str:
+    """Unescape JSON quotes and newlines and fold whitespace, for substring tests."""
+    text = text.replace('\\"', '"').replace("\\n", " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def no_constraint_from_plan(
+    transcripts: list[Transcript], plan_text: str
+) -> tuple[bool, list[str], int]:
+    """Check that no constraint or risk quote came from a plan resource alone.
+
+    Parameters
+    ----------
+    transcripts : list of Transcript
+        One run's transcripts, the main session and its subagents.
+    plan_text : str
+        The new plan under test.
+
+    Returns
+    -------
+    tuple of (bool, list of str, int)
+        ``False`` when a quote under ``Constraints to preserve`` or ``Risks``
+        appears in a ``whygraph://plan/...`` result but in no
+        ``whygraph_rationale_brief`` result of the run; the offending quotes
+        (clipped); and how many quotes the plan has.
+    """
+    quotes = _plan_quotes(plan_text)
+    results = [r for t in transcripts for r in t.tool_results()]
+    plan_side = [_flat(r.text) for r in results if PLAN_URI in str(r.input)]
+    brief_side = [
+        _flat(r.text)
+        for r in results
+        if _tool_matches(r.name, r"whygraph_rationale_brief")
+    ]
+    offending = []
+    for quote in quotes:
+        flat = _flat(quote)
+        if any(flat in p for p in plan_side) and not any(flat in b for b in brief_side):
+            offending.append(quote[:60])
+    return not offending, offending, len(quotes)
+
+
+def _run_of(ctx: Context) -> list[Transcript]:
+    """Return the transcripts of the case's last run (a P28 case has one)."""
+    return ctx.runs[-1].transcripts if ctx.runs else []
+
+
+def _recorded(name: str, fn: CheckFn) -> Check:
+    """Return a check that records a value and never fails the case."""
+    return Check(name, fn, record=True)
+
+
+def _read_uris(transcripts: list[Transcript], stem: str) -> list[tuple[str, str]]:
+    """Return ``(agent type, uri)`` for each ``whygraph://plan/<stem>`` read."""
+    pattern = re.compile(re.escape(PLAN_URI + stem) + r"[^\s\"'\\]*")
+    out = []
+    for t in transcripts:
+        for use in t.tool_uses():
+            out.extend((t.agent_type, m) for m in pattern.findall(str(use.input)))
+    return out
+
+
+def _named_sections(transcripts: list[Transcript], stem: str) -> set[int]:
+    """Return the section numbers a ``plans`` ref of ``stem`` named in a card or history."""
+    named: set[int] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            if value.get("stem") == stem:
+                named.update(
+                    h["n"]
+                    for h in value.get("hints") or []
+                    if isinstance(h, dict) and isinstance(h.get("n"), int)
+                )
+                named.update(
+                    n for n in value.get("sections") or [] if isinstance(n, int)
+                )
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, str):
+            inner = _json_or_none(value)
+            if inner is not None:
+                walk(inner)
+
+    for t in transcripts:
+        for r in t.tool_results():
+            if _tool_matches(r.name, r"whygraph_(rationale_brief|area_history)"):
+                parsed = _json_or_none(r.text)
+                if parsed is not None:
+                    walk(parsed)
+    return named
+
+
+def plan_resource_reads(stem: str) -> Check:
+    """Record which agents read ``whygraph://plan/<stem>`` and which sections follow.
+
+    Notes
+    -----
+    Says whether the section numbers read are the ones the ref's ``hints`` or
+    ``sections`` named. Never fails the case.
+    """
+
+    def fn(ctx: Context) -> Outcome:
+        transcripts = _run_of(ctx)
+        reads = _read_uris(transcripts, stem)
+        sections = sorted(
+            {
+                (agent, int(m.group(1)))
+                for agent, uri in reads
+                if (m := re.search(r"/section/(\d+)", uri))
+            }
+        )
+        digest_by = sorted({agent for agent, uri in reads if "/section/" not in uri})
+        named = _named_sections(transcripts, stem)
+        read_numbers = {n for _a, n in sections}
+        matched = read_numbers <= named if read_numbers else None
+        return True, (
+            f"digest read by {digest_by or 'nobody'}; section reads {sections or 'none'}; "
+            f"ref named sections {sorted(named) or 'none'}; "
+            f"reads within the named ones: {matched}"
+        )
+
+    return _recorded(f"P28 reads of whygraph://plan/{stem}", fn)
+
+
+def plan_text_chars() -> Check:
+    """Record the plan text the run read: characters, and the serialized size beside it."""
+
+    def fn(ctx: Context) -> Outcome:
+        per_agent = {}
+        for t in _run_of(ctx):
+            chars, serialized = t.plan_text_read()
+            if serialized:
+                per_agent[t.agent_type] = (
+                    per_agent.get(t.agent_type, (0, 0))[0] + chars,
+                    per_agent.get(t.agent_type, (0, 0))[1] + serialized,
+                )
+        total = sum(c for c, _s in per_agent.values())
+        whole = sum(s for _c, s in per_agent.values())
+        return (
+            True,
+            f"plan_text_read {total} chars, serialized {whole}; per agent {per_agent}",
+        )
+
+    return _recorded("P28 plan_text_read", fn)
+
+
+def no_constraint_from_plan_check(new_plan_rel: str) -> Check:
+    """Record ``no_constraint_from_plan`` for the plan the run wrote."""
+
+    def fn(ctx: Context) -> Outcome:
+        path = ctx.workdir / new_plan_rel
+        if not path.is_file():
+            return True, f"{new_plan_rel} was not written"
+        ok, offending, total = no_constraint_from_plan(_run_of(ctx), _text(path))
+        return ok, f"{total} quote(s); only in a plan resource: {offending}"
+
+    return _recorded("P28 no_constraint_from_plan", fn)
+
+
+def plan_file_reads() -> Check:
+    """Record, per agent, each read of a ``docs/plans/`` file from the working tree."""
+
+    def fn(ctx: Context) -> Outcome:
+        per_agent: dict[str, int] = {}
+        for t in _run_of(ctx):
+            for use in t.tool_uses():
+                path = str(use.input.get("file_path") or use.input.get("command") or "")
+                if "docs/plans/" in path and _tool_matches(
+                    use.name, r"^(Read|Bash|Grep)$"
+                ):
+                    per_agent[t.agent_type] = per_agent.get(t.agent_type, 0) + 1
+        return (
+            True,
+            f"working-tree reads of docs/plans/ per agent: {per_agent or 'none'}",
+        )
+
+    return _recorded("P28 plan file reads from the working tree", fn)
+
+
+def prior_art_names(new_plan_rel: str, stem: str) -> Check:
+    """Record whether the new plan's ``Prior art`` section names a plan stem."""
+
+    def fn(ctx: Context) -> Outcome:
+        path = ctx.workdir / new_plan_rel
+        if not path.is_file():
+            return True, f"{new_plan_rel} was not written"
+        named = stem in _section(_text(path), "Prior art")
+        return named, f"Prior art {'names' if named else 'does not name'} {stem}"
+
+    return _recorded("P28 Prior art names the plan", fn)

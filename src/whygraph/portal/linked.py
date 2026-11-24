@@ -38,10 +38,13 @@ rather than sent.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Sequence, TypeVar
+from pathlib import Path
+from typing import Any, Callable, Literal, Sequence, TypeVar
 
 from cryptography.fernet import InvalidToken
 from pydantic import ValidationError
@@ -51,15 +54,34 @@ from whygraph.api_v1 import (
     MAX_HUNKS,
     MAX_LIMIT,
     MAX_ORIGINS,
+    MAX_PATH,
+    MAX_PLAN_PATHS,
+    MAX_PLAN_SECTION,
     EvidenceIn,
     HunkIn,
     OriginIn,
+    PlansForIn,
+    PlansTargetIn,
     RationaleIn,
     StatusOut,
     TargetIn,
 )
 from whygraph.core.remote import RemoteError, RemoteNotFound
+from whygraph.mcp.plans import (
+    CARD_HINTS_MAX,
+    CARD_PLANS_CHARS,
+    CARD_REFS_MAX,
+    FILE_LINKS_MAX,
+    FILE_REFS_MAX,
+    LINK_KINDS,
+    PLAN_STEM_RE,
+    PLAN_URI,
+    RECORD_COMMITS_MAX,
+    REF_TITLE_MAX,
+    SECTIONS_MAX,
+)
 from whygraph.mcp.targets import Target
+from whygraph.project_setup import sync_plans_marker
 from whygraph.services.git import BlameHunk
 
 from .db import get_session
@@ -78,6 +100,18 @@ _T = TypeVar("_T")
 
 NOT_FOUND_CODE = "not_found"
 """The platform's code for an object it does not hold."""
+
+LOGIN_REQUIRED_CODE = "login_required"
+"""An older platform's catch-all answer to an ``/api/v1`` route it lacks."""
+
+PLANS_CAPABILITY = "plans"
+"""The ``meta`` capability of a platform that serves the plans routes."""
+
+PLAN_STATUSES = ("shipped", "in_flight", "not_implemented")
+"""The derived statuses a plan ref may carry (plan 61 section 3.2)."""
+
+_SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_SHORT_SHA_RE = re.compile(r"[0-9a-f]{4,64}")
 
 PROJECT_ACCESS_REMOVED = "project_access_removed"
 """The revocation reason of a token whose user lost access to the project
@@ -100,6 +134,151 @@ def _target_in(target: Target) -> TargetIn:
         line_end=target.line_end,
         qualified_name=target.qualified_name,
     )
+
+
+def _plans_target_in(target: Target) -> PlansTargetIn:
+    """The wire form of a ``plans/for`` target: its name and range, never its path."""
+    return PlansTargetIn(
+        qualified_name=target.qualified_name,
+        line_start=target.line_start,
+        line_end=target.line_end,
+    )
+
+
+def _plans_unsupported(exc: BaseException | None) -> bool:
+    """Whether a refusal means "this platform has no plans routes".
+
+    An older platform's catch-all answers an unknown ``/api/v1`` path with
+    ``401 login_required``, which a real v1 route never does; a ``404``
+    without the ``not_found`` code is a route it does not know either.
+    """
+    if not isinstance(exc, PlatformRefused):
+        return False
+    if exc.status == 401:
+        return exc.code == LOGIN_REQUIRED_CODE
+    return exc.status == 404 and exc.code != NOT_FOUND_CODE
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` on one line, cut to ``limit`` characters with an ellipsis."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _count(value: Any) -> bool:
+    """Whether ``value`` is a non-negative ``int`` (not a ``bool``)."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _hints(raw: Any) -> list[dict]:
+    """A ref's ``hints``, well-formed and at most :data:`CARD_HINTS_MAX`."""
+    out: list[dict] = []
+    for item in raw if isinstance(raw, list) else []:
+        if len(out) >= CARD_HINTS_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        hint_id, title, n = item.get("id"), item.get("title"), item.get("n")
+        if not isinstance(hint_id, str) or not hint_id.strip() or not _count(n):
+            continue
+        hint: dict[str, Any] = {"id": _clip(hint_id, REF_TITLE_MAX)}
+        if isinstance(title, str) and title.strip():
+            hint["title"] = _clip(title, REF_TITLE_MAX)
+        hint["n"] = n
+        out.append(hint)
+    return out
+
+
+def _ref(item: Any, *, symbol: bool, detail: str) -> dict | None:
+    """One platform ref rebuilt in the §3.3 shape, or ``None`` when malformed.
+
+    Only known fields are kept, titles are clipped and the ``uri`` is built
+    here from the stem, so nothing but a pointer reaches the agent.
+    """
+    if not isinstance(item, dict):
+        return None
+    stem, link, status = item.get("stem"), item.get("link"), item.get("status")
+    if (
+        not isinstance(stem, str)
+        or not PLAN_STEM_RE.fullmatch(stem)
+        or link not in LINK_KINDS
+        or status not in PLAN_STATUSES
+    ):
+        return None
+    title = item.get("title")
+    ref: dict[str, Any] = {
+        "stem": stem,
+        "title": _clip(
+            title if isinstance(title, str) and title.strip() else stem,
+            REF_TITLE_MAX,
+        ),
+        "status": status,
+        "link": link,
+        "uri": PLAN_URI.format(stem=stem),
+    }
+    present = item.get("present")
+    if detail != "full" and present is False:
+        ref["present"] = False
+    if symbol:
+        hints = _hints(item.get("hints"))
+        if hints:
+            ref["hints"] = hints
+    else:
+        raw = item.get("sections")
+        sections = [n for n in raw if _count(n)] if isinstance(raw, list) else []
+        if sections:
+            ref["sections"] = sections[:SECTIONS_MAX]
+            total = item.get("sections_total")
+            if len(sections) > SECTIONS_MAX or (_count(total) and total > SECTIONS_MAX):
+                ref["sections_total"] = max(
+                    len(sections), total if _count(total) else 0
+                )
+    if detail == "full":
+        path = item.get("path")
+        ref["path"] = path if isinstance(path, str) and len(path) <= MAX_PATH else None
+        ref["present"] = present if isinstance(present, bool) else True
+        commits = item.get("commits")
+        ref["commits"] = (
+            [c for c in commits if isinstance(c, str) and _SHORT_SHA_RE.fullmatch(c)][
+                :RECORD_COMMITS_MAX
+            ]
+            if isinstance(commits, list)
+            else []
+        )
+    return ref
+
+
+def _cut_refs(raw: Any, *, scope: str, detail: str) -> list[dict]:
+    """A platform's ``plans`` list cut to the local ceilings (plan 61 section 3.3).
+
+    Symbol scope: no ``file`` link, at most :data:`CARD_REFS_MAX` refs and
+    :data:`CARD_HINTS_MAX` hints each, and at most :data:`CARD_PLANS_CHARS`
+    serialized characters (hints dropped from the last ref, then the ref).
+    File scope: at most :data:`FILE_REFS_MAX` refs, :data:`FILE_LINKS_MAX`
+    of them ``file`` links. The platform's order is kept.
+    """
+    symbol = scope == "symbol"
+    cap = CARD_REFS_MAX if symbol else FILE_REFS_MAX
+    out: list[dict] = []
+    file_links = 0
+    for item in raw if isinstance(raw, list) else []:
+        if len(out) >= cap:
+            break
+        ref = _ref(item, symbol=symbol, detail=detail)
+        if ref is None:
+            continue
+        if ref["link"] == "file":
+            if symbol or file_links >= FILE_LINKS_MAX:
+                continue
+            file_links += 1
+        out.append(ref)
+    if symbol:
+        while out and len(json.dumps(out, ensure_ascii=False)) > CARD_PLANS_CHARS:
+            if out[-1].pop("hints", None) is None:
+                out.pop()
+    return out
 
 
 def _hunks_in(hunks: Sequence[BlameHunk]) -> list[HunkIn]:
@@ -178,6 +357,7 @@ class LinkedProject:
         self.status = status
         self.reason = reason
         self.project_id = project_id
+        self._plans: bool | None = None  # the ``plans`` capability, once read
 
     @property
     def url(self) -> str:
@@ -371,6 +551,143 @@ class LinkedProject:
             self._guard(lambda: self._client.overview(self.slug))
         )
 
+    # -- plans (plan 61 section 4.8) ----------------------------------------
+
+    def _plans_capable(self) -> bool:
+        """Whether the platform's ``meta`` lists ``plans`` (read once, if it succeeds).
+
+        An older platform has no plans routes, and its catch-all answers
+        them with ``401 login_required``, so the capability is read first.
+        Only a successful read is kept: a failed one raises
+        :class:`RemoteError` (``status`` ``ok``, nothing recorded about the
+        link) and the next call reads it again.
+        """
+        if self._plans is None:
+            try:
+                meta = self._client.meta()
+            except PlatformError as exc:
+                status, reason = link_status_for(exc)
+                raise RemoteError(
+                    str(self._error(exc, status, reason)), status=status, reason=reason
+                ) from exc
+            self._plans = PLANS_CAPABILITY in meta.capabilities
+        return self._plans
+
+    def plans_for(
+        self,
+        shas: Sequence[str],
+        paths: Sequence[str],
+        *,
+        scope: Literal["symbol", "file"],
+        target: Target | None = None,
+        detail: Literal["compact", "full"] = "compact",
+    ) -> tuple[list[dict], bool]:
+        """``POST /plans/for``: the platform's refs, cut to the local ceilings.
+
+        Sends only what it is given - the caller passes the SHAs and paths
+        its own call already sent - capped at :data:`~whygraph.api_v1.MAX_LIMIT`
+        SHAs and :data:`~whygraph.api_v1.MAX_PLAN_PATHS` paths. The answer
+        is re-cut here (:func:`_cut_refs`), so an older or misbehaving
+        platform never reaches a card unbounded.
+
+        Parameters
+        ----------
+        shas, paths : Sequence[str]
+            What the same tool call already sent.
+        scope : {"symbol", "file"}
+            Beside a card, or a file-level answer.
+        target : Target or None, optional
+            The target the same call sent (symbol scope); only its name and
+            range travel, the path goes in ``paths``.
+        detail : {"compact", "full"}, optional
+            The ref form to return.
+
+        Returns
+        -------
+        tuple[list[dict], bool]
+            The refs and ``supported``; ``([], False)`` without a request
+            when ``meta`` lacks ``plans``, and for an older platform's
+            ``401 login_required`` or a ``404`` without ``not_found``.
+
+        Raises
+        ------
+        RemoteError
+            ``meta`` could not be read, or the platform could not be
+            reached or refused.
+        """
+        if not self._plans_capable():
+            return [], False
+        body = self._body(
+            lambda: PlansForIn(
+                shas=list(
+                    dict.fromkeys(
+                        s for s in shas if _SHA_RE.fullmatch(s) and s.strip("0")
+                    )
+                )[:MAX_LIMIT],
+                paths=list(dict.fromkeys(p for p in paths if p))[:MAX_PLAN_PATHS],
+                scope=scope,
+                detail=detail,
+                target=_plans_target_in(target) if target is not None else None,
+            )
+        )
+        try:
+            reply = self._guard(
+                lambda: self._client.plans_for(
+                    self.slug,
+                    body.shas,
+                    body.paths,
+                    scope=body.scope,
+                    target=body.target,
+                    detail=body.detail,
+                )
+            )
+        except RemoteError as exc:
+            if _plans_unsupported(exc.__cause__):
+                return [], False
+            raise
+        return _cut_refs(reply.get("plans"), scope=scope, detail=detail), True
+
+    def plan(self, stem: str) -> dict:
+        """``GET /plans/{stem}``: the digest, contents and links of one plan.
+
+        The stem is checked against the stem pattern **before** any request
+        (the URL path is built from it); a mismatch, a platform without
+        plans and its ``401 login_required`` are all :class:`RemoteNotFound`.
+        """
+        if not PLAN_STEM_RE.fullmatch(stem or ""):
+            raise RemoteNotFound("no such plan", status=self.status)
+        return self._plan_read(lambda: self._client.plan(self.slug, stem))
+
+    def plan_section(self, stem: str, n: int) -> dict:
+        """``GET /plans/{stem}/sections/{n}``: one section of one plan.
+
+        ``n`` must be an ``int`` in ``0..MAX_PLAN_SECTION`` and the stem
+        must match the stem pattern, both checked before any request.
+        """
+        if (
+            not PLAN_STEM_RE.fullmatch(stem or "")
+            or isinstance(n, bool)
+            or not isinstance(n, int)
+            or not 0 <= n <= MAX_PLAN_SECTION
+        ):
+            raise RemoteNotFound("no such plan section", status=self.status)
+        return self._plan_read(lambda: self._client.plan_section(self.slug, stem, n))
+
+    def _plan_read(self, call: Callable[[], dict]) -> dict:
+        """One plan read: a missing capability or route reads as not found."""
+        if not self._plans_capable():
+            raise RemoteNotFound("this platform serves no plans", status=self.status)
+        try:
+            return self._without_project(self._guard(call))
+        except RemoteNotFound:
+            raise
+        except RemoteError as exc:
+            if _plans_unsupported(exc.__cause__):
+                raise RemoteNotFound(
+                    "this platform serves no plans", status=exc.status
+                ) from exc
+            raise
+
     def revoke(self) -> None:
         """``DELETE /token``: give up this machine's access (step 9's removal)."""
         self._guard(lambda: self._client.revoke(self.slug))
@@ -472,6 +789,12 @@ def save_status(
     (``not_found`` for an unknown commit, ``generation_limited``) is an
     answer about that one request, not a fact about the link.
 
+    The answer's ``plans_dir`` also keeps the checkout's
+    ``.whygraph/portal.env`` line current (plan 61 section 4.16), through
+    :func:`_sync_plans_dir`: only for an initialized ``platform`` project,
+    and only when the value differs from the last one written, so an
+    unchanged answer reads no file and runs no ``git``.
+
     Parameters
     ----------
     project_id : int
@@ -490,10 +813,22 @@ def save_status(
         Whether anything was written.
     """
     reason = None if status == "ok" else reason
+    plans_dir = None if project is None else project.plans_dir
+    if plans_dir is not None and _synced_plans_dir.get(project_id) == plans_dir:
+        plans_dir = None  # already written: no file read, no git
+    marker_root: str | None = None
     with get_session() as session:
         row = session.get(PlatformLink, project_id)
         if row is None:  # the project was removed while a call was in flight
             return False
+        if plans_dir is not None:
+            local = session.get(Project, project_id)
+            if (
+                local is not None
+                and local.source == "platform"
+                and local.initialized_at is not None
+            ):
+                marker_root = local.root
         changed = False
         if (row.status, row.status_reason) != (status, reason):
             row.status, row.status_reason = status, reason
@@ -515,7 +850,39 @@ def save_status(
                 changed = True
         if changed:
             session.add(row)
-        return changed
+    if marker_root is not None and plans_dir is not None:
+        _sync_plans_dir(project_id, Path(marker_root), plans_dir)
+    return changed
+
+
+_synced_plans_dir: dict[int, str] = {}
+"""``projects.id`` -> the ``plans_dir`` last written to its ``portal.env``."""
+
+_plans_dir_locks: dict[int, threading.Lock] = {}
+_plans_dir_locks_guard = threading.Lock()
+
+
+def _sync_plans_dir(project_id: int, root: Path, plans_dir: str) -> None:
+    """Write a linked checkout's ``plans_dir=`` line, once per new value.
+
+    Under a per-project lock, so two concurrent answers never race on
+    ``portal.env.tmp``; the value is remembered only after a successful
+    write (:func:`whygraph.project_setup.sync_plans_marker`, which refuses
+    a symlinked or tracked marker), so a failure is retried on the next
+    answer.
+    """
+    with _plans_dir_locks_guard:
+        lock = _plans_dir_locks.setdefault(project_id, threading.Lock())
+    with lock:
+        if _synced_plans_dir.get(project_id) == plans_dir or not root.is_dir():
+            return
+        error = sync_plans_marker(root, plans_dir)
+        if error is not None:
+            logger.debug(
+                "plans folder not recorded for project %s: %s", project_id, error
+            )
+            return
+        _synced_plans_dir[project_id] = plans_dir
 
 
 def touch_status(project_id: int) -> None:

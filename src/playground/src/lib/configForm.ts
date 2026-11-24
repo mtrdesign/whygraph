@@ -84,6 +84,10 @@ export interface ConfigFormValues {
   agentDescriptions: string;
   /** `[areas]`, project layer only. */
   areas: AreaRow[];
+  /** `[plans].dir` as typed; "" with `plansOff` false means the default (`docs/plans`). */
+  plansDir: string;
+  /** `[plans].dir = ""` is stored: plan indexing is off. */
+  plansOff: boolean;
 }
 
 /**
@@ -158,7 +162,15 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     agentGenerations: limitText(obj(layer.rationale).agent_generations_per_hour),
     agentDescriptions: limitText(obj(layer.analyze).agent_descriptions_per_hour),
     areas: areasFromLayer(layer),
+    ...plansFromLayer(layer),
   };
+}
+
+/** `[plans].dir`: absent = default folder (on), `""` = off, anything else = that folder. */
+export function plansFromLayer(layer: ConfigDict): { plansDir: string; plansOff: boolean } {
+  const dir = obj(layer.plans).dir;
+  if (typeof dir !== "string") return { plansDir: "", plansOff: false };
+  return dir === "" ? { plansDir: "", plansOff: true } : { plansDir: dir, plansOff: false };
 }
 
 const limitText = (v: unknown): string => (typeof v === "number" ? String(v) : "");
@@ -185,7 +197,7 @@ function prune(root: Record<string, unknown>, key: string) {
 export function valuesToLayer(
   base: ConfigDict,
   v: ConfigFormValues,
-  opts: { scan: boolean; limits?: boolean; areas?: boolean },
+  opts: { scan: boolean; limits?: boolean; areas?: boolean; plans?: boolean },
 ): ConfigDict {
   const layer = structuredClone(base) as Record<string, Record<string, unknown>>;
 
@@ -241,6 +253,13 @@ export function valuesToLayer(
       else scan.serve_codegraph = false;
     }
     prune(layer, "scan");
+  }
+  // Only the Plans section's save writes `[plans]`: off stores "" (an empty input alone drops the key = default on).
+  if (opts.plans) {
+    const plans = (layer.plans = obj(layer.plans));
+    if (v.plansOff) plans.dir = "";
+    else setOrDrop(plans, "dir", v.plansDir.trim());
+    prune(layer, "plans");
   }
   // Only the Areas section's save writes `[areas]`; zero rows removes the key.
   if (opts.areas) {
@@ -343,6 +362,8 @@ export const configFormSchema = z.object({
   keys: z.record(z.string(), z.string()),
   agentGenerations: agentLimit,
   agentDescriptions: agentLimit,
+  plansDir: z.string().refine((s) => !/[\n\r]/.test(s), "One folder only"),
+  plansOff: z.boolean(),
   areas: z.array(areaRow).refine(
     (rows) => new Set(rows.map((r) => r.name.trim())).size === rows.length,
     "Area names must be unique",

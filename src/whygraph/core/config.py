@@ -336,6 +336,23 @@ def is_agent_limit(value: object) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class PlansConfig:
+    """Configuration for the committed-plans index.
+
+    Loaded from the ``[plans]`` table in ``whygraph.toml``.
+
+    Attributes
+    ----------
+    dir : str
+        Repo-relative directory whose ``*.md`` plans are indexed, read
+        from ``HEAD``'s git objects only. ``""`` turns plan indexing off.
+        Validated by :func:`check_plans_dir`.
+    """
+
+    dir: str = "docs/plans"
+
+
+@dataclass(frozen=True, slots=True)
 class AnalyzeConfig:
     """Configuration for the LLM-driven commit descriptor.
 
@@ -871,6 +888,88 @@ def check_scan_remote(value: str) -> str:
     return value
 
 
+PLANS_DIR_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
+"""What ``[plans].dir`` may be. Must equal ``analyze/project_purpose._SAFE_REL``
+(a unit test keeps them in sync; ``core/`` must not import ``analyze/``)."""
+
+PLANS_DIR_DENIED_PREFIXES = (
+    ".env",
+    ".git",
+    "credential",
+    "secret",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+)
+"""Copy of ``analyze/project_purpose._DENIED_PREFIXES`` (kept in sync by a test)."""
+
+PLANS_DIR_DENIED_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".gpg",
+    ".asc",
+    ".ppk",
+    ".kdbx",
+)
+"""Copy of ``analyze/project_purpose._DENIED_SUFFIXES`` (kept in sync by a test)."""
+
+
+def check_plans_dir(value: str) -> str:
+    """Return ``value`` if it is a safe ``[plans].dir``.
+
+    One trailing ``/`` is stripped first. The empty string is allowed
+    (indexing off). Otherwise the value must fully match
+    :data:`PLANS_DIR_RE`, and no component may be ``.`` / ``..``, start
+    with ``.`` or ``-`` (this keeps a repo-committed value out of
+    ``.git``, ``.claude`` and the other agent trees), or be a name the
+    blob reader's deny list would refuse (``secret*``, ``*.pem``, ...).
+
+    Parameters
+    ----------
+    value : str
+        The configured directory.
+
+    Returns
+    -------
+    str
+        The value with one trailing ``/`` stripped.
+
+    Raises
+    ------
+    ConfigError
+        If ``value`` is not a string or breaks any rule above.
+    """
+    if not isinstance(value, str):
+        raise ConfigError(f"[plans].dir must be a string, got {value!r}")
+    if value.endswith("/"):
+        value = value[:-1]
+    if not value:
+        return value
+    if not PLANS_DIR_RE.fullmatch(value):
+        raise ConfigError(
+            "[plans].dir must be a repo-relative path of letters, digits, "
+            f"'.', '_', '-' and '/', got {value!r}"
+        )
+    for part in value.split("/"):
+        lowered = part.lower()
+        if part.startswith((".", "-")):
+            raise ConfigError(
+                f"[plans].dir components must not start with '.' or '-', got {value!r}"
+            )
+        if lowered.startswith(PLANS_DIR_DENIED_PREFIXES) or lowered.endswith(
+            PLANS_DIR_DENIED_SUFFIXES
+        ):
+            raise ConfigError(
+                f"[plans].dir must not name a secret or credential file, got {value!r}"
+            )
+    return value
+
+
 def check_default_branch(value: str) -> str:
     """Return ``value`` unless it could be read as a git option.
 
@@ -950,6 +1049,20 @@ def _build_llm_config(raw: dict, base: Path) -> LlmConfig:
     for unknown in set(raw) - {n for n, *_ in _LLM_SECTIONS} - {"model"}:
         _log.warning("ignoring unknown key in [llm]: %r", unknown)
     return LlmConfig(**{k: v for k, v in sections.items() if k in known_attrs})
+
+
+def _build_plans_config(raw: dict) -> PlansConfig:
+    """Parse a raw ``[plans]`` dict into a typed :class:`PlansConfig`.
+
+    An explicit ``""`` is kept (indexing off); an absent key or ``None``
+    gives the default.
+    """
+    for unknown in set(raw) - {"dir"}:
+        _log.warning("ignoring unknown key in [plans]: %r", unknown)
+    value = raw.get("dir")
+    if value is None:
+        return PlansConfig()
+    return PlansConfig(dir=check_plans_dir(value))
 
 
 def _build_analyze_config(raw: dict) -> AnalyzeConfig:
@@ -1316,6 +1429,9 @@ class Config:
         Settings for the portal's Chat assistant. Loaded from the
         ``[chat]`` table; consumed by :mod:`whygraph.chat` and
         :mod:`whygraph.serve.chat`.
+    plans : PlansConfig
+        Settings for the committed-plans index. Loaded from the
+        ``[plans]`` table.
     areas : tuple of AreaConfig
         Configured product areas, sorted by name. Loaded leniently from
         the ``[areas]`` table: an invalid entry is dropped with a warning.
@@ -1335,6 +1451,7 @@ class Config:
     analyze: AnalyzeConfig = field(default_factory=AnalyzeConfig)
     rationale: RationaleConfig = field(default_factory=RationaleConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
+    plans: PlansConfig = field(default_factory=PlansConfig)
     areas: tuple[AreaConfig, ...] = ()
 
     def __post_init__(self) -> None:
@@ -1548,6 +1665,10 @@ class Config:
         chat_raw = data.pop("chat", {}) or {}
         if chat_raw:
             data["chat"] = _build_chat_config(chat_raw)
+
+        plans_raw = data.pop("plans", {}) or {}
+        if plans_raw:
+            data["plans"] = _build_plans_config(plans_raw)
 
         areas_raw = data.pop("areas", None)
         if areas_raw:

@@ -1,0 +1,59 @@
+{
+  "body": {
+    "contents": [
+      {
+        "chars": 57,
+        "children": 1,
+        "n": 1,
+        "title": "Steps"
+      },
+      {
+        "chars": 98,
+        "children": 0,
+        "n": 3,
+        "title": "Resolved decisions"
+      }
+    ],
+    "digest": "# Build the sample module\n**Objective:** Give the project a sample module.\n\n| # | Question | Decision |\n|---|---|---|\n| Q1 | Where? | In `sample.py` |\n\n\u2026 digest of a 14-line plan; read one section at a time: whygraph://plan/sample-plan/section/<n>",
+    "implementing_commits": [
+      {
+        "on_default_branch": true,
+        "sha": "57275dc9",
+        "subject": "second commit"
+      }
+    ],
+    "implementing_commits_total": 1,
+    "kind": "plan",
+    "line_count": 14,
+    "objective": "Give the project a sample module.",
+    "path": "docs/plans/sample-plan.md",
+    "paths": [
+      "sample.py"
+    ],
+    "paths_total": 1,
+    "present": true,
+    "project": {
+      "access_lost": false,
+      "clone_url": "http://127.0.0.1:9/acme/api.git",
+      "default_branch": "main",
+      "github_full_name": "acme/api",
+      "last_scan_at": null,
+      "last_scanned_head": null,
+      "name": "Api project",
+      "plans_dir": "docs/plans",
+      "project_role": "admin",
+      "role": "owner",
+      "slug": "api"
+    },
+    "publishing_links": 0,
+    "pull_requests": [],
+    "pull_requests_total": 0,
+    "reading": "Intent when it was written. Commits and PRs say what was built.",
+    "redacted_lines": 0,
+    "status": "shipped",
+    "stem": "sample-plan",
+    "title": "Build the sample module",
+    "uri": "whygraph://plan/sample-plan"
+  },
+  "status": 200
+}

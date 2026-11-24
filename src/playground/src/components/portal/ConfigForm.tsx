@@ -78,7 +78,7 @@ type StoredConfig = Omit<ProjectConfigView, "import"> & {
  */
 export type ConfigScope = { kind: "project"; slug: string } | { kind: "global" };
 
-type SectionId = "models" | "github" | "hooks" | "scanning" | "limits" | "areas";
+type SectionId = "models" | "github" | "hooks" | "scanning" | "plans" | "limits" | "areas";
 
 /** Each section's form fields; a section's Save writes these and nothing else. */
 const SECTION_FIELDS: Record<SectionId, (keyof ConfigFormValues)[]> = {
@@ -86,6 +86,7 @@ const SECTION_FIELDS: Record<SectionId, (keyof ConfigFormValues)[]> = {
   github: ["forge"],
   hooks: ["hooks"],
   scanning: ["serveCodegraph"],
+  plans: ["plansDir", "plansOff"],
   limits: ["agentGenerations", "agentDescriptions"],
   areas: ["areas"],
 };
@@ -111,6 +112,7 @@ export function configSections(
       { id: "github", label: "GitHub" },
       ...(!production && source === "local" ? [{ id: "hooks", label: "Git hooks" }] : []),
       ...(!production && source === "local" ? [{ id: "scanning", label: "Scanning" }] : []),
+      { id: "plans", label: "Plans" },
       { id: "areas", label: "Areas" },
     ];
   }
@@ -510,7 +512,7 @@ export function ConfigForm({
     const fields = SECTION_FIELDS[section];
     if (!(await trigger(fields as FieldPath<ConfigFormValues>[]))) return false;
     const merged = { ...base, ...pick(getValues(), fields) } as ConfigFormValues;
-    const next = valuesToLayer(layer, merged, { scan: isProject, limits: section === "limits", areas: section === "areas" });
+    const next = valuesToLayer(layer, merged, { scan: isProject, limits: section === "limits", areas: section === "areas", plans: section === "plans" });
     const saved = await put.mutateAsync({ config: next });
     // The answer is the stored layer: this section is clean even when the
     // refetch brings back an identical payload (no new `stored.data`).
@@ -893,6 +895,53 @@ export function ConfigForm({
                 </div>
               )}
             />
+          </SectionForm>
+        </SettingsSection>
+      )}
+
+      {isProject && (
+        <SettingsSection
+          id="plans"
+          title="Plans"
+          description="Committed plans are read from this folder at HEAD and linked to the commits and PRs that name them."
+        >
+          <SectionForm
+            name="Plans"
+            dirty={dirty("plans")}
+            readOnly={readOnly}
+            onSave={() => saveSection("plans")}
+            onDiscard={() => discard("plans")}
+          >
+            <Controller
+              control={control}
+              name="plansOff"
+              render={({ field }) => (
+                <div className="row-wrap justify-between gap-3">
+                  <Label htmlFor="plans-index-switch" className="cursor-pointer">Index committed plans</Label>
+                  <Switch
+                    id="plans-index-switch"
+                    checked={!field.value}
+                    onCheckedChange={(on) => field.onChange(!on)}
+                    disabled={readOnly}
+                  />
+                </div>
+              )}
+            />
+            <Field
+              label="Plans folder"
+              hint="Committed plans are read from this folder at HEAD. Leave the folder empty for the default, docs/plans."
+              error={errors.plansDir?.message}
+            >
+              {(p) => (
+                <Input
+                  {...p}
+                  placeholder="docs/plans"
+                  className="font-mono"
+                  disabled={readOnly || values.plansOff}
+                  {...register("plansDir")}
+                />
+              )}
+            </Field>
           </SectionForm>
         </SettingsSection>
       )}

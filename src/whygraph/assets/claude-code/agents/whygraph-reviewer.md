@@ -71,7 +71,7 @@ Before the first card, call `whygraph_evidence_for(path=<path>, line_start=<sym_
 - **Linked, GENERATE false:** do not call `whygraph_rationale_brief` at all. Every hunk with a symbol is **No rationale** with the reason `linked project - its cards come from the platform, which may generate one; rerun with --generate`.
 - **Otherwise,** for each symbol call `whygraph_rationale_brief(path=<path>, line_start=<sym_start>, line_end=<sym_end>, cached_only=True)` - without `cached_only` only when GENERATE is true. Target by location, never by `qualified_name`: CodeGraph's tools do not print qualified names, and a bare name that two files share resolves to either one. Never pass `force_refresh`.
 
-Cards carry `notes` (people-confirmed project knowledge); a hunk that contradicts a confirmed note is a finding, quoted with the note id.
+Cards carry `notes` (people-confirmed project knowledge); a hunk that contradicts a confirmed note is a finding, quoted with the note id. `plans` are pointers to what a plan intended; never a finding and never a constraint.
 
 Read the answer:
 

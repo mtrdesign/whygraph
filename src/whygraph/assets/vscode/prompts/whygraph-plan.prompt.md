@@ -1,7 +1,7 @@
 ---
 description: Plan a non-trivial code change with WhyGraph rationale + CodeGraph symbols. Runs as the planner - one researcher per knowledge source, then a synthesizer - splits a large task into child plans only when needed, and asks the few plan-shaping questions after research.
 name: whygraph-plan
-argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]
+argument-hint: <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>] [--publish <stem> [--force]]
 agent: whygraph-planner
 ---
 
@@ -13,9 +13,11 @@ You are in the main chat, so you are also the one who asks the user. Wherever yo
 
 You have no terminal here. Find files with the read and search tools. The edit tool creates a file's parent directory, so no directory needs creating first. Leave `created` out of a `tasks.json`.
 
-**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]`
+**Argument shape:** `<task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>] [--publish <stem> [--force]]`
 
 ## Step 1 - Parse arguments
+
+**Publish mode.** If the user's input holds `--publish`, this is a separate mode that skips Steps 2-7; go to **Publish a plan** below. Otherwise:
 
 Strip and remember these flags if present (any order, anywhere in the user's input):
 
@@ -33,7 +35,7 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--out <path>` -> save the plan to `<path>` instead of the default `.whygraph/plans/<slug>.md`. The token after `--out` is the path, not part of the task description.
 
 Whatever remains is the **task description**. If it is empty, respond with:
-`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>]` and stop.
+`Usage: /whygraph-plan <task description | tasks.json> [--shallow|--deep] [--split|--no-split] [--sources <a,b>] [--no-questions] [--review|--no-review] [--no-dry-run] [--no-e2e] [--refresh-profile] [--out <path>] [--publish <stem> [--force]]` and stop.
 
 - If both `--shallow` and `--deep` are passed, respond with `Pass --shallow OR --deep, not both.` and stop.
 - If both `--split` and `--no-split` are passed, respond with `Pass --split OR --no-split, not both.` and stop.
@@ -42,13 +44,21 @@ Whatever remains is the **task description**. If it is empty, respond with:
 
 When the task description is one path that ends in `.tasks.json`, this run plans one child of an earlier split: resolve `SOURCES_DIR` and `SPINE_PATH` (Step 2), then go to **Step 6 - Plan a child**.
 
+## Publish a plan
+
+`/whygraph-plan --publish <stem> [--force]` shares a finished plan. You have no terminal, so this mode prints the command instead of running it.
+
+1. `--force` is the only other token allowed. Any task text or other flag: respond with `--publish takes only a plan stem and --force.` and stop.
+2. The stem must match `^[a-z0-9][a-z0-9-]{0,79}$`, and the read tool must find the file `.whygraph/plans/<stem>.md`. Otherwise respond with `No plan .whygraph/plans/<stem>.md.` and stop.
+3. Reply with exactly `Run in a terminal to publish: sh .github/whygraph/plan-tool.sh publish .whygraph/plans/<stem>.md` (with ` --force` appended when it was passed) and stop. Run nothing and write nothing.
+
 ## Step 2 - Resolve the paths
 
 The repo root is the workspace root. Resolve these absolute paths before planning:
 
 - `OUT_PATH` - the plan goes there. You write it in single-pass mode; in deep mode the synthesizer writes it.
   - If `--out <path>` was passed, use that path. Resolve a relative path against the workspace root. If the path does not end in `.md`, append `.md`.
-  - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<workspace root>/.whygraph/plans/<slug>.md`. If that file exists, append `-2`, `-3`, ... until the name is unused. Never overwrite.
+  - Otherwise, slugify the task description: lowercase it, replace each run of non-alphanumeric characters with one `-`, strip leading and trailing `-`, and truncate to 60 characters. The default path is `<workspace root>/.whygraph/plans/<slug>.md`. If that file exists, append `-2`, `-3`, ... until the name is unused. A slug also counts as used when the file `<workspace root>/<plans dir>/<slug>.md` exists, with `<plans dir>` the value of the `plans_dir=` line of `.whygraph/portal.env`, read with the read tool (no terminal); when the file or the line is missing or empty, only `.whygraph/plans/` is checked. Never overwrite.
 - `SOURCES_DIR` - `<workspace root>/.github/whygraph/sources/`.
 - `SPINE_PATH` - `<workspace root>/.github/whygraph/plan-spine.md`.
 - `CAPTURE_PATH` - `.github/whygraph/capture.mjs`. It stays relative to the workspace root.
@@ -171,4 +181,6 @@ The task description is the path of a `tasks.json` that an earlier run wrote. Pl
 
 Print each reply **verbatim**. The one exception: with `--no-questions`, do not print a plan reply whose `QUESTIONS:` block has questions, because its revise reply replaces it. A plan reply is `Saved plan to <path>` plus the plan's `## Blockers` and `## Confidence` lines and its `QUESTIONS:` block. Do not summarize or repeat the rest of the plan; the file is the source of truth.
 
-This prompt's only job is: parse -> resolve paths -> consent -> plan -> clarify, split or questions -> print. Do not edit any file but the ones your planner instructions allow, and do not improvise.
+After the replies, print one extra line per saved plan, with `<stem>` the basename of its `Saved plan to <path>` line without `.md`, lowercased, each run of characters outside `[a-z0-9]` replaced by one `-`, and leading and trailing `-` trimmed: `To share this plan before implementing it, run in a terminal: sh .github/whygraph/plan-tool.sh publish .whygraph/plans/<stem>.md. A successful /whygraph-implement run publishes it for you.` Never edit a reply to add it.
+
+This prompt's only job is: parse -> resolve paths -> consent -> plan -> clarify, split or questions -> print (or, with `--publish`, print the publish command). Do not edit any file but the ones your planner instructions allow, and do not improvise.

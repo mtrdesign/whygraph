@@ -1024,12 +1024,17 @@ def _get_evidence(qualified_name: str, limit: int = 10) -> dict:
 
 def _get_area_history(path: str, limit: int = 10, include_renames: bool = True) -> dict:
     """Handler for ``get_area_history``."""
-    return whygraph_area_history(
-        path=path,
-        limit=max(1, limit),
-        include_renames=include_renames,
-        detail="full",
+    result = dict(
+        whygraph_area_history(
+            path=path,
+            limit=max(1, limit),
+            include_renames=include_renames,
+            detail="full",
+        )
     )
+    # Chat stays plan-free until its prompt frames plans (plan 61, R22).
+    result.pop("plans", None)
+    return result
 
 
 def _find_changes(

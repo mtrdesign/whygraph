@@ -322,6 +322,11 @@ describe("Overview chart data", () => {
     expect(agentKindLabel("codegraph_node")).toBe("Symbol and file reads");
     expect(agentKindLabel("codegraph_search")).toBe("Symbol search");
     expect(agentKindLabel("codegraph_impact")).toBe("Change impact");
+    expect(agentKindLabel("whygraph_plan")).toBe("Plan digests");
+    expect(agentKindLabel("whygraph_plan_section")).toBe("Plan section reads");
+    expect(agentKindLabel("v1:plans_for")).toBe("Plan lookups");
+    expect(agentKindLabel("v1:plan")).toBe("Plan digests");
+    expect(agentKindLabel("v1:plan_section")).toBe("Plan section reads");
   });
 });
 

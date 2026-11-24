@@ -41,7 +41,7 @@ Two things differ from a `whygraph.toml`:
   never sent to a project that overrides that provider's endpoint (its key card says so).
 - **Only some keys can be set.** The WhyGraph database is always in the portal's data directory (`projects/<org>/<slug>/whygraph.db`) and the
   CodeGraph index always at `<repo>/.codegraph/codegraph.db`. Importing a repository's `whygraph.toml` takes models, the
-  `[analyze]` / `[rationale]` / `[chat]` tuning keys, the `[areas]` table, and `[scan].forge`, `remote`, `default_branch`,
+  `[analyze]` / `[rationale]` / `[chat]` tuning keys, the `[areas]` table, `[plans].dir`, and `[scan].forge`, `remote`, `default_branch`,
   `hooks` and `serve_codegraph`. It never takes endpoints, database paths or the log file, drops any setting for the removed
   [`claude-cli` provider](llm-providers.md#claude-cli-removed), and reports what it dropped. Endpoints
   are set in the UI.
@@ -76,6 +76,10 @@ hooks = true                  # auto-rescan git hooks installed by the portal:
 serve_codegraph = true        # serve CodeGraph's tools to agents at /mcp/<slug>/code.
                               # false answers every call there with a "turned off" error.
                               # Local and linked projects; not available in production.
+
+[plans]
+# dir = "docs/plans"          # repo-relative folder of committed plans, read from HEAD's git
+                              # objects. "" turns plan indexing off. See "Plans" below.
 
 [llm]
 # model = "anthropic/claude-opus-4-7"  # default model for every role, "provider/model"
@@ -154,12 +158,54 @@ timeout_sec = 120
 | Section | What it controls |
 |---|---|
 | `[scan]` | The crawl: which source-control forge to pull PRs and issues from, the git remote name, a GitHub token (imported once into the encrypted store), which [auto-rescan hooks](../guide/scanning.md#keep-it-fresh) to install, which branch counts as [shipped history](../guide/scanning.md#how-whygraph-sees-branches), and `serve_codegraph`, whether the portal serves [CodeGraph's tools](mcp.md#the-codegraph-endpoint) to agents (default `true`). |
+| `[plans]` | `dir`, the folder of [committed plans](#plans) the scan indexes (default `docs/plans`; empty turns indexing off). |
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
 | `[analyze]` | The per-commit LLM diff descriptions written during a scan - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
 | `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets, the output limit, continuations, the default [effort](../guide/chat.md#effort), and (per project) the default [mode](../guide/chat.md#modes). |
 | `[areas.<name>]` | Named [product areas](#areas): a set of paths and issue / PR labels the chat assistant can filter history by. Empty by default. |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
+
+## Plans { #plans }
+
+`[plans].dir` is the repository folder where a team commits its plans (see
+[Sharing plans with your team](../guide/planning.md#sharing-plans)). The scan's Plans phase indexes
+the Markdown files in it, reading `HEAD`'s git objects and never the working tree, and
+`/whygraph-plan --publish` and a passing `/whygraph-implement` run write into it.
+
+```toml
+[plans]
+dir = "docs/plans"
+```
+
+| Value | Meaning |
+|---|---|
+| absent | The default, `docs/plans`. Indexing is on. A repository without the folder costs one `git ls-tree`. |
+| `"docs/plans"` or any other path | Index that one folder (a single folder, not a list), including its subfolders. |
+| `""` | Plan indexing is off. Rows already indexed stay but are marked as no longer in the repository. |
+
+What is accepted (anything else is refused when you save in the portal, and dropped with a warning
+when read from a `whygraph.toml`):
+
+- A relative path of letters, digits, `.`, `_` and `-`, with `/` between components. One trailing `/` is
+  allowed.
+- No component may be `.` or `..` or start with `.` or `-`, so the folder cannot be `.git`,
+  `.whygraph`, `.codegraph`, `.claude`, `.cursor`, `.github`, `.codex` or `.vscode`. A repository file
+  must not be able to point plan publishing into an agent's configuration.
+- No component may be a name the scan refuses to read (`secret*`, `credential*`, `id_rsa*`, `*.pem`,
+  `*.key`); otherwise nothing in the folder would ever be indexed.
+
+The key is set per project, never in the portal defaults. It is editable in local and production
+mode (**Settings > Plans**), and a `whygraph.toml` may declare it on import because it only narrows what
+is read from the repository itself. It does not travel in a
+[project transfer](../portal/transfer.md). A project [linked to a platform](../portal/platform-projects.md)
+takes the platform's value and refuses a change (`403 managed_on_platform`).
+
+!!! warning "A `docs/` folder may be a static-site source"
+    MkDocs renders every `.md` under its docs folder (not only pages in its nav), and Docusaurus is
+    similar, so the default `docs/plans` can publish your plans on the project's documentation site, and
+    a plan with a broken link can fail a strict build. Set `[plans].dir` to a folder outside the site,
+    or exclude it: in MkDocs, `exclude_docs: plans/`.
 
 ## Areas
 

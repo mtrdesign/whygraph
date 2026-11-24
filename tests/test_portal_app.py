@@ -1422,6 +1422,9 @@ V1_ROUTES = {
     (f"{_V1}/prs/{{number}}", "GET"),
     (f"{_V1}/issues/{{number}}", "GET"),
     (f"{_V1}/overview", "GET"),
+    (f"{_V1}/plans/for", "POST"),
+    (f"{_V1}/plans/{{stem}}", "GET"),
+    (f"{_V1}/plans/{{stem}}/sections/{{n}}", "GET"),
 }
 """Production's bearer-only ``/api/v1`` project routes (M2e plan section 4.3):
 org host, a connection token instead of a session. They resolve
@@ -1549,6 +1552,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_V1}/prs/{{number}}", "GET"): _READ,
     (f"{_V1}/issues/{{number}}", "GET"): _READ,
     (f"{_V1}/overview", "GET"): _READ,
+    (f"{_V1}/plans/for", "POST"): _READ,
+    (f"{_V1}/plans/{{stem}}", "GET"): _READ,
+    (f"{_V1}/plans/{{stem}}/sections/{{n}}", "GET"): _READ,
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,
@@ -1584,6 +1590,9 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/pr/{{number}}", "GET"): _READ,
     (f"{_P}/issue/{{number}}", "GET"): _READ,
     # The Chat router: include_router(..., project_db_access(PROJECT_CHAT))
+    # Committed plans (plan 61): read-only
+    (f"{_P}/plans", "GET"): _READ,
+    (f"{_P}/plans/{{stem}}", "GET"): _READ,
     # Project notes (plan 40): reads for project.read, writes for project.chat
     (f"{_P}/notes", "GET"): _READ,
     (f"{_P}/notes/summary", "GET"): _READ,
@@ -1812,6 +1821,8 @@ _FILL = {
     "{note_id}": "1",
     "{sha}": "abc",
     "{number}": "1",
+    "{stem}": "nosuch-plan",
+    "{n}": "1",
     "{run_id}": "1",
     "{uid}": "someone",
     "{user_uid}": "someone",

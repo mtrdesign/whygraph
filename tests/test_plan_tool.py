@@ -5923,3 +5923,266 @@ def test_guard_implementor_allows_malformed_json(stdin: str) -> None:
 def test_guard_implementor_falls_open_on_another_json_escape() -> None:
     # Only \" and \n are normalized; any other escape is a parse fault (5.8).
     _assert_allowed(_guard(_bash("printf 'a\tb' && git push"), "implementor"))
+
+
+# ---- publish and plans-dir -------------------------------------------------
+
+_PUB_PLAN = ".whygraph/plans/Fix_Login.md"
+
+
+def _pub_plan(
+    repo: Path, text: str = "# Plan: one\n", name: str = "Fix_Login.md"
+) -> str:
+    path = repo / ".whygraph" / "plans" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return f".whygraph/plans/{name}"
+
+
+def _publish(
+    repo: Path, posix: str, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return _run(repo, posix, "publish", *args, env=env)
+
+
+def _portal_env(repo: Path, *lines: str) -> None:
+    (repo / ".whygraph").mkdir(exist_ok=True)
+    (repo / ".whygraph" / "portal.env").write_text("".join(f"{x}\n" for x in lines))
+
+
+def test_publish_writes_the_copy_and_the_record(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert (run.returncode, run.stdout) == (0, "published docs/shared/fix-login.md\n")
+    assert (repo / "docs/shared/fix-login.md").read_text() == "# Plan: one\n"
+    record = (repo / ".whygraph/plans/fix-login/published").read_text().splitlines()
+    assert record[0] == "docs/shared/fix-login.md"
+    assert record[1] == _git(
+        repo, "hash-object", "--no-filters", "--", "docs/shared/fix-login.md"
+    )
+    assert _git(repo, "status", "--porcelain", "--", "docs") == "?? docs/"
+    assert "docs/shared" not in _git(repo, "diff", "--cached", "--name-only")
+
+
+def test_publish_identical_then_republish(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    _publish(repo, posix, plan, "docs/shared")
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert (run.returncode, run.stdout) == (0, "unchanged docs/shared/fix-login.md\n")
+    _pub_plan(repo, "# Plan: two\n")
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert (run.returncode, run.stdout) == (0, "republished docs/shared/fix-login.md\n")
+    assert (repo / "docs/shared/fix-login.md").read_text() == "# Plan: two\n"
+
+
+def test_publish_refuses_a_hand_edited_copy_until_forced(
+    repo: Path, posix: str
+) -> None:
+    plan = _pub_plan(repo)
+    _publish(repo, posix, plan, "docs/shared")
+    dest = repo / "docs/shared/fix-login.md"
+    dest.write_text("edited\n")
+    _pub_plan(repo, "# Plan: two\n")
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.returncode == 1 and run.stderr == ""
+    assert run.stdout == (
+        "refuse: docs/shared/fix-login.md was changed since it was published;"
+        " pass --force to replace it\n"
+    )
+    assert dest.read_text() == "edited\n"
+    run = _publish(repo, posix, plan, "docs/shared", "--force")
+    assert (run.returncode, run.stdout) == (0, "published docs/shared/fix-login.md\n")
+    assert dest.read_text() == "# Plan: two\n"
+
+
+def test_publish_refuses_a_copy_with_no_record(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    (repo / "docs/shared").mkdir(parents=True)
+    (repo / "docs/shared/fix-login.md").write_text("someone else\n")
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.returncode == 1 and run.stderr == ""
+    assert run.stdout.startswith(
+        "refuse: docs/shared/fix-login.md exists and was not published from this machine"
+    )
+    assert (repo / "docs/shared/fix-login.md").read_text() == "someone else\n"
+    assert not (repo / ".whygraph/plans/fix-login/published").exists()
+
+
+def test_publish_without_a_work_dir_creates_it_first(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    assert not (repo / ".whygraph/plans/fix-login").exists()
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.returncode == 0, run.stderr
+    assert (repo / ".whygraph/plans/fix-login/published").is_file()
+
+
+def test_publish_symlinks_exit_2(repo: Path, posix: str) -> None:
+    other = repo / "other.md"
+    other.write_text("x\n")
+    (repo / ".whygraph/plans").mkdir(parents=True)
+    (repo / ".whygraph/plans/link.md").symlink_to(other)
+    run = _publish(repo, posix, ".whygraph/plans/link.md", "docs/shared")
+    assert run.returncode == 2 and run.stdout.startswith("refuse: ")
+    plan = _pub_plan(repo)
+    (repo / "docs/shared").mkdir(parents=True)
+    (repo / "docs/shared/fix-login.md").symlink_to(other)
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.returncode == 2 and run.stdout.startswith("refuse: ")
+    assert other.read_text() == "x\n"
+    (repo / "real").mkdir()
+    (repo / "docs/linked").symlink_to(repo / "real")
+    run = _publish(repo, posix, plan, "docs/linked/sub")
+    assert run.returncode == 2 and run.stdout.startswith("refuse: ")
+    assert not (repo / "real/sub").exists()
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [
+        "../x",
+        "/abs",
+        ".whygraph/x",
+        ".claude/commands",
+        "-x",
+        "a/-x",
+        "a/.hid",
+        ".codegraph/x",
+        ".vscode",
+        "a//b",
+    ],
+)
+def test_publish_bad_dir_exits_64(repo: Path, posix: str, folder: str) -> None:
+    plan = _pub_plan(repo)
+    run = _publish(repo, posix, plan, folder)
+    assert run.returncode == 64 and run.stdout == "", folder
+    assert not (repo / ".whygraph/plans/fix-login").exists()
+
+
+def test_publish_stem_and_source_errors_exit_64(repo: Path, posix: str) -> None:
+    long = _pub_plan(repo, name="a" * 81 + ".md")
+    assert _publish(repo, posix, long, "docs/shared").returncode == 64
+    ok = _pub_plan(repo, name="a" * 80 + ".md")
+    assert _publish(repo, posix, ok, "docs/shared").returncode == 0
+    assert (
+        _publish(repo, posix, ".whygraph/plans/none.md", "docs/shared").returncode == 64
+    )
+    assert _publish(repo, posix, "plans/p.md", "docs/shared").returncode == 64
+    assert _publish(repo, posix).returncode == 64
+
+
+def test_publish_names_the_folder_in_the_stem_form(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    run = _publish(repo, posix, plan, "docs/shared/")
+    assert run.stdout == "published docs/shared/fix-login.md\n"
+
+
+def test_publish_ignored_destination_prints_a_second_line(
+    repo: Path, posix: str
+) -> None:
+    plan = _pub_plan(repo)
+    run = _publish(repo, posix, plan, "plans")
+    assert run.returncode == 0
+    assert run.stdout.splitlines() == [
+        "published plans/fix-login.md",
+        "ignored: plans/fix-login.md is ignored by git; set [plans].dir to a tracked folder",
+    ]
+
+
+def test_publish_warns_about_absolute_paths(
+    repo: Path, posix: str, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    text = f"# Plan\n`ls {repo.resolve()}`\n`cat {home}/x`\nplain\n"
+    plan = _pub_plan(repo, text)
+    run = _publish(repo, posix, plan, "docs/shared", env={"HOME": str(home)})
+    assert run.returncode == 0
+    assert run.stdout.splitlines() == [
+        "published docs/shared/fix-login.md",
+        "warn: docs/shared/fix-login.md holds 2 absolute local paths; review before committing",
+    ]
+
+
+def test_publish_tracked_work_dir_exits_77(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    (repo / ".whygraph/plans/fix-login").mkdir()
+    (repo / ".whygraph/plans/fix-login/x").write_text("x\n")
+    _git(repo, "add", "-f", ".whygraph/plans/fix-login/x")
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.returncode == 77
+    assert not (repo / "docs").exists()
+
+
+def test_publish_record_is_written_after_the_copy(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    (repo / "docs").mkdir()
+    (repo / "docs/shared").write_text("a file, not a folder\n")
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.returncode != 0
+    assert not (repo / ".whygraph/plans/fix-login/published").exists()
+
+
+def test_format_never_touches_a_published_copy(repo: Path, posix: str) -> None:
+    _format_repo(repo)
+    plan = _pub_plan(repo, _setup_plan(("Format: `sh gen/fmt.sh`",)))
+    t0 = _snapshot(repo)
+    (repo / "a.txt").write_text("changed\n")
+    assert _publish(repo, posix, plan, "docs/shared").returncode == 0
+    run = _run(repo, posix, "format", plan, t0)
+    assert (run.returncode, run.stdout) == (0, "format: 1 files, exit 0\n"), run.stderr
+    assert (repo / "gen/args").read_text() == "a.txt\n"
+    run = _publish(repo, posix, plan, "docs/shared")
+    assert run.stdout == "unchanged docs/shared/fix-login.md\n"
+
+
+def test_publish_reads_the_folder_from_portal_env(repo: Path, posix: str) -> None:
+    plan = _pub_plan(repo)
+    _portal_env(repo, "slug=x", "port=8765", "plans_dir=docs/shared")
+    run = _publish(repo, posix, plan)
+    assert (run.returncode, run.stdout) == (0, "published docs/shared/fix-login.md\n")
+    assert _run(repo, posix, "plans-dir").stdout == "docs/shared\n"
+
+
+_SKIPS = {
+    "none": (
+        "skip: the plans folder is not known yet; open the portal and run Update agent files"
+    ),
+    "no line": (
+        "skip: the plans folder is not known yet; open the portal and run Update agent files"
+    ),
+    "empty": "skip: plan indexing is off for this project",
+    "dotdot": "skip: the plans folder in .whygraph/portal.env is not valid",
+    "agent": "skip: the plans folder in .whygraph/portal.env is not valid",
+    "symlink": (
+        "skip: the plans folder is not known yet; open the portal and run Update agent files"
+    ),
+    "tracked": (
+        "skip: the plans folder is not known yet; open the portal and run Update agent files"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SKIPS))
+def test_publish_and_plans_dir_skip_a_bad_marker(
+    repo: Path, posix: str, case: str
+) -> None:
+    plan = _pub_plan(repo)
+    value = {"empty": "", "dotdot": "../x", "agent": ".claude/x"}.get(
+        case, "docs/shared"
+    )
+    if case == "no line":
+        _portal_env(repo, "slug=x", "port=8765")
+    elif case == "symlink":
+        (repo / "real.env").write_text(f"plans_dir={value}\n")
+        (repo / ".whygraph/portal.env").symlink_to(repo / "real.env")
+    elif case == "tracked":
+        _portal_env(repo, f"plans_dir={value}")
+        _git(repo, "add", "-f", ".whygraph/portal.env")
+    elif case != "none":
+        _portal_env(repo, f"plans_dir={value}")
+    run = _publish(repo, posix, plan)
+    assert (run.returncode, run.stdout) == (0, _SKIPS[case] + "\n"), run.stderr
+    assert not (repo / "docs").exists() and not (repo / "x").exists()
+    assert not (repo / ".whygraph/plans/fix-login").exists()
+    run = _run(repo, posix, "plans-dir")
+    assert (run.returncode, run.stdout) == (0, "")

@@ -128,6 +128,38 @@ export function validateNotesSearch(search: Record<string, unknown>): NotesSearc
   return { filter: oneOf(NOTE_FILTERS, search.filter), id: positiveInt(search.id) };
 }
 
+// ---- /p/$slug/plans ---------------------------------------------------------------------
+
+export const PLAN_STATUSES = ["shipped", "in_flight", "not_implemented"] as const;
+/** The Plans page's status tabs (besides All). */
+export type PlanStatusFilter = (typeof PLAN_STATUSES)[number];
+
+/** `/p/$slug/plans?status=&q=&stem=&section=`: the filters, the open plan and the part it opens at. */
+export interface PlansSearch {
+  status?: PlanStatusFilter;
+  q?: string;
+  stem?: string;
+  section?: number;
+}
+
+export function validatePlansSearch(search: Record<string, unknown>): PlansSearch {
+  const q = typeof search.q === "string" ? search.q.trim() : "";
+  const rawStem = text(search.stem, 80);
+  const stem = rawStem && /^[a-z0-9][a-z0-9-]{0,79}$/.test(rawStem) ? rawStem : undefined;
+  const n =
+    typeof search.section === "number"
+      ? search.section
+      : typeof search.section === "string" && /^\d{1,3}$/.test(search.section)
+        ? Number(search.section)
+        : NaN;
+  return {
+    status: oneOf(PLAN_STATUSES, search.status),
+    q: q.length >= 1 && q.length <= 200 ? q : undefined,
+    stem,
+    section: stem && Number.isInteger(n) && n >= 0 && n <= 299 ? n : undefined,
+  };
+}
+
 // ---- settings sections (§0.3 #22) -------------------------------------------------------
 // Every id a settings page's section list renders, so each one deep-links (SET-1).
 
@@ -137,6 +169,7 @@ export const PROJECT_SETTINGS_SECTIONS = [
   "github",
   "hooks",
   "scanning",
+  "plans",
   "areas",
   "budgets",
   "agents",

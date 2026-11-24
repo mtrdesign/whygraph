@@ -154,6 +154,7 @@ from .orgs import ensure_builtin_org
 from .onboarding_routes import onboarding_router, welcome_router
 from .overview_routes import overview_router
 from .notes_routes import notes_read_router, notes_write_router
+from .plans_routes import plans_read_router
 from .purpose_routes import purpose_read_router, purpose_write_router
 from .transfer_routes import transfer_router
 from .platform_routes import platform_router
@@ -392,6 +393,21 @@ def create_portal_app(
                 )
             ],
         )
+    # Committed plans (plan 61): read-only, project.read; a linked project's
+    # plans are browsed on its platform.
+    app.include_router(
+        plans_read_router,
+        prefix="/api/projects/{slug}/plans",
+        dependencies=[
+            Depends(
+                project_db_access(
+                    Action.PROJECT_READ,
+                    guard=linked_guard("Plans"),
+                    usage_source="explorer",
+                )
+            )
+        ],
+    )
     # The project-purpose card (plan 41): reads need project.read; a
     # generation is an LLM call only a project admin starts (project.scan_full),
     # charged to the caller. A linked project has no purpose here.

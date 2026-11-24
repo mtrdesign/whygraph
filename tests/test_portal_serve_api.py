@@ -358,7 +358,12 @@ def test_node_detail_handles_file_node_with_slashes_in_qn(serve_client) -> None:
 
 
 def _fake_evidence() -> SimpleNamespace:
-    return SimpleNamespace(pull_requests=[], issues=[])
+    return SimpleNamespace(
+        pull_requests=[],
+        issues=[],
+        commit=SimpleNamespace(sha="a" * 40),
+        source="blame",
+    )
 
 
 def test_rationale_get_no_evidence_makes_no_llm_call(serve_client, monkeypatch) -> None:
@@ -467,3 +472,46 @@ def test_serves_spa_when_built(
         assert "WG-BUILT" in client.get("/").text
         assert "WG-BUILT" in client.get("/some/client/route").text
         assert client.get("/api/tree").status_code == 200
+
+
+# ---- plans beside the card (plan 61, section 4.6, R19) -------------------
+
+_PLAN_REF = {"stem": "p", "title": "P", "status": "shipped", "link": "pr", "uri": "u"}
+
+
+def test_rationale_routes_return_plans_in_every_answer(
+    serve_client, monkeypatch
+) -> None:
+    monkeypatch.setattr(routes, "guarded_plans_for", lambda *a, **k: [_PLAN_REF])
+    url = "/api/node/rationale?qualified_name=pkg.a.A.m"
+
+    monkeypatch.setattr(routes, "collect_evidence", lambda t, limit=20: [])
+    assert serve_client.get(url).json()["plans"] == [_PLAN_REF]
+
+    monkeypatch.setattr(
+        routes, "collect_evidence", lambda t, limit=20: [_fake_evidence()]
+    )
+    monkeypatch.setattr(routes, "lookup_cached", lambda *a, **k: None)
+    body = serve_client.get(url).json()
+    assert body["status"] == "not_generated" and body["plans"] == [_PLAN_REF]
+
+    monkeypatch.setattr(
+        routes,
+        "whygraph_rationale_brief",
+        lambda **k: {"target": {"path": "x"}, "purpose": "p"},
+    )
+    assert serve_client.post(url).json()["plans"] == [_PLAN_REF]
+
+
+def test_rationale_routes_omit_plans_on_failure_and_when_empty(
+    serve_client, monkeypatch
+) -> None:
+    monkeypatch.setattr(routes, "collect_evidence", lambda t, limit=20: [])
+    monkeypatch.setattr(
+        "whygraph.mcp.plans.plans_for", mock.Mock(side_effect=RuntimeError("boom"))
+    )
+    url = "/api/node/rationale?qualified_name=pkg.a.A.m"
+    resp = serve_client.get(url)
+    assert resp.status_code == 200 and "plans" not in resp.json()
+    monkeypatch.setattr(routes, "guarded_plans_for", lambda *a, **k: [])
+    assert "plans" not in serve_client.get(url).json()

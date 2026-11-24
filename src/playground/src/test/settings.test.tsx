@@ -1,3 +1,4 @@
+import { configSections } from "../components/portal/ConfigForm";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -231,6 +232,7 @@ describe("SettingsLayout", () => {
       "GitHub",
       "Git hooks",
       "Scanning",
+      "Plans",
       "Areas",
       "Usage",
       "Agents",
@@ -315,6 +317,17 @@ describe("SectionForm", () => {
     expect(await within(region("Git hooks")).findByText("Saved")).toBeInTheDocument();
     expect(screen.getByLabelText("Default model model")).toHaveValue("x");
     expect(within(region("Models and keys")).getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("Plans: the switch stores an empty dir (off), a folder stores it, and production shows the section", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    await user.click(within(region("Plans")).getByRole("switch", { name: "Index committed plans" }));
+    await user.click(within(region("Plans")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({ config: { plans: { dir: "" } } });
+    expect(configSections("project", { production: true, source: "github" }).map((s) => s.id)).toContain("plans");
   });
 
   it("Areas: an untouched table round-trips exactly, another section never rewrites it", async () => {

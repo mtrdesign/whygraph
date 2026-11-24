@@ -92,7 +92,9 @@ from .transfer_export import origin_of
 
 _log = logging.getLogger(__name__)
 
-TRANSFER_CONFIG_ALLOWLIST = {k: v for k, v in IMPORT_ALLOWLIST.items() if k != "scan"}
+TRANSFER_CONFIG_ALLOWLIST = {
+    k: v for k, v in IMPORT_ALLOWLIST.items() if k not in ("scan", "plans")
+}
 """D15: model and knowledge settings only. ``llm.model``, ``llm.<provider>.model``,
 ``[analyze]``, ``[rationale]``, ``[chat]`` (all minus the org-only keys, which
 :data:`~whygraph.portal.policy.IMPORT_ALLOWLIST` already leaves out) and
@@ -498,6 +500,7 @@ def _apply_settings(
         Whether the layer was saved, and the error when it was not.
     """
     old_hooks = project.ctx.config.scan_hooks
+    old_plans_dir = project.ctx.config.plans.dir
     try:
         with portal_db.get_session() as session:
             row = session.get(Project, project.id)
@@ -516,7 +519,7 @@ def _apply_settings(
         )
         return False, _error_text(exc)
     try:
-        finish_project_layer(state, project, new_ctx, old_hooks)
+        finish_project_layer(state, project, new_ctx, old_hooks, old_plans_dir)
     except Exception:  # noqa: BLE001 - saved; the cache invalidation is best effort
         _log.exception("transfer import into project %s: settings saved", project.id)
     return True, None

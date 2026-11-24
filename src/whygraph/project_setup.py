@@ -41,6 +41,7 @@ from .agents import (
     FileOutcome,
     HttpMcp,
 )
+from .core.config import ConfigError, check_plans_dir
 from .core.gitignore import ensure_gitignore_entries
 from .core.safe_paths import UnsafePathError, check_inside
 from .hooks import HooksResult
@@ -70,22 +71,33 @@ class PortalMarker:
         The project slug (``^[a-z0-9][a-z0-9-]{0,62}$``).
     port : int
         The portal port.
+    plans_dir : str or None
+        The configured plans folder, written as a third ``plans_dir=``
+        line of ``portal.env``. ``""`` means indexing is off; ``None``
+        means "not known": :func:`write_portal_marker` then keeps a valid
+        line already in the file.
 
     Raises
     ------
     ValueError
-        If ``slug`` or ``port`` would not survive the hook helper's
-        validation, so an invalid marker can never be written.
+        If ``slug``, ``port`` or ``plans_dir`` would not survive the hook
+        helper's validation, so an invalid marker can never be written.
     """
 
     slug: str
     port: int
+    plans_dir: str | None = None
 
     def __post_init__(self) -> None:
         if not _SLUG_RE.match(self.slug):
             raise ValueError(f"invalid project slug: {self.slug!r}")
         if not isinstance(self.port, int) or not 0 < self.port < 65536:
             raise ValueError(f"invalid portal port: {self.port!r}")
+        if self.plans_dir is not None and self.plans_dir != "":
+            try:
+                check_plans_dir(self.plans_dir)
+            except ConfigError as exc:
+                raise ValueError(f"invalid plans dir: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -522,21 +534,106 @@ def _remove_stale_scan_lock(root: Path) -> None:
         shutil.rmtree(lock, ignore_errors=True)
 
 
+def _existing_plans_dir(root: Path) -> str | None:
+    """Return the valid ``plans_dir=`` value of ``portal.env``, or ``None``.
+
+    ``None`` when the file is missing, a symlink, tracked by git, has no
+    such line, or holds a value ``check_plans_dir`` refuses. ``""`` is a
+    valid value (indexing off).
+    """
+    path = root / PORTAL_ENV
+    try:
+        if not os.path.lexists(path):
+            return None
+        check_inside(root, path)
+        if agents_mod.is_git_tracked(root, PORTAL_ENV.as_posix()):
+            return None
+        text = path.read_text(encoding="utf-8")
+    except (UnsafePathError, OSError, UnicodeDecodeError):
+        return None
+    value: str | None = None
+    for line in text.splitlines():
+        if line.startswith("plans_dir="):
+            value = line[len("plans_dir=") :]
+    if value is None or value == "":
+        return value
+    try:
+        return check_plans_dir(value)
+    except ConfigError:
+        return None
+
+
 def write_portal_marker(root: Path, marker: PortalMarker) -> None:
     """Write ``portal.env`` then ``portal.json``, each atomically.
+
+    ``portal.env`` holds ``slug=``, ``port=`` and, when known, a third
+    ``plans_dir=`` line. With ``marker.plans_dir`` ``None`` a valid
+    ``plans_dir=`` line already in the file is kept, so a writer that does
+    not know the value never drops it. ``portal.json`` is unchanged.
 
     Parameters
     ----------
     root : Path
         Repository root. The caller has checked the marker paths.
     marker : PortalMarker
-        The validated slug and port.
+        The validated slug, port and plans folder.
     """
-    _atomic_write(root / PORTAL_ENV, f"slug={marker.slug}\nport={marker.port}\n")
+    plans_dir = marker.plans_dir
+    if plans_dir is None:
+        plans_dir = _existing_plans_dir(root)
+    text = f"slug={marker.slug}\nport={marker.port}\n"
+    if plans_dir is not None:
+        text += f"plans_dir={plans_dir}\n"
+    _atomic_write(root / PORTAL_ENV, text)
     _atomic_write(
         root / PORTAL_JSON,
         json.dumps({"slug": marker.slug, "port": marker.port}) + "\n",
     )
+
+
+def sync_plans_marker(root: Path, plans_dir: str | None) -> str | None:
+    """Bring the ``plans_dir=`` line of ``portal.env`` to ``plans_dir``.
+
+    Click-free and root-based; the caller resolves the root. Writes
+    nothing when the line already matches; otherwise rewrites the markers
+    with the existing slug and port. Never raises.
+
+    Parameters
+    ----------
+    root : Path
+        Repository root.
+    plans_dir : str or None
+        The folder to record (``""`` for indexing off). ``None`` is a
+        no-op ("not known").
+
+    Returns
+    -------
+    str or None
+        ``None`` on success or when nothing was to be done; otherwise a
+        short error message (unsafe path, no marker, invalid value, I/O).
+    """
+    if plans_dir is None:
+        return None
+    try:
+        value = check_plans_dir(plans_dir) if plans_dir != "" else ""
+        for rel in (PORTAL_ENV, PORTAL_JSON):
+            check_inside(root, root / rel)
+            check_inside(root, (root / rel).with_name(rel.name + ".tmp"))
+        if agents_mod.is_git_tracked(root, PORTAL_ENV.as_posix()):
+            return (
+                f"{PORTAL_ENV.as_posix()} is tracked by git; plans folder not recorded"
+            )
+        marker, warning = read_portal_marker(root)
+        if marker is None:
+            return warning or "no portal marker; plans folder not recorded"
+        if _existing_plans_dir(root) == value:
+            return None
+        write_portal_marker(
+            root, PortalMarker(slug=marker.slug, port=marker.port, plans_dir=value)
+        )
+    except (ConfigError, UnsafePathError, OSError, ValueError) as exc:
+        return str(exc)
+    return None
 
 
 def read_portal_marker(root: Path) -> tuple[PortalMarker | None, str | None]:
@@ -598,5 +695,6 @@ __all__ = [
     "PortalMarker",
     "initialize_project",
     "read_portal_marker",
+    "sync_plans_marker",
     "write_portal_marker",
 ]

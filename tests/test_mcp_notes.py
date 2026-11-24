@@ -1429,6 +1429,8 @@ def _fake_brief(monkeypatch: pytest.MonkeyPatch, outcome: Any) -> None:
         return dict(outcome)
 
     monkeypatch.setattr(rationale, "_brief", _brief)
+    monkeypatch.setattr(rationale, "collect_evidence", lambda t, limit=20: [])
+    monkeypatch.setattr(rationale, "guarded_plans_for", lambda *a, **k: [])
 
 
 def _brief_args() -> dict:

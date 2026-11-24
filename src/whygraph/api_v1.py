@@ -33,6 +33,7 @@ from pydantic import (
     model_validator,
 )
 
+from whygraph.core.config import PLANS_DIR_RE
 from whygraph.services.git import BlameHunk, BlameOrigin
 
 API_VERSION = 2
@@ -90,6 +91,22 @@ Basis = Literal["quoted", "cited", "inferred", "unknown"]
 
 RefKind = Literal["commit", "pr", "issue"]
 """What a constraint's or risk's ref points at (``analyze.REF_KINDS``)."""
+
+
+PLAN_STEM_PATTERN = r"[a-z0-9][a-z0-9-]{0,79}"
+"""A plan stem (``mcp.plans.PLAN_STEM_RE``), for a route path and a wire field."""
+
+MAX_PLAN_PATHS = 20
+"""Most paths one ``plans/for`` request may carry."""
+
+MAX_PLAN_SECTION = 299
+"""Highest plan section number a route serves."""
+
+PLAN_TITLE_MAX = 80
+"""Longest plan or hint title on the wire, in characters."""
+
+PLAN_SECTION_TEXT_MAX = 8000
+"""Longest section text on the wire, in characters."""
 
 
 def _check_sha(value: str) -> str:
@@ -260,6 +277,70 @@ class RationaleIn(_In):
 
     target: TargetIn
     hunks: list[HunkIn] = Field(default_factory=list, max_length=MAX_HUNKS)
+
+
+class PlansTargetIn(_In):
+    """The symbol a ``plans/for`` request is about (scope ``symbol``).
+
+    The path travels in ``paths``; this carries only what the same call
+    already sent (:class:`TargetIn` minus the path).
+
+    Attributes
+    ----------
+    qualified_name : str or None
+        The symbol name; when the platform's index resolves it, the
+        platform's own range is the anchor.
+    line_start, line_end : int or None
+        The range in the sender's working tree (both or neither).
+    """
+
+    qualified_name: StrictStr | None = None
+    line_start: StrictInt | None = None
+    line_end: StrictInt | None = None
+
+    @field_validator("qualified_name")
+    @classmethod
+    def _name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not value or len(value) > MAX_QUALIFIED_NAME or not value.isprintable():
+            raise ValueError(
+                f"qualified_name must be 1 to {MAX_QUALIFIED_NAME} printable characters"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _range(self) -> PlansTargetIn:
+        if (self.line_start is None) != (self.line_end is None):
+            raise ValueError("line_start and line_end go together")
+        if self.line_start is not None and self.line_end is not None:
+            _check_lines(self.line_start, self.line_end)
+        return self
+
+
+class PlansForIn(_In):
+    """``POST /api/v1/projects/{slug}/plans/for`` (plan 61 section 4.7).
+
+    Attributes
+    ----------
+    shas : list[str]
+        The commit SHAs of the sender's answer (at most :data:`MAX_LIMIT`).
+    paths : list[str]
+        Its file path(s) (at most :data:`MAX_PLAN_PATHS`).
+    scope : {"symbol", "file"}
+        Which relevance rules apply (default ``file``).
+    detail : {"compact", "full"}
+        ``full`` adds ``path``, ``present`` and ``commits`` to each ref.
+    target : PlansTargetIn or None
+        The symbol, for scope ``symbol``; with none only ``commit`` and
+        ``pr`` links apply.
+    """
+
+    shas: list[Sha] = Field(default_factory=list, max_length=MAX_LIMIT)
+    paths: list[RepoPath] = Field(default_factory=list, max_length=MAX_PLAN_PATHS)
+    scope: Literal["symbol", "file"] = "file"
+    detail: Literal["compact", "full"] = "compact"
+    target: PlansTargetIn | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +553,12 @@ class StatusOut(_Out):
         The token user's effective role on the project
         (:data:`ProjectRoleName`): a ``viewer`` causes no LLM spend, so
         has no chat.
+    plans_dir : str or None
+        The project's ``[plans].dir`` (``""`` when plan indexing is off;
+        ``None`` from a platform that does not send it), so a linked
+        checkout's ``.whygraph/portal.env`` can name the folder to publish
+        into. A value a one-line ``portal.env`` entry cannot hold is
+        refused (plan 61 section 4.16).
     """
 
     slug: str
@@ -484,6 +571,9 @@ class StatusOut(_Out):
     access_lost: bool = False
     role: Role
     project_role: ProjectRoleName
+    plans_dir: str | None = Field(
+        default=None, pattern=f"^(?:{PLANS_DIR_RE.pattern})?$"
+    )
 
 
 class ErrorOut(_Out):
@@ -570,6 +660,130 @@ class EvidenceReplyOut(_Out):
     project: StatusOut | None = None
 
 
+class PlanHintOut(_Out):
+    """One hint beside a card: a plan step or decision row that names the symbol."""
+
+    id: str
+    title: str | None = None
+    n: int
+
+
+class PlanRefOut(_Out):
+    """A pointer to a plan (``mcp.plans.plans_for``; no ``objective``, R22).
+
+    The platform always sends the fields of the scope and detail asked for;
+    a linked portal trims to compact.
+    """
+
+    stem: str
+    title: str = Field(max_length=PLAN_TITLE_MAX)
+    status: str
+    link: str
+    uri: str
+    hints: list[PlanHintOut] | None = Field(default=None, max_length=2)
+    sections: list[int] | None = None
+    sections_total: int | None = None
+    path: str | None = None
+    present: bool | None = None
+    commits: list[str] | None = None
+
+
+class PlansForOut(_Out):
+    """``POST /api/v1/projects/{slug}/plans/for``."""
+
+    plans: list[PlanRefOut] = Field(default_factory=list)
+    project: StatusOut | None = None
+
+
+class PlanCommitOut(_Out):
+    """An implementing commit in a plan record (8-character SHA)."""
+
+    sha: str
+    subject: str | None = None
+    on_default_branch: bool | None = None
+
+
+class PlanPullRequestOut(_Out):
+    """An implementing pull request in a plan record."""
+
+    number: int
+    title: str | None = None
+    state: str | None = None
+
+
+class PlanContentsOut(_Out):
+    """One level-2 entry of a plan's contents."""
+
+    n: int
+    title: str
+    chars: int = 0
+    children: int = 0
+
+
+class PlanOut(_Out):
+    """``GET /api/v1/projects/{slug}/plans/{stem}``: digest, contents, links.
+
+    There is no body field: no route returns a whole plan (R15).
+    """
+
+    kind: str = "plan"
+    reading: str | None = None
+    stem: str
+    title: str = Field(max_length=PLAN_TITLE_MAX)
+    status: str
+    uri: str | None = None
+    path: str | None = None
+    present: bool | None = None
+    objective: str | None = None
+    line_count: int | None = None
+    redacted_lines: int | None = None
+    publishing_links: int | None = None
+    implementing_commits: list[PlanCommitOut] = Field(default_factory=list)
+    implementing_commits_total: int | None = None
+    pull_requests: list[PlanPullRequestOut] = Field(default_factory=list)
+    pull_requests_total: int | None = None
+    paths: list[str] = Field(default_factory=list)
+    paths_total: int | None = None
+    digest: str = ""
+    contents: list[PlanContentsOut] = Field(default_factory=list)
+    contents_total: int | None = None
+    project: StatusOut | None = None
+
+
+class PlanChildOut(_Out):
+    """A child entry of a plan section."""
+
+    n: int
+    title: str
+    chars: int = 0
+
+
+class PlanSectionOut(_Out):
+    """``GET /api/v1/projects/{slug}/plans/{stem}/sections/{n}``.
+
+    ``text`` is at most :data:`PLAN_SECTION_TEXT_MAX` characters, so the
+    model itself refuses an over-long section.
+    """
+
+    kind: str = "plan"
+    reading: str | None = None
+    stem: str
+    status: str
+    n: int
+    title: str
+    level: int | None = None
+    text: str = Field(max_length=PLAN_SECTION_TEXT_MAX)
+    chars: int | None = None
+    children: list[PlanChildOut] = Field(default_factory=list)
+    children_total: int | None = None
+    prev: int | None = None
+    next: int | None = None
+    version: str | None = None
+    copies: bool | None = None
+    copies_note: str | None = None
+    project: StatusOut | None = None
+
+
 # ---------------------------------------------------------------------------
 # Conversions
 # ---------------------------------------------------------------------------
@@ -644,7 +858,12 @@ __all__ = [
     "MAX_LINE",
     "MAX_ORIGINS",
     "MAX_PATH",
+    "MAX_PLAN_PATHS",
+    "MAX_PLAN_SECTION",
     "MAX_QUALIFIED_NAME",
+    "PLAN_SECTION_TEXT_MAX",
+    "PLAN_STEM_PATTERN",
+    "PLAN_TITLE_MAX",
     "PLATFORM_BUDGET_MESSAGE",
     "Basis",
     "CommitOut",
@@ -657,6 +876,17 @@ __all__ = [
     "IssueOut",
     "MetaOut",
     "OriginIn",
+    "PlanChildOut",
+    "PlanCommitOut",
+    "PlanContentsOut",
+    "PlanHintOut",
+    "PlanOut",
+    "PlanPullRequestOut",
+    "PlanRefOut",
+    "PlanSectionOut",
+    "PlansForIn",
+    "PlansForOut",
+    "PlansTargetIn",
     "ProjectRoleName",
     "PullRequestOut",
     "PushStatus",

@@ -233,6 +233,8 @@ usage: plan-tool.sh snapshot
        plan-tool.sh ready <plan> [<blob>]
        plan-tool.sh dryrun <plan>
        plan-tool.sh red <plan> <N> [again] [<blob>]
+       plan-tool.sh publish <plan> [<dir>] [--force]
+       plan-tool.sh plans-dir
        plan-tool.sh smoke <out path> <test file>
 EOF
     exit 64
@@ -3707,6 +3709,7 @@ cmd_format() {
     now=$(take_snapshot) || fail "snapshot failed"
     run_git -c core.quotePath=false diff --name-only --no-renames "$t0" "$now" >"$work/paths" ||
         fail "git diff failed"
+    published_paths >"$work/published"
     count=0
     unsafe=0
     while IFS= read -r path; do
@@ -3715,6 +3718,7 @@ cmd_format() {
         esac
         [ "$root/$path" != "$plan_at" ] || continue
         [ -f "$path" ] && [ ! -h "$path" ] || continue
+        ! grep -qxF -- "$path" "$work/published" || continue
         if ! path_is_safe "$path"; then
             unsafe=$((unsafe + 1))
             continue
@@ -3736,6 +3740,184 @@ cmd_format() {
         exit 3
     fi
     [ "$code" -eq 0 ] || exit 1
+    exit 0
+}
+
+# Print the destination path that each publish record names: the first line
+# of every .whygraph/plans/*/published file that is a regular file. Run from
+# the repository root.
+published_paths() {
+    for record in .whygraph/plans/*/published; do
+        [ -f "$record" ] && [ ! -h "$record" ] || continue
+        sed -n 1p "$record"
+    done
+}
+
+# 0 when $1 is a folder that publish may write to: a relative path with safe
+# characters, not reserved, and no component that starts with "." or "-"
+# (which also rules out .codegraph and .vscode).
+plans_dir_ok() {
+    path_is_safe "$1" || return 1
+    case $1 in
+        '' | */ | *//* | . | .* | */.* | -* | */-* | .codegraph | .codegraph/* | .vscode | .vscode/*) return 1 ;;
+    esac
+    reserved_path "$1" && return 1
+    return 0
+}
+
+# Set plans_state to ok (and plans_value), missing, off or bad from the
+# plans_dir line of .whygraph/portal.env. The file is parsed with sed and
+# never sourced, and it is ignored when .whygraph or the file is a symlink or
+# git tracks it. Run from the repository root.
+read_plans_dir() {
+    plans_state=missing
+    plans_value=
+    [ ! -h .whygraph ] && [ ! -h .whygraph/portal.env ] && [ -f .whygraph/portal.env ] || return 0
+    if run_git ls-files --error-unmatch -- .whygraph/portal.env >/dev/null 2>&1; then
+        return 0
+    fi
+    grep -q '^plans_dir=' .whygraph/portal.env 2>/dev/null || return 0
+    plans_value=$(sed -n 's/^plans_dir=//p' .whygraph/portal.env | head -n 1)
+    if [ -z "$plans_value" ]; then
+        plans_state=off
+    elif plans_dir_ok "$plans_value"; then
+        plans_state=ok
+    else
+        plans_state=bad
+        plans_value=
+    fi
+}
+
+cmd_plans_dir() {
+    [ $# -eq 0 ] || usage
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    cd "$root" || exit 1
+    read_plans_dir
+    [ "$plans_state" != ok ] || printf '%s\n' "$plans_value"
+    exit 0
+}
+
+# A refusal of publish: the line goes to stdout and the exit code is $2. It
+# never calls refuse(), which is exit 77 and belongs to check_work_dir.
+publish_refuse() {
+    printf 'refuse: %s\n' "$1"
+    exit "$2"
+}
+
+# After a publish result: the ignored and absolute-path lines for $1.
+publish_notes() {
+    if run_git check-ignore -q -- "$1" 2>/dev/null; then
+        printf 'ignored: %s is ignored by git; set [plans].dir to a tracked folder\n' "$1"
+    fi
+    holds=$(grep -cF -e "$root" -- "$1" 2>/dev/null)
+    case ${HOME:-} in
+        '' | /) ;;
+        *) holds=$(grep -cF -e "$root" -e "$HOME" -- "$1" 2>/dev/null) ;;
+    esac
+    case $holds in
+        '' | 0 | *[!0123456789]*) return 0 ;;
+    esac
+    printf 'warn: %s holds %s absolute local paths; review before committing\n' "$1" "$holds"
+}
+
+cmd_publish() {
+    plan=
+    dir=
+    force=
+    for arg in "$@"; do
+        case $arg in
+            --force) force=1 ;;
+            *)
+                if [ -z "$plan" ]; then
+                    plan=$arg
+                elif [ -z "$dir" ]; then
+                    dir=$arg
+                else
+                    usage
+                fi
+                ;;
+        esac
+    done
+    [ -n "$plan" ] || usage
+    path_is_safe "$plan" || usage "not a plan path: $plan"
+    case $plan in
+        .whygraph/plans/*/*) usage "not a plan path: $plan" ;;
+        .whygraph/plans/*.md) ;;
+        *) usage "not a plan path: $plan" ;;
+    esac
+    root=$(run_git rev-parse --show-toplevel) || usage "not in a git repository"
+    cd "$root" || exit 1
+    root=$(pwd -P)
+    [ ! -h "$plan" ] || publish_refuse "$plan is a symlink or not a regular file" 2
+    [ -e "$plan" ] || usage "no such plan: $plan"
+    [ -f "$plan" ] || publish_refuse "$plan is a symlink or not a regular file" 2
+    stem=$(stem_of "$plan")
+    case $stem in
+        '' | -* | *[!abcdefghijklmnopqrstuvwxyz0123456789-]*) usage "not a usable plan name: $plan" ;;
+    esac
+    [ ${#stem} -le 80 ] || usage "the plan name is longer than 80 characters: $plan"
+    if [ -n "$dir" ]; then
+        dir=${dir%/}
+        plans_dir_ok "$dir" || usage "not a usable plans folder: $dir"
+    else
+        read_plans_dir
+        case $plans_state in
+            missing)
+                printf 'skip: the plans folder is not known yet; open the portal and run Update agent files\n'
+                exit 0
+                ;;
+            off)
+                printf 'skip: plan indexing is off for this project\n'
+                exit 0
+                ;;
+            bad)
+                printf 'skip: the plans folder in .whygraph/portal.env is not valid\n'
+                exit 0
+                ;;
+        esac
+        dir=$plans_value
+    fi
+    check_work_dir
+    mkdir -p ".whygraph/plans/$stem" || fail "cannot create .whygraph/plans/$stem"
+    has_symlink_part "$dir" && publish_refuse "$dir is a symlink or not a regular file" 2
+    [ ! -e "$dir" ] || [ -d "$dir" ] || publish_refuse "$dir is a symlink or not a regular file" 2
+    mkdir -p "$dir" || fail "cannot create $dir"
+    has_symlink_part "$dir" && publish_refuse "$dir is a symlink or not a regular file" 2
+    dest=$dir/$stem.md
+    [ ! -h "$dest" ] || publish_refuse "$dest is a symlink or not a regular file" 2
+    [ ! -e "$dest" ] || [ -f "$dest" ] || publish_refuse "$dest is a symlink or not a regular file" 2
+    record=.whygraph/plans/$stem/published
+    [ ! -h "$record" ] || publish_refuse "$record is a symlink or not a regular file" 2
+    result=published
+    if [ -e "$dest" ]; then
+        if cmp -s "$plan" "$dest"; then
+            result=unchanged
+        elif [ -n "$force" ]; then
+            result=published
+        elif [ -f "$record" ] && [ "$(sed -n 1p "$record")" = "$dest" ] &&
+            [ "$(sed -n 2p "$record")" = "$(run_git hash-object --no-filters -- "$dest")" ]; then
+            result=republished
+        elif [ -f "$record" ] && [ "$(sed -n 1p "$record")" = "$dest" ]; then
+            publish_refuse "$dest was changed since it was published; pass --force to replace it" 1
+        else
+            publish_refuse "$dest exists and was not published from this machine (another plan may use this stem); rename the plan or pass --force" 1
+        fi
+    fi
+    if [ "$result" != unchanged ]; then
+        start_write "$dest"
+        cat "$plan" >"$tmp" || {
+            rm -f "$tmp"
+            fail "cannot write $dest"
+        }
+        chmod 644 "$tmp" 2>/dev/null
+        finish_write "$dest"
+    fi
+    # The record comes after the destination, never before it.
+    nl='
+'
+    put_file "$record" "$dest$nl$(run_git hash-object --no-filters -- "$dest")"
+    printf '%s %s\n' "$result" "$dest"
+    publish_notes "$dest"
     exit 0
 }
 
@@ -4847,6 +5029,8 @@ case $subcommand in
     proof) cmd_proof "$@" ;;
     setup) cmd_setup "$@" ;;
     format) cmd_format "$@" ;;
+    publish) cmd_publish "$@" ;;
+    plans-dir) cmd_plans_dir "$@" ;;
     ready) cmd_ready "$@" ;;
     dryrun) cmd_dryrun "$@" ;;
     red) cmd_red "$@" ;;

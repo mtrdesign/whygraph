@@ -134,6 +134,8 @@ def test_resources_registered() -> None:
         "whygraph://pr/{number}",
         "whygraph://issue/{number}",
         "whygraph://note/{id}",
+        "whygraph://plan/{stem}",
+        "whygraph://plan/{stem}/section/{n}",
     }
 
 

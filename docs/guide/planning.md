@@ -5,10 +5,13 @@ project's recorded rationale. `/whygraph-implement <plan>` then carries the plan
 time. Both commands are installed with your [agent files](../portal/agents.md) and run in your editor.
 Neither one is a new MCP tool: they are skills and subagents that call the tools you already have.
 
-!!! note "Plans are local"
+!!! note "Plans start out local"
     A plan is written to `.whygraph/plans/`, which is gitignored. Use `--out <path>` to put the plan
     file somewhere else, for example to commit it. Research notes and split files stay under
-    `.whygraph/plans/` whatever `--out` says.
+    `.whygraph/plans/` whatever `--out` says. To share a finished plan with your team, publish it
+    into the repository's plans folder: a passing `/whygraph-implement` run does it for you, and
+    `/whygraph-plan --publish <stem>` does it on demand. See
+    [Sharing plans with your team](#sharing-plans).
 
 ## The pipeline
 
@@ -356,6 +359,7 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--no-e2e` | Plan no [browser test](#end-to-end-tests). Without it, a UI plan in a project with browser tests gets one. |
 | `--out <path>` | Save the plan at `<path>` instead of `.whygraph/plans/<name>.md`. |
 | `--refresh-profile` | Derive the [UI profile](#ui-evidence) again instead of reusing the cached one. |
+| `--publish <stem> [--force]` | A separate mode that plans nothing: copy the finished plan `.whygraph/plans/<stem>.md` into the repository's [plans folder](#sharing-plans) so you can commit it. `--force` replaces a copy that someone edited by hand. No task text and no other flag with it. In VS Code it prints the command for you to run in a terminal. |
 
 `/whygraph-implement <plan.md | tasks.json> [flags]`
 
@@ -372,6 +376,7 @@ lines as `- Proof:`. `proof` speaks for the last run only, because each run star
 | `--no-capture` | Skip [UI evidence](#ui-evidence) capture. |
 | `--no-e2e` | Run no [browser test](#end-to-end-tests), in a step or in Acceptance. |
 | `--eval-fix-attempts N` | How many times a failed spec evaluation sends the step back to the implementor, 0 to 2. Default 1. |
+| `--no-publish` | Do not [publish the plan](#sharing-plans) into the repository's plans folder at the end of a passing run. |
 
 The command refuses a plan that has open Blockers or an unanswered plan-shaping question. A plan whose
 only Blockers are dry-run ones is not refused at once: the command runs the dry run again and goes on when
@@ -500,6 +505,146 @@ model's account: each retry with its models, each amendment's old and new line, 
 was not run because it is `manual:` or prose, and the Acceptance status. With nothing to report it
 prints `no recovery was needed`. The plan tool runs each Acceptance Check **before** the last
 implementor run logs the result, so the Acceptance status never depends on that run's report.
+
+## Sharing plans with your team { #sharing-plans }
+
+A plan you drafted lives in `.whygraph/plans/`, which git ignores, so nobody else sees it. **Publishing**
+copies the finished plan file (without its sidecar records) into the repository's plans folder,
+`docs/plans` by default (the [`[plans].dir`](../reference/configuration.md#plans) key). You commit it
+with your change like any other file. WhyGraph never runs `git add` or `git commit` for you.
+
+Once a plan is committed, each scan indexes it from `HEAD`'s git objects, never from the working tree.
+Agents then see it as a pointer beside the history they already fetch, and people can read it on the
+[Plans page](#the-plans-page). A plan is **intent, ranked below commits and PRs**: it says what
+someone meant to do, while the commits and PRs say what was built.
+
+### Publishing
+
+- **Automatically.** At the end of a `/whygraph-implement` run whose summary says `Acceptance: passed`
+  or `Acceptance: no items`, the command publishes the plan. It runs last, after the polish run, so
+  the shared copy matches what was built, amendments included. A run that stopped publishes nothing.
+  The run prints the `git add` line for the published file, so the plan can land in the same PR as the
+  code. Pass `--no-publish` to skip it. A plan written with `--out` into the repository is already
+  there, and the run says so. Each child plan of a split run is published under its own name.
+- **On demand.** `/whygraph-plan --publish <stem>` shares a plan before (or without) implementing it.
+  After saving a plan, `/whygraph-plan` prints this command in its closing line.
+- **Where the folder comes from.** The publish tool reads the folder from the `plans_dir=` line of the
+  untracked `.whygraph/portal.env` that the portal keeps current, so it works in every editor and
+  while the portal is down. If that line is missing (a project set up by an earlier build), it prints
+  `skip: the plans folder is not known yet; open the portal and run Update agent files` and writes
+  nothing; if indexing is off, `skip: plan indexing is off for this project`.
+
+The tool tells WhyGraph's own earlier copy from one someone edited:
+
+| The destination | Result |
+|---|---|
+| Does not exist | `published <path>` |
+| Is identical to the plan | `unchanged <path>` |
+| Is WhyGraph's earlier copy, now outdated | `republished <path>` |
+| Was edited by hand since it was published | `refuse: ... was changed since it was published; pass --force to replace it` |
+| Exists but was not published from this machine | `refuse: ... another plan may use this stem; rename the plan or pass --force` |
+
+A refusal is information, not a failed run. The second refusal matters: two people who plan "Fix login
+bug" both get `fix-login-bug`, and once one copy is committed the other must rename or force. After a
+write, an `ignored:` line means git ignores the destination, so set `[plans].dir` to a tracked folder;
+a `warn:` line means the plan holds absolute local paths (a home directory in a `Verify` command, for
+example), because a published plan is **shared verbatim**, local paths included. Review it before you
+commit.
+
+!!! warning "A `docs/` folder may be a static-site source"
+    MkDocs renders every `.md` under its docs folder, and Docusaurus treats a docs folder the same way,
+    so the default `docs/plans` can publish your plans on the project's documentation site, and a
+    plan with a broken link can fail a strict build. Set `[plans].dir` to a folder outside the site,
+    or exclude it (MkDocs: `exclude_docs: plans/`). This repository does the latter.
+
+Plan files are skipped (and counted in the scan's summary line) when their name is not a stem
+(`a-z`, `0-9` and `-`, at most 80 characters, starting with a letter or digit), when they look like
+secrets (`secret*`, `credential*`, `id_rsa*`, `*.pem`, `*.key`), or when they are not regular files.
+At most 500 plans are indexed, bodies are stored up to 512 KiB, and secret-shaped lines are removed
+(the Plans page says how many).
+
+### How a plan is linked to code { #plan-links }
+
+Three links are stored, and the scan finds them without a model:
+
+- **A commit link.** A line `WhyGraph-Plan: <stem>` in a commit message. `/whygraph-implement`
+  writes it on the commits it makes with `--commit-each-step`. When it does not commit for you, the
+  final report tells you the exact line to add yourself.
+- **A PR link.** The same line in a pull request description.
+- **A path link.** A repository file that the plan text names and that exists at `HEAD`. This links a
+  plan to a file even when no commit names it.
+
+Only the line `WhyGraph-Plan:` counts: there are no aliases such as `Plan:` or `Refs:`, so a repository
+that already uses those words gets no false links. A value may be the stem, a path or a file name; it
+is reduced to the stem, and at most five values are read per message. A link to a stem that is not
+indexed yet is kept, because the plan may be published later.
+
+At read time a plan reaches a piece of code in one of four ways, strongest first:
+
+| Link | Meaning |
+|---|---|
+| `commit` | A commit on that code's own lines names the plan |
+| `pr` | A PR that contains such a commit names the plan |
+| `declared` | A step's `Files:` range of the plan, or a row of its decisions table, declares a change to that code, and the plan is `shipped` (beside a rationale card), with a change to the file behind it |
+| `file` | The plan names the file; shown in file-level answers only |
+
+Text that is only a copy of WhyGraph's own output never makes a link: the constraints and risks a
+planner quotes from rationale cards, the Prior art section, and paths named in Non-goals, Boundaries
+or "No change needed" lines.
+
+**Derived status.** A plan's status is computed from its links when it is read, never taken from the
+plan's own `Status:` line (which `/whygraph-implement` never updates):
+
+| Status | Meaning |
+|---|---|
+| `shipped` | An implementing commit is on the default branch, or a linked PR is merged |
+| `in_flight` | An implementing commit exists or a linked PR is open, but nothing has reached the default branch |
+| `not_implemented` | Nothing implements it yet, including a plan whose only links are closed, unmerged PRs |
+
+A commit or PR that **only adds the plan file** is a publishing link: WhyGraph keeps and shows it, but
+it does not count toward status. Sharing a plan early in a docs-only PR therefore leaves it
+`not_implemented` until a later commit or PR changes code and names it. A plan that has left `HEAD`
+shows as no longer in the repository.
+
+On the Platform, a plan becomes `in_flight` through a `WhyGraph-Plan:` line in an open PR's
+description; commit trailers count once the commit reaches the default branch, because the Platform
+reads only that branch. A plan shows beside a rationale card only when commits or a PR on that code's
+own lines name it, or when it is `shipped` and a step or decision declares a change to that code.
+
+### Where plans appear and how to push them { #pushing-plans }
+
+1. **The Platform, and every linked checkout, sees a plan only once it is merged into the
+   repository's default branch**, after the next sync (the push webhook, or the hourly check). A
+   `WhyGraph-Plan:` line in an open PR's description is recorded early and connects when the plan file
+   is merged. See [Projects from a platform](../portal/platform-projects.md#plans).
+2. **The recommended flow.** Publish (automatic after a passing implement run), `git add` the plan with
+   the code on your feature branch, push, open the PR **with `WhyGraph-Plan: <stem>` in its
+   description**, and merge.
+3. **Put the line in the PR description even when your commits carry the trailer.** A squash merge
+   drops the per-step commits from the default branch, and a merged linked PR is what makes the plan
+   `shipped`.
+4. **To share a plan before building it**, publish it with `--publish`, commit it alone and merge a
+   small docs-only PR. It shows as `not_implemented` until a later PR names it.
+5. **On a local project, plans follow the checked-out branch.** Switching away from the branch that
+   holds a plan hides it from agents until you switch back. Nothing is lost: the rows are kept.
+
+### The Plans page { #the-plans-page }
+
+Each local or production project has a read-only **Plans** page at `/p/<slug>/plans`, in the sidebar
+after Notes. It lists the plans your team committed, newest change first, with a status badge, the
+plan's path and its objective. The tabs filter by status (**All**, **Shipped**, **In flight**, **Not
+implemented**), and the search box filters by text; both are in the address, so a filtered view can be
+bookmarked. A plan opens above the list with its whole text, its linked commits (and whether each is
+on the default branch), its PRs and the paths it names. People reading the page spend no tokens: the
+bounds on what agents get (see [Using WhyGraph](mcp-usage.md#plans)) do not apply to it.
+
+When indexing is off the page says so and points to **Settings > Plans**. The Explorer's **Rationale**
+tab shows a **Related plans** block under a card when the card has any, each a link to the Plans page
+that opens at the step or decision it names. A project [linked to a platform](../portal/platform-projects.md)
+has no local Plans page: open it on the Platform, where the plans are indexed.
+
+To turn indexing off, or to read another folder, use **Settings > Plans** or set
+[`[plans].dir`](../reference/configuration.md#plans).
 
 ## Sources
 
@@ -1013,6 +1158,8 @@ record. Step N's own record is left out, so a step can still change what it wrot
 | Trust root across steps | Yes | Yes | No: no parent agent | No: no parent agent |
 | `/whygraph-ui-check` by hand | Yes | Yes | No | No |
 | Acceptance | Separate run | Separate run | At the end of the run | At the end of the run |
+| Publish after a passing Acceptance (`--no-publish` turns it off) | Yes | Yes | Yes | Yes |
+| `/whygraph-plan --publish <stem>` | Yes | Yes | Prints the command to run in a terminal | Yes |
 | Questions | Dialog | Asked in chat | Asked in chat | Asked in chat |
 | Splitting | Child plans started for you | Child plans started for you | Run the prompt once per child | The main agent runs one implementor per child |
 

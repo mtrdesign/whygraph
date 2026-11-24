@@ -106,8 +106,8 @@ def main() -> int:
     _emit(
         {
             "type": "start",
-            "phase_total": 2,
-            "phases": ["Structural crawl", "Author identity"],
+            "phase_total": 3,
+            "phases": ["Structural crawl", "Author identity", "Plans"],
         }
     )
     _emit({"type": "phase", "phase": 1, "title": "Structural crawl"})
@@ -131,6 +131,7 @@ def main() -> int:
             sys.stderr.write(chunk)
         sys.stderr.flush()
     _emit({"type": "phase", "phase": 2, "title": "Author identity"})
+    _emit({"type": "phase", "phase": 3, "title": "Plans"})
     _emit(
         {
             "type": "result",

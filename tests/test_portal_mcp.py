@@ -38,7 +38,15 @@ from test_portal_app import (  # noqa: F401 -- `env` is a fixture
 from whygraph.core.context import use_project
 from whygraph.db import get_session
 from whygraph.db.models import Commit
-from whygraph.mcp import area_history, evidence, notes, prompts, rationale, resources
+from whygraph.mcp import (
+    area_history,
+    evidence,
+    notes,
+    plans,
+    prompts,
+    rationale,
+    resources,
+)
 from whygraph.mcp import server as mcp_server
 from whygraph.mcp.evidence import whygraph_evidence_for
 from whygraph.services.git import Repository
@@ -167,7 +175,15 @@ def _schema_view(tools) -> list[tuple]:
 
 def test_list_tools_schemas_are_unchanged_by_the_adapter() -> None:
     baseline = FastMCP("baseline")
-    for module in (evidence, rationale, area_history, notes, resources, prompts):
+    for module in (
+        evidence,
+        rationale,
+        area_history,
+        notes,
+        plans,
+        resources,
+        prompts,
+    ):
         module.register(baseline)
 
     wrapped = asyncio.run(mcp_server.mcp.list_tools())
@@ -543,3 +559,7 @@ def test_tools_carry_titles_annotations_and_server_instructions() -> None:
     assert mcp_server.mcp.instructions == WHYGRAPH_INSTRUCTIONS
     assert WHYGRAPH_INSTRUCTIONS.startswith("WhyGraph")
     assert "`partial: true`" in WHYGRAPH_INSTRUCTIONS
+    assert len(WHYGRAPH_INSTRUCTIONS) <= 2200
+    assert "`plans`: plans that built this code." in brief
+    assert "`plans` lists committed plans" in tools["whygraph_area_history"].description
+    assert "plans" not in tools["whygraph_evidence_for"].description

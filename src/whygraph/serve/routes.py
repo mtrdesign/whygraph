@@ -18,6 +18,7 @@ is on :data:`router`, mounted with ``project.read``.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -31,6 +32,7 @@ from whygraph.mcp.rationale import (
     _partial_fields,
     whygraph_rationale_brief,
 )
+from whygraph.mcp.plans import card_plan_shas, guarded_plans_for
 from whygraph.mcp.rationale_cache import lookup_cached
 from whygraph.mcp.resources import _commit_resource, _issue_resource, _pr_resource
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
@@ -38,6 +40,8 @@ from whygraph.services.codegraph import CodeGraph, CodeGraphError
 
 from . import graphdata
 from .errors import ServeError
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 generate_router = APIRouter()
@@ -178,6 +182,14 @@ def node_detail(qualified_name: str = Query(...)) -> dict:
         }
 
 
+def _plans_field(target, evidence) -> dict:
+    """``{"plans": [...]}`` for a rationale answer, ``{}`` when none or on failure."""
+    plans = guarded_plans_for(
+        card_plan_shas(evidence), [target.path], target=target, scope="symbol"
+    )
+    return {"plans": plans} if plans else {}
+
+
 @router.get("/node/rationale")
 def rationale_read(qualified_name: str = Query(...)) -> dict:
     """Cache-only rationale read — never calls an LLM (the resolved Q3 split).
@@ -191,12 +203,13 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
         path=None, line_start=None, line_end=None, qualified_name=qualified_name
     )
     evidence = collect_evidence(target, limit=20)
+    plans = _plans_field(target, evidence)
     if not evidence:
-        return {"status": "no_evidence", "target": target_dict(target)}
+        return {"status": "no_evidence", "target": target_dict(target), **plans}
     provider, pinned_model = get_config().cache_identity("rationale")
     cached = lookup_cached(target, evidence, provider, pinned_model)
     if cached is None:
-        return {"status": "not_generated", "target": target_dict(target)}
+        return {"status": "not_generated", "target": target_dict(target), **plans}
     return {
         "status": "cached",
         **_format_response(
@@ -206,6 +219,7 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
             cached.cached_at,
             **_partial_fields(cached),
         ),
+        **plans,
     }
 
 
@@ -218,7 +232,15 @@ def rationale_generate(qualified_name: str = Query(...)) -> dict:
     (one LLM call); runs in the threadpool so the event loop is not blocked.
     """
     card = whygraph_rationale_brief(qualified_name=qualified_name)
-    return {"status": "cached", **card}
+    try:
+        target = resolve_target(
+            path=None, line_start=None, line_end=None, qualified_name=qualified_name
+        )
+        plans = _plans_field(target, collect_evidence(target, limit=20))
+    except Exception:
+        _log.warning("plans lookup failed", exc_info=True)
+        plans = {}
+    return {"status": "cached", **card, **plans}
 
 
 @router.get("/node/evidence")

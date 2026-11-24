@@ -795,3 +795,445 @@ def test_engine_opens_normally_without_a_remote(repo: SimpleNamespace) -> None:
     with use_project(plain):
         assert get_engine() is not None
     assert db.parent.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Plans (plan 61 section 4.8, section 9.2 case 14)
+# ---------------------------------------------------------------------------
+
+
+def plan_requests(fake: FakePlatform) -> list[httpx.Request]:
+    """The plans requests the fake saw (``plans/for`` and the two reads)."""
+    return [r for r in fake.requests if "/plans" in r.url.path]
+
+
+def meta_requests(fake: FakePlatform) -> list[httpx.Request]:
+    return [r for r in fake.requests if r.url.path == "/api/v1/meta"]
+
+
+def answer_plans(fake: FakePlatform, refs: list[dict]) -> None:
+    """Make ``POST /plans/for`` answer with ``refs``."""
+    fake.responses["plans_for"] = (200, {"plans": refs, "project": fake.projects[SLUG]})
+
+
+def answer_history(fake: FakePlatform, items: list[dict]) -> None:
+    fake.responses["history"] = (
+        200,
+        {
+            "path": "a.py",
+            "include_renames": True,
+            "evidence": items,
+            "project": fake.projects[SLUG],
+        },
+    )
+
+
+def plan_ref(stem: str, link: str = "commit", **extra: object) -> dict:
+    """One full-detail ref as a platform sends it."""
+    return {
+        "stem": stem,
+        "title": f"Plan {stem}",
+        "status": "shipped",
+        "link": link,
+        "uri": f"whygraph://plan/{stem}",
+        "path": f"docs/plans/{stem}.md",
+        "present": True,
+        "commits": ["a" * 8],
+        **extra,
+    }
+
+
+def linked_over(repo: SimpleNamespace, fake: FakePlatform) -> ProjectContext:
+    """A linked context over ``repo`` whose platform is ``fake``."""
+    fake.add_token()
+    remote = LinkedProject(
+        PlatformHttp(
+            platform_origin=PLATFORM_ORIGIN,
+            api_origin=API_ORIGIN,
+            token=TOKEN,
+            transport=httpx.MockTransport(fake.handle),
+        ),
+        slug=SLUG,
+        org=ORG,
+        platform_origin=PLATFORM_ORIGIN,
+    )
+    return ProjectContext(
+        slug="demo",
+        root=repo.root,
+        config=Config(
+            whygraph_db=project_db_path(portal_db.data_dir(), "local", "demo"),
+            codegraph_db=repo.root / ".codegraph" / "codegraph.db",
+        ),
+        remote=remote,
+    )
+
+
+def test_mcp_linked_plans_never_asked_by_evidence(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """``whygraph_evidence_for`` carries no plans (R22): no plans call, no meta."""
+    answer_evidence(fake, [platform_item(repo.c1, committed_at=C1_DATE)], [repo.c2])
+    with use_project(linked):
+        payload = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
+    assert "plans" not in payload
+    assert plan_requests(fake) == [] and meta_requests(fake) == []
+
+
+def test_mcp_linked_area_history_plans_send_only_the_platforms_shas(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """File scope: the SHAs of the platform's own answer and the path it was sent."""
+    answer_history(
+        fake,
+        [
+            platform_item(repo.c2, committed_at=C2_DATE),
+            platform_item(repo.c1, committed_at=C1_DATE),
+        ],
+    )
+    answer_plans(
+        fake,
+        [plan_ref("built", "file", sections=[3, 8], sections_total=2, hints=[])],
+    )
+    with use_project(linked):
+        payload = whygraph_area_history("a.py", limit=5)
+
+    sent = bodies(fake, "for")
+    assert sent == [
+        {
+            "shas": [repo.c2, repo.c1],
+            "paths": ["a.py"],
+            "scope": "file",
+            "detail": "compact",
+            "target": None,
+        }
+    ]
+    raw = json.dumps(sent)
+    assert repo.c3 not in raw and UNCOMMITTED_SHA not in raw
+    # The compact ref: pointer fields and the sections, nothing of `full`.
+    assert payload["plans"] == [
+        {
+            "stem": "built",
+            "title": "Plan built",
+            "status": "shipped",
+            "link": "file",
+            "uri": "whygraph://plan/built",
+            "sections": [3, 8],
+        }
+    ]
+    assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
+
+    fake.requests.clear()
+    with use_project(linked):
+        full = whygraph_area_history("a.py", limit=5, detail="full")
+    assert bodies(fake, "for")[0]["detail"] == "full"
+    assert full["plans"][0]["path"] == "docs/plans/built.md"
+    assert full["plans"][0]["present"] is True
+    assert full["plans"][0]["commits"] == ["a" * 8]
+    # The meta read is cached after a success: one per LinkedProject.
+    assert meta_requests(fake) == []
+
+
+def test_mcp_linked_area_history_plans_cut_to_the_file_ceiling(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """At most 5 refs, at most 3 of them ``file`` links, whatever the platform sends."""
+    answer_history(fake, [platform_item(repo.c1, committed_at=C1_DATE)])
+    answer_plans(
+        fake,
+        [plan_ref(f"file-{i}", "file") for i in range(5)]
+        + [plan_ref(f"commit-{i}") for i in range(4)],
+    )
+    with use_project(linked):
+        payload = whygraph_area_history("a.py")
+    assert [ref["stem"] for ref in payload["plans"]] == [
+        "file-0",
+        "file-1",
+        "file-2",
+        "commit-0",
+        "commit-1",
+    ]
+
+
+def test_mcp_linked_history_of_an_unpushed_path_asks_no_plans(
+    linked: ProjectContext, fake: FakePlatform
+) -> None:
+    (linked.root / "secret.py").write_text("x = 1\n")
+    with use_project(linked):
+        payload = whygraph_area_history("secret.py")
+    assert "plans" not in payload
+    assert fake.requests == []
+
+
+def test_mcp_linked_rationale_plans_send_the_pushed_shas_and_target(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """Symbol scope: first distinct pushed SHAs (blame order) and the sent target."""
+    answer_plans(fake, [plan_ref("built", hints=[{"id": "step 2", "n": 4}])])
+    with use_project(linked):
+        card = whygraph_rationale_brief(path="a.py", line_start=1, line_end=6)
+    rationale_body = bodies(fake, "rationale")[0]
+    sent = bodies(fake, "for")
+    assert sent == [
+        {
+            # c1 owns lines 1-2 and 5: sent once, in blame order.
+            "shas": [repo.c1, repo.c2],
+            "paths": ["a.py"],
+            "scope": "symbol",
+            "detail": "compact",
+            "target": {"qualified_name": None, "line_start": 1, "line_end": 6},
+        }
+    ]
+    # Nothing that the card request did not already send.
+    assert {h["sha"] for h in rationale_body["hunks"]} == set(sent[0]["shas"])
+    assert rationale_body["target"]["path"] == sent[0]["paths"][0]
+    raw = json.dumps(sent)
+    assert repo.c3 not in raw and UNCOMMITTED_SHA not in raw
+    assert card["plans"] == [
+        {
+            "stem": "built",
+            "title": "Plan built",
+            "status": "shipped",
+            "link": "commit",
+            "uri": "whygraph://plan/built",
+            "hints": [{"id": "step 2", "n": 4}],
+        }
+    ]
+
+    fake.requests.clear()
+    with use_project(linked):
+        whygraph_rationale_brief(qualified_name="pkg.mixed")
+    # The declaration line is unpushed, so the name stays here.
+    assert bodies(fake, "for")[0]["target"] == {
+        "qualified_name": None,
+        "line_start": 3,
+        "line_end": 5,
+    }
+    assert bodies(fake, "for")[0]["shas"] == [repo.c2, repo.c1]
+
+    fake.requests.clear()
+    with use_project(linked):
+        whygraph_rationale_brief(qualified_name="pkg.head")
+    assert bodies(fake, "for")[0]["target"] == {
+        "qualified_name": "pkg.head",
+        "line_start": 1,
+        "line_end": 2,
+    }
+
+
+def test_mcp_linked_rationale_plans_need_a_sendable_target_and_a_card(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """No plans call without a pushed hunk, nor after a refused card."""
+    with use_project(linked), pytest.raises(WhyGraphError):
+        whygraph_rationale_brief(path="a.py", line_start=3, line_end=3)
+    assert fake.requests == []
+
+    fake.responses["rationale"] = (
+        403,
+        error_body("budget_exceeded", PLATFORM_BUDGET_MESSAGE, scope="org"),
+    )
+    with use_project(linked), pytest.raises(WhyGraphError):
+        whygraph_rationale_brief(qualified_name="pkg.head")
+    assert plan_requests(fake) == [] and meta_requests(fake) == []
+
+
+def test_mcp_linked_rationale_plans_send_no_target_for_a_substituted_path(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """A locally renamed file is asked about by its pushed origin path, untargeted."""
+    _git(repo.root, "mv", "a.py", "b.py")
+    _git(repo.root, "commit", "-q", "-m", "rename locally", date=C3_DATE)
+    with use_project(linked):
+        whygraph_rationale_brief(path="b.py", line_start=1, line_end=2)
+    assert bodies(fake, "rationale")[0]["target"]["path"] == "a.py"
+    sent = bodies(fake, "for")
+    assert sent == [
+        {
+            "shas": [repo.c1],
+            "paths": ["a.py"],
+            "scope": "symbol",
+            "detail": "compact",
+            "target": None,
+        }
+    ]
+    assert "b.py" not in json.dumps(sent)
+
+
+def test_mcp_linked_rationale_plans_cut_to_the_card_ceiling(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """5 refs, 4 hints each, a ``file`` link, 300-character titles: cut here."""
+    long = "x" * 300
+    hints = [{"id": f"step {k}", "title": long, "n": k} for k in range(4)]
+    answer_plans(
+        fake,
+        [plan_ref("only-file", "file", title=long, hints=hints)]
+        + [
+            plan_ref(f"plan-{i}", "declared", title=long, hints=hints) for i in range(5)
+        ],
+    )
+    with use_project(linked):
+        card = whygraph_rationale_brief(path="a.py", line_start=1, line_end=6)
+    refs = card["plans"]
+    assert 1 <= len(refs) <= 3
+    assert all(ref["link"] != "file" for ref in refs)
+    assert all(len(ref["title"]) <= 80 for ref in refs)
+    for ref in refs:
+        assert len(ref.get("hints", [])) <= 2
+        assert all(len(h["title"]) <= 80 for h in ref.get("hints", []))
+        assert set(ref) <= {"stem", "title", "status", "link", "uri", "hints"}
+    assert len(json.dumps(refs, ensure_ascii=False)) <= 1200
+
+
+def test_mcp_linked_plans_meta_failure_is_not_cached(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """A failed capability read skips plans for one call, then is read again."""
+    answer_history(fake, [platform_item(repo.c1, committed_at=C1_DATE)])
+    answer_plans(fake, [plan_ref("built")])
+    fake.responses["meta"] = (503, error_body("unavailable"))
+    with use_project(linked):
+        payload = whygraph_area_history("a.py")
+    assert "plans" not in payload
+    assert payload["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert len(meta_requests(fake)) == 1 and plan_requests(fake) == []
+
+    del fake.responses["meta"]
+    with use_project(linked):
+        payload = whygraph_area_history("a.py")
+    assert [ref["stem"] for ref in payload["plans"]] == ["built"]
+    assert len(meta_requests(fake)) == 2 and len(plan_requests(fake)) == 1
+
+
+def test_mcp_linked_generic_plans_reads_make_no_request(
+    linked: ProjectContext, repo: SimpleNamespace, fake: FakePlatform
+) -> None:
+    """The generic read functions are local-only: no HTTP on a linked context."""
+    from whygraph.mcp import plans
+
+    with use_project(linked):
+        assert plans.plans_for([repo.c3], ["a.py"], scope="file") == []
+        assert plans.guarded_plans_for([repo.c3], ["a.py"], scope="symbol") == []
+    assert fake.requests == []
+
+
+def test_mcp_linked_plans_cut_to_fifty_shas(
+    remote: LinkedProject, fake: FakePlatform
+) -> None:
+    shas = [f"{i + 1:040x}" for i in range(60)]
+    refs, supported = remote.plans_for(shas, ["a.py"], scope="file")
+    assert (refs, supported) == ([], True)
+    assert bodies(fake, "for")[0]["shas"] == shas[:50]
+
+
+def test_mcp_linked_plan_resources_read_from_the_platform(
+    linked: ProjectContext, fake: FakePlatform
+) -> None:
+    from platform_fake import PLAN_STEM
+
+    from whygraph.mcp.plans import _plan_resource, _plan_section_resource
+
+    with use_project(linked):
+        plan = _plan_resource(PLAN_STEM)
+        section = _plan_section_resource(PLAN_STEM, "1")
+        missing = _plan_resource("nosuch-plan")
+        missing_section = _plan_section_resource(PLAN_STEM, "2")
+    assert plan["stem"] == PLAN_STEM and plan["digest"]
+    assert plan["kind"] == "plan" and plan["reading"]
+    assert "project" not in plan and "body" not in plan
+    assert plan["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert section["n"] == 1 and section["text"].startswith("## Steps")
+    assert "project" not in section
+    assert missing == {
+        "error": "not_found",
+        "stem": "nosuch-plan",
+        "platform": {"status": "ok", "url": API_ORIGIN},
+    }
+    assert missing_section["error"] == "not_found"
+    assert missing_section["section"] == "2"
+
+
+@pytest.mark.parametrize(
+    "stem, n",
+    [
+        ("..", None),
+        ("..", "1"),
+        ("Bad_Stem", None),
+        ("a/b", None),
+        ("demo-plan", "x"),
+        ("demo-plan", "300"),
+        ("demo-plan", "-1"),
+    ],
+)
+def test_mcp_linked_plan_resources_check_locally_first(
+    linked: ProjectContext, fake: FakePlatform, stem: str, n: str | None
+) -> None:
+    """A stem off the pattern, or a section off ``0..299``, never leaves the machine."""
+    from whygraph.mcp.plans import _plan_resource, _plan_section_resource
+
+    with use_project(linked):
+        payload = _plan_resource(stem) if n is None else _plan_section_resource(stem, n)
+    assert payload["error"] == "not_found"
+    assert payload["stem"] == stem
+    assert payload["platform"]["status"] == "ok"
+    assert fake.requests == []
+
+
+def test_mcp_linked_plans_on_an_older_platform(repo: SimpleNamespace) -> None:
+    """No ``plans`` capability: one meta read, no plans request, link ``ok``."""
+    from platform_fake import PLAN_STEM
+
+    from whygraph.mcp.plans import _plan_resource, _plan_section_resource
+
+    fake = FakePlatform(plans_supported=False)
+    ctx = linked_over(repo, fake)
+    answer_history(fake, [platform_item(repo.c1, committed_at=C1_DATE)])
+    with use_project(ctx):
+        history = whygraph_area_history("a.py")
+        card = whygraph_rationale_brief(path="a.py", line_start=1, line_end=6)
+        plan = _plan_resource(PLAN_STEM)
+        section = _plan_section_resource(PLAN_STEM, "1")
+        evidence = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
+    for payload in (history, card):
+        assert "plans" not in payload
+        assert payload["platform"] == {
+            "status": "ok",
+            "url": API_ORIGIN,
+            "plans": "unsupported",
+        }
+    # Only the two tool branches say so; the evidence tool's block is unchanged.
+    assert "plans" not in evidence["platform"]
+    assert plan["error"] == "not_found" and section["error"] == "not_found"
+    assert len(meta_requests(fake)) == 1
+    assert plan_requests(fake) == []
+    assert ctx.remote is not None and ctx.remote.status == "ok"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [(401, error_body("login_required")), (404, error_body("no_such_route"))],
+)
+def test_mcp_linked_plans_unknown_route_reads_as_unsupported(
+    linked: ProjectContext,
+    repo: SimpleNamespace,
+    fake: FakePlatform,
+    answer: tuple[int, dict],
+) -> None:
+    """An older platform's catch-all answer (or a bare 404) is "no plans here"."""
+    answer_history(fake, [platform_item(repo.c1, committed_at=C1_DATE)])
+    for route in ("plans_for", "plan", "plan_section"):
+        fake.responses[route] = answer
+    from platform_fake import PLAN_STEM
+
+    from whygraph.mcp.plans import _plan_resource
+
+    with use_project(linked):
+        history = whygraph_area_history("a.py")
+        plan = _plan_resource(PLAN_STEM)
+    assert "plans" not in history
+    assert history["platform"]["plans"] == "unsupported"
+    assert plan["error"] == "not_found"
+    assert linked.remote is not None and linked.remote.status == "ok"
+    with use_project(linked):
+        follow = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
+    assert follow["platform"]["status"] == "ok"

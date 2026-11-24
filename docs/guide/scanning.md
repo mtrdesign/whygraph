@@ -48,8 +48,8 @@ the address, so a filtered view can be bookmarked or shared; **Clear filters** r
 
 ## What a scan does
 
-A scan runs up to five ordered phases. The run's page numbers them against the phases that will
-actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2" rather than gaps.
+A scan runs up to six ordered phases. The run's page numbers them against the phases that will
+actually run this time, so a Quick rescan shows "Phase 1 of 3" through "Phase 3 of 3" rather than gaps.
 
 1. **Structural crawl** - the git crawler and, when a remote provider is enabled, the GitHub crawler,
    running concurrently. Records commits and the files each one touched, links PRs and issues to
@@ -65,12 +65,22 @@ actually run this time, so a Quick rescan shows "Phase 1 of 2" and "Phase 2 of 2
    on GitHub; the others are still recovered.
 3. **Author identity** - resolves commit addresses into one row per human. Local-only, no network and
    no token, so it runs on every scan including the offline git-hook path.
-4. **Core commits** *(optional)* - finds the commits behind the most-referenced files, so
+4. **Plans** - indexes the [committed plans](planning.md#sharing-plans) under `[plans].dir` (default
+   `docs/plans`): it reads each plan's Markdown from `HEAD`'s git objects, never the working tree,
+   and stores its title, objective, a short decision digest and an outline of its sections, with no
+   model call. It then links plans to code from `WhyGraph-Plan:` lines in commit messages and PR
+   descriptions and from the repository paths a plan names. A plan is re-read only when its file
+   changed, and the links are cheap queries over data the earlier phases stored, so it runs on every
+   scan, git-hook scans included. A repository without the folder pays one `git ls-tree`; set
+   `[plans].dir = ""` to turn it off. The phase's summary line reads like `12 plans (3 changed, 1
+   removed); links 4 commit, 1 pr, 37 path`, with a count for any plan skipped (a bad name, a
+   duplicate stem, an unreadable file or the 500-plan cap). Forge-only and CodeGraph-only scans skip it.
+5. **Core commits** *(optional)* - finds the commits behind the most-referenced files, so
    **Describe core** knows what to describe. It reads the CodeGraph index to choose its files, so on
    a first scan with no index it waits for the CodeGraph refresh. It runs on the first scan and on
    Quick rescans until one pass completes, is capped at 15 minutes after the code index is ready,
    and resumes where it stopped. Git-hook scans skip it.
-5. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
+6. **LLM descriptions** *(optional)* - writes a short description of each commit's diff with the
    configured provider, and the pending per-file changes of large commits in core files. The slow,
    token-heavy long pole, so it runs strictly last and alone. **Describe core** describes only core;
    **Describe all** and a Full rescan describe everything. Untick **Also describe large commits file
@@ -113,7 +123,7 @@ In the portal, **Scan now** offers two kinds of run:
 
 | Run | What it does |
 |---|---|
-| **Quick rescan** | Git history and the CodeGraph index only: no LLM and no remote calls (no GitHub PRs or issues), so it is fast, offline and token-free. This is also what the git hooks ask for. While core commits are still being found, the first passes can be slower (they run the "Core commits" phase), then it is fast again; the hooks ask for the quick scan without that phase. |
+| **Quick rescan** | Git history, the committed [plans](planning.md#sharing-plans) and the CodeGraph index only: no LLM and no remote calls (no GitHub PRs or issues), so it is fast, offline and token-free. This is also what the git hooks ask for. While core commits are still being found, the first passes can be slower (they run the "Core commits" phase), then it is fast again; the hooks ask for the quick scan without that phase. |
 | **Full rescan** | Everything a Quick rescan does, plus the GitHub crawl (after the first one, only what changed since), squash-merge recovery and the LLM description of each commit. |
 
 !!! tip "Lazy backfill"
@@ -144,7 +154,7 @@ The hooks run a shared helper that lives in the git directory, at `.git/whygraph
 linked worktree, the main repository's git directory), never in the working tree - a checkout or pull
 cannot replace it. Repositories set up by an earlier build had it at `.whygraph/hooks/whygraph-scan`;
 the next set-up or hooks change moves it. The helper finds the portal through
-`.whygraph/portal.env`, a two-line file (`slug`, `port`) it **parses and never sources**, and ignores
+`.whygraph/portal.env`, a small file of `key=value` lines it **parses and never sources** (it reads only `slug` and `port`; the third line, `plans_dir`, is read by the plan-publish tool, [not by the hooks](planning.md#sharing-plans)), and ignores
 if git tracks it or it is a symbolic link. It never writes through a symbolic link either. An existing hook of your own is appended to behind a
 sentinel guard, never overwritten. `post-checkout` skips the two cases that can't have changed
 anything - a file checkout (`git checkout -- somefile`) and `git switch -c` at the current commit.

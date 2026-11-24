@@ -42,6 +42,7 @@ only when the code has clearly changed since the last card).
 - **Risks** are flagged to the user *before* the change, not after.
 - **`evidence_count`**: if it's empty or low, the card has little git history behind it -
   treat it as a weak signal and verify against the code yourself.
+- **`plans`** are pointers to what a plan intended; never a finding and never a constraint.
 
 If the `whygraph_*` tools are missing from this session, flag that the WhyGraph portal is not connected (start it with `whygraph up`) and proceed with the edit using your own judgment.
 

@@ -54,7 +54,9 @@ from test_portal_v1 import (  # noqa: F401 -- `v1` and `generator` are fixtures
     V1World,
     _Generator,
     generator,
+    PLAN_STEM,
     hunks_of,
+    seed_plan,
     target_body,
     v1,
 )
@@ -63,6 +65,9 @@ from whygraph.api_v1 import (
     EvidenceIn,
     EvidenceReplyOut,
     MetaOut,
+    PlanOut,
+    PlanSectionOut,
+    PlansForOut,
     RationaleIn,
     RationaleOut,
     StatusOut,
@@ -171,6 +176,7 @@ def world(v1: V1World, generator: type[_Generator], monkeypatch) -> V1World:  # 
     monkeypatch.setattr(analyze_pkg, "backfill_commit_description", backfill_commit)
     monkeypatch.setattr(analyze_pkg, "backfill_file_description", backfill_file)
     head = head_sha(v1)
+    seed_plan(v1)
     with use_project(v1.ctx()), get_session() as session:
         session.add(
             PullRequest(
@@ -260,8 +266,30 @@ def cases(w: V1World) -> list[Case]:
         Case("pr", "GET", f"/prs/{PR_NUMBER}"),
         Case("issue", "GET", f"/issues/{ISSUE_NUMBER}"),
         Case("overview", "GET", "/overview"),
+        Case(
+            "plans_for",
+            "POST",
+            "/plans/for",
+            model=PlansForOut,
+            kwargs={"json": {"shas": [head_sha(w)], "paths": ["sample.py"]}},
+        ),
+        Case("plan", "GET", f"/plans/{PLAN_STEM}", model=PlanOut),
+        Case(
+            "plan_section",
+            "GET",
+            f"/plans/{PLAN_STEM}/sections/{_plan_section(w)}",
+            model=PlanSectionOut,
+        ),
         Case("revoke", "DELETE", "/token"),
     ]
+
+
+def _plan_section(w: V1World) -> int:
+    """The first contents entry of the seeded plan (a section that exists)."""
+    from whygraph.mcp.plans import plan_record
+
+    with use_project(w.ctx()):
+        return plan_record(PLAN_STEM)["contents"][0]["n"]
 
 
 def _exchange(w: V1World) -> dict:
@@ -406,6 +434,9 @@ def test_platform_client_parses_every_recorded_reply() -> None:
             lambda: client.pr(FAKE_SLUG, PR_NUMBER),
             lambda: client.issue(FAKE_SLUG, ISSUE_NUMBER),
             lambda: client.overview(FAKE_SLUG),
+            lambda: client.plans_for(FAKE_SLUG, ["a" * 40], ["sample.py"]),
+            lambda: client.plan(FAKE_SLUG, PLAN_STEM),
+            lambda: client.plan_section(FAKE_SLUG, PLAN_STEM, 1),
         ):
             assert isinstance(call(), dict)
         client.revoke(FAKE_SLUG)

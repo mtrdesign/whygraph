@@ -73,6 +73,12 @@ to a platform it asks for no cards unless you pass `--generate`, because the pla
 `cached_only`. See [Reviewing a diff](../portal/agents.md#whygraph-review) for what it reviews and its
 limits.
 
+## Writing CLAUDE.md
+
+In Claude Code, `/whygraph-claude-md` drafts the project's `CLAUDE.md` from the repository, its history
+and your answers, with a source on every line. It spends no LLM budget. See
+[Writing CLAUDE.md](../portal/agents.md#whygraph-claude-md).
+
 ## The resources
 
 Read-only JSON, addressed by URI - handy when you already know the commit, PR, or issue:

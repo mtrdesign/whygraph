@@ -42,7 +42,8 @@ The planning commands take flags: `/whygraph-plan` accepts `--shallow`, `--deep`
 `--no-split`, `--sources <a,b>`, `--no-questions`, `--review`, `--no-review` and `--out <path>`; `/whygraph-implement` accepts
 `--from-step N`, `--step N`, `--commit-each-step`, `--fix-attempts N`, `--model`, `--no-review`,
 `--no-eval`, `--no-capture` and `--eval-fix-attempts N`. See
-[Planning a change](planning.md).
+[Planning a change](planning.md). Claude Code also gets `/whygraph-claude-md`, which writes the project's
+`CLAUDE.md`; see [Writing CLAUDE.md](../portal/agents.md#whygraph-claude-md).
 
 Cursor's slash commands (`/rationale`, `/whygraph-plan`, `/whygraph-implement`, `/whygraph-ui-check`, `/whygraph-note`) are installed as skills under
 `.cursor/skills/`. Cursor also loads `.claude/skills/`, so with both Claude Code and Cursor selected each

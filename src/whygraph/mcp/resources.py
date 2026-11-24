@@ -76,6 +76,7 @@ from whygraph.db.models import (
     Issue,
     Milestone,
     PRIssueLink,
+    Plan,
     PullRequest,
     Tag,
 )
@@ -2298,6 +2299,9 @@ def _repo_overview_resource() -> dict:
                 .order_by(func.count().desc(), Commit.author_name.asc())
                 .limit(_TOP_CONTRIBUTORS_LIMIT)
             ).all()
+            plan_count = session.exec(
+                select(func.count()).select_from(Plan).where(col(Plan.present) == 1)
+            ).one()
     except OperationalError as exc:
         raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
 
@@ -2324,6 +2328,7 @@ def _repo_overview_resource() -> dict:
             "fraction": fraction,
         },
         "freshness": _freshness(),
+        "plans": {"dir": get_config().plans.dir, "count": plan_count},
         "top_contributors": [
             {
                 "author_name": row[0],

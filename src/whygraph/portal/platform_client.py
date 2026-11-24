@@ -36,7 +36,7 @@ import os
 import re
 from importlib import metadata
 from ipaddress import ip_address
-from typing import Any
+from typing import Any, Literal, Sequence
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -48,6 +48,10 @@ from whygraph.api_v1 import (
     EvidenceIn,
     EvidenceReplyOut,
     MetaOut,
+    PlanOut,
+    PlanSectionOut,
+    PlansForIn,
+    PlansTargetIn,
     RationaleIn,
     RationaleOut,
     StatusOut,
@@ -712,6 +716,52 @@ class PlatformHttp:
     def overview(self, slug: str) -> dict[str, Any]:
         """``GET .../overview`` (parsed JSON)."""
         return self._resource(slug, "overview")
+
+    def plans_for(
+        self,
+        slug: str,
+        shas: Sequence[str],
+        paths: Sequence[str],
+        *,
+        scope: Literal["symbol", "file"] = "file",
+        target: PlansTargetIn | None = None,
+        detail: Literal["compact", "full"] = "compact",
+    ) -> dict[str, Any]:
+        """``POST .../plans/for``: plan refs for SHAs and paths (parsed JSON).
+
+        The body is built with :class:`~whygraph.api_v1.PlansForIn`, so a
+        value the contract refuses raises ``ValidationError`` before
+        anything is sent. The refs are returned unvalidated: the linked
+        side cuts them to its ceilings (plan 61 section 4.8).
+        """
+        body = PlansForIn(
+            shas=list(shas),
+            paths=list(paths),
+            scope=scope,
+            detail=detail,
+            target=target,
+        )
+        return self._object(
+            self._v1("POST", f"{self._slug(slug)}/plans/for", body=body)
+        )
+
+    def plan(self, slug: str, stem: str) -> dict[str, Any]:
+        """``GET .../plans/{stem}``: digest, contents and links (validated).
+
+        The stem is quoted, but the caller must check it against the stem
+        pattern first: httpx normalises dot segments.
+        """
+        data = self._resource(slug, f"plans/{quote(stem, safe='')}")
+        return self._fields(PlanOut, data)
+
+    def plan_section(self, slug: str, stem: str, n: int) -> dict[str, Any]:
+        """``GET .../plans/{stem}/sections/{n}``: one section (validated)."""
+        data = self._resource(slug, f"plans/{quote(stem, safe='')}/sections/{int(n)}")
+        return self._fields(PlanSectionOut, data)
+
+    def _fields(self, model: type[BaseModel], data: Any) -> dict[str, Any]:
+        """``data`` validated with ``model``, as the fields the platform sent."""
+        return self._model(model, data).model_dump(mode="json", exclude_unset=True)
 
     def revoke(self, slug: str) -> None:
         """``DELETE .../token``: revoke this connection (the caller catches errors)."""

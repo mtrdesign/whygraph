@@ -88,9 +88,10 @@ read-only grant to an organization cannot.
 | What a pushed commit was for, its pull requests and issues | The platform, from its own database |
 | The rationale card of a symbol | The platform, from its shared cache |
 | Every commit that touched a path | The platform |
+| The committed [plans](../guide/planning.md#sharing-plans) that name this code, their digests and sections | The platform, from the plans it indexed on its default branch |
 | Symbols and the CodeGraph index | Your machine, your own index |
 | Graph tools (`codegraph_*`, at `/mcp/<slug>/code`) | Your machine, from your own index; nothing is sent to the platform |
-| Explorer, Chat, models, keys, descriptions | The platform. The local routes refuse and point there |
+| Explorer, Chat, the Plans page, models, keys, descriptions | The platform. The local routes refuse and point there |
 
 A linked project **never opens a local WhyGraph database**: it has no `whygraph.db` anywhere (not in the
 checkout and not in the data directory), and the code that would open one refuses. It never has
@@ -119,7 +120,9 @@ sends the platform:
   they own, at the path they had in that commit;
 - the target's **path**, only when a pushed revision tracks it (otherwise the path a pushed hunk
   came from);
-- the symbol's **qualified name**, only when the line it is declared on blames to a pushed commit.
+- the symbol's **qualified name**, only when the line it is declared on blames to a pushed commit;
+- for [plans](#plans), only those same SHAs and that path, and the stem of a plan when your agent reads
+  one.
 
 It never sends file contents, commit messages, uncommitted lines, or commits that exist only in your
 checkout. Whether a commit is pushed is read from your `origin/*` refs as the last `git fetch` left
@@ -146,6 +149,33 @@ Rationale cards are generated **on the platform**, by the organization's own mod
 shared by everyone on the project: an agent that asks for a card nobody has generated yet spends the
 organization's [hourly agent limit](../deploy/production.md#agent-limits), and an organization can set
 it to zero so agents get only cards that exist.
+
+### Plans { #plans }
+
+The platform indexes your team's [committed plans](../guide/planning.md#sharing-plans) in its own
+scan, reading the repository's **default branch** (the folder is the platform's `[plans].dir`), and
+serves them to linked checkouts. So an agent on a linked checkout sees a plan only once it has been
+merged into the default branch and the platform has synced; a plan on your feature branch, or one
+you have only published locally, is not there yet. The planning guide has the
+[push flow](../guide/planning.md#pushing-plans). Plans are **intent, ranked below commits and PRs**,
+and a linked project's `whygraph_area_history` and `whygraph_rationale_brief` carry them as pointers
+just as a local project's do (see [Plans in the MCP reference](../reference/mcp.md#plans)).
+
+Three routes carry them, all bearer-only like the rest of `/api/v1`:
+
+| Route | Returns |
+|---|---|
+| `POST /api/v1/projects/{slug}/plans/for` | The `plans` list for the commit SHAs and path your call already sent, in `symbol` or `file` scope |
+| `GET /api/v1/projects/{slug}/plans/{stem}` | A plan's digest, links and contents list |
+| `GET /api/v1/projects/{slug}/plans/{stem}/sections/{n}` | One section, at most 8,000 characters |
+
+A platform advertises the `plans` capability in `GET /api/v1/meta`. Against an older platform that
+lacks it, your portal makes no plans request: the results leave `plans` out and carry
+`"plans": "unsupported"` in their `platform` block, and the link stays `ok`. The platform also tells
+your portal its plans folder, which your portal writes to the untracked `.whygraph/portal.env`, so
+`/whygraph-plan --publish` and an auto-publish publish into the right folder. The platform shows the
+same read-only **Plans** page as a local project, so teammates can browse the plans there; the linked
+project has no Plans page of its own.
 
 ### No notes
 

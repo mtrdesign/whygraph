@@ -38,6 +38,7 @@ from .descriptions import (
     RATIONALE_BRIEF_DESCRIPTION,
 )
 from .notes import NoteView, notes_for_target
+from .plans import attach_linked_plans, card_plan_shas, guarded_plans_for
 from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
@@ -161,7 +162,9 @@ class RationaleCard(_RationaleCardRequired, total=False):
     code with no commits but with confirmed notes. ``notes`` (confirmed
     project notes, member-written data) is attached by the registered MCP
     tool only, on every non-linked outcome; the Explorer, Chat and the
-    ``/api/v1`` response never carry it.
+    ``/api/v1`` response never carry it. ``plans`` (plan refs, compact) is
+    attached by the MCP tool and the Explorer's rationale routes, never
+    cached and never fed to the card prompt.
     """
 
     status: str
@@ -184,6 +187,7 @@ class RationaleCard(_RationaleCardRequired, total=False):
     card_range: dict[str, int]
     platform: dict[str, Any]
     notes: list[NoteView]
+    plans: list[dict[str, Any]]
 
 
 def card_evidence_refs(evidence: list[CommitEvidence]) -> list[dict]:
@@ -379,7 +383,8 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
     dict
         The platform's card plus a ``platform`` block. Its ``target`` is
         the platform's own range for the symbol, which is what the card
-        describes.
+        describes. ``plans`` (symbol scope, from the platform) when any;
+        ``platform.plans = "unsupported"`` on an older platform.
 
     Raises
     ------
@@ -397,7 +402,20 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
         card = remote.rationale(sendable, split.pushed)
     except RemoteError as exc:
         raise WhyGraphError(str(exc)) from exc
-    return {**card, "platform": platform_block(remote)}
+    result = {**card, "platform": platform_block(remote)}
+    # Plans beside the card (plan 61 section 4.8): only what this call just
+    # sent - the pushed hunks' SHAs (first distinct, blame order) and the
+    # sendable path; the target only when its path is the asked-for one,
+    # since a substituted origin path's range belongs to another file.
+    attach_linked_plans(
+        result,
+        remote,
+        [hunk.sha for hunk in split.pushed],
+        [sendable.path],
+        scope="symbol",
+        target=sendable if sendable.path == target.path else None,
+    )
+    return result
 
 
 def _partial_fields(row: CachedCard) -> dict[str, Any]:
@@ -1019,6 +1037,7 @@ def _brief(
     cached_only: bool,
     progress: Callable[[int, str], None] | None,
     note: Callable[[str], None] | None,
+    evidence: list[CommitEvidence] | None = None,
 ) -> RationaleCard:
     """The non-linked half of :func:`whygraph_rationale_brief`.
 
@@ -1030,6 +1049,10 @@ def _brief(
         As for :func:`whygraph_rationale_brief`.
     progress, note : callable or None
         The client channel from :func:`_client_channel`.
+    evidence : list of CommitEvidence or None
+        ``collect_evidence(target, limit=20)`` when the caller already
+        has it (so plans and the card share one list); collected here
+        otherwise.
 
     Returns
     -------
@@ -1041,7 +1064,8 @@ def _brief(
     NoEvidenceError
         The target has no commits.
     """
-    evidence = collect_evidence(target, limit=20)
+    if evidence is None:
+        evidence = collect_evidence(target, limit=20)
     if progress is not None:
         progress(1, f"evidence collected ({len(evidence)} commits)")
     return rationale_card(
@@ -1071,7 +1095,10 @@ def _rationale_brief_tool(
     members wrote, never fed into the card). A linked project gets the
     platform's card unchanged. Code with no commits raises
     ``no_evidence`` as before, unless confirmed notes exist, in which case
-    ``{"status": "no_evidence", "target", "notes"}`` is returned.
+    ``{"status": "no_evidence", "target", "notes"}`` is returned. The same
+    holds for ``plans`` (compact pointers to the committed plans that
+    built the code, never fed to the card, omitted when empty or on a
+    ``cached_only`` miss).
     """
     progress, note = _client_channel(ctx)
     target = resolve_target(
@@ -1084,6 +1111,10 @@ def _rationale_brief_tool(
     if project is not None and project.remote is not None:
         return linked_rationale(project.remote, target)
     notes = notes_for_target(target)
+    evidence = collect_evidence(target, limit=20)
+    plans = guarded_plans_for(
+        card_plan_shas(evidence), [target.path], target=target, scope="symbol"
+    )
     try:
         card = _brief(
             target,
@@ -1091,13 +1122,24 @@ def _rationale_brief_tool(
             cached_only=cached_only,
             progress=progress,
             note=note,
+            evidence=evidence,
         )
     except NoEvidenceError:
-        if not notes:
+        if not notes and not plans:
             raise
-        return {"status": "no_evidence", "target": target_dict(target), "notes": notes}
+        reply: RationaleCard = {
+            "status": "no_evidence",
+            "target": target_dict(target),
+        }
+        if notes:
+            reply["notes"] = notes
+        if plans:
+            reply["plans"] = plans
+        return reply
     if notes:
         card["notes"] = notes
+    if plans and card.get("status") != "not_cached":
+        card["plans"] = plans
     return card
 
 

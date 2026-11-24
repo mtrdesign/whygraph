@@ -39,9 +39,9 @@ your editor how to use WhyGraph's tools. Re-initializing leaves your existing fi
 agent files** in the project's Settings overwrites them.
 
 The planning commands take flags: `/whygraph-plan` accepts `--shallow`, `--deep`, `--split`,
-`--no-split`, `--sources <a,b>`, `--no-questions`, `--review`, `--no-review` and `--out <path>`; `/whygraph-implement` accepts
+`--no-split`, `--sources <a,b>`, `--no-questions`, `--review`, `--no-review`, `--out <path>` and `--publish <stem> [--force]`; `/whygraph-implement` accepts
 `--from-step N`, `--step N`, `--commit-each-step`, `--fix-attempts N`, `--model`, `--no-review`,
-`--no-eval`, `--no-capture` and `--eval-fix-attempts N`. See
+`--no-eval`, `--no-capture`, `--eval-fix-attempts N` and `--no-publish`. `--publish` and `--no-publish` share a plan into the repository's [plans folder](planning.md#sharing-plans); VS Code prints the `--publish` command for you to run in a terminal. See
 [Planning a change](planning.md). Claude Code also gets `/whygraph-claude-md`, which writes the project's
 `CLAUDE.md`; see [Writing CLAUDE.md](../portal/agents.md#whygraph-claude-md).
 

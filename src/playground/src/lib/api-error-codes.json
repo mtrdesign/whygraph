@@ -127,6 +127,7 @@
   "origin_mismatch",
   "owner_required",
   "path_missing",
+  "plan_not_found",
   "platform_address_mismatch",
   "platform_unreachable",
   "project_deleted",

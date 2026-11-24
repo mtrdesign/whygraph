@@ -1179,6 +1179,8 @@ NOT_TRANSFERRED: dict[str, str] = {
     "core_rename": "recomputed by the next scan",
     "core_commit": "recomputed by the next scan",
     "core_bulk_pair": "recomputed by the next scan",
+    "plan": "rebuilt from HEAD by the next scan",
+    "plan_link": "rebuilt by the next scan",
 }
 """Tables that never travel, with why."""
 

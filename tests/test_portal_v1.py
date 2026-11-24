@@ -49,13 +49,17 @@ from test_portal_hosts_isolation import _insert_project
 from whygraph.analyze import AnalyzeError, Item, ItemRef, Rationale
 from whygraph.api_v1 import (
     EvidenceReplyOut,
+    PlanOut,
+    PlanSectionOut,
+    PlansForOut,
     RationaleOut,
     StatusOut,
     hunk_in_from_blame,
 )
 from whygraph.core.context import use_project
 from whygraph.db import get_session
-from whygraph.db.models import Commit
+from whygraph.db.models import Commit, Plan, PlanLink
+from whygraph.mcp import plans as plans_mod
 from whygraph.mcp import rationale as rationale_mod
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import collect_evidence
@@ -1097,6 +1101,224 @@ def test_v1_unknown_resource_is_not_found(v1: V1World, tail: str) -> None:
     response = call(v1, "GET", tail)
     assert response.status_code == 404, response.text
     assert response.json()["code"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# Plans (plan 61 section 4.7, 9.2 case 13)
+# ---------------------------------------------------------------------------
+
+PLAN_STEM = "sample-plan"
+PLAN_BODY = """# Plan: Build the sample module
+
+**Objective:** Give the project a sample module.
+
+## Steps
+
+1. **Write it**
+   - **Files:** sample.py:1-3
+
+## Resolved decisions
+
+| # | Question | Decision |
+|---|---|---|
+| Q1 | Where? | In `sample.py` |
+"""
+
+
+def seed_plan(w: V1World, stem: str = PLAN_STEM, body: str = PLAN_BODY) -> str:
+    """Add one present plan, linked to HEAD and ``sample.py``; return HEAD."""
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=w.root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    spans = plans_mod.echo_spans(body)
+    outline = plans_mod.build_outline(body, spans)
+    title, objective = plans_mod.parse_header(body)
+    now = "2026-02-01T00:00:00+00:00"
+    with use_project(w.ctx()), get_session() as session:
+        session.add(
+            Plan(
+                stem=stem,
+                path=f"docs/plans/{stem}.md",
+                blob_sha="ab" * 20,
+                parser_version=1,
+                title=title or stem,
+                line_count=plans_mod.line_count(body),
+                objective=objective,
+                digest=plans_mod.build_digest(body, outline, spans, stem=stem),
+                outline=json.dumps(outline),
+                why_index=json.dumps(plans_mod.build_why_index(body, outline, spans)),
+                body=body,
+                first_seen_at=now,
+                updated_at=now,
+            )
+        )
+        session.add(PlanLink(stem=stem, kind="commit", ref=head))
+        session.add(PlanLink(stem=stem, kind="path", ref="sample.py"))
+    return head
+
+
+@pytest.fixture
+def counted(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The agent-call kinds the v1 routes count."""
+    kinds: list[str] = []
+    monkeypatch.setattr(v1_routes, "count_agent_call", kinds.append)
+    return kinds
+
+
+def test_v1_plans_for_serves_compact_and_full_refs(
+    v1: V1World, counted: list[str]
+) -> None:
+    head = seed_plan(v1)
+    response = call(
+        v1, "POST", "/plans/for", json={"shas": [head], "paths": ["sample.py"]}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    PlansForOut.model_validate(body)
+    (ref,) = body["plans"]
+    assert ref["stem"] == PLAN_STEM and ref["link"] == "commit"
+    assert ref["uri"] == f"whygraph://plan/{PLAN_STEM}"
+    assert "objective" not in ref and "path" not in ref
+    assert StatusOut.model_validate(body["project"]).slug == SLUG
+
+    full = call(
+        v1,
+        "POST",
+        "/plans/for",
+        json={"shas": [head], "paths": ["sample.py"], "detail": "full"},
+    ).json()["plans"][0]
+    assert full["path"] == f"docs/plans/{PLAN_STEM}.md" and full["present"] is True
+    assert full["commits"] == [head[:8]]
+    assert counted == ["v1:plans_for", "v1:plans_for"]
+
+
+def test_v1_plans_for_symbol_scope_anchors_on_the_platform_range(
+    v1: V1World,
+) -> None:
+    head = seed_plan(v1)
+    unshipped = call(
+        v1,
+        "POST",
+        "/plans/for",
+        json={
+            "shas": [head],
+            "paths": ["sample.py"],
+            "scope": "symbol",
+            "target": {"qualified_name": "sample.fn", "line_start": 50, "line_end": 60},
+        },
+    )
+    assert unshipped.status_code == 200, unshipped.text
+    # a commit link still answers beside a card, never a `file` link
+    assert {p["link"] for p in unshipped.json()["plans"]} <= {
+        "commit",
+        "pr",
+        "declared",
+    }
+    nothing = call(
+        v1,
+        "POST",
+        "/plans/for",
+        json={"shas": [], "paths": ["sample.py"], "scope": "symbol", "target": None},
+    )
+    assert nothing.json()["plans"] == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"shas": ["-x"], "paths": []},
+        {"shas": [], "paths": ["../x"]},
+        {"shas": [], "paths": [], "query": "x"},
+        {"shas": [], "paths": [], "status": "shipped"},
+        {"shas": [], "paths": [], "scope": "area"},
+        {"shas": ["a" * 40] * 51, "paths": []},
+        {"shas": [], "paths": ["a.py"] * 21},
+        {"shas": [], "paths": [], "target": {"line_start": 1}},
+    ],
+)
+def test_v1_plans_for_refuses_a_bad_body(v1: V1World, payload: dict) -> None:
+    response = call(v1, "POST", "/plans/for", json=payload)
+    assert response.status_code == 422, response.text
+
+
+def test_v1_plans_for_needs_a_bearer(v1: V1World) -> None:
+    response = call(v1, "POST", "/plans/for", token="", json={"shas": [], "paths": []})
+    assert response.status_code == 401
+
+
+def test_v1_plan_serves_digest_and_contents_never_the_body(
+    v1: V1World, counted: list[str]
+) -> None:
+    seed_plan(v1)
+    response = call(v1, "GET", f"/plans/{PLAN_STEM}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    PlanOut.model_validate(body)
+    assert body["stem"] == PLAN_STEM and body["kind"] == "plan"
+    assert body["digest"] and body["contents"]
+    assert (
+        "body" not in body and "Give the project a sample module" in body["objective"]
+    )
+    assert PlanOut.model_fields.keys().isdisjoint({"body", "full"})
+    same = call(v1, "GET", f"/plans/{PLAN_STEM}", params={"full": "true"})
+    assert same.json() == body
+    assert counted == ["v1:plan", "v1:plan"]
+
+
+def test_v1_plan_section_serves_one_section(v1: V1World, counted: list[str]) -> None:
+    seed_plan(v1)
+    contents = call(v1, "GET", f"/plans/{PLAN_STEM}").json()["contents"]
+    response = call(v1, "GET", f"/plans/{PLAN_STEM}/sections/{contents[0]['n']}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    section = PlanSectionOut.model_validate(body)
+    assert section.n == contents[0]["n"] and len(section.text) <= 8000
+    assert counted[-1] == "v1:plan_section"
+
+
+def test_plan_section_out_refuses_an_over_long_text() -> None:
+    base = {"stem": "x", "status": "shipped", "n": 1, "title": "t"}
+    PlanSectionOut.model_validate({**base, "text": "x" * 8000})
+    with pytest.raises(ValueError):
+        PlanSectionOut.model_validate({**base, "text": "x" * 8001})
+
+
+@pytest.mark.parametrize(
+    "tail", ["/plans/nosuch-plan", "/plans/nosuch-plan/sections/1", "/plans/.._x"]
+)
+def test_v1_unknown_plan_is_not_found(v1: V1World, tail: str) -> None:
+    response = call(v1, "GET", tail)
+    assert response.status_code == 404, response.text
+    assert response.json().get("code") in ("not_found", None)
+
+
+def test_v1_unknown_plan_section_is_not_found(v1: V1World) -> None:
+    seed_plan(v1)
+    missing = call(v1, "GET", f"/plans/{PLAN_STEM}/sections/250")
+    assert (missing.status_code, missing.json()["code"]) == (404, "not_found")
+    assert call(v1, "GET", f"/plans/{PLAN_STEM}/sections/300").status_code == 422
+
+
+def test_v1_status_carries_the_plans_dir(v1: V1World) -> None:
+    body = call(v1, "GET").json()
+    assert StatusOut.model_validate(body).plans_dir == body["plans_dir"] == "docs/plans"
+    assert StatusOut.model_validate({**body, "plans_dir": ""}).plans_dir == ""
+    for bad in ("a\nb=c", "docs/plans\n", "/abs", "a b"):
+        with pytest.raises(ValueError):
+            StatusOut.model_validate({**body, "plans_dir": bad})
+
+
+def test_v1_overview_carries_the_plans_block(v1: V1World) -> None:
+    assert call(v1, "GET", "/overview").json()["plans"] == {
+        "dir": "docs/plans",
+        "count": 0,
+    }
+    seed_plan(v1)
+    assert call(v1, "GET", "/overview").json()["plans"]["count"] == 1
 
 
 # ---------------------------------------------------------------------------

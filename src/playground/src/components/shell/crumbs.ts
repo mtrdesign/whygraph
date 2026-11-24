@@ -28,6 +28,7 @@ export interface CrumbContext {
 const PROJECT_PAGES: Record<string, string> = {
   explorer: "Explorer",
   notes: "Notes",
+  plans: "Plans",
   chat: "Chat",
   scans: "Scans",
   settings: "Settings",

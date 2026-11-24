@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Execute a reviewed WhyGraph plan (or a split's `tasks.json`) one step per fresh implementor subagent, then run the plan's Acceptance list once. Each run reads the plan as a strict contract, runs the step's Verify, recovers a failed step on a counted ladder and appends to the plan's Implementation log.
 
-**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-eval] [--no-polish] [--eval-fix-attempts N] [--no-capture] [--no-e2e]`
+**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-eval] [--no-polish] [--eval-fix-attempts N] [--no-capture] [--no-e2e] [--no-publish]`
 
 ## Step 1 - Parse arguments
 
@@ -25,9 +25,10 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--eval-fix-attempts <N>` -> integer 0-2 (consume the next token; default `1`, values above 2 become 2). It caps the findings re-runs of one step after a spec `fix` verdict. It is separate from `--fix-attempts`.
 - `--no-capture` -> pass `CAPTURE: none` to every implementor (Step 2b).
 - `--no-e2e` -> pass `E2E: none` to every implementor, and run no browser test at Acceptance (Step 2b).
+- `--no-publish` -> do not publish the plan after a run that did not stop (Step 3h).
 
 The first non-flag positional token is the **path**: a plan (`.md`) or a split's `.tasks.json`. If it is empty, respond with:
-`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-eval] [--no-polish] [--eval-fix-attempts N] [--no-capture] [--no-e2e]` and stop.
+`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-eval] [--no-polish] [--eval-fix-attempts N] [--no-capture] [--no-e2e] [--no-publish]` and stop.
 
 - If both `--from-step` and `--step` are passed, respond with `Pass --from-step OR --step, not both.` and stop.
 - If the path ends in `.tasks.json` and `--from-step` or `--step` is passed, respond with `--from-step and --step take a plan; pass the child's plan file instead of the tasks.json.` and stop.
@@ -309,7 +310,7 @@ Run this only when the loop passed the plan's last step, or when `next` printed 
 4. Do the checks after a subagent run (Step 3a).
 5. Print its report in full, then run Step 5 on it.
 6. Print the run summary (Step 7).
-7. The `accept` and browser test exit codes decide the result, never the records or the report. If any item failed, stop with `acceptance failed: <item numbers>`. Otherwise run the second paragraph of Step 5, then Step 3e.
+7. The `accept` and browser test exit codes decide the result, never the records or the report. If any item failed, stop with `acceptance failed: <item numbers>`. Otherwise run the second paragraph of Step 5, then Step 3e. With `--no-eval`, run Step 3h instead of Step 3e.
 
 ### Step 3e - Quality and UI evaluation (skip with `--no-eval`)
 
@@ -335,7 +336,7 @@ These two evaluations are advisory. They never stop the run on their verdict. Do
 
    Run the `whygraph-evaluator` again with the prompt of 2, with `STAGE: ui` in place of `STAGE: quality`. If its `## Findings` list is `- none` and no `## Expected UI` line says `does not match`, print one line: `UI evaluation: no findings.` Otherwise print the reply in full.
 4. When the UI evaluation ran, print one line: `UI evidence: .whygraph/plans/<stem>/ui/index.html`.
-5. Then run Step 3e-bis.
+5. Then run Step 3e-bis. With `--no-polish`, run Step 3h instead.
 
 ### Step 3e-bis - Polish run (skip with `--no-polish` or `--no-eval`)
 
@@ -348,6 +349,17 @@ The polish run applies the quality findings, formats the changed files and check
    - Exit 0, 1, 3 or 6: go on. Exit 6 means that the plan has no Format command.
 3. Run item 1 of Step 3d again, for each Acceptance item. If any item failed, stop with `acceptance failed after the polish run: <item numbers>`.
 4. Print `Polish: applied <k> of <n> quality findings`. `<n>` counts the finding lines of item 1, and `<k>` the report's `- F<i>: applied` lines. Then print each `- F<i>: skipped: <why>` line of the report. Without a polish run, `<k>` and `<n>` are 0.
+5. Then run Step 3h.
+
+### Step 3h - Publish the plan (skip with `--no-publish`)
+
+This is the last action of a run that did not stop, never after a Step 6 stop. It runs at the end of Step 3e-bis; with `--no-polish`, at the end of Step 3e; with `--no-eval`, right after Step 3d item 7. It is not a plan-tool stop condition: Step 2a's stop rules never apply to `publish`.
+
+1. Gate. Go on only when all hold: the run summary's Acceptance line starts `- Acceptance: passed` (a `; not run (manual or prose): ...` suffix is allowed) or is `- Acceptance: no items`; no stop block was printed; `--no-publish` was not passed. Otherwise do nothing and print nothing.
+2. When `<plan>` is not under `.whygraph/plans/`, print `Publish: skipped, the plan is already in the repository.` and go to item 5.
+3. Run `sh .cursor/skills/whygraph-plan/plan-tool.sh publish <plan>` with no folder argument, as a command of its own: one tool command per call, nothing chained after it. Print its line(s) verbatim. The tool reports an unknown or disabled plans folder as a `skip:` line.
+4. Exit 0, 1 or 2: print the line(s) and go on. Any other exit code, 77 included: print `publish skipped: exit <code>: <first stderr line>` and go on. A `refuse:` line is not a run failure and changes no exit status. After a `published`, `republished` or `unchanged` line with no `ignored:` line, print `To share it, commit it with your change: git add <dest>`.
+5. When `--commit-each-step` was not passed, print `To link your commits to this plan, add the line "WhyGraph-Plan: <stem>" to a commit message or the PR description.` Do not print it after a `refuse:` line for a destination that was not published from this machine (the stem may belong to someone else's plan). `<stem>` is as Step 3e defines it.
 
 ### Step 3f - A tasks.json
 
@@ -356,7 +368,7 @@ Run the children one at a time, even within a wave, in ascending `wave` order an
 1. If its `status` is `done`, skip it.
 2. If any id in its `depends_on` is not `done`, stop with `Stopped at <id>: it depends on <ids>, which are not done.`
 3. `Read` its plan at `<repo root>/<plan>`. If the file is missing, stop with `<id> has no plan at <plan>; run /whygraph-plan again.` Run the plan checks of Step 2 on it, then Step 2b, then Step 2c.
-4. Run Steps 3, 3d, 3e and 3e-bis for that plan. Set `TASKS_PATH` to the tasks.json's absolute path and `TASK_ID` to the child's `id`. A stop ends the whole run.
+4. Run Steps 3, 3d, 3e, 3e-bis and 3h for that plan. Set `TASKS_PATH` to the tasks.json's absolute path and `TASK_ID` to the child's `id`. A stop ends the whole run.
 5. `Read` the tasks.json again, because the acceptance run wrote the child's `status`.
 
 ### Step 3g - Amend the plan (S3)
@@ -514,4 +526,4 @@ Print this in Step 3d, after the Acceptance report. Build it from files and exit
    - Add `; not run (manual or prose): <item numbers>` for the items whose result is `not literal`.
    - A plan with no `## Acceptance` items: `- Acceptance: no items`.
 
-This command's only job is: parse -> validate -> decide capture -> save, probe and baseline -> one implementor per step, with the recovery ladder -> spec evaluation -> acceptance -> run summary -> quality and UI evaluation -> polish run -> print -> propose the listed decisions and, after a passing Acceptance, the changes on purpose -> a stop block on any stop. Besides the plan tool, this skill runs only its self-hash, the capture probe and the Step 3d browser tests. Do not edit files, run other commands, or improvise.
+This command's only job is: parse -> validate -> decide capture -> save, probe and baseline -> one implementor per step, with the recovery ladder -> spec evaluation -> acceptance -> run summary -> quality and UI evaluation -> polish run -> publish the plan -> print -> propose the listed decisions and, after a passing Acceptance, the changes on purpose -> a stop block on any stop. Besides the plan tool, this skill runs only its self-hash, the capture probe, the Step 3d browser tests and the publish call (Step 3h). Do not edit files, run other commands, or improvise.

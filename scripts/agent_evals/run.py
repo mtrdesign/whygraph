@@ -451,6 +451,21 @@ def case_repo(case: Case, repo: Path) -> Path:
     return repo.parent / case.repo if case.repo else repo
 
 
+PLANS_DIR_CASES = ("P24", "P25", "P26")
+"""Cases that publish a plan: they need ``plans_dir=`` in ``.whygraph/portal.env``,
+which only Initialize, Update agent files or a ``[plans].dir`` save writes."""
+
+
+def _has_plans_dir(repo: Path) -> bool:
+    """Return whether ``.whygraph/portal.env`` has a ``plans_dir=`` line."""
+    marker = repo / ".whygraph" / "portal.env"
+    try:
+        lines = marker.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return any(line.startswith("plans_dir=") for line in lines)
+
+
 def portal_skip_reason(case: Case, repo: Path) -> str | None:
     """Return why a ``P`` case cannot run, or ``None``.
 
@@ -489,6 +504,8 @@ def portal_skip_reason(case: Case, repo: Path) -> str | None:
         == 0
     ):
         return f"--repo {repo} already has a branch eval-tmp"
+    if case.id in PLANS_DIR_CASES and not _has_plans_dir(repo):
+        return "portal.env has no plans_dir= line"
     return None
 
 
@@ -537,6 +554,7 @@ def portal_workspace(
             ["clean", "-fdq"],
             ["checkout", "-q", first],
             ["branch", "-qD", "eval-tmp"],
+            ["update-ref", "-d", "refs/eval/setup"],
         ):
             result = _git(args, repo, check=False)
             if result.returncode != 0:

@@ -111,11 +111,13 @@ class FakePlatform:
         *,
         api_version: int = API_VERSION,
         min_client: str = "0.0.0",
+        plans_supported: bool = True,
     ) -> None:
         self.platform_origin = platform_origin
         self.host = httpx.URL(platform_origin).netloc.decode()
         self.api_version = api_version
         self.min_client = min_client
+        self.plans_supported = plans_supported
         self.requests: list[httpx.Request] = []
         self.responses: dict[str, tuple[int, Any]] = {}
         self.failure: str | None = None
@@ -219,7 +221,13 @@ class FakePlatform:
             {
                 "api_version": self.api_version,
                 "min_client": self.min_client,
-                "capabilities": ["evidence", "rationale", "history", "resources"],
+                "capabilities": [
+                    "evidence",
+                    "rationale",
+                    "history",
+                    "resources",
+                    *(["plans"] if self.plans_supported else []),
+                ],
                 "base_origin": self.platform_origin,
             },
         )
@@ -293,12 +301,95 @@ class FakePlatform:
             return self._out("history", 200, {"commits": [], "project": project})
         if method == "GET" and tail == "overview":
             return self._out("overview", 200, {"name": "Demo", "project": project})
+        if tail == "plans/for" or tail.startswith("plans/"):
+            return self._plans(method, tail, project)
         for route, noun in (("commit", "commits"), ("pr", "prs"), ("issue", "issues")):
             if method == "GET" and tail.startswith(noun + "/"):
                 return self._out(
                     route, 200, {"id": tail.split("/", 1)[1], "project": project}
                 )
         return httpx.Response(404, json=error_body("not_found"))
+
+    def _plans(self, method: str, tail: str, project: dict) -> httpx.Response:
+        """The three plans routes (plan 61 section 4.7).
+
+        Knows one plan, :data:`PLAN_STEM` (section ``1``); any other stem or
+        section is ``404 not_found``. Without ``plans_supported`` all three
+        answer ``401 login_required``.
+        """
+        if not self.plans_supported:
+            return httpx.Response(401, json=error_body("login_required"))
+        parts = tail.split("/")
+        if method == "POST" and parts == ["plans", "for"]:
+            return self._out("plans_for", 200, {"plans": [], "project": project})
+        if method != "GET":
+            return httpx.Response(404, json=error_body("not_found"))
+        recorded = "plan" in self.responses  # a replayed recording knows its own stem
+        if len(parts) == 2 and (parts[1] == PLAN_STEM or recorded):
+            return self._out("plan", 200, {**plan_body(), "project": project})
+        if (
+            len(parts) == 4
+            and parts[2] == "sections"
+            and (
+                (parts[1] == PLAN_STEM and parts[3] == "1")
+                or "plan_section" in self.responses
+            )
+        ):
+            return self._out(
+                "plan_section", 200, {**plan_section_body(), "project": project}
+            )
+        return httpx.Response(404, json=error_body("not_found"))
+
+
+PLAN_STEM = "demo-plan"
+"""The one plan the fake knows."""
+
+
+def plan_body() -> dict:
+    """The fake's ``PlanOut`` (digest form)."""
+    return {
+        "kind": "plan",
+        "reading": "Intent when it was written. Commits and PRs say what was built.",
+        "stem": PLAN_STEM,
+        "title": "Build the demo",
+        "status": "shipped",
+        "uri": f"whygraph://plan/{PLAN_STEM}",
+        "path": f"docs/plans/{PLAN_STEM}.md",
+        "present": True,
+        "objective": "Build the demo.",
+        "line_count": 12,
+        "redacted_lines": 0,
+        "publishing_links": 0,
+        "implementing_commits": [
+            {"sha": SHA[:8], "subject": "Build it", "on_default_branch": True}
+        ],
+        "implementing_commits_total": 1,
+        "pull_requests": [],
+        "pull_requests_total": 0,
+        "paths": ["a.py"],
+        "paths_total": 1,
+        "digest": "Objective: build the demo.",
+        "contents": [{"n": 1, "title": "Steps", "chars": 40, "children": 0}],
+    }
+
+
+def plan_section_body() -> dict:
+    """The fake's ``PlanSectionOut``."""
+    return {
+        "kind": "plan",
+        "reading": "Intent when it was written. Commits and PRs say what was built.",
+        "stem": PLAN_STEM,
+        "status": "shipped",
+        "n": 1,
+        "title": "Steps",
+        "level": 2,
+        "text": "## Steps\n\n1. Build it.\n",
+        "chars": 24,
+        "children": [],
+        "prev": 0,
+        "next": None,
+        "version": "abababab",
+    }
 
 
 RATIONALE_ITEMS = (

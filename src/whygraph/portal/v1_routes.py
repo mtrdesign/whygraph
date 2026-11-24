@@ -54,7 +54,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, TypeVar
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy.exc import OperationalError
 
@@ -62,8 +62,10 @@ from whygraph.analyze import AnalyzeError
 from whygraph.api_v1 import (
     MAX_LIMIT,
     MAX_PATH,
+    MAX_PLAN_SECTION,
     PLATFORM_BUDGET_MESSAGE,
     EvidenceIn,
+    PlansForIn,
     RationaleIn,
     RepoPath,
     Sha,
@@ -81,6 +83,7 @@ from whygraph.mcp.evidence import (
     evidence_from_hunks,
 )
 from whygraph.mcp.path_history import area_history_commits
+from whygraph.mcp.plans import _plan_resource, _plan_section_resource, plans_for
 from whygraph.mcp.rationale import (
     ORG_SUSPENDED,
     GenerationNotPermitted,
@@ -444,7 +447,11 @@ def _status(project: BoundProject, principal: Principal) -> dict:
         status = load_status(db, project.id, principal.user_id)
     if status is None:  # removed, or the membership ended, since the bind
         raise ApiError(404, "not found")
-    return status.model_dump(mode="json")
+    out = status.model_dump(mode="json")
+    # Plans (plan 61 section 4.7): the bound project's merged [plans].dir, which
+    # v1_status (portal rows only) cannot see; "" when indexing is off.
+    out["plans_dir"] = get_config().plans.dir
+    return out
 
 
 def _target(target: TargetIn, *, keep_name: bool = True) -> Target:
@@ -629,6 +636,72 @@ def get_overview(
 ) -> dict:
     """Repository-level counts, freshness and top contributors."""
     return _resource(project, principal, _repo_overview_resource)
+
+
+def _plans_target(body: PlansForIn) -> Target | None:
+    """The symbol target of a ``plans/for`` request (scope ``symbol`` only).
+
+    As ``/rationale``: the platform's own indexed range when the name
+    resolves, else the sent range on the sent path (name dropped).
+    """
+    sent = body.target
+    if body.scope != "symbol" or sent is None:
+        return None
+    if sent.qualified_name:
+        found = indexed_symbol_target(sent.qualified_name)
+        if found is not None:
+            return found
+    if sent.line_start is None or sent.line_end is None or not body.paths:
+        return None
+    return Target(
+        path=body.paths[0], line_start=sent.line_start, line_end=sent.line_end
+    )
+
+
+@v1_router.post("/plans/for")
+def post_plans_for(
+    project: BoundProject = Depends(_PROJECT),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    body: PlansForIn = Depends(_json_body(PlansForIn)),
+    _count: None = Depends(_counted("v1:plans_for")),
+) -> dict:
+    """The plans that relate to a target's commits and paths (``PlansForOut``)."""
+    status = _status(project, principal)
+    with _mapped_errors():
+        plans = plans_for(
+            body.shas,
+            body.paths,
+            target=_plans_target(body),
+            scope=body.scope,
+            detail=body.detail,
+        )
+    return {"plans": plans, "project": status}
+
+
+@v1_router.get("/plans/{stem}")
+def get_plan(
+    stem: str,
+    project: BoundProject = Depends(_PROJECT),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:plan")),
+) -> dict:
+    """A plan's digest, contents and links (never the whole plan)."""
+    return _resource(project, principal, lambda: _plan_resource(stem))
+
+
+@v1_router.get("/plans/{stem}/sections/{n}")
+def get_plan_section(
+    stem: str,
+    n: int = Path(..., ge=0, le=MAX_PLAN_SECTION),
+    project: BoundProject = Depends(_PROJECT),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:plan_section")),
+) -> dict:
+    """One section of a plan, at most 8,000 characters."""
+    return _resource(project, principal, lambda: _plan_section_resource(stem, str(n)))
 
 
 __all__ = ["GIT_BUDGET", "MAX_BODY_BYTES", "org_limit", "v1_router"]

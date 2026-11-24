@@ -50,6 +50,8 @@ from whygraph.db.models.imported_actor import ImportedActor
 from whygraph.db.models.imported_chat import ImportedChat
 from whygraph.db.models.issue import Issue
 from whygraph.db.models.milestone import Milestone
+from whygraph.db.models.plan import Plan
+from whygraph.db.models.plan_link import PlanLink
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pr_origin_skip import PROriginSkip
 from whygraph.db.models.project_import import ProjectImport
@@ -75,6 +77,8 @@ __all__ = [
     "ImportedChat",
     "Issue",
     "Milestone",
+    "Plan",
+    "PlanLink",
     "PRIssueLink",
     "PROriginSkip",
     "ProjectImport",

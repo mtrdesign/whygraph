@@ -6,7 +6,8 @@
       "evidence",
       "rationale",
       "history",
-      "resources"
+      "resources",
+      "plans"
     ],
     "min_client": "2.0.0"
   },

@@ -689,6 +689,7 @@ PATH_PARAMS: dict[str, Callable[[OrgWorld], str]] = {
     "{session_id}": lambda o: str(o.session_id),
     "{message_id}": lambda o: str(o.message_id),
     "{note_id}": lambda o: str(o.note_id),
+    "{stem}": lambda o: "no-such-plan",  # not indexed: 404 plan_not_found
     "{uid}": lambda o: o.owner_uid,
     "{user_uid}": lambda o: o.owner_uid,  # an owner: 409 org_admin
     "{installation_id}": lambda o: "7",
@@ -1186,6 +1187,10 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, shows=lambda o: [f"{o.mark}-model"]
     ),
     ("GET", "/api/projects/{slug}/chat/modes"): Call(200),
+    # Committed plans (plan 61): no plans are seeded, so the list is empty and
+    # one stem is a 404 (the REST cases live in test_portal_plans_routes.py).
+    ("GET", "/api/projects/{slug}/plans"): Call(200),
+    ("GET", "/api/projects/{slug}/plans/{stem}"): Call(404),
     # Project notes (plan 40): the seeded note is confirmed, anchored to the
     # org's marked symbol and carries its mark in the body.
     ("GET", "/api/projects/{slug}/notes"): Call(200, shows=lambda o: [o.mark]),

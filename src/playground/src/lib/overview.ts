@@ -18,6 +18,8 @@ const AGENT_KINDS: Record<string, string> = {
   whygraph_pre_edit_brief: "Pre-edit briefs",
   whygraph_triage_commit: "Commit triage",
   whygraph_why_was_this_written: "Why was this written",
+  whygraph_plan: "Plan digests",
+  whygraph_plan_section: "Plan section reads",
   codegraph_explore: "Code exploration",
   codegraph_node: "Symbol and file reads",
   codegraph_search: "Symbol search",
@@ -29,6 +31,9 @@ const AGENT_KINDS: Record<string, string> = {
   "v1:pr": "Pull request lookups",
   "v1:issue": "Issue lookups",
   "v1:overview": "Repository overview",
+  "v1:plans_for": "Plan lookups",
+  "v1:plan": "Plan digests",
+  "v1:plan_section": "Plan section reads",
 };
 
 /** `Evidence lookups` for `whygraph_evidence_for`; an unknown kind is shown as sent. */

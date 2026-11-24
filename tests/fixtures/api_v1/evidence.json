@@ -65,6 +65,7 @@
       "last_scan_at": null,
       "last_scanned_head": null,
       "name": "Api project",
+      "plans_dir": "docs/plans",
       "project_role": "admin",
       "role": "owner",
       "slug": "api"

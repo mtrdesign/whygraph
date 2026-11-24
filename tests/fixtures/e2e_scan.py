@@ -59,7 +59,7 @@ DROPPED_FLAGS = ("--find-core", "--describe-core")
 REAL_GIT_FLAGS = ("--skip-analyze", "--no-remote", "--no-codegraph")
 """Forced on the real scanner: no LLM, no network, no CodeGraph binary."""
 
-REAL_GIT_PHASES = ["Structural crawl", "Author identity"]
+REAL_GIT_PHASES = ["Structural crawl", "Author identity", "Plans"]
 """The phases the real scanner announces under :data:`REAL_GIT_FLAGS`."""
 
 FAKE_KEY = "sk-ant-api03-simulatedE2EKey0123456789"
@@ -154,6 +154,7 @@ PHASES = [
     "Structural crawl",
     "PR-origin recovery",
     "Author identity",
+    "Plans",
     "LLM descriptions",
 ]
 """Phase titles, in order, for the ``start`` event's ``phases`` list."""
@@ -213,7 +214,13 @@ def real_git(args: list[str], fail: bool) -> int:
     if fail:
         # The phases the real scanner announces with REAL_GIT_FLAGS; the git
         # crawler fails in the first, so the second never starts.
-        emit({"type": "start", "phase_total": 2, "phases": REAL_GIT_PHASES})
+        emit(
+            {
+                "type": "start",
+                "phase_total": len(REAL_GIT_PHASES),
+                "phases": REAL_GIT_PHASES,
+            }
+        )
         emit({"type": "phase", "phase": 1, "title": "Structural crawl"})
         sys.stderr.write("scan failed: simulated git error\n")
         emit(
@@ -262,7 +269,7 @@ def main() -> int:
             problem = "WHYGRAPH_GITHUB_TOKEN_FILE is empty"
         if not token:
             sys.stderr.write(f"scan failed: {problem}\n")
-            emit({"type": "start", "phase_total": 3, "phases": PHASES[:3]})
+            emit({"type": "start", "phase_total": 4, "phases": PHASES[:4]})
             emit(
                 {
                     "type": "result",
@@ -284,8 +291,8 @@ def main() -> int:
     emit(
         {
             "type": "start",
-            "phase_total": 4 if analyze else 3,
-            "phases": PHASES if analyze else PHASES[:3],
+            "phase_total": 5 if analyze else 4,
+            "phases": PHASES if analyze else PHASES[:4],
         }
     )
     emit({"type": "phase", "phase": 1, "title": "Structural crawl"})
@@ -329,10 +336,11 @@ def main() -> int:
     time.sleep(delay)
     emit({"type": "phase", "phase": 3, "title": "Author identity"})
     time.sleep(delay)
+    emit({"type": "phase", "phase": 4, "title": "Plans"})
 
     seed_codegraph(Path(os.getcwd()))
     if analyze:
-        emit({"type": "phase", "phase": 4, "title": "LLM descriptions"})
+        emit({"type": "phase", "phase": 5, "title": "LLM descriptions"})
         for i in range(11):
             emit(
                 {
@@ -353,6 +361,7 @@ def main() -> int:
                 "Structural crawl": 1.5,
                 "PR-origin recovery": 0.1,
                 "Author identity": 0.1,
+                "Plans": 0.01,
                 **({"LLM descriptions": 1.5} if analyze else {}),
             },
             "crawlers": [

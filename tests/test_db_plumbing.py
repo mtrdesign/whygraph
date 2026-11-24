@@ -35,6 +35,8 @@ SQLMODEL_TABLES = {
     "imported_chat",
     "issue",
     "milestone",
+    "plan",
+    "plan_link",
     "pr_issue_link",
     "pr_origin_skip",
     "project_import",
@@ -106,6 +108,29 @@ def test_alembic_upgrade_on_empty_db(_isolate_config_and_engine: Path) -> None:
 
     assert db_path.exists()
     assert _table_names(db_path) == SQLMODEL_TABLES | {"alembic_version"}
+
+
+def test_ensure_initialized_creates_plan_tables_and_index(
+    _isolate_config_and_engine: Path,
+) -> None:
+    from whygraph.db.bootstrap import ensure_initialized
+
+    ensure_initialized()
+
+    conn = sqlite3.connect(_isolate_config_and_engine)
+    try:
+        index = conn.execute(
+            "SELECT tbl_name FROM sqlite_master "
+            "WHERE type='index' AND name='ix_plan_link_kind_ref'"
+        ).fetchone()
+        columns = [
+            r[2] for r in conn.execute("PRAGMA index_info(ix_plan_link_kind_ref)")
+        ]
+    finally:
+        conn.close()
+    assert {"plan", "plan_link"} <= _table_names(_isolate_config_and_engine)
+    assert index == ("plan_link",)
+    assert [c for c in columns] == ["kind", "ref"]
 
 
 def _insert_commit(sha: str, **overrides: object) -> None:

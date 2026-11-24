@@ -10,7 +10,7 @@ The protocol is what keeps :mod:`whygraph.core` free of
 :mod:`whygraph.portal`: the only implementation,
 :class:`whygraph.portal.linked.LinkedProject`, lives on the portal side
 with the HTTP client, the connection token and the link row, while
-:mod:`whygraph.mcp` sees nothing but these seven calls, two exception
+:mod:`whygraph.mcp` sees nothing but these ten calls, two exception
 types and the two display fields.
 
 Every method returns JSON-ready data (plain ``dict`` / ``list``), already
@@ -20,7 +20,14 @@ result unchanged.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, Sequence, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     from whygraph.mcp.targets import Target
@@ -132,6 +139,45 @@ class RemoteProject(Protocol):
 
     def overview(self) -> dict:
         """The repository-level summary."""
+        ...
+
+    def plans_for(
+        self,
+        shas: Sequence[str],
+        paths: Sequence[str],
+        *,
+        scope: Literal["symbol", "file"],
+        target: Target | None = None,
+        detail: Literal["compact", "full"] = "compact",
+    ) -> tuple[list[dict], bool]:
+        """The platform's plan refs for SHAs and paths the caller already sent.
+
+        Parameters
+        ----------
+        shas, paths : Sequence[str]
+            Only values the same tool call already sent to the platform
+            (plan 61 section 4.8).
+        scope : {"symbol", "file"}
+            Beside a card, or a file-level answer.
+        target : Target or None, optional
+            The target the same call sent (symbol scope), or ``None``.
+        detail : {"compact", "full"}, optional
+            The ref form to return.
+
+        Returns
+        -------
+        tuple[list[dict], bool]
+            The refs, already cut to the scope's ceiling, and whether the
+            platform serves plans at all (``False`` for an older one).
+        """
+        ...
+
+    def plan(self, stem: str) -> dict:
+        """A plan's digest, links and contents; :class:`RemoteNotFound` for a miss."""
+        ...
+
+    def plan_section(self, stem: str, n: int) -> dict:
+        """One section of a plan; :class:`RemoteNotFound` for a miss."""
         ...
 
 

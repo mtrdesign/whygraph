@@ -69,7 +69,10 @@ def test_a_port_change_rewrites_markers_and_literal_entries_only(
         "slug": "alpha",
         "port": 9100,
     }
-    assert (alpha / ".whygraph" / "portal.env").read_text() == "slug=alpha\nport=9100\n"
+    # The plans_dir= line Initialize wrote survives the port change (plan 61, R14).
+    assert (alpha / ".whygraph" / "portal.env").read_text() == (
+        "slug=alpha\nport=9100\nplans_dir=docs/plans\n"
+    )
 
     # The untracked Codex literal is rewritten (only the whygraph key's URL).
     codex = (alpha / ".codex" / "config.toml").read_text()

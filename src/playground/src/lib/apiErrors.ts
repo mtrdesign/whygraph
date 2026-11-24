@@ -454,6 +454,9 @@ export const MESSAGES: Record<string, Resolver> = {
   note_no_actor: "WhyGraph couldn't tell who made this request. Reload the page and try again.",
   note_linked: "Notes for this project are kept on the platform.",
 
+  // Committed plans (plan 61)
+  plan_not_found: "That plan is not indexed in this project.",
+
   // Project purpose (plan 41)
   purpose_in_progress: {
     tone: "warn",

@@ -56,6 +56,7 @@ from whygraph.core.config import (
     area_errors,
     areas_table_errors,
     check_default_branch,
+    check_plans_dir,
     check_scan_remote,
     normalize_v2,
 )
@@ -107,6 +108,7 @@ IMPORT_ALLOWLIST: Spec = {
     "rationale": _all_fields(RationaleConfig, "rationale"),
     "chat": _all_fields(ChatConfig),
     "areas": True,
+    "plans": {"dir": True},
     "scan": {
         "forge": True,
         "remote": True,
@@ -137,7 +139,11 @@ PUT_ALLOWLIST: Spec = {
 """Rule 1b: what ``PUT /api/projects/{slug}/config`` may store."""
 
 DEFAULTS_ALLOWLIST: Spec = {
-    **{k: v for k, v in PUT_ALLOWLIST.items() if k not in ("scan", "areas", "chat")},
+    **{
+        k: v
+        for k, v in PUT_ALLOWLIST.items()
+        if k not in ("scan", "areas", "chat", "plans")
+    },
     "chat": {k: v for k, v in PUT_ALLOWLIST["chat"].items() if k != "mode"},
     **{
         section: {**PUT_ALLOWLIST[section], **{key: True for key in keys}}
@@ -503,6 +509,16 @@ def invalid_values(
         same = isinstance(old_chat, Mapping) and old_chat.get("mode") == mode
         if mode is not None and not same and mode not in MODE_IDS:
             found["chat.mode"] = f"must be one of {', '.join(MODE_IDS)}"
+
+    plans = layer.get("plans")
+    if isinstance(plans, Mapping) and "dir" in plans:
+        old_plans = old.get("plans")
+        same = isinstance(old_plans, Mapping) and old_plans.get("dir") == plans["dir"]
+        if plans["dir"] is not None and not same:
+            try:
+                check_plans_dir(plans["dir"])
+            except ConfigError as exc:
+                found["plans.dir"] = str(exc)
     return found
 
 
@@ -527,8 +543,12 @@ def _drop_invalid_values(kept: dict) -> list[str]:
             kept["areas"].pop(key[len("areas.") :], None)
         elif key in ("chat.effort", "chat.mode"):
             kept["chat"].pop(key.split(".")[1], None)
+        elif key == "plans.dir":
+            kept["plans"].pop("dir", None)
     if isinstance(kept.get("areas"), dict) and not kept["areas"]:
         del kept["areas"]
     if isinstance(kept.get("chat"), dict) and not kept["chat"]:
         del kept["chat"]
+    if isinstance(kept.get("plans"), dict) and not kept["plans"]:
+        del kept["plans"]
     return sorted(bad)

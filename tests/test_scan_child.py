@@ -118,6 +118,7 @@ _CLASSES = {
     "GitHubCrawler": "github",
     "PROriginEnricher": "pr-origins",
     "AuthorResolver": "authors",
+    "PlansCrawler": "plans",
     "CodeGraphCrawler": "codegraph",
     "TagCrawler": "tags",
     "CoreCrawler": "core",
@@ -221,16 +222,25 @@ def test_four_phases_run_in_order_with_llm_last(
     status, events, _ = _run(capsys)
 
     assert status == 0
-    # All six crawlers constructed exactly once.
-    for name in ("git", "github", "pr-origins", "authors", "analyze", "codegraph"):
+    # All seven crawlers constructed exactly once.
+    for name in (
+        "git",
+        "github",
+        "pr-origins",
+        "authors",
+        "plans",
+        "analyze",
+        "codegraph",
+    ):
         assert stubs[name].constructed == 1, name
 
-    # Numbered phase events for all four phases.
+    # Numbered phase events for all five phases.
     assert [(e["phase"], e["title"]) for e in events if e["type"] == "phase"] == [
         (1, "Structural crawl"),
         (2, "PR-origin recovery"),
         (3, "Author identity"),
-        (4, "LLM descriptions"),
+        (4, "Plans"),
+        (5, "LLM descriptions"),
     ]
 
     # CodeGraph is a background task: started first, joined last.
@@ -246,8 +256,11 @@ def test_four_phases_run_in_order_with_llm_last(
     # Author resolution runs after PR-origin recovery: an address can appear
     # only in the on_default_branch=0 rows Phase 2 writes.
     assert _idx(order, ("join", "pr-origins")) < _idx(order, ("start", "authors"))
+    # Plans run after author resolution: they need Phase 1 and 2's commits
+    # and PRs.
+    assert _idx(order, ("join", "authors")) < _idx(order, ("start", "plans"))
     # LLM is strictly last and alone.
-    assert _idx(order, ("join", "authors")) < _idx(order, ("start", "analyze"))
+    assert _idx(order, ("join", "plans")) < _idx(order, ("start", "analyze"))
 
     assert events[-1]["type"] == "result" and events[-1]["status"] == "ok"
 
@@ -262,6 +275,7 @@ def test_four_phases_run_in_order_with_llm_last(
                 "Structural crawl",
                 "PR-origin recovery",
                 "Author identity",
+                "Plans",
                 "LLM descriptions",
             ],
             id="default",
@@ -269,19 +283,19 @@ def test_four_phases_run_in_order_with_llm_last(
         pytest.param(
             ["--skip-analyze"],
             True,
-            ["Structural crawl", "PR-origin recovery", "Author identity"],
+            ["Structural crawl", "PR-origin recovery", "Author identity", "Plans"],
             id="skip-analyze",
         ),
         pytest.param(
             ["--no-remote"],
             False,
-            ["Structural crawl", "Author identity", "LLM descriptions"],
+            ["Structural crawl", "Author identity", "Plans", "LLM descriptions"],
             id="no-remote",
         ),
         pytest.param(
             ["--no-remote", "--skip-analyze"],
             False,
-            ["Structural crawl", "Author identity"],
+            ["Structural crawl", "Author identity", "Plans"],
             id="no-remote-skip-analyze",  # the git-hook path
         ),
     ],
@@ -309,8 +323,10 @@ def test_phases_are_listed_and_numbered_across_flag_combinations(
     assert [e for e in events if e["type"] == "phase"] == [
         {"type": "phase", "phase": i, "title": t} for i, t in enumerate(titles, 1)
     ]
-    # Author resolution is local-only, so it runs under every combination.
+    # Author resolution and plans are local-only, so they run under every
+    # combination.
     assert stubs["authors"].constructed == 1
+    assert stubs["plans"].constructed == 1
 
 
 def test_codegraph_only_start_event_sends_code_index(
@@ -330,7 +346,7 @@ def test_codegraph_only_start_event_sends_code_index(
 # --------------------------------------------------------------------------- #
 
 
-def test_skip_analyze_no_remote_emits_two_phases_and_a_result(
+def test_skip_analyze_no_remote_emits_three_phases_and_a_result(
     isolated_db: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -342,8 +358,8 @@ def test_skip_analyze_no_remote_emits_two_phases_and_a_result(
     assert status == 0
     assert events[0] == {
         "type": "start",
-        "phase_total": 2,
-        "phases": ["Structural crawl", "Author identity"],
+        "phase_total": 3,
+        "phases": ["Structural crawl", "Author identity", "Plans"],
     }
     assert events[-1]["type"] == "result"
     assert events[-1]["status"] == "ok"
@@ -351,14 +367,15 @@ def test_skip_analyze_no_remote_emits_two_phases_and_a_result(
     assert {c["name"] for c in events[-1]["crawlers"]} == {
         "git",
         "authors",
+        "plans",
         "codegraph",
     }
     # The stubs' tasks were reported, finishing at 2/2.
     tasks = [e for e in events if e["type"] == "task"]
-    assert {t["name"] for t in tasks} == {"git", "authors", "codegraph"}
+    assert {t["name"] for t in tasks} == {"git", "authors", "plans", "codegraph"}
     assert all(
         [t for t in tasks if t["name"] == n][-1]["completed"] == 2
-        for n in ("git", "authors", "codegraph")
+        for n in ("git", "authors", "plans", "codegraph")
     )
 
 
@@ -581,7 +598,7 @@ def test_a_failed_descriptor_probe_skips_the_llm_phase(
 
     assert status == 0
     assert stubs["analyze"].constructed == 0
-    assert events[0]["phases"] == ["Structural crawl", "Author identity"]
+    assert events[0]["phases"] == ["Structural crawl", "Author identity", "Plans"]
     assert events[-1]["analyze_skipped"] == "provider 'broken' is not registered"
 
 
@@ -1101,8 +1118,8 @@ def test_real_child_scan_of_a_fixture_repo_emits_valid_jsonl(tmp_path: Path) -> 
     events = _events(proc.stdout)  # every line valid JSON, nothing else on stdout
     assert events[0] == {
         "type": "start",
-        "phase_total": 2,
-        "phases": ["Structural crawl", "Author identity"],
+        "phase_total": 3,
+        "phases": ["Structural crawl", "Author identity", "Plans"],
     }
     phases = [e for e in events if e["type"] == "phase"]
     assert len(phases) == events[0]["phase_total"]
@@ -1162,12 +1179,18 @@ def test_the_core_phase_runs_after_authors_and_before_descriptions(
     status, events, _ = _run(capsys, "--no-remote", *flags)
 
     assert status == 0
-    titles = ["Structural crawl", "Author identity", "Core commits", "LLM descriptions"]
-    assert events[0] == {"type": "start", "phase_total": 4, "phases": titles}
+    titles = [
+        "Structural crawl",
+        "Author identity",
+        "Plans",
+        "Core commits",
+        "LLM descriptions",
+    ]
+    assert events[0] == {"type": "start", "phase_total": 5, "phases": titles}
     assert [e["title"] for e in events if e["type"] == "phase"] == titles
     assert stubs["core"].constructed == 1
     assert stubs["core"].last_kwargs["wall_sec"] == wall  # type: ignore[index]
-    assert _idx(order, ("join", "authors")) < _idx(order, ("start", "core"))
+    assert _idx(order, ("join", "plans")) < _idx(order, ("start", "core"))
     assert _idx(order, ("join", "core")) < _idx(order, ("start", "analyze"))
     assert "core" in {c["name"] for c in events[-1]["crawlers"]}
     # The start log line names the flag.
@@ -1396,6 +1419,7 @@ def test_real_child_scan_finds_core_commits_once(tmp_path: Path) -> None:
     assert events[0]["phases"] == [
         "Structural crawl",
         "Author identity",
+        "Plans",
         "Core commits",
     ]
     core = next(c for c in events[-1]["crawlers"] if c["name"] == "core")

@@ -112,6 +112,9 @@ export function CommandPalette({ slug }: { slug?: string }) {
         ...(linked || !current?.initialized || current.importing
           ? []
           : [{ label: "Notes", run: () => navigate({ to: "/p/$slug/notes", params: { slug } }) }]),
+        ...(linked || !current?.initialized || current.importing
+          ? []
+          : [{ label: "Plans", run: () => navigate({ to: "/p/$slug/plans", params: { slug } }) }]),
         ...(!canChat
           ? []
           : [{ label: "New chat", run: () => navigate({ to: "/p/$slug/chat/{-$id}", params: { slug, id: undefined } }) }]),

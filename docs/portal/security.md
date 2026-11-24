@@ -359,7 +359,11 @@ symbolic-link check above walks every folder its `include` and `includeIgnored` 
 The git hook helper lives in the git directory (`.git/whygraph/whygraph-scan`), not in the working
 tree, so a commit pulled from a remote cannot replace it: git never checks files out into `.git/`. It
 reads `.whygraph/portal.env` with `sed` and validates the two values it takes (a slug and a port); it
-never `source`s the file. It ignores the file if git tracks it or it is a symbolic link, and it never
+never `source`s the file. The file has a third line, `plans_dir=`, which only the plan-publish tool
+(`plan-tool.sh publish`) reads, with the same rules: it parses the line and never sources the file,
+ignores the file when git tracks it or `.whygraph` or the file is a symbolic link, and re-checks the
+value (no `.git`, `.whygraph` or agent folders, no dot or dash components, no symlinks in the path)
+before it writes anything, so a hand-edited file can only make publishing skip. It ignores the file if git tracks it or it is a symbolic link, and it never
 writes its log or pending flag through a symbolic link. It only ever sends a request to `127.0.0.1`
 and never runs a scan itself.
 

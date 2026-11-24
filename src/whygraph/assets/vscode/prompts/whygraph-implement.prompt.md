@@ -1,7 +1,7 @@
 ---
 description: Execute a reviewed WhyGraph plan (or one child of a split's tasks.json). Reads the plan as a strict contract, runs Verify after each step, halts on first failure, then walks the plan's Acceptance list.
 name: whygraph-implement
-argument-hint: <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture] [--no-e2e]
+argument-hint: <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture] [--no-e2e] [--no-publish]
 agent: whygraph-implementor
 ---
 
@@ -11,7 +11,7 @@ Execute a reviewed WhyGraph plan (or one child of a split's `tasks.json`). Reads
 
 This prompt runs **as** the implementor, so every step runs in this one conversation. The per-step review gate needs Claude Code: run `/whygraph-review` there when you want the step's diff checked against the recorded rationale. The evaluator stage is unavailable here (nested subagents are not available); run `/whygraph-implement` from Claude Code or Cursor for it.
 
-**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture] [--no-e2e]`
+**Argument shape:** `<plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture] [--no-e2e] [--no-publish]`
 
 ## Step 1 - Parse arguments
 
@@ -23,9 +23,10 @@ Strip and remember these flags if present (any order, anywhere in the user's inp
 - `--model <model-id>` -> optional override (consume the next token). Default: the implementor subagent's inherited model.
 - `--no-capture` -> pass `CAPTURE: none` to the implementor (Step 2b).
 - `--no-e2e` -> pass `E2E: none` to the implementor, so it runs no browser test (Step 2b).
+- `--no-publish` -> do not publish the plan after a passing run (Step 4).
 
 The first non-flag positional token is the **path**: a plan (`.md`) or a split's `.tasks.json`. If it is empty, respond with:
-`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture] [--no-e2e]` and stop.
+`Usage: /whygraph-implement <plan.md | tasks.json> [--from-step N] [--commit-each-step] [--fix-attempts N] [--model <model-id>] [--no-capture] [--no-e2e] [--no-publish]` and stop.
 
 If the path ends in `.tasks.json` and `--from-step` is passed, respond with `--from-step takes a plan; pass the child's plan file instead of the tasks.json.` and stop.
 
@@ -117,4 +118,8 @@ If the report has a `## Decisions worth a note` section, end by telling the user
 
 If the report's `**Status:**` is `acceptance passed`, also print one line for each step of the plan that has a **Changes on purpose** line, at most 3: `Step <N> changed a recorded constraint on purpose: run /whygraph-note to record that "<quote>" no longer holds, then confirm it in the portal.` The quote is the text inside the quotation marks on that line, without its tag. When the tag is `(note #<id>)`, add `It replaces note #<id>.` Call no tool for it.
 
-This prompt's only job is: parse -> validate -> dispatch -> print. Do not edit other files, run other tools, or improvise.
+**Publish the plan.** When the report's `**Status:**` is `acceptance passed` (not `acceptance manual only`), the plan is under `.whygraph/plans/`, and `--no-publish` was not passed, run `sh .github/whygraph/plan-tool.sh publish <plan>` through runCommands, with `<plan>` the plan's path relative to the workspace root and no folder argument, as a command of its own with nothing chained after it. Print its line(s) verbatim. Exit 0, 1 or 2: go on. Any other exit code: print `publish skipped: exit <code>` and go on. After `published`, `republished` or `unchanged` with no `ignored:` line, print `To share it, commit it with your change: git add <dest>`. A `skip:` or `refuse:` line is information, not a failure.
+
+When `--commit-each-step` was not passed, print `To link your commits to this plan, add the line "WhyGraph-Plan: <stem>" to a commit message or the PR description.` (`<stem>` is the plan's file name without `.md`, lowercased, runs of characters outside `[a-z0-9]` replaced by one `-`, leading and trailing `-` trimmed), except after a `refuse:` for a destination that was not published from this machine.
+
+This prompt's only job is: parse -> validate -> dispatch -> print -> publish the plan. Do not edit other files, run other tools (the publish call above is the one exception), or improvise.

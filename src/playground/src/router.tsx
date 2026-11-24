@@ -41,6 +41,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { ChatView } from "./components/chat/ChatView";
 import { ExplorerPage } from "./pages/ExplorerPage";
 import { NotesPage } from "./pages/NotesPage";
+import { PlansPage } from "./pages/PlansPage";
 import { ProjectHome } from "./pages/ProjectHome";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { AddProjectPage, type NewProjectSearch } from "./pages/AddProjectPage";
@@ -107,6 +108,7 @@ import {
   validateProjectSettingsSearch,
   validateProjectsSearch,
   validateNotesSearch,
+  validatePlansSearch,
   validateScansSearch,
 } from "./lib/routeSearch";
 
@@ -645,7 +647,7 @@ const memberUsageRoute = createRoute({
 
 // Pages that read project data; on an unusable project they are replaced by an
 // edge-state notice (screen 12) instead of firing requests that can only fail.
-const DATA_PAGES = new Set(["explorer", "chat", "scans", "notes"]);
+const DATA_PAGES = new Set(["explorer", "chat", "scans", "notes", "plans"]);
 
 // The width of each project page's `PageContainer`, so the layout's loading and
 // error states sit where the page will (PH-11, ER-5). The Overview, the wizard and
@@ -654,6 +656,7 @@ const PAGE_WIDTH: Record<string, React.ComponentProps<typeof PageContainer>["wid
   explorer: "full",
   chat: "full",
   notes: "narrow",
+  plans: "default",
   settings: "default",
   scans: "default",
 };
@@ -785,6 +788,12 @@ const notesRoute = createRoute({
   path: "notes",
   validateSearch: validateNotesSearch,
   component: NotesPage,
+});
+const plansRoute = createRoute({
+  getParentRoute: () => projectRoute,
+  path: "plans",
+  validateSearch: validatePlansSearch,
+  component: PlansPage,
 });
 const chatRoute = createRoute({
   getParentRoute: () => projectRoute,
@@ -973,6 +982,7 @@ const routeTree = rootRoute.addChildren([
     projectHomeRoute,
     explorerRoute,
     notesRoute,
+    plansRoute,
     chatRoute,
     scansRoute,
     projectSettingsRoute,

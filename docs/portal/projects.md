@@ -62,7 +62,9 @@ file:
   entry uses - the portal's own. See [Connecting agents](agents.md).
 - The project database is created in the portal's data directory (`projects/<org>/<slug>/whygraph.db`), never in the repository. A `.whygraph/whygraph.db` left by 1.x or 2.0.0 is ignored.
 - Two small marker files, `.whygraph/portal.json` and `.whygraph/portal.env`, record that the
-  portal manages this project. They are gitignored.
+  portal manages this project. They are gitignored. `portal.env` holds the project's slug and port
+  and, for [publishing plans](../guide/planning.md#sharing-plans), a `plans_dir=` line that follows
+  `[plans].dir` (empty when plan indexing is off).
 
 A file that is tracked by git is shown as a diff and needs an explicit confirmation before it is
 touched. A file the portal cannot parse safely (JSONC with comments, TOML with comments) is **refused**
@@ -141,7 +143,7 @@ A project's **Settings** set how it uses LLMs and GitHub (the wizard's Configure
 **More settings**). A list of sections sits beside the page (a strip you can scroll sideways on a
 phone) and follows your scroll position. A section you pick there goes into the address, so a
 refresh returns to it, and a link such as `/p/<project>/settings?section=models` opens the page at that
-section. The section ids are `general`, `models`, `github`, `scanning`, `areas`, `budgets`,
+section. The section ids are `general`, `models`, `github`, `scanning`, `plans`, `areas`, `budgets`,
 `agents`, `access`, `connections` and `danger`.
 
 | Section | What you set |
@@ -151,6 +153,7 @@ section. The section ids are `general`, `models`, `github`, `scanning`, `areas`,
 | **GitHub** | Whether to crawl pull requests and issues at all, and (locally) the GitHub token card |
 | **Git hooks** | Which of `post-commit`, `post-merge`, `post-rewrite` and `post-checkout` refresh the project (local folders only) |
 | **Scanning** | One switch, **Serve CodeGraph tools to agents** (`[scan].serve_codegraph`, on by default; local folders and linked projects). Off, the project's `/mcp/<slug>/code` endpoint answers every call with a "turned off" error and the Overview says so. It stops nothing that is running: the CodeGraph server is shared by every project |
+| **Plans** | Whether to index the [plans your team commits](../guide/planning.md#sharing-plans) and which folder to read them from (`[plans].dir`, default `docs/plans`). Switch **Index committed plans** off to stop indexing; leave **Plans folder** empty to use the default. Shown for local and production projects, not for linked ones (the platform owns the setting) |
 | **Areas** | Named parts of the codebase (path and label lists) the Chat assistant can filter by, with **Suggest areas** to propose some from recent commits; per project only (not in the portal defaults) and not shown for linked projects. See [Areas](../reference/configuration.md#areas) |
 | **Usage** | This month's spend on the project and, for owners and admins, its monthly budget |
 | **Agents** | The coding agents connected to the project, and **Update agent files** (unedited files update silently, edited ones wait for your say, and **Overwrite my edits too** replaces those as well; a line shows the installed version of the agent files against the current one; see [Keeping the agent files up to date](agents.md#agent-files-upgrade)) |
@@ -217,7 +220,7 @@ Windows.
 ### A `whygraph.toml` in the repository
 
 If the repository has a `whygraph.toml`, the portal offers its **settings** as the project's starting
-configuration - models, the tuning keys, `[scan].forge`, `remote`, `default_branch` and `hooks`. API
+configuration - models, the tuning keys, `[plans].dir`, `[scan].forge`, `remote`, `default_branch` and `hooks`. API
 keys and the GitHub token in it are moved into the portal's encrypted store. Things the portal will not take from a repository file are
 reported and dropped: endpoints (`base_url`, `host`), database paths, the log file and similar, and
 any setting for the removed [`claude-cli` provider](../reference/llm-providers.md#claude-cli-removed).

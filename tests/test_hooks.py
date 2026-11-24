@@ -451,6 +451,21 @@ def test_an_invalid_portal_env_sends_nothing_and_logs_one_line(
     assert not _scan_was_armed(repo)
 
 
+def test_a_third_plans_dir_line_does_not_disturb_the_helper(
+    repo: Path, fake_curl: SimpleNamespace
+) -> None:
+    (repo / ".whygraph" / "portal.env").write_text(
+        f"slug=demo\nport={PORT}\nplans_dir=docs/plans\n"
+    )
+    _install_all(repo)
+
+    assert _run_helper(repo).returncode == 0
+
+    (argv,) = _wait(lambda: _curl_calls(fake_curl))
+    assert f"127.0.0.1:{PORT}/api/projects/demo/scans" in " ".join(argv)
+    assert _log_lines(repo) == []
+
+
 def test_portal_env_is_parsed_never_sourced(
     repo: Path, fake_curl: SimpleNamespace, tmp_path: Path
 ) -> None:

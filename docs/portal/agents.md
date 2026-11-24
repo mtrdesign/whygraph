@@ -327,7 +327,7 @@ like any other file.
 **Commit-safe.** The entries hold no slug and no port. Each is a short shell command that finds the
 helper from `CLAUDE_PROJECT_DIR`, runs it if it is there, and always exits 0 with a 3 second limit. A
 teammate who clones the repository without WhyGraph sees nothing and no error; with it, the helper
-reads the project's slug and port from the untracked `.whygraph/portal.env` and asks your local portal
+reads the project's slug and port from the untracked `.whygraph/portal.env` (which also holds a third line, `plans_dir`, for [publishing plans](../guide/planning.md#sharing-plans); the hook helper ignores it) and asks your local portal
 on `127.0.0.1`. If the portal is down, the helper prints nothing.
 
 **Local mode only.** Production has no hooks, and a project [linked to a platform](platform-projects.md)

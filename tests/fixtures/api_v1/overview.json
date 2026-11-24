@@ -21,6 +21,10 @@
       "fraction": 0.0,
       "total_commits": 2
     },
+    "plans": {
+      "count": 1,
+      "dir": "docs/plans"
+    },
     "project": {
       "access_lost": false,
       "clone_url": "http://127.0.0.1:9/acme/api.git",
@@ -29,6 +33,7 @@
       "last_scan_at": null,
       "last_scanned_head": null,
       "name": "Api project",
+      "plans_dir": "docs/plans",
       "project_role": "admin",
       "role": "owner",
       "slug": "api"

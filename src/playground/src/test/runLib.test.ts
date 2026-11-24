@@ -19,7 +19,7 @@ import {
   runTitle,
   syncOutcome,
 } from "../lib/scanFormat";
-import { progressModel, rawPercent } from "../lib/scanProgress";
+import { PHASE_TASKS, crawlerLabel, phaseLabel, progressModel, rawPercent } from "../lib/scanProgress";
 import { codegraphText, initialScanRunState, phaseRows, reduceScanRun, type ScanRunState } from "../lib/scanRun";
 
 const fold = (events: Parameters<typeof reduceScanRun>[1][]): ScanRunState =>
@@ -448,6 +448,36 @@ describe("reducer: plannedPhases, sync clone, maxPercent", () => {
     ]);
     expect(s.maxPercent).toBe(38);
     expect(reduceScanRun(s, { type: "reset" }).maxPercent).toBeNull();
+  });
+});
+
+describe("scan progress Plans phase", () => {
+  it("names the plans crawler and the Plans phase", () => {
+    expect(PHASE_TASKS.Plans).toEqual(["plans"]);
+    expect(crawlerLabel("plans")).toBe("Plans");
+    expect(phaseLabel("Plans")).toBe("Plans");
+  });
+
+  it("shows the Plans phase between Author identity and Core commits, with its count", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 4, phases: ["Author identity", "Plans", "Core commits", "LLM descriptions"] }),
+      ev({ type: "phase", phase: 2, title: "Plans" }),
+      ev({ type: "task", name: "plans", completed: 2, total: 4 }),
+    ]);
+    const model = progressModel(s);
+    expect(model.status).toBe("Indexing plans - 2 of 4 plans");
+    const labels = model.steps.map((x) => x.label);
+    expect(labels.indexOf("Plans")).toBe(labels.indexOf("Author identities") + 1);
+    expect(labels.indexOf("Core commits")).toBe(labels.indexOf("Plans") + 1);
+    expect(model.steps.find((x) => x.label === "Plans")).toEqual({ label: "Plans", state: "running", detail: "2 of 4" });
+  });
+
+  it("gives the phase a status line before its crawler reports a total", () => {
+    const s = fold([
+      ev({ type: "start", phase_total: 1, phases: ["Plans"] }),
+      ev({ type: "phase", phase: 1, title: "Plans" }),
+    ]);
+    expect(progressModel(s).status).toBe("Indexing plans");
   });
 });
 

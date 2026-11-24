@@ -249,6 +249,7 @@ describe("breadcrumbs", () => {
     expect(labels("/p/alpha", { projectName: "Alpha" })).toEqual(["Projects", "Alpha"]);
     expect(labels("/p/alpha/explorer", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Explorer"]);
     expect(labels("/p/alpha/notes", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Notes"]);
+    expect(labels("/p/alpha/plans", { projectName: "Alpha" })).toEqual(["Projects", "Alpha", "Plans"]);
     expect(labels("/projects/new")).toEqual(["Projects", "Add project"]);
   });
 

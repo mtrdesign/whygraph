@@ -1,0 +1,37 @@
+{
+  "body": {
+    "chars": 10,
+    "children": [
+      {
+        "chars": 47,
+        "n": 2,
+        "title": "Step 1: Write it"
+      }
+    ],
+    "kind": "plan",
+    "level": 2,
+    "n": 1,
+    "next": 2,
+    "prev": 0,
+    "project": {
+      "access_lost": false,
+      "clone_url": "http://127.0.0.1:9/acme/api.git",
+      "default_branch": "main",
+      "github_full_name": "acme/api",
+      "last_scan_at": null,
+      "last_scanned_head": null,
+      "name": "Api project",
+      "plans_dir": "docs/plans",
+      "project_role": "admin",
+      "role": "owner",
+      "slug": "api"
+    },
+    "reading": "Intent when it was written. Commits and PRs say what was built.",
+    "status": "shipped",
+    "stem": "sample-plan",
+    "text": "## Steps\n\n",
+    "title": "Steps",
+    "version": "abababab"
+  },
+  "status": 200
+}

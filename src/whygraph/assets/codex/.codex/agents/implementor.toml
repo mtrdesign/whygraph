@@ -173,9 +173,9 @@ Then run these sub-steps in this order:
 10. **Scope and commit.** Run `git diff --name-only <t0> <t1>`. Remove the step's **Files**, the Test first file, `PLAN_PATH` and `TASKS_PATH` from the list. Untracked files count. For each remaining path, add `  - out of scope: <path>` under the step's log entry and list the path in the report's `## Out-of-scope edits`. This is not a halt.
     - **Verify passed:** if `COMMIT_EACH_STEP=true`, run:
       ```bash
-      git add -- <files edited in this step> && git commit -m "<step name> (from <plan-slug>)"
+      git add -- <files edited in this step> && git commit -m "<step name> (from <plan-slug>)" -m "WhyGraph-Plan: <stem>"
       ```
-      Where `<plan-slug>` = the basename of `PLAN_PATH` without the `.md` extension. Capture the new commit SHA. Then continue to step `N+1`.
+      Where `<plan-slug>` = the basename of `PLAN_PATH` without the `.md` extension. `<stem>` = `<plan-slug>` lowercased, each run of characters outside `[a-z0-9]` replaced by one `-`, leading and trailing `-` trimmed. Capture the new commit SHA. Then continue to step `N+1`.
       If the commit fails (e.g. nothing staged), record the issue but treat the step as still completed - verify is the source of truth, not the commit.
     - **Verify failed or the step halted:** **stop iteration immediately**. Do not start step `N+1`. Do not commit. Proceed to Phase 3 with status `halted at step N`.
 

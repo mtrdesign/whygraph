@@ -1221,7 +1221,7 @@ def test_meta_is_public_on_every_host(cn: SimpleNamespace) -> None:
         assert response.json() == {
             "api_version": 2,
             "min_client": MIN_CLIENT_VERSION,
-            "capabilities": ["evidence", "rationale", "history", "resources"],
+            "capabilities": ["evidence", "rationale", "history", "resources", "plans"],
             "base_origin": PROD_BASE,  # the same on every host
         }
         MetaOut.model_validate(response.json())
@@ -1437,6 +1437,9 @@ V1_REQUESTS: dict[tuple[str, str], tuple[int, str | None, dict]] = {
     (f"{_V1}/prs/{{number}}", "GET"): (404, "not_found", {}),
     (f"{_V1}/issues/{{number}}", "GET"): (404, "not_found", {}),
     (f"{_V1}/overview", "GET"): (200, None, {}),
+    (f"{_V1}/plans/for", "POST"): (200, None, {"json": {"shas": [], "paths": []}}),
+    (f"{_V1}/plans/{{stem}}", "GET"): (404, "not_found", {}),
+    (f"{_V1}/plans/{{stem}}/sections/{{n}}", "GET"): (404, "not_found", {}),
 }
 """How the bearer sweep calls each ``/api/v1`` project route, and the
 ``(status, code, request kwargs)`` of a call that gets through."""
@@ -1448,6 +1451,8 @@ def _v1_url(path: str, slug: str) -> str:
         ("{slug}", slug),
         ("{sha}", _SWEEP_SHA),
         ("{number}", "4242"),
+        ("{stem}", "nosuch-plan"),
+        ("{n}", "1"),
     ):
         path = path.replace(placeholder, value)
     assert "{" not in path, path

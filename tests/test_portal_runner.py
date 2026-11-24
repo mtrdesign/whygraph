@@ -747,8 +747,8 @@ def test_read_frames_skips_a_line_longer_than_a_chunk(tmp_path: Path) -> None:
     start = json.dumps(
         {
             "type": "start",
-            "phase_total": 2,
-            "phases": ["Structural crawl", "Author identity"],
+            "phase_total": 3,
+            "phases": ["Structural crawl", "Author identity", "Plans"],
         }
     )
     phase = json.dumps({"type": "phase", "phase": 2})
@@ -1098,6 +1098,7 @@ def test_events_sse_replays_then_follows(
         "start",
         "phase",
         "phase",
+        "phase",
         "result",
     ]
     offsets = [int(f["id"]) for f in data]
@@ -1112,7 +1113,7 @@ def test_events_sse_replays_then_follows(
         headers={"Last-Event-ID": str(offsets[1])},
     )
     rest = [json.loads(f["data"])["type"] for f in _frames(resumed.text) if "id" in f]
-    assert rest == ["phase", "result", "end"]
+    assert rest == ["phase", "phase", "result", "end"]
     assert portal.get("/api/projects/demo/scans/999/events").status_code == 404
 
 

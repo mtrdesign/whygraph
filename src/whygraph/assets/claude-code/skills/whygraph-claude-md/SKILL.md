@@ -12,7 +12,7 @@ Arguments: `$ARGUMENTS`
 
 Accept only the flags `--no-interview`, `--no-nested`, `--no-notes` and `--write`, in any order. For any other token, respond with `Usage: /whygraph-claude-md [--no-interview] [--no-nested] [--no-notes] [--write]` and stop.
 
-In this file, **the tool** is `sh .claude/skills/whygraph-claude-md/claude-md-tool.sh`. Run it from the repository root, the directory that holds `.claude/`. A **target** is a `CLAUDE.md` that this run may write. A **draft** is its copy at `.whygraph/claude-md/draft/<target path>`.
+In this file, **the tool** is `sh .claude/skills/whygraph-claude-md/claude-md-tool.sh`. Run it from the repository root, the directory that holds `.claude/`. Run each tool command alone, with nothing appended: the Bash result already reports the exit code. A **target** is a `CLAUDE.md` that this run may write. A **draft** is its copy at `.whygraph/claude-md/draft/<target path>`.
 
 ## Rules
 

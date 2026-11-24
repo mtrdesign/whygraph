@@ -120,6 +120,7 @@ nav:
       - LLM providers: reference/llm-providers.md
       - Source control providers: reference/providers.md
   - Releases:
+      - WhyGraph 2.8.0: releases/2.8.0.md
       - WhyGraph 2.7.1: releases/2.7.1.md
       - WhyGraph 2.7.0: releases/2.7.0.md
       - WhyGraph 2.6.0: releases/2.6.0.md

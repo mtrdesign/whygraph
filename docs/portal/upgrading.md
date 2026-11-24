@@ -67,6 +67,8 @@ you come from:
   [WhyGraph 2.7.0](../releases/2.7.0.md).
 - **From 2.7.0**, `whygraph update`; 2.7.1 changes only the portal's UI. See
   [WhyGraph 2.7.1](../releases/2.7.1.md).
+- **From 2.7.1**, `whygraph update`; no database changes. Run **Update agent files** in each project
+  to get the new `/whygraph-claude-md`. See [WhyGraph 2.8.0](../releases/2.8.0.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

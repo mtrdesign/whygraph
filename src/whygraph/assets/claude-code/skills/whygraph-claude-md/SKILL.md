@@ -53,7 +53,7 @@ With the tools:
 4. Otherwise call `whygraph_area_history` the same way on up to nine more of those files.
 5. Call `whygraph_rationale_brief` with `cached_only: true`, `path`, `line_start: 1` and `line_end` set to the file's line count from **Most-changed files**. Do this for up to ten of those files.
 
-A `not_cached` card is normal. Never ask for a card to be generated.
+Make every call this step lists, up to its limits. Do not stop early to save cost: these calls generate nothing. A `not_cached` card is normal. Never ask for a card to be generated.
 
 ## Step 4 - Interview
 

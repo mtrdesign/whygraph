@@ -418,6 +418,108 @@ symbol's rationale card, and reports exactly one verdict - **Constraint at risk*
   `.claude/skills/`, so with Claude Code selected `/whygraph-review` shows up in Cursor's slash menu too;
   it is untested there.
 
+## Writing CLAUDE.md (Claude Code) { #whygraph-claude-md }
+
+Claude Code also gets `/whygraph-claude-md [--no-interview] [--no-nested] [--no-notes] [--write]`. It
+writes or revises the project's root `CLAUDE.md`, and a directory-level `CLAUDE.md` only where a
+directory earns one. It reads the repository's scripts, CI commands and git history, asks you four
+short questions about what Claude keeps getting wrong, and keeps a line only when it has a source and
+Claude could not find it by reading the repo. Nothing is written until you have seen a draft and a
+ledger: **Kept**, **Moved**, **Dropped**, **Suggested, not written** and **Foreign blocks kept**.
+
+- **Two files named `CLAUDE.md`.** WhyGraph's own block lives in `.claude/CLAUDE.md`, which the
+  installer owns. The skill writes the root `CLAUDE.md` and never touches `.claude/CLAUDE.md`,
+  `CLAUDE.local.md`, `.claude/rules/`, `.claude/settings.json` or anything outside the repository. It
+  leaves out what that block already says, because both files load into the same context.
+- **Suggested, never written.** Path-scoped rules, skills and hooks are suggested with their text. So
+  are lines that are true in any repo, which belong in your own `~/.claude/CLAUDE.md`. An existing
+  section whose lines are all general is kept as written, and the ledger notes the suggested move.
+- **Directory files.** A directory gets its own `CLAUDE.md` only when at least three facts are unique
+  to it and it holds 15 or more tracked files or is a package root. A run writes at most five.
+  `--no-nested` skips new ones and leaves existing ones alone.
+- **Asking first.** `--write` skips the question only for a new file or a tracked file with no
+  uncommitted changes. Anything else, and every run without `--write`, asks: write, edit or cancel.
+  `--no-interview` skips the four questions.
+- **Backups.** An existing file is copied to `.whygraph/claude-md/backup/<UTC timestamp>/` before it is
+  overwritten. Every write goes through the bundled `claude-md-tool.sh apply`, which refuses any
+  target outside its allowlist: a file named exactly `CLAUDE.md`, inside the repository, with no
+  symlink on its path.
+- **No LLM spend through WhyGraph.** It reads history with `describe: false` and rationale cards only
+  when they are already cached, and never asks for one to be generated.
+- **Notes.** A decision tied to one symbol or file is proposed as a [project note](../guide/notes.md)
+  instead of a line in the file: at most five per run, none with `--no-notes` or after a cancel.
+  `.whygraph/claude-md/proposed.txt` records what was proposed, so a re-run does not propose the same
+  one again. A member must confirm each proposal in the portal; **Reject all from this origin**
+  removes every pending proposal from that member's agent (see
+  [Limits on agent proposals](../guide/notes.md#limits-on-agent-proposals)).
+- **Linked projects.** On a checkout [linked to a platform](platform-projects.md) it makes no rationale
+  and no note calls, and lists the note candidates under **Suggested, not written**.
+- **Without the WhyGraph tools** it still works, from git and your answers.
+- **Other agents.** Cursor also loads `.claude/skills/`, so with Claude Code selected the command shows
+  up in Cursor's slash menu too; it is untested there. VS Code and Codex do not get it.
+
+### What it checks
+
+Every draft goes through `claude-md-tool.sh check` before you see it, and `apply` runs the same check
+again. A `fail` blocks the write; a `warn` is shown and does not.
+
+| Rule | Level | What it catches |
+|---|---|---|
+| `size` | fail | A root file over 200 lines or 12,288 bytes, a directory file over 80 lines or 6,144 bytes. Comments and foreign blocks are not counted. |
+| `line-length` | fail | A line over 400 characters outside a code block. |
+| `heading-depth` | fail | A `####` heading. |
+| `tree` | fail | A directory tree, drawn with box characters or as a run of four path lines. |
+| `emphasis` | fail | A shouted `IMPORTANT`, `NEVER`, `ALWAYS`, `CRITICAL` or `YOU MUST`. |
+| `dead-path` | fail | A backticked path that does not exist in the repository. |
+| `sources` | fail | A section without a sources comment, or one that does not number its entries one per bullet. |
+| `secret` | fail | A token, key, private key or credential in a URL. |
+| `duplicate` | fail | A bullet in a directory file that repeats a bullet of the root file. |
+| `import` | warn | An `@path` import, which loads with the file and saves no context. |
+| `section-name` | warn | A `##` heading outside `Commands`, `Verify`, `Boundaries`, `Traps`, `Conventions`, `Where things live`. |
+| `managed-block` | warn | A `codegraph_*` tool name, which WhyGraph's block already lists. |
+
+Another tool's marker block, such as the one CodeGraph writes between `<!-- CODEGRAPH_START -->` and
+`<!-- CODEGRAPH_END -->`, is kept byte for byte and listed under **Foreign blocks kept**.
+
+### Sources
+
+Each section ends with an HTML comment that names where every bullet came from, one entry per bullet.
+Claude Code strips block comments before it loads the file, so they cost no context, and a later
+run can tell a line that has a source from one that does not.
+
+```markdown
+## Commands
+- `uv run pytest -n0 path::test` - one test, serially
+- `make check-fast` - before a pull request
+
+<!-- whygraph:sources
+1: manifest:pyproject.toml
+2: user
+-->
+```
+
+An entry is `manifest:<file>`, `ci:<workflow>`, `commit <sha>`, `PR #N`, `issue #N`, `note #N`, `user`
+or `existing`.
+
+### What earns a line
+
+- **Commands that differ from the obvious,** with when to run each, and the one command that gates a
+  pull request.
+- **Boundaries with their reason** on the same line, so Claude can generalize them.
+- **Traps:** code that misleads, or an old pattern new code must not copy.
+- **Decisions the repo does not show,** and corrections you have made twice.
+- **Not an overview.** No directory tree, tech-stack list or description of what the code plainly does.
+- **No shouted emphasis.** A plainly worded line is followed; a piled-on one is over-applied.
+- **One fact in one place,** in the smallest file that reaches the tasks that need it.
+- **A short file.** The targets are 100 lines for the root and 50 for a directory file. A 20-line file
+  is a good result.
+
+The rules draw on [a study of AGENTS.md files](https://arxiv.org/abs/2602.11988) and the
+memory page of the Claude Code documentation.
+
+After a write, run `/context all` to confirm what loaded, and run the command again after a large
+refactor.
+
 ## Evaluating an implementation { #whygraph-evaluator }
 
 Claude Code and Cursor also get `whygraph-evaluator`, a read-only subagent that `/whygraph-implement`

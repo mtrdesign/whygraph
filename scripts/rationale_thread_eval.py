@@ -1435,6 +1435,35 @@ def _quote_origins(item: dict, texts: list[dict]) -> list[str]:
     return sorted(set(found))
 
 
+_STOP = frozenset(
+    "the a an of to and or in is are be for on with that this it by as its not "
+    "from at when which so if than can".split()
+)
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        w
+        for w in re.findall(r"[a-z0-9_`:]+", text.lower())
+        if len(w) > 2 and w not in _STOP
+    }
+
+
+def _thread_link(unit: dict, rec: dict) -> str:
+    """Why a card unit is linked to a rendered thread, or ``""`` (M4 triage only)."""
+    threaded = set(rec["rendered_threads"])
+    prs = [r["id"] for r in unit["refs"] if r["kind"] == "pr" and r["id"] in threaded]
+    if prs:
+        return "cites PR #" + ", #".join(prs) + ", whose thread was rendered"
+    words = _content_words(unit["text"])
+    thread_words = _content_words(
+        " ".join(line for lines in rec["rendered_threads"].values() for line in lines)
+    )
+    if words and len(words & thread_words) / len(words) >= 0.4:
+        return "shares content words with the rendered thread"
+    return ""
+
+
 def _any_origin(item: dict, texts: list[dict]) -> list[str]:
     """Where a cited item's quote text appears anywhere in the bundle (any ref)."""
     needle = _norm(item.get("quote") or "")
@@ -1567,6 +1596,7 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
     gain_targets: dict[str, list[str]] = {}
     displaced_t = displaced_b = 0
     m5_rows = []
+    m5_lost: list[tuple[str, dict, bool, list[str]]] = []
     for rec in records:
         texts = rec["texts"]
         for arm in ARMS:
@@ -1607,11 +1637,16 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
         ]
         b2_units = c["baseline2"]["constraints"] + c["baseline2"]["risks"]
         t_units = c["treated"]["constraints"] + c["treated"]["risks"]
-        lost_t = sum(1 for i in q1 if not _present(i, t_units))
+        lost_t_items = [i for i in q1 if not _present(i, t_units)]
         lost_b = sum(1 for i in q1 if not _present(i, b2_units))
+        lost_t = len(lost_t_items)
         displaced_t += lost_t
         displaced_b += lost_b
         m5_rows.append((rec["tid"], len(q1), lost_b, lost_t))
+        for i in lost_t_items:
+            m5_lost.append(
+                (rec["tid"], i, _present(i, b2_units), _quote_origins(i, rec["texts"]))
+            )
     displacement = displaced_t - displaced_b
     m5_pass = displacement <= 1
     gain_pass = len(gain_targets) >= 5
@@ -1635,12 +1670,31 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
         "",
     ]
     m4_count = 0
+    m4_linked = 0
+    noise_total = noise_new = 0
+    for rec in thread_recs:
+        c = rec["cards"]
+        b2 = _units(c["baseline2"])
+        noise_total += len(b2)
+        noise_new += sum(1 for u in b2 if not _present(u, _units(c["baseline1"])))
+    m4_lines += [
+        f"Noise floor: {noise_new} of {noise_total} baseline-2 units are absent from "
+        "baseline 1 under the same matcher, so most units below differ from the "
+        "baselines by run-to-run variance, not by the threads. Units marked "
+        "**thread-linked** (they cite a PR whose thread was rendered, or share at "
+        "least 40 % of their content words with the rendered thread text) are listed "
+        "first in each target: the rejected-suggestion risk is concentrated there.",
+        "",
+    ]
     for rec in thread_recs:
         c = rec["cards"]
         base_units = _units(c["baseline1"]) + _units(c["baseline2"])
         new = [u for u in _units(c["treated"]) if not _present(u, base_units)]
         if not new:
             continue
+        for u in new:
+            u["thread_linked"] = _thread_link(u, rec)
+        new.sort(key=lambda u: not u["thread_linked"])
         tgt = rec["target"]
         m4_lines += [
             f"## {rec['tid']} - `{tgt['qualified_name']}`",
@@ -1666,10 +1720,16 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
         ]
         for u in new:
             m4_count += 1
+            m4_linked += bool(u["thread_linked"])
             origins = _quote_origins(u, rec["texts"]) if u["quote"] else []
             refs = ", ".join(f"{r['kind']} {r['id'][:10]}" for r in u["refs"]) or "-"
+            link = (
+                f" - **thread-linked** ({u['thread_linked']})"
+                if u["thread_linked"]
+                else ""
+            )
             m4_lines += [
-                f"### M4-{m4_count:03d} ({u['kind']}, basis `{u['basis']}`)",
+                f"### M4-{m4_count:03d} ({u['kind']}, basis `{u['basis']}`){link}",
                 "",
                 f"> {u['text']}",
                 "",
@@ -1682,7 +1742,7 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
                 "|   |   |   |   |",
                 "",
             ]
-    m4_lines.insert(4, f"Units to judge: **{m4_count}**.")
+    m4_lines.insert(4, f"Units to judge: **{m4_count}** ({m4_linked} thread-linked).")
     m4_lines.insert(5, "")
     (EVAL_DIR / "part-a-m4-sheet.md").write_text("\n".join(m4_lines) + "\n")
 
@@ -1907,6 +1967,13 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
         "|---|---|---|---|",
     ]
     rep += [f"| {t} | {q} | {lb} | {lt} |" for t, q, lb, lt in m5_rows]
+    if m5_lost:
+        rep += ["", "Baseline-1 quoted items missing from the treated card:", ""]
+        for tid, item, in_b2, origins in m5_lost:
+            rep.append(
+                f"- {tid} ({'also in' if in_b2 else 'also missing from'} baseline 2; quote "
+                f"from {', '.join(origins) or '?'}): {item['text']}"
+            )
     rep += [
         "",
         "## Gain",
@@ -1924,7 +1991,10 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
         "## M4 - precision: awaiting owner",
         "",
         f"`plans/62-eval/part-a-m4-sheet.md`: {m4_count} treated units absent from both "
-        "baselines. Bar: 0 rejected-suggestion constraints; at least 90 % precise.",
+        f"baselines ({m4_linked} thread-linked, listed first per target). Noise floor: "
+        f"{noise_new} of {noise_total} baseline-2 units are absent from baseline 1 under "
+        "the same matcher, so most of the sheet is run-to-run variance. Bar: 0 "
+        "rejected-suggestion constraints; at least 90 % precise.",
         "",
         "## M6 - focus: awaiting owner",
         "",

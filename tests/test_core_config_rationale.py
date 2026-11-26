@@ -114,6 +114,30 @@ def test_rationale_pr_render_cap_below_one_raises(
         Config.from_toml(config)
 
 
+def test_rationale_review_threads_max_chars_default() -> None:
+    assert RationaleConfig().review_threads_max_chars == 3000
+
+
+@pytest.mark.parametrize("value", [0, 3000])
+def test_rationale_review_threads_max_chars_accepted(
+    tmp_path: Path, value: int
+) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\nreview_threads_max_chars = {value}\n",
+    )
+    assert Config.from_toml(config).rationale.review_threads_max_chars == value
+
+
+def test_rationale_review_threads_max_chars_negative_raises(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[rationale]\nreview_threads_max_chars = -1\n",
+    )
+    with pytest.raises(ConfigError, match="review_threads_max_chars"):
+        Config.from_toml(config)
+
+
 def test_rationale_config_is_frozen() -> None:
     cfg = RationaleConfig()
     with pytest.raises(Exception):  # FrozenInstanceError

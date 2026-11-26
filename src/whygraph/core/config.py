@@ -463,10 +463,15 @@ class RationaleConfig:
         when a squash collapsed a long feature branch. Must be ``>= 1``.
     pr_discussion_max_comments : int
         Cap on how many PR comments are rendered into a single PR block
-        in the rationale prompt. Must be ``>= 1``.
+        in the rationale prompt, and on PR and issue discussion in
+        ``detail="full"`` evidence. Must be ``>= 1``.
     pr_comment_max_chars : int
         Per-comment body clip applied before rendering a PR comment into
-        the rationale prompt. Must be ``>= 1``.
+        the rationale prompt, and before PR and issue discussion in
+        ``detail="full"`` evidence. Must be ``>= 1``.
+    review_threads_max_chars : int
+        Characters of qualified review-thread text in one card prompt;
+        ``0`` keeps threads out. Must be ``>= 0``.
     agent_generations_per_hour : int
         Production only, **org setting** (owners): how many uncached
         rationale cards connected portals' agents (``/api/v1``) may
@@ -485,6 +490,7 @@ class RationaleConfig:
     pr_roster_max_commits: int = 30
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
+    review_threads_max_chars: int = 3000
     agent_generations_per_hour: int = 120
     agent_generations_per_member_per_hour: int = 30
 
@@ -1467,7 +1473,8 @@ class Config:
             or ``analyze.pr_origin_min_commits`` is less than ``1``, or if
             any of the ``rationale`` PR-rendering caps
             (``pr_roster_max_commits``, ``pr_discussion_max_comments``,
-            ``pr_comment_max_chars``) is less than ``1``.
+            ``pr_comment_max_chars``) is less than ``1``, or if
+            ``rationale.review_threads_max_chars`` is negative.
         """
         try:
             LogLevel[self.log_level.upper()]
@@ -1511,6 +1518,11 @@ class Config:
             raise ConfigError(
                 "rationale.pr_comment_max_chars must be >= 1, "
                 f"got {self.rationale.pr_comment_max_chars}"
+            )
+        if self.rationale.review_threads_max_chars < 0:
+            raise ConfigError(
+                "rationale.review_threads_max_chars must be >= 0, "
+                f"got {self.rationale.review_threads_max_chars}"
             )
         for name, value in (
             (

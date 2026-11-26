@@ -1070,13 +1070,14 @@ def cmd_generate(env: Env, args: argparse.Namespace) -> None:
     from whygraph.mcp.targets import repo_root
 
     corpus = json.loads((EVAL_DIR / "part-a-corpus.json").read_text())
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
     ledger = Ledger(LEDGER, CAP_USD)
     price_in, price_out = _price_per_m()
     print(f"corpus {len(corpus)} targets; ledger ${ledger.total():.4f} of ${CAP_USD}")
     print(
-        f"estimate: {len(corpus) * len(ARMS)} card calls on {PROVIDER}/{MODEL} "
+        f"estimate: {len(corpus) * len(arms)} card calls on {PROVIDER}/{MODEL} "
         f"(${price_in}/${price_out} per M) at ~40k input / 2k output tokens = "
-        f"${len(corpus) * len(ARMS) * (40e3 * price_in + 2e3 * price_out) / 1e6:.2f}, "
+        f"${len(corpus) * len(arms) * (40e3 * price_in + 2e3 * price_out) / 1e6:.2f}, "
         f"plus up to {len(corpus) * 20} commit descriptions at ~8k / 0.4k = "
         f"${len(corpus) * 20 * (8e3 * price_in + 400 * price_out) / 1e6:.2f} "
         "(an upper bound: commits shared between targets are described once)"
@@ -1106,7 +1107,7 @@ def cmd_generate(env: Env, args: argparse.Namespace) -> None:
                 tid = row["tid"]
                 out = CARDS / f"{tid}.json"
                 record = json.loads(out.read_text()) if out.exists() else {}
-                if all(arm in record.get("cards", {}) for arm in ARMS):
+                if all(arm in record.get("cards", {}) for arm in arms):
                     continue
                 print(f"{tid} {row['corpus_class']} {row['qualified_name']}")
                 target = _target_of(Node(**{k: row[k] for k in Node.__annotations__}))
@@ -1154,11 +1155,11 @@ def cmd_generate(env: Env, args: argparse.Namespace) -> None:
                 )
                 record.setdefault("cards", {})
                 record.setdefault("prompts", {})
-                for arm in ARMS:
+                for arm in arms:
                     if arm in record["cards"]:
                         continue
                     kwargs: dict[str, Any] = {}
-                    if arm == "treated":
+                    if arm.startswith("treated"):
                         kwargs = {
                             "paths": scope.paths,
                             "file_lines": scope.current_lines,
@@ -2025,6 +2026,259 @@ def cmd_measure(env: Env, args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# repeats: M5, M2 and Gain over every baseline and treated pass
+# ---------------------------------------------------------------------------
+
+REPEATS_START = "<!-- repeats:start -->"
+REPEATS_END = "<!-- repeats:end -->"
+BOOTSTRAP = 5000
+
+
+def _quoted(card: dict) -> list[dict]:
+    return [i for i in card["constraints"] + card["risks"] if i["basis"] == "quoted"]
+
+
+def _losses(src: dict, dst: dict) -> tuple[int, int]:
+    """``(quoted items of src, how many have no match in dst)``."""
+    q = _quoted(src)
+    dst_items = dst["constraints"] + dst["risks"]
+    return len(q), sum(1 for i in q if not _present(i, dst_items))
+
+
+def _gain_hit(card: dict, texts: list[dict]) -> bool:
+    for item in card["constraints"] + card["risks"]:
+        if item["basis"] == "quoted" and "author_thread" in _quote_origins(item, texts):
+            return True
+        if item["basis"] == "cited" and "author_thread" in _any_origin(item, texts):
+            return True
+    return False
+
+
+def _mean_abs_pair(values: list[float]) -> float:
+    pairs = [abs(a - b) for i, a in enumerate(values) for b in values[i + 1 :]]
+    return statistics.mean(pairs) if pairs else 0.0
+
+
+def cmd_repeats(env: Env, args: argparse.Namespace) -> None:
+    """M5, M2 and Gain over all passes; writes a section into ``part-a-report.md``."""
+    recs = []
+    for path in sorted(CARDS.glob("T*.json")):
+        rec = json.loads(path.read_text())
+        bases = sorted(a for a in rec["cards"] if a.startswith("baseline"))
+        treats = sorted(a for a in rec["cards"] if a.startswith("treated"))
+        recs.append((rec, bases, treats))
+    n_b = min(len(b) for _, b, _ in recs)
+    n_t = min(len(t) for _, _, t in recs)
+
+    # M5: per-item loss rates over every ordered pair.
+    per_target = []
+    for rec, bases, treats in recs:
+        c = rec["cards"]
+        bb_q = bb_l = bt_q = bt_l = 0
+        for a in bases:
+            for b in bases:
+                if a != b:
+                    q, lost = _losses(c[a], c[b])
+                    bb_q, bb_l = bb_q + q, bb_l + lost
+            for t in treats:
+                q, lost = _losses(c[a], c[t])
+                bt_q, bt_l = bt_q + q, bt_l + lost
+        per_target.append(
+            {
+                "tid": rec["tid"],
+                "class": rec["corpus_class"],
+                "quoted_per_baseline": [len(_quoted(c[a])) for a in bases],
+                "quoted_per_treated": [len(_quoted(c[t])) for t in treats],
+                "bb": (bb_q, bb_l),
+                "bt": (bt_q, bt_l),
+            }
+        )
+
+    def excess(rows: list[dict]) -> tuple[float, float, float, float]:
+        bbq = sum(r["bb"][0] for r in rows)
+        bbl = sum(r["bb"][1] for r in rows)
+        btq = sum(r["bt"][0] for r in rows)
+        btl = sum(r["bt"][1] for r in rows)
+        noise = bbl / bbq if bbq else 0.0
+        treat = btl / btq if btq else 0.0
+        per_run = sum(statistics.mean(r["quoted_per_baseline"]) for r in rows)
+        return noise, treat, per_run, (treat - noise) * per_run
+
+    noise, treat, per_run, displaced = excess(per_target)
+    rnd = random.Random(args.seed)
+    boots = sorted(
+        excess([rnd.choice(per_target) for _ in per_target])[3]
+        for _ in range(BOOTSTRAP)
+    )
+    lo, hi = boots[int(0.025 * BOOTSTRAP)], boots[int(0.975 * BOOTSTRAP) - 1]
+    m5_pass = displaced <= 1
+    distinguishable = lo > 0
+
+    # M2 over passes (thread targets).
+    m2 = []
+    for rec, bases, treats in recs:
+        if rec["corpus_class"] != "thread":
+            continue
+        c = rec["cards"]
+        bi = [_n_items(c[a]) for a in bases]
+        ti = [_n_items(c[t]) for t in treats]
+        bc = [_card_chars(c[a]) for a in bases]
+        tc = [_card_chars(c[t]) for t in treats]
+        mb = statistics.mean(bc)
+        m2.append(
+            {
+                "tid": rec["tid"],
+                "items_b": bi,
+                "items_t": ti,
+                "items_delta": statistics.mean(ti) - statistics.mean(bi),
+                "items_noise": _mean_abs_pair(bi),
+                "chars_delta_pct": (statistics.mean(tc) - mb) / mb * 100,
+                "chars_noise_pct": _mean_abs_pair(bc) / mb * 100,
+            }
+        )
+    med = {
+        k: statistics.median(x[k] for x in m2)
+        for k in ("items_delta", "items_noise", "chars_delta_pct", "chars_noise_pct")
+    }
+    m2_items_pass = med["items_delta"] <= 1
+    m2_chars_pass = med["chars_delta_pct"] - med["chars_noise_pct"] <= 15
+
+    # Gain per treated pass, and the baselines as a control for the matcher.
+    gain_rows = []
+    for rec, bases, treats in recs:
+        if rec["corpus_class"] != "thread":
+            continue
+        gain_rows.append(
+            {
+                "tid": rec["tid"],
+                "treated": [_gain_hit(rec["cards"][t], rec["texts"]) for t in treats],
+                "baseline": [_gain_hit(rec["cards"][a], rec["texts"]) for a in bases],
+            }
+        )
+    per_pass = [sum(r["treated"][k] for r in gain_rows) for k in range(n_t)]
+    any_pass = sum(any(r["treated"]) for r in gain_rows)
+    two_pass = sum(sum(r["treated"]) >= 2 for r in gain_rows)
+    base_hits = sum(any(r["baseline"]) for r in gain_rows)
+    gain_pass = statistics.mean(per_pass) >= 5
+
+    spent = Ledger(LEDGER, CAP_USD).total()
+
+    def yn(ok: bool) -> str:
+        return "**PASS**" if ok else "**FAIL**"
+
+    sec = [
+        REPEATS_START,
+        "## Repeats (owner's request: more passes before any rule change)",
+        "",
+        f"{n_b} baseline passes and {n_t} treated passes per target, same corpus, model "
+        f"`{PROVIDER}/{MODEL}` and pinned worktree `0eb814c`; ledger total "
+        f"**${spent:.4f} of ${CAP_USD:.2f}**. These numbers supersede the single-pass "
+        "M2, M5 and Gain above; M1, M3, M4 and M6 are unchanged.",
+        "",
+        "### M5 - displacement over every pair",
+        "",
+        "Loss rate = the share of a baseline pass's `quoted` items with no match "
+        "(fuzzy text or shared quote) in another card. Noise floor = over every ordered "
+        f"pair of the {n_b} baselines; treated = over every (baseline, treated) pair. "
+        "Excess displaced items per run = (treated rate - noise rate) x the corpus's "
+        "mean quoted items per baseline run.",
+        "",
+        f"- Baseline-vs-baseline loss rate (noise floor): **{noise:.1%}**",
+        f"- Baseline-vs-treated loss rate: **{treat:.1%}**",
+        f"- Mean quoted items per baseline run across the corpus: {per_run:.1f}",
+        f"- Excess displaced quoted items per treated run: **{displaced:+.2f}** "
+        f"(bootstrap over targets, {BOOTSTRAP} resamples, 95 % interval "
+        f"[{lo:+.2f}, {hi:+.2f}])",
+        f"- Bar (at most 1 across the corpus): {yn(m5_pass)}. Distinguishable from "
+        f"noise: **{'yes' if distinguishable else 'no'}** (the interval "
+        f"{'excludes' if distinguishable else 'includes'} 0).",
+        "",
+        "| Target | Class | quoted per baseline | quoted per treated | b-b lost / compared | b-t lost / compared |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in per_target:
+        if not (r["bb"][0] or r["bt"][0]):
+            continue
+        sec.append(
+            f"| {r['tid']} | {r['class']} | {r['quoted_per_baseline']} | "
+            f"{r['quoted_per_treated']} | {r['bb'][1]} / {r['bb'][0]} | "
+            f"{r['bt'][1]} / {r['bt'][0]} |"
+        )
+    sec += [
+        "",
+        "Targets with no quoted item in any baseline pass are left out of the table.",
+        "",
+        "### M2 - card size over passes (thread targets)",
+        "",
+        "Delta = mean of the treated passes minus mean of the baseline passes; noise = "
+        "mean absolute difference between baseline passes.",
+        "",
+        f"- Items: median delta {med['items_delta']:+.2f} (noise median "
+        f"{med['items_noise']:.2f}); bar +1 or less: {yn(m2_items_pass)}",
+        f"- Characters: median delta {med['chars_delta_pct']:+.1f} % (noise median "
+        f"{med['chars_noise_pct']:.1f} %; delta - noise "
+        f"{med['chars_delta_pct'] - med['chars_noise_pct']:+.1f} %); bar +15 % or less "
+        f"over the noise floor: {yn(m2_chars_pass)}",
+        "",
+        "| Target | Items per baseline | Items per treated | Chars delta % | Chars noise % |",
+        "|---|---|---|---|---|",
+    ]
+    for x in m2:
+        sec.append(
+            f"| {x['tid']} | {x['items_b']} | {x['items_t']} | "
+            f"{x['chars_delta_pct']:+.1f} | {x['chars_noise_pct']:.1f} |"
+        )
+    sec += [
+        "",
+        "### Gain over passes",
+        "",
+        f"- Thread targets with a thread-sourced item, per treated pass: "
+        f"{', '.join(map(str, per_pass))} (mean {statistics.mean(per_pass):.1f}, "
+        f"min {min(per_pass)}, max {max(per_pass)}); bar at least 5 of 15 (on the "
+        f"mean): {yn(gain_pass)}",
+        f"- In at least one pass: {any_pass} of {len(gain_rows)}; in at least two: "
+        f"{two_pass}.",
+        f"- Matcher control: baseline passes (which never see a thread) hit on "
+        f"{base_hits} targets.",
+        "",
+        "| Target | Treated passes with a thread-sourced item |",
+        "|---|---|",
+    ]
+    for r in gain_rows:
+        sec.append(f"| {r['tid']} | {sum(r['treated'])} of {n_t} |")
+    sec += ["", REPEATS_END]
+    report = EVAL_DIR / "part-a-report.md"
+    text = report.read_text()
+    block = "\n".join(sec)
+    if REPEATS_START in text:
+        head, rest = text.split(REPEATS_START, 1)
+        text = head + block + rest.split(REPEATS_END, 1)[1]
+    else:
+        text = text.rstrip("\n") + "\n\n" + block + "\n"
+    report.write_text(text)
+    print(
+        json.dumps(
+            {
+                "passes": [n_b, n_t],
+                "m5": {
+                    "noise": noise,
+                    "treated": treat,
+                    "per_run": per_run,
+                    "excess": displaced,
+                    "ci": [lo, hi],
+                    "pass": m5_pass,
+                    "distinguishable": distinguishable,
+                },
+                "m2": {**med, "items_pass": m2_items_pass, "chars_pass": m2_chars_pass},
+                "gain": {"per_pass": per_pass, "any": any_pass, "two": two_pass},
+                "spend": spent,
+            },
+            indent=1,
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2064,9 +2318,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("generate")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--no-portal-ledger", action="store_true")
+    p.add_argument(
+        "--arms",
+        default=",".join(ARMS),
+        help="comma-separated arms; a name starting with treated gets the thread inputs",
+    )
     sub.add_parser("prompts")
     sub.add_parser("m1")
     sub.add_parser("measure")
+    sub.add_parser("repeats")
     args = parser.parse_args(argv)
     env = Env(slug=args.slug, data=args.data.expanduser(), db_url=args.db_url)
     commands = {
@@ -2078,6 +2338,7 @@ def main(argv: list[str] | None = None) -> int:
         "prompts": cmd_prompts,
         "m1": cmd_m1,
         "measure": cmd_measure,
+        "repeats": cmd_repeats,
     }
     commands[args.cmd](env, args)
     return 0

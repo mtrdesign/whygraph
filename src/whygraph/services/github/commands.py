@@ -133,8 +133,9 @@ def tolerated_data(exc: ShellError, tolerate: Tolerate | None) -> dict | None:
     if not isinstance(payload, dict) or not tolerate(payload):
         return None
     _log.warning(
-        "GitHub refused %d nested field(s) (FORBIDDEN); dropped them, kept the rest",
+        "GitHub refused %d nested field(s) (%s); dropped them, kept the rest",
         len(payload["errors"]),
+        ", ".join(sorted({str(e.get("type")) for e in payload["errors"]})),
     )
     return payload["data"]
 

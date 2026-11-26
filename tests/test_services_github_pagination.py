@@ -555,3 +555,251 @@ def test_review_thread_parses_anchor_and_drops_file_level() -> None:
     assert ReviewThread.from_graphql_node(file_level).anchor is None
     left = {**node, "diffSide": "LEFT"}
     assert ReviewThread.from_graphql_node(left).anchor is None
+
+
+# --- Thread pass (plan 62 step 3) ----------------------------------------
+
+_HUNK = "@@ -1,2 +1,3 @@\n ctx\n+    value = compute_the_thing(argument)\n"
+
+
+def _thread(path: str = "a.py", **extra) -> dict:
+    return {
+        "path": path,
+        "originalLine": 3,
+        "isResolved": False,
+        "isOutdated": False,
+        "subjectType": "LINE",
+        "diffSide": "RIGHT",
+        "comments": {
+            "totalCount": 1,
+            "nodes": [
+                {
+                    "author": {"__typename": "User", "login": "h"},
+                    "body": "why?",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "isMinimized": False,
+                    "diffHunk": _HUNK,
+                }
+            ],
+        },
+        **extra,
+    }
+
+
+def _threads_page(numbers, *, remaining: int | None = 5000, none=()) -> dict:
+    repo = {
+        f"pr{n}": None
+        if n in none
+        else {"number": n, "reviewThreads": {"totalCount": 1, "nodes": [_thread()]}}
+        for n in numbers
+    }
+    data: dict = {"repository": repo}
+    if remaining is not None:
+        data["rateLimit"] = {
+            "cost": 1,
+            "remaining": remaining,
+            "resetAt": "2026-11-26T13:00:00Z",
+        }
+    return data
+
+
+def _aliases(query: str) -> list[int]:
+    return [int(n) for n in re.findall(r"pr(\d+): pullRequest\(number: \1\)", query)]
+
+
+def test_thread_pass_batches_of_five_and_asks_rate_limit() -> None:
+    shell = CmdShell([])
+    assert (
+        list(PullRequests("o", "r", shell=shell).review_threads([], point_floor=0))
+        == []
+    )
+    nums = list(range(1, 13))
+    shell = CmdShell(
+        [_threads_page(nums[:5]), _threads_page(nums[5:10]), _threads_page(nums[10:])]
+    )
+    run = PullRequests("o", "r", shell=shell).review_threads(nums, point_floor=1000)
+    assert shell.cmds == []  # nothing sent until iterated
+    got = list(run)
+    assert prs_mod.THREAD_BATCH == 5
+    assert [_aliases(shell.query(i)) for i in range(3)] == [
+        nums[:5],
+        nums[5:10],
+        nums[10:],
+    ]
+    q = shell.query(0)
+    assert q.startswith("query($owner: String!, $name: String!) {")
+    assert "rateLimit { cost remaining resetAt }" in q
+    assert "reviewThreads(first: 20)" in q and "$cursor" not in q
+    assert (
+        "comments(first: 10) { totalCount nodes { author { __typename login } "
+        "body createdAt isMinimized diffHunk } }" in q
+    )
+    assert [n for n, _ in got] == nums
+    assert all(len(threads) == 1 for _, threads in got)
+    assert (run.stopped, run.pending, run.skipped) == (False, (), ())
+    assert (run.remaining, run.reset_at) == (5000, "2026-11-26T13:00:00Z")
+
+
+def test_thread_pass_halves_to_one_and_skips_a_pr_that_times_out_alone(
+    caplog, monkeypatch
+) -> None:
+    monkeypatch.setattr(logging.getLogger("whygraph"), "propagate", True)
+    nums = [1, 2, 3, 4, 5]
+    shell = _Flaky(
+        [
+            _gateway(502),  # 5
+            _gateway(504),  # 2
+            _truncated(),  # 1: PR 1, skipped
+            _threads_page([2]),
+            _threads_page([3]),
+            _threads_page([4]),
+            _threads_page([5]),
+        ]
+    )
+    run = PullRequests("o", "r", shell=shell).review_threads(nums, point_floor=0)
+    with caplog.at_level("WARNING"):
+        got = [n for n, _ in run]
+    assert got == [2, 3, 4, 5]
+    assert [_aliases(shell.query(i)) for i in range(4)] == [nums, [1, 2], [1], [2]]
+    assert run.skipped == (1,) and run.stopped is False
+    assert any(
+        "#1" in r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    )
+
+
+def test_thread_pass_splits_a_batch_on_a_gateway_error() -> None:
+    nums = [1, 2, 3, 4, 5]
+    shell = _Flaky(
+        [_gateway(), _threads_page([1, 2]), _threads_page([3, 4]), _threads_page([5])]
+    )
+    run = PullRequests("o", "r", shell=shell).review_threads(nums, point_floor=0)
+    assert [n for n, _ in run] == nums
+    assert [_aliases(shell.query(i)) for i in range(4)] == [nums, [1, 2], [3, 4], [5]]
+    assert run.skipped == ()
+
+
+def test_thread_pass_stops_below_the_floor_before_the_next_request() -> None:
+    nums = list(range(1, 18))
+    shell = CmdShell(
+        [
+            _threads_page(nums[:5], remaining=1000),  # at the floor: go on
+            _threads_page(nums[5:10], remaining=999),  # below: stop
+            _threads_page(nums[10:15]),  # never asked
+        ]
+    )
+    run = PullRequests("o", "r", shell=shell).review_threads(nums, point_floor=1000)
+    got = [n for n, _ in run]  # no error raised
+    assert got == nums[:10]
+    assert len(shell.cmds) == 2
+    assert run.stopped is True
+    assert run.pending == tuple(nums[10:])
+    assert run.remaining == 999
+
+
+def test_thread_pass_first_request_needs_no_rate_limit() -> None:
+    # The first request has no previous response, and a response without
+    # rateLimit keeps the pass going.
+    shell = CmdShell(
+        [_threads_page([1, 2, 3, 4, 5], remaining=None), _threads_page([6])]
+    )
+    run = PullRequests("o", "r", shell=shell).review_threads(
+        list(range(1, 7)), point_floor=10**9
+    )
+    assert [n for n, _ in run] == [1, 2, 3, 4, 5, 6]
+    assert run.stopped is False and run.remaining == 5000
+
+
+def _not_found_error(alias: str, data: dict, extra: dict | None = None) -> ShellError:
+    errors = [
+        {
+            "type": "NOT_FOUND",
+            "path": ["repository", alias],
+            "message": "Could not resolve to a PullRequest with the number of 2.",
+        }
+    ]
+    errors += [extra] if extra else []
+    out = json.dumps({"data": data, "errors": errors})
+    return ShellError(["gh"], 1, out, "gh: Could not resolve to a PullRequest")
+
+
+def test_thread_pass_tolerates_a_deleted_pr_as_none() -> None:
+    page = _threads_page([1, 2, 3], none=(2,), remaining=4000)
+    shell = _Flaky([_not_found_error("pr2", page)])
+    run = PullRequests("o", "r", shell=shell).review_threads([1, 2, 3], point_floor=0)
+    got = dict(run)
+    assert got[2] is None
+    assert len(got[1]) == 1 and len(got[3]) == 1
+    assert run.remaining == 4000  # a tolerated answer still counts for the floor
+
+
+def test_thread_pass_does_not_tolerate_not_found_mixed_with_another_error() -> None:
+    page = _threads_page([1, 2], none=(2,))
+    other = {"type": "INTERNAL", "path": ["repository", "pr1"], "message": "x"}
+    shell = _Flaky([_not_found_error("pr2", page, other)])
+    with pytest.raises(GitHubError):
+        list(PullRequests("o", "r", shell=shell).review_threads([1, 2], point_floor=0))
+
+
+def test_thread_pass_raises_other_errors_after_the_yielded_batches() -> None:
+    nums = list(range(1, 12))
+    shell = _Flaky(
+        [_threads_page(nums[:5]), ShellError(["gh"], 1, "", "HTTP 403 forbidden")]
+    )
+    got: list[int] = []
+    with pytest.raises(GitHubError, match="403"):
+        for n, _ in PullRequests("o", "r", shell=shell).review_threads(
+            nums, point_floor=0
+        ):
+            got.append(n)
+    assert got == nums[:5]
+    assert len(shell.cmds) == 2
+
+
+def test_thread_pass_yields_nothing_of_a_malformed_batch() -> None:
+    page = _threads_page([1, 2])
+    del page["repository"]["pr2"]
+    got: list[int] = []
+    with pytest.raises(GitHubError, match="pr2"):
+        for n, _ in PullRequests("o", "r", shell=CmdShell([page])).review_threads(
+            [1, 2], point_floor=0
+        ):
+            got.append(n)
+    assert got == []
+
+
+def test_thread_pass_parses_anchor_from_the_first_comment_only() -> None:
+    other_hunk = "@@ -9 +9 @@\n+    something_else_entirely_different(here)\n"
+    line = _thread()
+    line["comments"]["nodes"].append(
+        {
+            "author": {"__typename": "User", "login": "author"},
+            "body": "because",
+            "createdAt": "2026-01-02T00:00:00Z",
+            "isMinimized": False,
+            "diffHunk": other_hunk,
+        }
+    )
+    line["comments"]["totalCount"] = 2
+    file_level = _thread("b.py", subjectType="FILE", originalLine=None)
+    left = _thread("c.py", diffSide="LEFT")
+    page = {
+        "rateLimit": {"cost": 1, "remaining": 4999, "resetAt": "t"},
+        "repository": {
+            "pr7": {
+                "number": 7,
+                "reviewThreads": {"totalCount": 3, "nodes": [line, file_level, left]},
+            }
+        },
+    }
+    shell = CmdShell([page])
+    [(number, threads)] = list(
+        PullRequests("o", "r", shell=shell).review_threads([7], point_floor=0)
+    )
+    assert number == 7
+    t, f, lt = threads
+    assert t.anchor is not None and t.anchor.added is True
+    assert t.anchor.lines[-1] == "value = compute_the_thing(argument)"
+    assert [c.author for c in t.comments] == ["h", "author"]
+    assert t.comments_total == 2
+    assert (f.path, f.original_line, f.anchor) == ("b.py", None, None)
+    assert (lt.path, lt.anchor) == ("c.py", None)

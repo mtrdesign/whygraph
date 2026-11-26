@@ -1070,6 +1070,9 @@ def cmd_generate(env: Env, args: argparse.Namespace) -> None:
     from whygraph.mcp.targets import repo_root
 
     corpus = json.loads((EVAL_DIR / "part-a-corpus.json").read_text())
+    if args.classes:
+        wanted = set(args.classes.split(","))
+        corpus = [r for r in corpus if r["corpus_class"] in wanted]
     arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
     ledger = Ledger(LEDGER, CAP_USD)
     price_in, price_out = _price_per_m()
@@ -1094,6 +1097,8 @@ def cmd_generate(env: Env, args: argparse.Namespace) -> None:
     CARDS.mkdir(parents=True, exist_ok=True)
 
     def allow() -> bool:
+        if args.no_describe:
+            return False  # cached descriptions still apply; no new describe call
         try:
             ledger.check(0.02)
         except BudgetStop:
@@ -1159,7 +1164,7 @@ def cmd_generate(env: Env, args: argparse.Namespace) -> None:
                     if arm in record["cards"]:
                         continue
                     kwargs: dict[str, Any] = {}
-                    if arm.startswith("treated"):
+                    if "treated" in arm:
                         kwargs = {
                             "paths": scope.paths,
                             "file_lines": scope.current_lines,
@@ -2279,6 +2284,418 @@ def cmd_repeats(env: Env, args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# rerun: one model's baseline x2 + treated arms, measured, with blind sheets
+# ---------------------------------------------------------------------------
+
+
+def _render_card(card: dict) -> list[str]:
+    """A card as the blind sheets show it (no arm, no model)."""
+    out = [f"**Purpose.** {card['purpose']}", "", f"**Why.** {card['why']}", ""]
+    for kind in ("constraints", "risks"):
+        if card[kind]:
+            out.append(f"**{kind.capitalize()}.**")
+            for i in card[kind]:
+                refs = ", ".join(f"{r['kind']} {r['id'][:10]}" for r in i["refs"])
+                out.append(f"- {i['text']}" + (f" ({refs})" if refs else ""))
+            out.append("")
+    if card["tradeoffs"]:
+        out.append("**Tradeoffs.**")
+        out += [f"- {t}" for t in card["tradeoffs"]]
+        out.append("")
+    return out
+
+
+def _code_block(rec: dict) -> list[str]:
+    tgt = rec["target"]
+    return [
+        f"`{tgt['path']}` lines {tgt['start']}-{tgt['end']}",
+        "",
+        "<details><summary>Target code (today)</summary>",
+        "",
+        "```",
+        rec["code"][:6000],
+        "```",
+        "",
+        "</details>",
+        "",
+    ]
+
+
+def cmd_rerun(env: Env, args: argparse.Namespace) -> None:
+    """Measure the ``<prefix>baseline1/2`` and ``<prefix>treated`` arms; write blind sheets.
+
+    Writes ``part-a-m4-sheet-<suffix>.md``, ``part-a-m6-sheet-<suffix>.md`` (both
+    baseline-vs-baseline and baseline-vs-treated pairs, shuffled, pair type
+    hidden), ``part-a-m6-key-<suffix>.json`` and a section of
+    ``part-a-report.md``.
+    """
+    b1, b2, tr = (f"{args.prefix}{a}" for a in ("baseline1", "baseline2", "treated"))
+    recs = []
+    for path in sorted(CARDS.glob("T*.json")):
+        rec = json.loads(path.read_text())
+        if all(a in rec["cards"] for a in (b1, b2, tr)):
+            recs.append(rec)
+    if not recs:
+        raise SystemExit(f"no target has all of {b1}, {b2}, {tr}")
+    thread = [r for r in recs if r["corpus_class"] == "thread"]
+    m1 = {r["tid"]: r for r in json.loads((WORK / "m1.json").read_text())}
+
+    # Prompt identity with the first run (M1 does not depend on the model).
+    same_prompt = sum(
+        1
+        for r in recs
+        if r["prompts"].get(tr, {}).get("user")
+        == r["prompts"].get("treated", {}).get("user")
+        and r["prompts"].get(b1, {}).get("user")
+        == r["prompts"].get("baseline1", {}).get("user")
+    )
+    m1_fail = [f"{r['tid']}: {'; '.join(_code_checks_arms(r, b1, tr))}" for r in recs]
+    m1_fail = [f for f in m1_fail if not f.endswith(": ")]
+
+    # M2.
+    m2 = []
+    for r in thread:
+        c = r["cards"]
+        mean_items = (_n_items(c[b1]) + _n_items(c[b2])) / 2
+        mean_chars = (_card_chars(c[b1]) + _card_chars(c[b2])) / 2
+        m2.append(
+            {
+                "tid": r["tid"],
+                "items": (_n_items(c[b1]), _n_items(c[b2]), _n_items(c[tr])),
+                "chars": (_card_chars(c[b1]), _card_chars(c[b2]), _card_chars(c[tr])),
+                "items_delta": _n_items(c[tr]) - mean_items,
+                "items_noise": abs(_n_items(c[b2]) - _n_items(c[b1])),
+                "chars_delta_pct": (_card_chars(c[tr]) - mean_chars) / mean_chars * 100,
+                "chars_noise_pct": abs(_card_chars(c[b2]) - _card_chars(c[b1]))
+                / mean_chars
+                * 100,
+            }
+        )
+    med = {
+        k: statistics.median(x[k] for x in m2)
+        for k in ("items_delta", "items_noise", "chars_delta_pct", "chars_noise_pct")
+    }
+    m2_items_pass = med["items_delta"] <= 1
+    m2_chars_pass = med["chars_delta_pct"] - med["chars_noise_pct"] <= 15
+
+    # M5, pairwise (both directions), with a bootstrap over targets.
+    rows = []
+    for r in thread:
+        c = r["cards"]
+        bbq, bbl = (sum(x) for x in zip(_losses(c[b1], c[b2]), _losses(c[b2], c[b1])))
+        btq, btl = (sum(x) for x in zip(_losses(c[b1], c[tr]), _losses(c[b2], c[tr])))
+        rows.append(
+            {
+                "tid": r["tid"],
+                "quoted": (
+                    len(_quoted(c[b1])),
+                    len(_quoted(c[b2])),
+                    len(_quoted(c[tr])),
+                ),
+                "bb": (bbq, bbl),
+                "bt": (btq, btl),
+            }
+        )
+
+    def excess(sample: list[dict]) -> tuple[float, float, float, float]:
+        bbq = sum(x["bb"][0] for x in sample)
+        bbl = sum(x["bb"][1] for x in sample)
+        btq = sum(x["bt"][0] for x in sample)
+        btl = sum(x["bt"][1] for x in sample)
+        noise = bbl / bbq if bbq else 0.0
+        treat = btl / btq if btq else 0.0
+        per_run = sum((x["quoted"][0] + x["quoted"][1]) / 2 for x in sample)
+        return noise, treat, per_run, (treat - noise) * per_run
+
+    noise, treat, per_run, displaced = excess(rows)
+    rnd = random.Random(args.seed)
+    boots = sorted(
+        excess([rnd.choice(rows) for _ in rows])[3] for _ in range(BOOTSTRAP)
+    )
+    lo, hi = boots[int(0.025 * BOOTSTRAP)], boots[int(0.975 * BOOTSTRAP) - 1]
+    m5_pass = displaced <= 1
+    distinguishable = lo > 0
+
+    # Gain, and the matcher control on the baselines.
+    gain = {r["tid"]: _gain_hit(r["cards"][tr], r["texts"]) for r in thread}
+    gain_base = sum(
+        _gain_hit(r["cards"][b1], r["texts"]) or _gain_hit(r["cards"][b2], r["texts"])
+        for r in thread
+    )
+    gain_n = sum(gain.values())
+    gain_pass = gain_n >= 5
+
+    # Unit disagreement (the noise of M4).
+    b2_units = b2_new = t_units = t_new = 0
+    for r in thread:
+        c = r["cards"]
+        u1, u2, ut = _units(c[b1]), _units(c[b2]), _units(c[tr])
+        b2_units += len(u2)
+        b2_new += sum(1 for u in u2 if not _present(u, u1))
+        t_units += len(ut)
+        t_new += sum(1 for u in ut if not _present(u, u1 + u2))
+
+    # M4 sheet.
+    m4 = [
+        f"# Plan 62 Part A - M4 precision sheet, `{args.suffix}` run (judge, by hand)",
+        "",
+        "Every item or `why` sentence of a **treated** card that is absent from **both** "
+        f"baseline cards of the same run (fuzzy match, `SequenceMatcher` ratio >= "
+        f"{FUZZY_SAME}, or a shared quote). Thread targets only. Fill the three verdict "
+        "columns with `y` / `n` / `?`.",
+        "",
+        "- **True?** Is the claim true of today's code (the code block shown)?",
+        "- **Rejected / open?** Is it a rejected suggestion or an open question "
+        "presented as fact (`y` = yes, it is one; this must be `n`)?",
+        "- **On target?** Is it about the target symbol (not other code in the file)?",
+        "",
+        "Bar (plan section 9): 0 rejected-suggestion constraints; at least 90 % precise "
+        "(precise = True `y`, Rejected `n`, On target `y`).",
+        "",
+        f"Noise floor: {b2_new} of {b2_units} baseline-2 units are absent from baseline 1 "
+        "under the same matcher. Units marked **thread-linked** are listed first in each "
+        "target.",
+        "",
+    ]
+    m4_count = m4_linked = 0
+    for r in thread:
+        c = r["cards"]
+        new = [
+            u for u in _units(c[tr]) if not _present(u, _units(c[b1]) + _units(c[b2]))
+        ]
+        if not new:
+            continue
+        for u in new:
+            u["thread_linked"] = _thread_link(u, r)
+        new.sort(key=lambda u: not u["thread_linked"])
+        m4 += [
+            f"## {r['tid']} - `{r['target']['qualified_name']}`",
+            "",
+            *_code_block(r),
+            "<details><summary>Review threads the treated prompt rendered</summary>",
+            "",
+            "```",
+            *[line for lines in r["rendered_threads"].values() for line in lines],
+            "```",
+            "",
+            "</details>",
+            "",
+        ]
+        for u in new:
+            m4_count += 1
+            m4_linked += bool(u["thread_linked"])
+            origins = _quote_origins(u, r["texts"]) if u["quote"] else []
+            refs = ", ".join(f"{x['kind']} {x['id'][:10]}" for x in u["refs"]) or "-"
+            link = (
+                f" - **thread-linked** ({u['thread_linked']})"
+                if u["thread_linked"]
+                else ""
+            )
+            m4 += [
+                f"### M4-{m4_count:03d} ({u['kind']}, basis `{u['basis']}`){link}",
+                "",
+                f"> {u['text']}",
+                "",
+                f"- Refs: {refs}",
+                f"- Quote: {u['quote'] or '-'}"
+                + (f" (found in: {', '.join(origins)})" if origins else ""),
+                "",
+                "| True of today's code? | Rejected suggestion / open question? "
+                "| About the target symbol? | Note |",
+                "|---|---|---|---|",
+                "|   |   |   |   |",
+                "",
+            ]
+    m4.insert(4, f"Units to judge: **{m4_count}** ({m4_linked} thread-linked).")
+    m4.insert(5, "")
+    (EVAL_DIR / f"part-a-m4-sheet-{args.suffix}.md").write_text("\n".join(m4) + "\n")
+
+    # M6 sheet: both pair types, shuffled, the type hidden.
+    pairs = [(r, "baseline-vs-baseline", b1, b2) for r in thread] + [
+        (r, "baseline-vs-treated", b1, tr) for r in thread
+    ]
+    rnd = random.Random(f"{args.seed}-{args.suffix}-m6")
+    rnd.shuffle(pairs)
+    key: dict[str, dict] = {}
+    m6 = [
+        f"# Plan 62 Part A - M6 blind focus comparison, `{args.suffix}` run (judge)",
+        "",
+        "For each pair: two cards of the same code. Which card states the target's "
+        "reason more accurately and with less irrelevant content? Write `A`, `B` or `=` "
+        "in the verdict line. Pairs are shuffled and some pairs compare two cards made "
+        f"the same way. The key is `part-a-m6-key-{args.suffix}.json`: do not open it "
+        "until every verdict is in.",
+        "",
+    ]
+    for n, (r, kind, left, right) in enumerate(pairs, 1):
+        sides = [left, right]
+        rnd.shuffle(sides)
+        label = f"P{n:02d}"
+        key[label] = {"tid": r["tid"], "pair": kind, "A": sides[0], "B": sides[1]}
+        m6 += [
+            f"## {label} - `{r['target']['qualified_name']}`",
+            "",
+            *_code_block(r),
+            "### Card A",
+            "",
+            *_render_card(r["cards"][sides[0]]),
+            "### Card B",
+            "",
+            *_render_card(r["cards"][sides[1]]),
+            "**Verdict (A / B / =):** ",
+            "",
+            "---",
+            "",
+        ]
+    (EVAL_DIR / f"part-a-m6-sheet-{args.suffix}.md").write_text("\n".join(m6) + "\n")
+    (EVAL_DIR / f"part-a-m6-key-{args.suffix}.json").write_text(
+        json.dumps(key, indent=1) + "\n"
+    )
+
+    # Spend of this run.
+    spend: Counter = Counter()
+    for line in LEDGER.read_text().splitlines():
+        if line.strip():
+            e = json.loads(line)
+            if str(e.get("arm", "")).startswith(args.prefix):
+                spend[e["arm"]] += float(e.get("cost") or 0)
+    total = Ledger(LEDGER, CAP_USD).total()
+
+    def yn(ok: bool) -> str:
+        return "**PASS**" if ok else "**FAIL**"
+
+    start, end = f"<!-- {args.suffix}:start -->", f"<!-- {args.suffix}:end -->"
+    sec = [
+        start,
+        f"## {args.title}",
+        "",
+        f"Model `{PROVIDER}/{MODEL}`, thread targets only ({len(thread)}), arms "
+        f"`{b1}`, `{b2}` and `{tr}` (one pass each), same pinned worktree and DB copies "
+        "as the Haiku runs; no new commit description was made (the cached ones apply). "
+        "Spend of this run: "
+        + ", ".join(f"{k} ${v:.4f}" for k, v in sorted(spend.items()))
+        + f" (**${sum(spend.values()):.4f}**); ledger total **${total:.4f} of "
+        f"${CAP_USD:.2f}**.",
+        "",
+        "### M1",
+        "",
+        f"The prompts do not depend on the model (one default prompt for every model): "
+        f"{same_prompt} of {len(recs)} targets' baseline-1 and treated prompts are "
+        "byte-identical to the Haiku run's, so M1 above stands (thread targets median "
+        f"+{statistics.median(m1[r['tid']]['delta'] for r in thread):.0f} characters). "
+        "Code checks on these prompts: "
+        + ("**all hold**." if not m1_fail else "**failing**: " + "; ".join(m1_fail)),
+        "",
+        "### M2 - card size",
+        "",
+        f"- Items: median delta {med['items_delta']:+.1f} (noise median "
+        f"{med['items_noise']:.1f}); bar +1 or less: {yn(m2_items_pass)}",
+        f"- Characters: median delta {med['chars_delta_pct']:+.1f} % (noise median "
+        f"{med['chars_noise_pct']:.1f} %; delta - noise "
+        f"{med['chars_delta_pct'] - med['chars_noise_pct']:+.1f} %); bar +15 % or less "
+        f"over the noise floor: {yn(m2_chars_pass)}",
+        "",
+        "| Target | Items b1 / b2 / t | Chars b1 / b2 / t | Chars delta % |",
+        "|---|---|---|---|",
+        *[
+            f"| {x['tid']} | {' / '.join(map(str, x['items']))} | "
+            f"{' / '.join(map(str, x['chars']))} | {x['chars_delta_pct']:+.1f} |"
+            for x in m2
+        ],
+        "",
+        "### M5 - displacement (pairwise)",
+        "",
+        f"- Baseline-vs-baseline loss rate (noise floor, both directions): **{noise:.1%}**",
+        f"- Baseline-vs-treated loss rate (both baselines against treated): **{treat:.1%}**",
+        f"- Mean quoted items per baseline run (thread targets): {per_run:.1f}",
+        f"- Excess displaced quoted items per treated run: **{displaced:+.2f}** "
+        f"(bootstrap over targets, {BOOTSTRAP} resamples, 95 % interval "
+        f"[{lo:+.2f}, {hi:+.2f}])",
+        f"- Bar (at most 1): {yn(m5_pass)}. Distinguishable from noise: "
+        f"**{'yes' if distinguishable else 'no'}**.",
+        "",
+        "| Target | quoted b1 / b2 / t | b-b lost / compared | b-t lost / compared |",
+        "|---|---|---|---|",
+        *[
+            f"| {x['tid']} | {' / '.join(map(str, x['quoted']))} | "
+            f"{x['bb'][1]} / {x['bb'][0]} | {x['bt'][1]} / {x['bt'][0]} |"
+            for x in rows
+        ],
+        "",
+        "### Gain",
+        "",
+        f"- {gain_n} of {len(thread)} thread targets have a treated item quoted from (or "
+        f"citing the text of) a PR-author thread comment; bar at least 5: {yn(gain_pass)}",
+        f"- Targets: {', '.join(t for t, hit in gain.items() if hit) or '-'}",
+        f"- Matcher control: the baselines hit on {gain_base} targets.",
+        "",
+        "### Noise of the card text",
+        "",
+        f"- Baseline-1 vs baseline-2 unit disagreement: **{b2_new} of {b2_units} "
+        f"({b2_new / b2_units:.0%})** baseline-2 units have no match in baseline 1 "
+        "(Haiku: 137 of 156, 88 %).",
+        f"- Treated units absent from both baselines: {t_new} of {t_units} "
+        f"({t_new / t_units:.0%}).",
+        "",
+        "### Sheets for the judge (blind)",
+        "",
+        f"- `plans/62-eval/part-a-m4-sheet-{args.suffix}.md`: {m4_count} units "
+        f"({m4_linked} thread-linked).",
+        f"- `plans/62-eval/part-a-m6-sheet-{args.suffix}.md`: {len(pairs)} shuffled "
+        f"pairs, {len(thread)} baseline-vs-baseline and {len(thread)} "
+        "baseline-vs-treated, sides randomized, pair type hidden; key "
+        f"`plans/62-eval/part-a-m6-key-{args.suffix}.json`. Bar: treated worse on at "
+        "most 2 of 15; the baseline-vs-baseline pairs give the judge's own noise rate.",
+        "",
+        end,
+    ]
+    report = EVAL_DIR / "part-a-report.md"
+    text = report.read_text()
+    block = "\n".join(sec)
+    if start in text:
+        head, rest = text.split(start, 1)
+        text = head + block + rest.split(end, 1)[1]
+    else:
+        text = text.rstrip("\n") + "\n\n" + block + "\n"
+    report.write_text(text)
+    print(
+        json.dumps(
+            {
+                "targets": len(thread),
+                "same_prompt": same_prompt,
+                "m1_failures": m1_fail,
+                "m2": {**med, "items_pass": m2_items_pass, "chars_pass": m2_chars_pass},
+                "m5": {
+                    "noise": noise,
+                    "treated": treat,
+                    "per_run": per_run,
+                    "excess": displaced,
+                    "ci": [lo, hi],
+                    "pass": m5_pass,
+                    "distinguishable": distinguishable,
+                },
+                "gain": [gain_n, gain_pass, gain_base],
+                "unit_noise": [b2_new, b2_units],
+                "m4_units": [m4_count, m4_linked],
+                "spend": dict(spend),
+                "ledger": total,
+            },
+            indent=1,
+        )
+    )
+
+
+def _code_checks_arms(record: dict, base: str, treated: str) -> list[str]:
+    """:func:`_code_checks` on a named pair of arms."""
+    prompts = record["prompts"]
+    view = {
+        "corpus_class": record["corpus_class"],
+        "prompts": {"baseline1": prompts.get(base), "treated": prompts.get(treated)},
+    }
+    return _code_checks(view)
+
+
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2294,6 +2711,7 @@ def main(argv: list[str] | None = None) -> int:
     int
         The exit status.
     """
+    global MODEL
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--slug", default="biome")
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
@@ -2301,6 +2719,9 @@ def main(argv: list[str] | None = None) -> int:
         "--db-url", default=os.environ.get("WHYGRAPH_DATABASE_URL", DEFAULT_DB_URL)
     )
     parser.add_argument("--seed", type=int, default=62)
+    parser.add_argument(
+        "--model", default=MODEL, help=f"{PROVIDER} model (default {MODEL})"
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("copy")
     p.add_argument("--v1-db", help="a WhyGraph DB from before the v2 crawl (M1)")
@@ -2321,13 +2742,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--arms",
         default=",".join(ARMS),
-        help="comma-separated arms; a name starting with treated gets the thread inputs",
+        help="comma-separated arms; a name containing treated gets the thread inputs",
+    )
+    p.add_argument(
+        "--classes", help="comma-separated corpus classes to run (default all)"
+    )
+    p.add_argument(
+        "--no-describe",
+        action="store_true",
+        help="describe nothing new (the cached descriptions still apply)",
     )
     sub.add_parser("prompts")
     sub.add_parser("m1")
     sub.add_parser("measure")
     sub.add_parser("repeats")
+    p = sub.add_parser("rerun")
+    p.add_argument("--prefix", default="sonnet-", help="arm-name prefix of the run")
+    p.add_argument("--suffix", default="sonnet", help="suffix of the sheet files")
+    p.add_argument("--title", default="Sonnet re-run", help="report section heading")
     args = parser.parse_args(argv)
+    MODEL = args.model
     env = Env(slug=args.slug, data=args.data.expanduser(), db_url=args.db_url)
     commands = {
         "copy": cmd_copy,
@@ -2339,6 +2773,7 @@ def main(argv: list[str] | None = None) -> int:
         "m1": cmd_m1,
         "measure": cmd_measure,
         "repeats": cmd_repeats,
+        "rerun": cmd_rerun,
     }
     commands[args.cmd](env, args)
     return 0

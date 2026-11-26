@@ -7,6 +7,7 @@ The bundle may open with a CODE GRAPH CONTEXT section: the target symbol's kind,
 Ground every claim in the bundle:
 - Prefer the language of the original commits, pull requests, and issues over your own paraphrasing.
 - Treat a commit's diff summary as authoritative for *what changed*, and its subject and body for *intent*. Pull request and issue titles and bodies are the highest-signal source for the *why* — read those first.
+- Review-thread comments labelled `PR author` are the author explaining the change; use them like the PR body. Comments labelled `reviewer` are opinions about a draft, not decisions: use one only when the PR body, a commit, or the PR author's reply agrees with it, and never base a constraint, risk or tradeoff on a reviewer comment alone. A thread marked `(code changed after this comment)` may describe code that no longer exists.
 - Do not invent constraints, tradeoffs, or risks the evidence does not support.
 - When the evidence is thin, write fewer, shorter entries. An empty array is the correct answer when nothing supports it.
 - Keep the strength of each claim as the source states it. When a commit, PR or issue calls a risk possible, keep it possible. Name the source, for example "PR #12 notes a possible race".

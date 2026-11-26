@@ -59,6 +59,9 @@ class _FakeGenerator:
         *,
         symbol_context: SymbolContext | None = None,
         subject: str | None = None,
+        paths: frozenset[str] | None = None,
+        file_lines: Sequence[str] | None = None,
+        target_range: tuple[int, int] | None = None,
     ) -> Rationale:
         return Rationale(
             purpose="Holds two sample lines.",
@@ -171,6 +174,9 @@ def test_rationale_brief_wraps_generator_failure(
             *,
             symbol_context: SymbolContext | None = None,
             subject: str | None = None,
+            paths: frozenset[str] | None = None,
+            file_lines: Sequence[str] | None = None,
+            target_range: tuple[int, int] | None = None,
         ) -> Rationale:
             raise AnalyzeError("model unavailable")
 
@@ -590,7 +596,7 @@ def test_force_refresh_skips_the_cache_and_stores_the_new_card(
     calls: list[int] = []
 
     class _CountingGenerator(_FakeGenerator):
-        def generate(self, evidence, *, symbol_context=None, subject=None):
+        def generate(self, evidence, *, symbol_context=None, subject=None, **_):
             calls.append(1)
             return super().generate(
                 evidence, symbol_context=symbol_context, subject=subject
@@ -815,7 +821,7 @@ def test_cached_only_never_generates(
     calls: list[int] = []
 
     class _CountingGenerator(_FakeGenerator):
-        def generate(self, evidence, *, symbol_context=None, subject=None):
+        def generate(self, evidence, *, symbol_context=None, subject=None, **_):
             calls.append(1)
             return super().generate(
                 evidence, symbol_context=symbol_context, subject=subject
@@ -898,7 +904,7 @@ def _cache_card(
 class _NoGenerator(_FakeGenerator):
     """A generator a cached_only call must never reach."""
 
-    def generate(self, evidence, *, symbol_context=None, subject=None):
+    def generate(self, evidence, *, symbol_context=None, subject=None, **_):
         raise AssertionError("cached_only must not generate")
 
 
@@ -1148,6 +1154,9 @@ def _counting_generator(monkeypatch: pytest.MonkeyPatch) -> list[int]:
             *,
             symbol_context: SymbolContext | None = None,
             subject: str | None = None,
+            paths: frozenset[str] | None = None,
+            file_lines: Sequence[str] | None = None,
+            target_range: tuple[int, int] | None = None,
         ) -> Rationale:
             calls.append(len(evidence))
             return super().generate(evidence)
@@ -1604,3 +1613,90 @@ def test_stopping_a_project_mid_completion_recreates_nothing(
 
     assert not history.exists()
     assert calls == [2]
+
+
+# ---- plan 62: the review-thread scope reaches the generator -----------------
+
+
+def _recording_generator(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Patch the generator; return the ``(paths, file_lines, target_range)`` it got."""
+    seen: list[tuple] = []
+
+    class _Recording(_FakeGenerator):
+        def generate(
+            self,
+            evidence: Sequence[CommitEvidence],
+            *,
+            symbol_context: SymbolContext | None = None,
+            subject: str | None = None,
+            paths: frozenset[str] | None = None,
+            file_lines: Sequence[str] | None = None,
+            target_range: tuple[int, int] | None = None,
+        ) -> Rationale:
+            seen.append((paths, file_lines, target_range))
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Recording)
+    return seen
+
+
+def test_rationale_brief_passes_the_working_tree_scope(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locally the anchors are checked on the working-tree file blame reads."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    seen = _recording_generator(monkeypatch)
+
+    whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
+
+    (paths, file_lines, target_range), *_ = seen
+    assert "sample.py" in paths
+    text = (temp_git_repo / "sample.py").read_text()
+    assert file_lines == tuple(text.split("\n"))
+    assert target_range == (1, 3)
+
+
+def test_rationale_card_without_a_scope_passes_no_thread_inputs(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``review_scope=None`` fails closed: the generator gets no thread inputs."""
+    monkeypatch.chdir(temp_git_repo)
+    seen = _recording_generator(monkeypatch)
+    shas = _seed_undescribed(1)
+    with get_session() as session:
+        session.get(Commit, shas[0]).llm_description = "described"
+
+    _card(shas, target_range=(1, 3))
+
+    assert seen == [(None, None, None)]
+
+
+def test_a_completion_reuses_the_requests_review_scope(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The background completion regenerates with the scope of the request."""
+    from whygraph.mcp.evidence import ReviewScope, drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    seen = _recording_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    scope = ReviewScope(paths=frozenset({"sample.py"}), current_lines=("a", "b"))
+    inputs = {"review_scope": scope, "target_range": (1, 3)}
+
+    fake.unavailable = True
+    assert _card(shas, **inputs)["partial"] is True
+    assert drain_describes(timeout=30)
+    fake.unavailable = False
+    monkeypatch.setattr("whygraph.mcp.rationale.CARD_RETRY_COOLDOWN_SEC", 0)
+    assert _card(shas, **inputs)["completing"] is True
+    assert drain_describes(timeout=30)
+
+    assert seen == [(scope.paths, scope.current_lines, (1, 3))] * 2

@@ -276,13 +276,27 @@ class _Generator:
     """Stub :class:`~whygraph.analyze.RationaleGenerator`; counts generations."""
 
     calls = 0
+    threads: list[dict] = []
+    """The review-thread arguments of each generation (plan 62 section 4.9)."""
 
     @classmethod
     def from_config(cls, config: object) -> _Generator:
         return cls()
 
-    def generate(self, evidence, *, symbol_context=None, subject=None) -> Rationale:  # noqa: ANN001
+    def generate(  # noqa: ANN001
+        self,
+        evidence,
+        *,
+        symbol_context=None,
+        subject=None,
+        paths=None,
+        file_lines=None,
+        target_range=None,
+    ) -> Rationale:
         type(self).calls += 1
+        type(self).threads.append(
+            {"paths": paths, "file_lines": file_lines, "target_range": target_range}
+        )
         return Rationale(
             purpose="Holds the sample lines.",
             why="Two commits built it up.",
@@ -298,6 +312,7 @@ class _Generator:
 def generator(monkeypatch: pytest.MonkeyPatch) -> type[_Generator]:
     """``RationaleGenerator`` stubbed; ``generator.calls`` counts generations."""
     _Generator.calls = 0
+    _Generator.threads = []
     monkeypatch.setattr(rationale_mod, "RationaleGenerator", _Generator)
     # A configured, reachable provider: the key pre-check is its own test.
     monkeypatch.setattr(v1_routes, "_missing_key", lambda *a, **k: None)
@@ -580,6 +595,39 @@ def test_rationale_without_a_symbol_uses_the_requested_range(
     card = RationaleOut.model_validate(response.json())
     assert (card.target.line_start, card.target.line_end) == (1, 3)
     assert generator.calls == 1
+
+
+def test_rationale_for_an_indexed_symbol_checks_threads_on_the_clone(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """The platform's own range and blame: review threads are scoped to its clone."""
+    response = call(
+        v1,
+        "POST",
+        "/rationale",
+        json={"target": target_body(start=100, end=120, name="sample.fn"), "hunks": []},
+    )
+    assert response.status_code == 200, response.text
+    (inputs,) = generator.threads
+    assert "sample.py" in inputs["paths"]
+    assert inputs["file_lines"] is not None and len(inputs["file_lines"]) >= 3
+    assert inputs["target_range"] == (1, 3)
+
+
+def test_rationale_for_an_explicit_range_renders_no_threads(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """The requester's working-tree numbers: no scope, so no threads (fail closed)."""
+    response = call(
+        v1,
+        "POST",
+        "/rationale",
+        json={"target": target_body(name="nosuch.symbol"), "hunks": hunks_of(v1)},
+    )
+    assert response.status_code == 200, response.text
+    assert generator.threads == [
+        {"paths": None, "file_lines": None, "target_range": None}
+    ]
 
 
 def test_rationale_without_evidence_is_404(

@@ -43,6 +43,7 @@ from .structured import structured
 from .errors import WhyGraphError, log_tool_errors
 from .targets import Target, repo_root, resolve_target, target_dict
 from .evidence import (
+    ReviewScope,
     _db_key,
     _spawn,
     _stop_event,
@@ -50,6 +51,7 @@ from .evidence import (
     blame_target,
     collect_evidence,
     pushed_target,
+    review_scope,
     split_by_push_status,
 )
 from .rationale_cache import (
@@ -439,6 +441,25 @@ def _reset_completions() -> None:
         _completion_attempts.clear()
 
 
+def _thread_inputs(
+    scope: ReviewScope | None, target_range: tuple[int, int] | None
+) -> dict[str, Any]:
+    """The generator's review-thread arguments; all ``None`` without a scope (fail closed)."""
+    if scope is None or target_range is None:
+        return {"paths": None, "file_lines": None, "target_range": None}
+    return {
+        "paths": scope.paths,
+        "file_lines": scope.current_lines,
+        "target_range": target_range,
+    }
+
+
+def _local_review_scope(target: Target) -> ReviewScope:
+    """The review-thread scope of a local target: its file under :func:`repo_root`."""
+    with get_session() as session:
+        return review_scope(session, repo_root(), target.path)
+
+
 def _start_completion(
     target: Target,
     evidence: list[CommitEvidence],
@@ -446,6 +467,9 @@ def _start_completion(
     model: str | None,
     allow_description: Callable[[], bool] | None,
     before_generate: Callable[[], None] | None,
+    *,
+    review_scope: ReviewScope | None = None,
+    target_range: tuple[int, int] | None = None,
 ) -> bool:
     """Start completing a partial card in the background, unless one may not start.
 
@@ -469,6 +493,11 @@ def _start_completion(
         The description budget, passed to the backfill.
     before_generate : callable or None
         The card budget, called before the card is generated again.
+    review_scope : ReviewScope or None, optional
+        The request's review-thread scope, reused by the completion (see
+        :func:`rationale_card`); ``None`` keeps threads out of the card.
+    target_range : tuple[int, int] or None, optional
+        The target's line range in ``review_scope.current_lines``.
 
     Returns
     -------
@@ -515,6 +544,8 @@ def _start_completion(
                 allow_description=allow_description,
                 before_generate=before_generate,
                 stop=stop,
+                review_scope=review_scope,
+                target_range=target_range,
             )
         finally:
             with _completions_lock:
@@ -565,6 +596,8 @@ def _complete_partial(
     allow_description: Callable[[], bool] | None,
     before_generate: Callable[[], None] | None,
     stop: threading.Event,
+    review_scope: ReviewScope | None = None,
+    target_range: tuple[int, int] | None = None,
 ) -> None:
     """Describe a partial card's deferred commits, then regenerate it once (plan 49 section 4.3).
 
@@ -588,6 +621,8 @@ def _complete_partial(
         The card budget; a refusal leaves the row partial.
     stop : threading.Event
         The project's stop event, taken when the completion started.
+    review_scope, target_range : optional
+        As for :func:`_start_completion`: computed once at request time.
     """
     try:
         if stop.is_set():
@@ -632,6 +667,7 @@ def _complete_partial(
             fresh,
             symbol_context=_symbol_context(target),
             subject=target.qualified_name or target.path,
+            **_thread_inputs(review_scope, target_range),
         )
         if stop.is_set():
             return
@@ -727,6 +763,8 @@ def rationale_card(
     mark_generated: bool = False,
     progress: Callable[[int, str], None] | None = None,
     note: Callable[[str], None] | None = None,
+    review_scope: ReviewScope | None = None,
+    target_range: tuple[int, int] | None = None,
 ) -> dict:
     """The rationale card of ``target`` from ``evidence``: cached, or generated and cached.
 
@@ -767,6 +805,14 @@ def rationale_card(
         ("generating card") of :data:`PROGRESS_STEPS` on a cache miss.
     note : callable, optional
         Called with a one-line cache hit / miss message.
+    review_scope : ReviewScope, optional
+        The target file's review-thread scope (its rename aliases and
+        current lines), computed once by the caller at request time and
+        reused by a background completion. ``None`` (default) keeps review
+        threads out of the card (fail closed).
+    target_range : tuple[int, int], optional
+        The target's line range in ``review_scope.current_lines``; ``None``
+        keeps review threads out too.
 
     Returns
     -------
@@ -815,6 +861,8 @@ def rationale_card(
                 pinned_model,
                 allow_description,
                 before_generate,
+                review_scope=review_scope,
+                target_range=target_range,
             )
         card = _format_response(
             target,
@@ -881,6 +929,7 @@ def rationale_card(
             evidence,
             symbol_context=_symbol_context(target),
             subject=target.qualified_name or target.path,
+            **_thread_inputs(review_scope, target_range),
         )
     except (AnalyzeError, LlmError) as exc:
         raise RationaleGenerationError.wrap(
@@ -906,6 +955,8 @@ def rationale_card(
             pinned_model,
             allow_description,
             before_generate,
+            review_scope=review_scope,
+            target_range=target_range,
         )
     )
     return _format_response(
@@ -1068,6 +1119,7 @@ def _brief(
         evidence = collect_evidence(target, limit=20)
     if progress is not None:
         progress(1, f"evidence collected ({len(evidence)} commits)")
+    # Local blame reads the working tree, so the anchors are checked on it.
     return rationale_card(
         target,
         evidence,
@@ -1076,6 +1128,8 @@ def _brief(
         mark_generated=True,
         progress=progress,
         note=note,
+        review_scope=_local_review_scope(target),
+        target_range=(target.line_start, target.line_end),
     )
 
 

@@ -109,6 +109,9 @@ class _CountingGenerator:
         *,
         symbol_context: SymbolContext | None = None,
         subject: str | None = None,
+        paths: frozenset[str] | None = None,
+        file_lines: Sequence[str] | None = None,
+        target_range: tuple[int, int] | None = None,
     ) -> Rationale:
         type(self).calls += 1
         return Rationale(

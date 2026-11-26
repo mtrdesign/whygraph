@@ -379,7 +379,7 @@ def test_rationale_progress_reaches_the_client_over_stateless_http(
         def from_config(cls, config: object) -> "_Generator":
             return cls()
 
-        def generate(self, evidence, *, symbol_context=None, subject=None):  # noqa: ANN001
+        def generate(self, evidence, *, symbol_context=None, subject=None, **_):  # noqa: ANN001, ANN003
             return Rationale(
                 purpose="p",
                 why="w",

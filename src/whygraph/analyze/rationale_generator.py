@@ -24,7 +24,9 @@ import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
+from whygraph.core.code_anchor import anchor_positions
 from whygraph.core.config import Config, RationaleConfig
 from whygraph.core.usage import record_usage
 from whygraph.db.models import Commit, Issue, PullRequest
@@ -109,19 +111,24 @@ class _PrRenderCaps:
         Max PR comments rendered into a PR block.
     pr_comment_max_chars : int
         Per-comment body clip.
+    review_threads_max_chars : int
+        Characters of qualified review-thread text in one prompt; ``0``
+        keeps threads out.
     """
 
     pr_roster_max_commits: int = 30
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
+    review_threads_max_chars: int = 3000
 
     @classmethod
     def from_config(cls, config: RationaleConfig) -> "_PrRenderCaps":
-        """Project the three rendering caps out of a :class:`RationaleConfig`."""
+        """Project the four rendering caps out of a :class:`RationaleConfig`."""
         return cls(
             pr_roster_max_commits=config.pr_roster_max_commits,
             pr_discussion_max_comments=config.pr_discussion_max_comments,
             pr_comment_max_chars=config.pr_comment_max_chars,
+            review_threads_max_chars=config.review_threads_max_chars,
         )
 
 
@@ -149,13 +156,20 @@ def _format_commit(commit: Commit) -> list[str]:
     return lines
 
 
-def _format_pr(pr: PullRequest, caps: _PrRenderCaps = _PrRenderCaps()) -> list[str]:
+def _format_pr(
+    pr: PullRequest,
+    caps: _PrRenderCaps = _PrRenderCaps(),
+    *,
+    discussion: bool = True,
+) -> list[str]:
     """Render one pull request as the indented lines of an evidence block.
 
     Appends the squashed-commit roster and the PR discussion so the LLM
     sees the narrative a squash merge collapsed. Both are clipped by
     ``caps`` to bound the prompt size; ``pr.commit_titles`` / ``pr.comments``
     are JSON-encoded list columns decoded via :func:`_json_list`.
+    ``discussion=False`` leaves the ``Discussion:`` block out (a later
+    occurrence of a PR already rendered in the bundle).
     """
     when = f"merged {pr.merged_at}" if pr.merged_at else pr.state
     author = f"by {pr.author}" if pr.author else "by unknown"
@@ -173,7 +187,7 @@ def _format_pr(pr: PullRequest, caps: _PrRenderCaps = _PrRenderCaps()) -> list[s
             oid = (c.get("oid") or "")[:9]
             lines.append(f"      - {c.get('headline', '')}  ({oid})")
     comments = _json_list(pr.comments)[: caps.pr_discussion_max_comments]
-    if comments:
+    if comments and discussion:
         lines.append("    Discussion:")
         for cm in comments:
             if not isinstance(cm, dict):
@@ -206,9 +220,322 @@ _SOURCE_LABELS = {
     "area": "area-history (touched the file but not these lines)",
 }
 
+# Evidence sources that attribute the target's own lines (plan 62 R20): only
+# a PR linked to one of these may bring review threads into the prompt.
+_LINE_SOURCES = frozenset({"blame", "pr-origin", "blame-walked", "predecessor-blame"})
+
+# Review-thread rendering (plan 62 section 4.9 / 4.9a).
+_THREADS_HEADER = (
+    "    Review threads on these lines (comments on a draft of this change):"
+)
+_THREADS_PER_PR_CHARS = 1200
+_THREAD_COMMENT_MAX_CHARS = 400
+_THREAD_AUTHOR_MIN_CHARS = 60
+_THREAD_OUTDATED = "(code changed after this comment)"
+_DISCUSSION_SHOWN_ABOVE = "    (discussion shown above)"
+
+# Agent or bot text posted from a ``User`` account: an HTML-comment marker
+# (``<!-- cookie-review``), an agent signature, or an agent severity label.
+# Matched on the raw comment body.
+_MACHINE_TEXT_RE = re.compile(
+    r"^\s*<!--"
+    r"|written by .{0,40}agent"
+    r"|agent-assisted"
+    r"|^\s*(\*\*|\[)\s*(p[0-3]|critical|high|medium|low|optional)\b",
+    re.IGNORECASE,
+)
+_SUGGESTION_BLOCK_RE = re.compile(r"```[ \t]*suggestion\b.*?(?:```|\Z)", re.DOTALL)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+_CODE_FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+
+
+def _clean_thread_comment(body: object) -> str:
+    """The text of one review-thread comment as the prompt may show it.
+
+    Removes suggestion blocks and HTML comments, replaces any other fenced
+    code block with ``[code]``, drops lines that start with ``>`` (text the
+    commenter quoted) and collapses whitespace. The one cleaning used for
+    the length rule, the rendering and the quote sources alike; ``""``
+    means the comment is dropped.
+    """
+    if not isinstance(body, str):
+        return ""
+    text = _SUGGESTION_BLOCK_RE.sub("", body)
+    text = _HTML_COMMENT_RE.sub("", text)
+    text = _CODE_FENCE_RE.sub("[code]", text)
+    kept = [line for line in text.split("\n") if not line.lstrip().startswith(">")]
+    return _collapse_whitespace("\n".join(kept))
+
+
+def _is_machine_text(body: object) -> bool:
+    """Whether a raw comment body is agent or bot text (:data:`_MACHINE_TEXT_RE`)."""
+    return isinstance(body, str) and _MACHINE_TEXT_RE.search(body) is not None
+
+
+def _parse_time(value: object) -> datetime | None:
+    """An ISO-8601 timestamp as an aware datetime (naive read as UTC), else ``None``."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True, slots=True)
+class _RenderedThreads:
+    """One PR's review-thread block, as the prompt shows it.
+
+    Attributes
+    ----------
+    lines : tuple[str, ...]
+        The block's indented lines (header, threads, the omitted line).
+    author_texts : tuple[str, ...]
+        The PR author's rendered, cleaned comments: the only thread texts a
+        quote may come from (plan 62 R14).
+    """
+
+    lines: tuple[str, ...]
+    author_texts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _Thread:
+    """One qualified thread: its rendered entries and the PR author's texts."""
+
+    entries: tuple[str, ...]
+    author_texts: tuple[str, ...]
+
+    @property
+    def chars(self) -> int:
+        """The thread text this thread spends from the budgets."""
+        return sum(len(entry) for entry in self.entries)
+
+
+def _covers(ranges: Sequence[tuple[int, int]] | None, line: int) -> bool:
+    """Whether one of the inclusive ``ranges`` holds ``line``."""
+    return any(start <= line <= end for start, end in ranges or ())
+
+
+def _anchor_owned(
+    thread: dict,
+    pr: PullRequest,
+    blame: Sequence[CommitEvidence],
+    file_lines: Sequence[str],
+    target_range: tuple[int, int],
+) -> bool:
+    """Rule 4 (R21, R22): the thread's code is inside the target and still the PR's.
+
+    The anchor's commented line must lie inside ``target_range`` at a
+    position that blame ties to the PR: for an ``added`` line, a ``blame``
+    item covering it is linked to this PR; for a context line, the anchor
+    occurs once in the whole file and the ``blame`` item covering it was
+    committed before the PR was created.
+    """
+    anchor = thread.get("anchor")
+    if not isinstance(anchor, dict):
+        return False
+    anchor_lines = anchor.get("lines")
+    if not isinstance(anchor_lines, list) or not all(
+        isinstance(line, str) for line in anchor_lines
+    ):
+        return False
+    positions = anchor_positions(anchor_lines, file_lines)
+    start, end = target_range
+    added = anchor.get("added") is True
+    created = _parse_time(pr.created_at)
+    if not added and (len(positions) != 1 or created is None):
+        return False
+    for y in positions:
+        if not start <= y <= end:
+            continue
+        for item in blame:
+            if not _covers(item.lines, y):
+                continue
+            if added:
+                if any(p.number == pr.number for p in item.pull_requests):
+                    return True
+            else:
+                committed = _parse_time(item.commit.committed_at)
+                if committed and created and committed < created:
+                    return True
+    return False
+
+
+def _qualify_thread(
+    thread: object,
+    pr: PullRequest,
+    paths: frozenset[str],
+    blame: Sequence[CommitEvidence],
+    file_lines: Sequence[str],
+    target_range: tuple[int, int],
+) -> _Thread | None:
+    """One stored thread as the prompt renders it, or ``None`` when it does not qualify.
+
+    Applies plan 62 section 4.9a rules 1, 2 and 4 (rule 3 is per PR, in
+    :func:`_select_threads`) and builds the opener plus the last two
+    remaining comments, each cleaned and clipped.
+    """
+    if not isinstance(thread, dict) or thread.get("path") not in paths:
+        return None
+    comments = [c for c in thread.get("comments") or () if isinstance(c, dict)]
+    if not comments:
+        return None
+    opener = comments[0]
+    # Rule 1: a flagged or machine-written opener is context for agents only.
+    if opener.get("bot") or opener.get("minimized"):
+        return None
+    if _is_machine_text(opener.get("body")):
+        return None
+    kept: list[tuple[str, str]] = []
+    for comment in comments:
+        if comment.get("bot") or comment.get("minimized"):
+            continue
+        if _is_machine_text(comment.get("body")):
+            continue
+        text = _clean_thread_comment(comment.get("body"))
+        if text:
+            kept.append((str(comment.get("author") or "unknown"), text))
+    rendered = kept[:1] + kept[1:][-2:]
+    pr_author = (pr.author or "").lower()
+    # Rule 2: the PR author explains the change in a rendered comment.
+    if not pr_author or not any(
+        who.lower() == pr_author and len(text) >= _THREAD_AUTHOR_MIN_CHARS
+        for who, text in rendered
+    ):
+        return None
+    if not _anchor_owned(thread, pr, blame, file_lines, target_range):
+        return None
+    entries: list[str] = []
+    author_texts: list[str] = []
+    for who, text in rendered:
+        shown = text[:_THREAD_COMMENT_MAX_CHARS]
+        is_author = who.lower() == pr_author
+        role = "PR author" if is_author else "reviewer"
+        entries.append(f"[{who}, {role}] {shown}")
+        if is_author:
+            author_texts.append(shown)
+    if thread.get("outdated") is True:
+        entries.append(_THREAD_OUTDATED)
+    return _Thread(tuple(entries), tuple(author_texts))
+
+
+def _thread_lines(thread: _Thread) -> list[str]:
+    """A rendered thread: the first entry as a bullet, the rest beneath it."""
+    first, *rest = thread.entries
+    return [f"      - {first}", *(f"        {entry}" for entry in rest)]
+
+
+def _select_threads(
+    evidence: Sequence[CommitEvidence],
+    paths: frozenset[str] | None,
+    file_lines: Sequence[str] | None,
+    target_range: tuple[int, int] | None,
+    caps: _PrRenderCaps,
+) -> dict[int, _RenderedThreads]:
+    """The review threads a bundle's prompt shows, per PR number (plan 62 section 4.9a).
+
+    The one selection that both :func:`_format_evidence` and
+    :func:`_evidence_sources` use, so what is rendered and what may be
+    quoted cannot drift. A thread qualifies only when its opener is human
+    text, the PR author wrote a substantive rendered comment, its PR is
+    linked to a line-level evidence item, and its anchor lies inside the
+    target's lines at a position blame ties to the PR. Qualified threads
+    fill :data:`_THREADS_PER_PR_CHARS` per PR and
+    ``caps.review_threads_max_chars`` per card in bundle order, stopping at
+    the first thread that does not fit.
+
+    Parameters
+    ----------
+    evidence : Sequence[CommitEvidence]
+        The bundle, in prompt order.
+    paths : frozenset[str] or None
+        The target file and its rename aliases.
+    file_lines : Sequence[str] or None
+        The target file's current lines (the whole file).
+    target_range : tuple[int, int] or None
+        The target's inclusive line range in ``file_lines``.
+    caps : _PrRenderCaps
+        The rendering caps.
+
+    Returns
+    -------
+    dict[int, _RenderedThreads]
+        One entry per PR with at least one qualified thread; empty when any
+        of ``paths`` / ``file_lines`` / ``target_range`` is ``None`` (fail
+        closed) or the card budget is ``0``.
+    """
+    if (
+        paths is None
+        or file_lines is None
+        or target_range is None
+        or caps.review_threads_max_chars <= 0
+    ):
+        return {}
+    line_linked = {
+        pr.number
+        for item in evidence
+        if item.source in _LINE_SOURCES
+        for pr in item.pull_requests
+    }
+    blame = [item for item in evidence if item.source == "blame" and item.lines]
+    prs: dict[int, PullRequest] = {}
+    for item in evidence:
+        for pr in item.pull_requests:
+            prs.setdefault(pr.number, pr)
+    card_left = caps.review_threads_max_chars
+    card_full = False
+    selected: dict[int, _RenderedThreads] = {}
+    for number, pr in prs.items():
+        if number not in line_linked or not pr.author:
+            continue
+        qualified = [
+            thread
+            for raw in _json_list(pr.review_threads)
+            if (
+                thread := _qualify_thread(
+                    raw, pr, paths, blame, file_lines, target_range
+                )
+            )
+            is not None
+        ]
+        if not qualified:
+            continue
+        pr_left = _THREADS_PER_PR_CHARS
+        shown: list[_Thread] = []
+        for thread in qualified:
+            if card_full or thread.chars > card_left:
+                # The card budget stops every later thread, in any PR.
+                card_full = True
+                break
+            if thread.chars > pr_left:
+                break
+            shown.append(thread)
+            pr_left -= thread.chars
+            card_left -= thread.chars
+        lines = [_THREADS_HEADER]
+        for thread in shown:
+            lines.extend(_thread_lines(thread))
+        omitted = len(qualified) - len(shown)
+        if omitted:
+            lines.append(f"    ({omitted} more review threads omitted)")
+        selected[number] = _RenderedThreads(
+            tuple(lines),
+            tuple(text for thread in shown for text in thread.author_texts),
+        )
+    return selected
+
+
+def _has_discussion(pr: PullRequest, caps: _PrRenderCaps) -> bool:
+    """Whether :func:`_format_pr` renders a ``Discussion:`` block for ``pr``."""
+    return bool(_json_list(pr.comments)[: caps.pr_discussion_max_comments])
+
 
 def _format_evidence(
-    evidence: Sequence[CommitEvidence], caps: _PrRenderCaps = _PrRenderCaps()
+    evidence: Sequence[CommitEvidence],
+    caps: _PrRenderCaps = _PrRenderCaps(),
+    threads: dict[int, _RenderedThreads] | None = None,
 ) -> str:
     """Render an evidence bundle as the text payload for the rationale prompt.
 
@@ -222,13 +549,20 @@ def _format_evidence(
     rationale.
 
     ``caps`` bounds the per-PR roster / discussion rendering (see
-    :func:`_format_pr`).
+    :func:`_format_pr`). ``threads`` (:func:`_select_threads`) adds a PR's
+    review-thread block after its discussion. A PR's discussion and threads
+    render once per bundle: later occurrences of the PR keep the rest of
+    the block and say ``(discussion shown above)`` instead, when the first
+    showed any.
     """
+    threads = threads or {}
     n_prs = sum(len(item.pull_requests) for item in evidence)
     n_issues = sum(len(item.issues) for item in evidence)
     blocks = [
         f"Evidence: {len(evidence)} commit(s), {n_prs} PR(s), {n_issues} issue(s)."
     ]
+    # PR number -> whether its first occurrence showed a discussion or threads.
+    shown: dict[int, bool] = {}
     for item in evidence:
         lines = _format_commit(item.commit)
         label = _SOURCE_LABELS.get(item.source, item.source)
@@ -237,7 +571,16 @@ def _format_evidence(
         lines.insert(1, f"  Source: {label}")
         for pr in item.pull_requests:
             lines.append("")
+            if pr.number in shown:
+                lines.extend(_format_pr(pr, caps, discussion=False))
+                if shown[pr.number]:
+                    lines.append(_DISCUSSION_SHOWN_ABOVE)
+                continue
             lines.extend(_format_pr(pr, caps))
+            block = threads.get(pr.number)
+            if block is not None:
+                lines.extend(block.lines)
+            shown[pr.number] = _has_discussion(pr, caps) or block is not None
         for issue in item.issues:
             lines.append("")
             lines.extend(_format_issue(issue))
@@ -281,16 +624,21 @@ def _source(ref: ItemRef, texts: Sequence[str]) -> _Source:
 
 
 def _evidence_sources(
-    evidence: Sequence[CommitEvidence], caps: _PrRenderCaps = _PrRenderCaps()
+    evidence: Sequence[CommitEvidence],
+    caps: _PrRenderCaps = _PrRenderCaps(),
+    threads: dict[int, _RenderedThreads] | None = None,
 ) -> dict[tuple[str, str], _Source]:
     """Index the evidence a card item may cite, by ``(kind, id)``.
 
     Built beside :func:`_format_evidence` and kept in memory only. A commit's
     texts are its subject and body, not its ``llm_description``: the diff
     summary is model output, so a quote from it proves nothing. A PR's texts
-    are its title, body, squashed-commit headlines and discussion; an issue's
-    its title and body.
+    are its title, body, squashed-commit headlines and discussion, plus the
+    PR author's rendered review-thread comments from ``threads`` (the same
+    :func:`_select_threads` result the prompt renders; reviewer comments are
+    never a source); an issue's its title and body.
     """
+    threads = threads or {}
     sources: dict[tuple[str, str], _Source] = {}
     for item in evidence:
         commit = item.commit
@@ -303,7 +651,9 @@ def _evidence_sources(
             key = ("pr", str(pr.number))
             if key not in sources:
                 ref = ItemRef("pr", str(pr.number), pr.html_url or None)
-                sources[key] = _source(ref, _pr_texts(pr, caps))
+                block = threads.get(pr.number)
+                author_texts = block.author_texts if block is not None else ()
+                sources[key] = _source(ref, [*_pr_texts(pr, caps), *author_texts])
         for issue in item.issues:
             key = ("issue", str(issue.number))
             if key not in sources:
@@ -660,6 +1010,9 @@ class RationaleGenerator:
         *,
         symbol_context: SymbolContext | None = None,
         subject: str | None = None,
+        paths: frozenset[str] | None = None,
+        file_lines: Sequence[str] | None = None,
+        target_range: tuple[int, int] | None = None,
     ) -> Rationale:
         """Generate a rationale card for one evidence bundle.
 
@@ -679,6 +1032,16 @@ class RationaleGenerator:
             What the card is about (the qualified name, else the path),
             reported with the call's usage
             (:func:`whygraph.core.usage.record_usage`).
+        paths : frozenset[str], optional
+            The target file and its rename aliases: review threads on these
+            paths may enter the prompt (plan 62 section 4.9a).
+        file_lines : Sequence[str], optional
+            The target file's current lines, the whole file, to find each
+            thread's content anchor in.
+        target_range : tuple[int, int], optional
+            The target's inclusive line range in ``file_lines``. Review
+            threads render only when ``paths``, ``file_lines`` and
+            ``target_range`` are all given; any ``None`` keeps them out.
 
         Returns
         -------
@@ -700,9 +1063,11 @@ class RationaleGenerator:
 
         # TODO: capping bundle size belongs to the future evidence-bundle
         # builder — the generator neither truncates nor chunks its input.
-        bundle = _format_evidence(evidence, self._caps)
+        # One thread selection for both the prompt and the quote sources.
+        threads = _select_threads(evidence, paths, file_lines, target_range, self._caps)
+        bundle = _format_evidence(evidence, self._caps, threads)
         # The text of each piece of evidence, by id, to judge the items' quotes.
-        sources = _evidence_sources(evidence, self._caps)
+        sources = _evidence_sources(evidence, self._caps, threads)
         if symbol_context is not None:
             bundle = f"{_format_symbol_context(symbol_context)}\n\n{bundle}"
         task = render(

@@ -530,10 +530,16 @@ def post_rationale(
     with _heavy_slot(state, project.org_id), _mapped_errors():
         name = body.target.qualified_name
         target = indexed_symbol_target(name) if name else None
+        scope = None
         if target is not None:
-            # As the Explorer: the platform's range, its own blame of it.
+            # As the Explorer: the platform's range, its own blame of it, so
+            # review threads are checked against the clone's lines.
             evidence = collect_evidence(target, limit=20)
+            with get_session() as session:
+                scope = review_scope(session, project.root, target.path)
         else:
+            # The requester's working-tree numbers, not the clone's: no
+            # review threads (slicing the clone could match a neighbour's).
             target = _target(body.target, keep_name=False)
             evidence = evidence_from_hunks(
                 Repository(project.root),
@@ -551,6 +557,8 @@ def post_rationale(
             allow_description=_description_budget(
                 state, project.org_id, principal.user_id
             ),
+            review_scope=scope,
+            target_range=(target.line_start, target.line_end),
         )
     return {**card, "project": status}
 

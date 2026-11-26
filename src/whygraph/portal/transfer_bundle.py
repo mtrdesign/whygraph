@@ -567,6 +567,10 @@ class RationaleRecord(BaseModel):
     A constraint or risk is an item object (``text``, ``basis``, ``refs``,
     ``quote``) or, in a bundle written before items carried sources, a plain
     string (read as basis ``unknown``). Both stay format version 1.
+
+    ``depth`` (0 ``low`` .. 3 ``xhigh``), ``context_shas`` and ``coverage``
+    (plan 62 section 13.5) are absent from older bundles: such a record is a
+    legacy row (``depth`` ``None``), still format version 1.
     """
 
     model_config = _WIRE
@@ -589,6 +593,9 @@ class RationaleRecord(BaseModel):
     actual_model: str | None = None
     qualified_name: str | None = None
     deferred_shas: str = ""
+    depth: Int | None = None
+    context_shas: str = ""
+    coverage: dict[str, Any] | None = None
 
 
 class CommitDescriptionRecord(BaseModel):

@@ -52,6 +52,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import and_, insert, or_
 from sqlmodel import col, delete, func, select
 
+from whygraph.analyze.card_bundle import DEFAULT_LEVEL
 from whygraph.chat.harness import (
     BudgetStop,
     ContextTrimmed,
@@ -93,7 +94,7 @@ from whygraph.db.models import (
     ProjectNote,
     PullRequest,
 )
-from whygraph.mcp.rationale_cache import lookup_exact
+from whygraph.mcp.rationale_cache import depth_of, lookup_exact
 from whygraph.mcp.targets import indexed_symbol_target, repo_root
 from whygraph.services.codegraph import CodeGraph, CodeGraphError, Symbol
 from whygraph.services.llm import LlmError, LlmKeyMissing
@@ -980,7 +981,12 @@ class _ReferenceLookups:
     by primary key, and the rationale cache by its exact key with the target
     from :func:`~whygraph.mcp.targets.indexed_symbol_target` (never
     ``resolve_target``, which may re-sync CodeGraph - a write in a read
-    path). CodeGraph is opened on first use; :meth:`close` releases it.
+    path). The cache hint is deliberately not
+    :func:`~whygraph.mcp.rationale_cache.lookup_cached`: that needs the
+    symbol's evidence (a git blame per symbol) inside the pre-pass's
+    1.5-second budget, and may write (it follows the symbol); a card at an
+    older range shows as not cached until a real lookup moves it. CodeGraph
+    is opened on first use; :meth:`close` releases it.
     """
 
     def __init__(self) -> None:
@@ -1015,7 +1021,10 @@ class _ReferenceLookups:
         if target is None:
             return False
         identity = get_config().cache_identity("rationale")
-        return lookup_exact(target, *identity) is not None
+        row = lookup_exact(target, *identity)
+        # A card at least as deep as the level a chat card asks for (a
+        # legacy row counts as `medium`, plan 62 section 13.5).
+        return row is not None and depth_of(row.level) >= depth_of(DEFAULT_LEVEL)
 
     def note_count(self, symbol: Symbol) -> int:
         project = current_project()

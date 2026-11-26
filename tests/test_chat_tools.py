@@ -678,10 +678,16 @@ def test_rationale_no_evidence_is_a_status_not_an_error(
 def _fake_evidence_item():
     """A stand-in for one ``CommitEvidence``.
 
-    ``_format_response`` counts ``pull_requests`` / ``issues``, so the stub
-    needs those two attributes and nothing else.
+    ``_format_response`` counts ``pull_requests`` / ``issues`` over the
+    card's bundle, which reads each item's ``source`` and its commit's
+    ``sha`` / ``committed_at``; the stub carries those and nothing else.
     """
-    return SimpleNamespace(pull_requests=[], issues=[])
+    return SimpleNamespace(
+        pull_requests=[],
+        issues=[],
+        commit=SimpleNamespace(sha="a" * 40, committed_at="2026-01-01T00:00:00+00:00"),
+        source="blame",
+    )
 
 
 @pytest.fixture
@@ -796,6 +802,8 @@ def test_rationale_cache_hit_never_generates(
             ),
             cached_at="2026-07-29T00:00:00+00:00",
             deferred_shas="",
+            level="medium",
+            context_stale=False,
         ),
     )
 
@@ -838,6 +846,8 @@ def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:
             ),
             cached_at="2026-07-29T00:00:00+00:00",
             deferred_shas="a" * 40 + " " + "b" * 40,
+            level="medium",
+            context_stale=False,
         ),
     )
     monkeypatch.setattr(chat_tools, "whygraph_rationale_brief", spy)
@@ -3073,6 +3083,8 @@ def test_get_rationale_carries_notes_on_every_return(
             rationale=SimpleNamespace(),
             cached_at="2026-01-01T00:00:00+00:00",
             deferred_shas="",
+            level="medium",
+            context_stale=False,
         ),
     )
     monkeypatch.setattr(

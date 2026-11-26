@@ -52,6 +52,7 @@ from collections.abc import Callable
 
 from sqlalchemy.exc import SQLAlchemyError
 
+from whygraph.analyze.card_bundle import DEFAULT_LEVEL
 from whygraph.core import get_config
 from whygraph.core.context import current_actor, current_project
 from whygraph.core.config import AreaConfig
@@ -69,6 +70,7 @@ from whygraph.mcp.notes import (
 )
 from whygraph.mcp.path_history import path_commit_counts
 from whygraph.mcp.rationale import (
+    _card_items,
     _format_response,
     _partial_fields,
     whygraph_rationale_brief,
@@ -1510,7 +1512,9 @@ class ToolRegistry:
             }
 
         provider, pinned_model = get_config().cache_identity("rationale")
-        cached = lookup_cached(target, evidence, provider, pinned_model)
+        cached = lookup_cached(
+            target, evidence, provider, pinned_model, min_depth=DEFAULT_LEVEL
+        )
         if cached is not None:
             fields = _partial_fields(cached)
             if fields["partial"] and self.generations_used < self._generation_budget:
@@ -1524,7 +1528,12 @@ class ToolRegistry:
                 "status": "cached",
                 "generated": False,
                 **_format_response(
-                    target, cached.rationale, evidence, cached.cached_at, **fields
+                    target,
+                    cached.rationale,
+                    _card_items(evidence, cached.level),
+                    cached.cached_at,
+                    context_stale=cached.context_stale,
+                    **fields,
                 ),
                 "notes": notes,
             }

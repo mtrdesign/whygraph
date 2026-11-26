@@ -361,7 +361,7 @@ def _fake_evidence() -> SimpleNamespace:
     return SimpleNamespace(
         pull_requests=[],
         issues=[],
-        commit=SimpleNamespace(sha="a" * 40),
+        commit=SimpleNamespace(sha="a" * 40, committed_at="2026-01-01T00:00:00+00:00"),
         source="blame",
     )
 
@@ -417,6 +417,8 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
             rationale=rationale,
             cached_at="2026-01-01T00:00:00+00:00",
             deferred_shas="a" * 40 + " " + "b" * 40,
+            level="medium",
+            context_stale=False,
         ),
     )
     gen = mock.Mock()

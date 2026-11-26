@@ -192,8 +192,8 @@ class Rationale:
         Completion-token count when the provider reports it.
     coverage : CardCoverage or None
         What the card's prompt left out (plan 62 section 13.4), set by
-        :meth:`~whygraph.analyze.RationaleGenerator.generate`; ``None`` for
-        a card read back from the cache, which does not store it yet.
+        :meth:`~whygraph.analyze.RationaleGenerator.generate` and stored with
+        the cached card; ``None`` for a legacy cache row, which has none.
     """
 
     purpose: str

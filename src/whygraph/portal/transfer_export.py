@@ -247,6 +247,17 @@ def _json_list(text: str | None) -> list | None:
     return value if isinstance(value, list) else None
 
 
+def _json_object(text: str | None) -> dict | None:
+    """A stored JSON object, or ``None`` when absent or malformed."""
+    if text is None:
+        return None
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 class _Skips:
     """Counts the records that failed wire validation."""
 
@@ -575,6 +586,9 @@ def build_export(
                     actual_model=r.actual_model,
                     qualified_name=r.qualified_name,
                     deferred_shas=r.deferred_shas,
+                    depth=r.depth,
+                    context_shas=r.context_shas,
+                    coverage=_json_object(r.coverage),
                 )
                 if rec is not None:
                     yield rec

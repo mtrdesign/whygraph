@@ -28,6 +28,7 @@ from whygraph.core import get_config
 from whygraph.mcp.area_history import area_history_payload
 from whygraph.mcp.evidence import collect_evidence, evidence_payload
 from whygraph.mcp.rationale import (
+    _card_items,
     _format_response,
     _partial_fields,
     whygraph_rationale_brief,
@@ -197,7 +198,9 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     Returns ``{status: "cached", ...card}`` on a cache hit,
     ``{status: "no_evidence"}`` when the target has no historical evidence, or
     ``{status: "not_generated"}`` otherwise — the signal the UI uses to show a
-    "Generate" button.
+    "Generate" button. Any card of the target's lines is a hit, whatever its
+    depth (``min_depth="low"``, plan 62 section 13.5); its counts are over
+    the bundle at the card's own level.
     """
     target = resolve_target(
         path=None, line_start=None, line_end=None, qualified_name=qualified_name
@@ -207,7 +210,7 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     if not evidence:
         return {"status": "no_evidence", "target": target_dict(target), **plans}
     provider, pinned_model = get_config().cache_identity("rationale")
-    cached = lookup_cached(target, evidence, provider, pinned_model)
+    cached = lookup_cached(target, evidence, provider, pinned_model, min_depth="low")
     if cached is None:
         return {"status": "not_generated", "target": target_dict(target), **plans}
     return {
@@ -215,8 +218,9 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
         **_format_response(
             target,
             cached.rationale,
-            evidence,
+            _card_items(evidence, cached.level),
             cached.cached_at,
+            context_stale=cached.context_stale,
             **_partial_fields(cached),
         ),
         **plans,

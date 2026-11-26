@@ -25,6 +25,7 @@
         "text": "no network in the hot path"
       }
     ],
+    "context_stale": false,
     "describing": 2,
     "evidence_count": {
       "commits": 2,

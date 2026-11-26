@@ -784,3 +784,51 @@ def test_forge_discussion_round_trip_keeps_rows(
         assert conn.execute("SELECT COUNT(*) FROM issue").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_rationale_depth_columns_keep_legacy_rows(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """Plan 62 section 13.5: a row cached before ``depth`` survives as a legacy row."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    script = ScriptDirectory.from_config(alembic_config())
+    assert len(script.get_heads()) == 1
+    assert script.get_revision("9a4c6e1f3b57").down_revision == "d2c8e4a7f1b3"
+
+    new = {"depth", "context_shas", "coverage"}
+    command.upgrade(alembic_config(), "d2c8e4a7f1b3")
+    assert not new & _column_names(db_path, "rationale_cache")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO rationale_cache (path, line_start, line_end, provider, "
+            "model, evidence_fingerprint, cached_at, purpose, why, constraints, "
+            "tradeoffs, risks, deferred_shas) VALUES ('a.py', 1, 3, 'fake', "
+            "'default', 'fp', 'x', 'p', 'w', '[]', '[]', '[]', 'abc1234')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert new <= _column_names(db_path, "rationale_cache")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT purpose, deferred_shas, depth, context_shas, coverage "
+            "FROM rationale_cache"
+        ).fetchone() == ("p", "abc1234", None, "", None)
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "d2c8e4a7f1b3")
+    assert not new & _column_names(db_path, "rationale_cache")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT purpose FROM rationale_cache").fetchone() == ("p",)
+    finally:
+        conn.close()

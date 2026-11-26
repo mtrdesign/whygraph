@@ -191,6 +191,9 @@ def _seed(session: Any) -> None:
             risks="[]",
             import_id=7,
             deferred_shas="abc1234 def5678",
+            depth=2,
+            context_shas="1234abc",
+            coverage='{"line_commits": 3, "trimmed": []}',
         )
     )
     session.commit()
@@ -248,6 +251,9 @@ def test_descriptions_skip_stubs_and_rationale_drops_import_id(
     cards = recs(bundle, tb.RATIONALE)
     assert len(cards) == 1 and cards[0].model == "default"
     assert cards[0].deferred_shas == "abc1234 def5678"
+    # Plan 62 section 13.5: the depth and the context it rendered travel.
+    assert (cards[0].depth, cards[0].context_shas) == (2, "1234abc")
+    assert cards[0].coverage == {"line_commits": 3, "trimmed": []}
     assert "import_id" not in tb.RationaleRecord.model_fields
 
 

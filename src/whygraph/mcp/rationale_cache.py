@@ -1,11 +1,24 @@
 """SQLite-backed cache for ``whygraph_rationale_brief`` LLM output.
 
 Keys a cached card by ``(path, line_start, line_end, provider, model)``
-and invalidates by an *evidence fingerprint* — the sha256 of the sorted
-commit SHAs returned by :func:`whygraph.mcp.evidence.collect_evidence`.
-A new commit landing on the blamed lines changes the fingerprint and
-forces a regeneration on the next call; the stale row is overwritten by
-:func:`store_cached`.
+and invalidates by an *evidence fingerprint* over commit SHAs. Since plan 62
+(Part B, section 13.5) the fingerprint is the **Ring 0 fingerprint**: the
+sha256 of the sorted SHAs of every *line-level* item of
+``collect_evidence(limit=20)`` (``blame``, ``pr-origin``, ``blame-walked``,
+``predecessor-blame``, ``local``), whatever the card's depth, so a commit
+that only touched *other* lines of the file no longer invalidates the card.
+Context (``area``) commits are counted instead of hashed: a row stores the
+context commits it rendered (``context_shas``), and the number of other
+context commits committed after the card was built (its ``cached_at``)
+decides between fresh, ``context_stale`` (1 or 2) and a miss
+(:data:`CONTEXT_REFRESH_COMMITS` or more).
+
+Each row records its depth level (``depth``, 0 ``low`` .. 3 ``xhigh``). A
+deeper card satisfies a shallower request and is never overwritten by a
+shallower one (:func:`store_cached`). A row with ``depth`` ``NULL`` is a
+**legacy** row, written before depth levels: its fingerprint is the old
+whole-bundle hash (:func:`_fingerprint`), it is checked that way, it counts
+as ``medium`` and it never follows its symbol.
 
 Notes
 -----
@@ -27,6 +40,13 @@ that don't change the underlying commit set do not invalidate the cache.
 That matches :func:`collect_evidence`'s own derivation: PRs and issues
 are looked up *from* the commit set.
 
+Every caller reads through :func:`lookup_cached` (or :func:`lookup_card`,
+which also returns the row it rejected): it holds the legacy / Ring 0
+choice, the depth check and **symbol following** - when the exact key
+misses, a row of the same file, provider, model and qualified name whose
+Ring 0 fingerprint matches is moved to the request's range, so a card
+survives an edit above its symbol.
+
 A ``cached_only`` call (``/whygraph-review``) is looser than a generating
 one: :func:`lookup_exact` returns the key's row whatever its fingerprint,
 and :func:`lookup_overlapping` the best row of the same file whose range
@@ -36,6 +56,7 @@ lines. Both return a :class:`CachedCard`, which says whether it is stale.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -46,9 +67,11 @@ from typing import Any, Iterable, Iterator, Sequence
 
 from sqlalchemy import delete, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
-from whygraph.analyze import CommitEvidence, Item, ItemRef, Rationale
+from whygraph.analyze import CardCoverage, CommitEvidence, Item, ItemRef, Rationale
+from whygraph.analyze.card_bundle import DEFAULT_LEVEL, LEVELS, LINE_LEVEL_SOURCES
 from whygraph.analyze.rationale import ITEM_BASES, REF_KINDS
 from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.db import get_session
@@ -63,16 +86,89 @@ _DEFAULT_MODEL_TAG = "default"
 _PURGE_CHUNK = 500
 """Paths per ``DELETE ... WHERE path IN (...)`` (under SQLite's variable limit)."""
 
+CONTEXT_REFRESH_COMMITS = 3
+"""Newer context commits that make a card a miss (plan 62 R39); 1-2 are ``context_stale``."""
+
+LEGACY_LEVEL = "medium"
+"""The level a legacy (``depth`` ``NULL``) row counts as (plan 62 section 13.5)."""
+
+_DEFAULT_DEPTH = LEVELS.index(DEFAULT_LEVEL)
+"""The ``depth`` of a card stored without one (every card until Part C)."""
+
+
+def depth_of(level: str) -> int:
+    """The stored ``depth`` of a level name (0 ``low`` .. 3 ``xhigh``).
+
+    Parameters
+    ----------
+    level : str
+        One of :data:`~whygraph.analyze.card_bundle.LEVELS`.
+
+    Returns
+    -------
+    int
+        Its index in ``LEVELS``.
+
+    Raises
+    ------
+    ValueError
+        If ``level`` is not a known level.
+    """
+    if level not in LEVELS:
+        raise ValueError(f"unknown depth level {level!r}; expected one of {LEVELS}")
+    return LEVELS.index(level)
+
+
+def level_of(depth: int | None) -> str:
+    """The level name of a stored ``depth``; ``NULL`` (legacy) is :data:`LEGACY_LEVEL`.
+
+    Parameters
+    ----------
+    depth : int or None
+        A row's ``depth``.
+
+    Returns
+    -------
+    str
+        The level name.
+    """
+    if depth is None or not 0 <= depth < len(LEVELS):
+        return LEGACY_LEVEL
+    return LEVELS[depth]
+
 
 def _fingerprint(evidence: Sequence[CommitEvidence]) -> str:
-    """sha256 of the newline-joined, sorted commit SHAs from ``evidence``.
+    """The legacy fingerprint: sha256 of the sorted SHAs of the whole bundle.
 
     Sorting decouples the fingerprint from :func:`collect_evidence`'s
     return order, so a stable evidence set hashes to the same value
-    regardless of timing or future ordering tweaks.
+    regardless of timing or future ordering tweaks. Only legacy (``depth``
+    ``NULL``) rows are checked against it; new rows store
+    :func:`ring0_fingerprint`.
     """
     payload = "\n".join(sorted(item.commit.sha for item in evidence))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def ring0_fingerprint(evidence: Sequence[CommitEvidence]) -> str:
+    """The Ring 0 fingerprint: sha256 of the sorted SHAs of the line-level items.
+
+    Independent of the card's depth (every level includes every line-level
+    item), so cards of any depth for the same lines share it, and
+    independent of the ``area`` items, so a commit that touched other lines
+    of the file does not change it.
+
+    Parameters
+    ----------
+    evidence : Sequence[CommitEvidence]
+        ``collect_evidence(limit=20)`` of the target.
+
+    Returns
+    -------
+    str
+        64 lowercase hex characters.
+    """
+    return _fingerprint([i for i in evidence if i.source in LINE_LEVEL_SOURCES])
 
 
 def _model_key(config_model: str | None) -> str:
@@ -87,6 +183,17 @@ def _now_iso() -> str:
     :attr:`Issue.created_at`, and the rest of the WhyGraph schema.
     """
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _when(value: str | None) -> datetime | None:
+    """A commit timestamp as an aware datetime (naive read as UTC), else ``None``."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _decode_ref(value: object) -> ItemRef | None:
@@ -156,6 +263,50 @@ def decode_items(raw: str | None) -> tuple[Item, ...]:
     return tuple(item for item in map(decode_item, values) if item is not None)
 
 
+_COVERAGE_COUNTS = (
+    "line_commits",
+    "context_commits",
+    "context_omitted",
+    "full_prs_demoted",
+    "threads_lost",
+    "descriptions_missing",
+)
+"""The integer fields of a stored ``coverage`` object."""
+
+
+def decode_coverage(raw: str | None) -> CardCoverage | None:
+    """A stored ``coverage`` column as a :class:`~whygraph.analyze.CardCoverage`.
+
+    Parameters
+    ----------
+    raw : str or None
+        The JSON text of the column (:meth:`CardCoverage.as_dict`).
+
+    Returns
+    -------
+    CardCoverage or None
+        ``None`` for a missing or malformed column. Unknown keys are ignored,
+        a missing or non-integer count reads as 0.
+    """
+    try:
+        value = json.loads(raw) if raw else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    counts = {
+        name: n if isinstance(n := value.get(name), int) and n >= 0 else 0
+        for name in _COVERAGE_COUNTS
+    }
+    trimmed = value.get("trimmed")
+    return CardCoverage(
+        trimmed=tuple(t for t in trimmed if isinstance(t, str))
+        if isinstance(trimmed, list)
+        else (),
+        **counts,
+    )
+
+
 def _rationale_from_row(row: RationaleCache) -> Rationale:
     """Rebuild the :class:`~whygraph.analyze.Rationale` a cache row holds."""
     return Rationale(
@@ -168,17 +319,18 @@ def _rationale_from_row(row: RationaleCache) -> Rationale:
         provider=row.actual_provider or row.provider,
         input_tokens=row.input_tokens,
         output_tokens=row.output_tokens,
+        coverage=decode_coverage(row.coverage),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class CachedCard:
-    """A cache row read without its fingerprint check (a ``cached_only`` lookup).
+    """A cache row, detached from its session.
 
     Attributes
     ----------
     rationale : Rationale
-        The cached card.
+        The cached card (with its stored ``coverage``, when recorded).
     cached_at : str
         When the row was cached (ISO-8601).
     line_start : int
@@ -188,10 +340,20 @@ class CachedCard:
     qualified_name : str or None
         The symbol the card was generated for, when it was targeted by one.
     evidence_fingerprint : str
-        The row's fingerprint (see :func:`_fingerprint`).
+        The row's fingerprint: :func:`ring0_fingerprint` for a row with a
+        ``depth``, the legacy :func:`_fingerprint` for one without.
     deferred_shas : str
         Space-joined SHAs the card was written without a description for;
         empty means the card is final.
+    depth : int or None
+        The card's depth level (0 ``low`` .. 3 ``xhigh``); ``None`` for a
+        legacy row.
+    context_shas : str
+        Space-joined SHAs of the context commits the card rendered.
+    context_stale : bool
+        Set by :func:`lookup_cached` on a hit: 1 or 2 context commits
+        committed after the card was built (:meth:`context_newer`).
+        ``False`` otherwise.
     """
 
     rationale: Rationale
@@ -201,6 +363,9 @@ class CachedCard:
     qualified_name: str | None
     evidence_fingerprint: str
     deferred_shas: str = ""
+    depth: int | None = None
+    context_shas: str = ""
+    context_stale: bool = False
 
     @classmethod
     def from_row(cls, row: RationaleCache) -> "CachedCard":
@@ -213,7 +378,14 @@ class CachedCard:
             qualified_name=row.qualified_name,
             evidence_fingerprint=row.evidence_fingerprint,
             deferred_shas=row.deferred_shas,
+            depth=row.depth,
+            context_shas=row.context_shas or "",
         )
+
+    @property
+    def level(self) -> str:
+        """The card's level name (:func:`level_of`; a legacy row is ``medium``)."""
+        return level_of(self.depth)
 
     def is_stale(self, evidence: Sequence[CommitEvidence]) -> bool:
         """Whether ``evidence`` (of the card's range) differs from what the card saw.
@@ -226,10 +398,270 @@ class CachedCard:
         Returns
         -------
         bool
-            ``True`` when the fingerprint of ``evidence`` is not the row's,
-            i.e. the lines got new commits since the card was written.
+            ``True`` when the target's lines got new commits since the card
+            was written: the Ring 0 fingerprint differs (a legacy row: the
+            whole-bundle fingerprint, as before depth levels).
         """
-        return _fingerprint(evidence) != self.evidence_fingerprint
+        if self.depth is None:
+            return _fingerprint(evidence) != self.evidence_fingerprint
+        return ring0_fingerprint(evidence) != self.evidence_fingerprint
+
+    def context_newer(self, evidence: Sequence[CommitEvidence]) -> int:
+        """How many current context commits are newer than the card itself.
+
+        Parameters
+        ----------
+        evidence : Sequence[CommitEvidence]
+            The current evidence for the card's range.
+
+        Returns
+        -------
+        int
+            The ``area`` items of ``evidence`` not in ``context_shas`` whose
+            ``committed_at`` is later than the row's ``cached_at`` (the moment
+            the card was built); an item without a parseable ``committed_at``
+            never counts. Always 0 for a legacy row (its fingerprint already
+            covers the whole bundle) and for a ``low`` row (no context ring).
+
+        Notes
+        -----
+        The reference is the card's own build time, not its newest context
+        commit, so the count cannot loop: a regenerated card gets a new
+        ``cached_at``, and the commits that made the old one a miss no longer
+        count, even when its context ring renders nothing.
+        """
+        if self.depth is None or self.depth == 0:
+            return 0
+        built = _when(self.cached_at)
+        if built is None:
+            return 0
+        stored = set(self.context_shas.split())
+        return sum(
+            1
+            for i in evidence
+            if i.source not in LINE_LEVEL_SOURCES
+            and i.commit.sha not in stored
+            and (at := _when(i.commit.committed_at)) is not None
+            and at > built
+        )
+
+
+def _judge(
+    card: CachedCard, evidence: Sequence[CommitEvidence], need: int
+) -> CachedCard | None:
+    """``card`` as a hit for a request of depth ``need`` (``context_stale`` set), else ``None``."""
+    if card.depth is None:
+        fresh = _fingerprint(evidence) == card.evidence_fingerprint
+        return card if fresh and need <= depth_of(LEGACY_LEVEL) else None
+    if card.depth < need or ring0_fingerprint(evidence) != card.evidence_fingerprint:
+        return None
+    newer = card.context_newer(evidence)
+    if newer >= CONTEXT_REFRESH_COMMITS:
+        return None
+    return dataclasses.replace(card, context_stale=newer > 0)
+
+
+@dataclass(frozen=True, slots=True)
+class CacheLookup:
+    """What :func:`lookup_card` found.
+
+    Attributes
+    ----------
+    card : CachedCard or None
+        The hit (its ``context_stale`` set), or ``None`` on a miss.
+    seen : CachedCard or None
+        On a miss, the row now at the request's key that the lookup rejected
+        (stale, too shallow, or too many newer context commits; possibly a
+        row it just moved there by following the symbol), for
+        :func:`store_cached`'s ``seen``. ``None`` when the key holds no row.
+    """
+
+    card: CachedCard | None
+    seen: CachedCard | None = None
+
+
+def _rank(target: Target):  # noqa: ANN202 - a sort key
+    """The ranking of :func:`lookup_overlapping` (and symbol following) for ``target``."""
+
+    def rank(row: RationaleCache) -> tuple[int, int, int]:
+        named = (
+            target.qualified_name is not None
+            and row.qualified_name == target.qualified_name
+        )
+        contains = (
+            row.line_start <= target.line_start and row.line_end >= target.line_end
+        )
+        if contains:
+            return (0 if named else 1, 0, row.line_end - row.line_start)
+        overlap = min(row.line_end, target.line_end) - max(
+            row.line_start, target.line_start
+        )
+        return (0 if named else 1, 1, -overlap)
+
+    return rank
+
+
+def _key_where(path: str, line_start: int, line_end: int, provider: str, model: str):  # noqa: ANN202
+    """The ``WHERE`` terms of one primary key."""
+    return (
+        col(RationaleCache.path) == path,
+        col(RationaleCache.line_start) == line_start,
+        col(RationaleCache.line_end) == line_end,
+        col(RationaleCache.provider) == provider,
+        col(RationaleCache.model) == model,
+    )
+
+
+def _same_where(card: CachedCard):  # noqa: ANN202
+    """The ``WHERE`` terms that a row is still the one ``card`` was read from."""
+    return (
+        col(RationaleCache.cached_at) == card.cached_at,
+        col(RationaleCache.evidence_fingerprint) == card.evidence_fingerprint,
+        col(RationaleCache.deferred_shas) == card.deferred_shas,
+    )
+
+
+def _follow(
+    session: Session,
+    target: Target,
+    provider: str,
+    model_key: str,
+    ring0: str,
+    seen: CachedCard | None,
+) -> CachedCard | None:
+    """Move the best same-symbol, Ring-0-equal row to ``target``'s range; the moved row.
+
+    Candidates share ``target``'s path, provider, model and qualified name,
+    have a ``depth`` (legacy rows never follow) and the Ring 0 fingerprint
+    ``ring0``; they are ranked as :func:`lookup_overlapping` ranks. In one
+    transaction the row at the new key (``seen``, which already missed) is
+    deleted and the followed row's lines are updated, each guarded on the
+    row still being the one read; if either moved, nothing changes.
+    """
+    rows = [
+        row
+        for row in session.exec(
+            select(RationaleCache).where(
+                RationaleCache.path == target.path,
+                RationaleCache.provider == provider,
+                RationaleCache.model == model_key,
+                RationaleCache.qualified_name == target.qualified_name,
+                RationaleCache.evidence_fingerprint == ring0,
+                col(RationaleCache.depth).is_not(None),
+            )
+        ).all()
+        if (row.line_start, row.line_end) != (target.line_start, target.line_end)
+    ]
+    if not rows:
+        return None
+    newest_first = sorted(rows, key=lambda row: row.cached_at, reverse=True)
+    best = CachedCard.from_row(min(newest_first, key=_rank(target)))
+    session.expunge_all()
+    here = _key_where(
+        target.path, target.line_start, target.line_end, provider, model_key
+    )
+    try:
+        if seen is not None:
+            gone = session.exec(  # type: ignore[call-overload]
+                delete(RationaleCache).where(*here, *_same_where(seen))
+            )
+            if not gone.rowcount:
+                session.rollback()
+                return None
+        moved = session.exec(  # type: ignore[call-overload]
+            update(RationaleCache)
+            .where(
+                *_key_where(
+                    target.path, best.line_start, best.line_end, provider, model_key
+                ),
+                *_same_where(best),
+            )
+            .values(line_start=target.line_start, line_end=target.line_end)
+        )
+        if not moved.rowcount:
+            session.rollback()
+            return None
+        session.commit()
+    except IntegrityError:
+        # A row appeared at the new key since it was read: leave both alone.
+        session.rollback()
+        return None
+    return dataclasses.replace(
+        best, line_start=target.line_start, line_end=target.line_end
+    )
+
+
+def lookup_card(
+    target: Target,
+    evidence: Sequence[CommitEvidence],
+    provider: str,
+    config_model: str | None,
+    *,
+    min_depth: str,
+) -> CacheLookup:
+    """The one cache lookup of every caller (plan 62 section 13.5).
+
+    A row is a hit when:
+
+    * **legacy** (``depth`` ``NULL``): its fingerprint is the whole-bundle
+      :func:`_fingerprint` of ``evidence`` and ``min_depth`` is at most
+      ``medium`` (what a legacy row counts as);
+    * otherwise: its ``depth`` is at least ``min_depth`` (a deeper card
+      satisfies a shallower request), its fingerprint is
+      :func:`ring0_fingerprint` of ``evidence``, and fewer than
+      :data:`CONTEXT_REFRESH_COMMITS` current context commits outside its
+      ``context_shas`` were committed after its ``cached_at`` (1 or 2: a hit
+      with ``context_stale``; a ``low`` row is never context-stale).
+
+    When the exact key holds no hit and ``target`` names a symbol, the
+    symbol is **followed**: the best row of the same file, provider, model
+    and qualified name with a ``depth`` and a matching Ring 0 fingerprint
+    (ranked as :func:`lookup_overlapping` ranks) is moved to ``target``'s
+    range - in one transaction, after deleting the row at the new key, which
+    already missed - and then checked like an exact row. A target without a
+    qualified name (the platform's explicit-range branch) never follows.
+
+    Parameters
+    ----------
+    target : Target
+        Resolved target (path + line range + optional symbol name).
+    evidence : Sequence[CommitEvidence]
+        ``collect_evidence(target, limit=20)``: its SHAs drive the checks.
+    provider : str
+        LLM provider tag from ``Config.cache_identity("rationale")``.
+    config_model : str or None
+        Pinned model name (or ``None`` for the provider default);
+        translated to the cache-key token via :func:`_model_key`.
+    min_depth : str
+        The shallowest level the caller accepts
+        (:data:`~whygraph.analyze.card_bundle.LEVELS`).
+
+    Returns
+    -------
+    CacheLookup
+        The hit, or the row now at the key that missed (``seen``).
+    """
+    need = depth_of(min_depth)
+    model_key = _model_key(config_model)
+    with get_session() as session:
+        row = session.get(
+            RationaleCache,
+            (target.path, target.line_start, target.line_end, provider, model_key),
+        )
+        seen = None if row is None else CachedCard.from_row(row)
+        if seen is not None:
+            hit = _judge(seen, evidence, need)
+            if hit is not None:
+                return CacheLookup(hit)
+        if target.qualified_name is None:
+            return CacheLookup(None, seen)
+        moved = _follow(
+            session, target, provider, model_key, ring0_fingerprint(evidence), seen
+        )
+        if moved is None:
+            return CacheLookup(None, seen)
+        hit = _judge(moved, evidence, need)
+        return CacheLookup(hit) if hit is not None else CacheLookup(None, moved)
 
 
 def lookup_cached(
@@ -237,45 +669,28 @@ def lookup_cached(
     evidence: Sequence[CommitEvidence],
     provider: str,
     config_model: str | None,
+    *,
+    min_depth: str,
 ) -> CachedCard | None:
     """Return the cached card for ``target`` or ``None`` on miss.
 
-    A hit requires the row's ``evidence_fingerprint`` to match the
-    fingerprint of ``evidence``; a row with a stale fingerprint is
-    treated as a miss and will be overwritten by the next
-    :func:`store_cached` call.
+    :func:`lookup_card`'s hit, for the callers that only read (the Explorer,
+    Chat, the reference pre-pass); see there for what a hit is.
 
     Parameters
     ----------
-    target
-        Resolved target (path + line range + optional symbol name).
-    evidence
-        The evidence sequence as returned by
-        :func:`whygraph.mcp.evidence.collect_evidence` — its commit SHAs
-        drive the fingerprint check.
-    provider
-        LLM provider tag from ``Config.cache_identity("rationale")``.
-    config_model
-        Pinned model name (or ``None`` for the provider default);
-        translated to the cache-key token via :func:`_model_key`.
+    target, evidence, provider, config_model, min_depth
+        As for :func:`lookup_card`.
 
     Returns
     -------
     CachedCard or None
-        The row (its rationale, the ISO timestamp it was cached at and its
-        ``deferred_shas``). ``None`` if no row matches the key or its
-        fingerprint is stale.
+        The row (its rationale, ``cached_at``, ``deferred_shas``, ``depth``
+        and ``context_stale``), or ``None`` on a miss.
     """
-    fp = _fingerprint(evidence)
-    model_key = _model_key(config_model)
-    with get_session() as session:
-        row = session.get(
-            RationaleCache,
-            (target.path, target.line_start, target.line_end, provider, model_key),
-        )
-        if row is None or row.evidence_fingerprint != fp:
-            return None
-        return CachedCard.from_row(row)
+    return lookup_card(
+        target, evidence, provider, config_model, min_depth=min_depth
+    ).card
 
 
 def lookup_exact(
@@ -283,9 +698,10 @@ def lookup_exact(
 ) -> CachedCard | None:
     """The row keyed exactly by ``target``, whatever its evidence fingerprint.
 
-    For ``cached_only`` calls only: a stale row is still the rationale the
-    lines had before their latest commits. A generating call must use
-    :func:`lookup_cached`, which treats a stale row as a miss.
+    For ``cached_only`` calls and partial completions only: a stale row is
+    still the rationale the lines had before their latest commits. A
+    generating call must use :func:`lookup_card`, which treats a stale row
+    as a miss.
 
     Parameters
     ----------
@@ -294,7 +710,7 @@ def lookup_exact(
     provider : str
         LLM provider tag from ``Config.cache_identity("rationale")``.
     config_model : str or None
-        Pinned model name (or ``None``), as for :func:`lookup_cached`.
+        Pinned model name (or ``None``), as for :func:`lookup_card`.
 
     Returns
     -------
@@ -318,7 +734,7 @@ def lookup_overlapping(
     For ``cached_only`` calls only, when the exact key has no row: a
     symbol whose lines moved, or a hunk inside a cached symbol, still
     finds the card. Rows are matched on ``path``, ``provider`` and the
-    model key (resolved as in :func:`lookup_cached`) with
+    model key (resolved as in :func:`lookup_card`) with
     ``line_start <= target.line_end AND line_end >= target.line_start``;
     the fingerprint is not checked (see :meth:`CachedCard.is_stale`).
 
@@ -360,24 +776,8 @@ def lookup_overlapping(
         ).all()
         if not rows:
             return None
-
-        def rank(row: RationaleCache) -> tuple[int, int, int]:
-            named = (
-                target.qualified_name is not None
-                and row.qualified_name == target.qualified_name
-            )
-            contains = (
-                row.line_start <= target.line_start and row.line_end >= target.line_end
-            )
-            if contains:
-                return (0 if named else 1, 0, row.line_end - row.line_start)
-            overlap = min(row.line_end, target.line_end) - max(
-                row.line_start, target.line_start
-            )
-            return (0 if named else 1, 1, -overlap)
-
         newest_first = sorted(rows, key=lambda row: row.cached_at, reverse=True)
-        return CachedCard.from_row(min(newest_first, key=rank))
+        return CachedCard.from_row(min(newest_first, key=_rank(target)))
 
 
 def store_cached(
@@ -389,15 +789,28 @@ def store_cached(
     *,
     deferred_shas: str = "",
     only_if: CachedCard | None = None,
+    seen: CachedCard | None = None,
+    depth: int = _DEFAULT_DEPTH,
+    context_shas: str = "",
 ) -> str | None:
     """Upsert a freshly generated rationale; return its ``cached_at``.
 
     The PK ``(provider, model)`` columns mirror the *configured* LLM
     identity passed in by the caller — they must match what
-    :func:`lookup_cached` will use, since the lookup happens *before*
+    :func:`lookup_card` will use, since the lookup happens *before*
     the LLM is invoked. The LLM-reported model identity is persisted
     separately in :attr:`RationaleCache.actual_model` so rows keyed
     under the ``"default"`` model tag retain provenance.
+
+    The row stores :func:`ring0_fingerprint` of ``evidence``, ``depth``,
+    ``context_shas`` and the rationale's ``coverage``. One
+    ``INSERT ... ON CONFLICT DO UPDATE ... WHERE`` (plan 62 section 13.5):
+    an existing row is replaced only if the new card is at least as deep,
+    or the row is a legacy one, or its fingerprint differs (its lines
+    changed, so a deeper card of them is dead), or it is still ``seen``
+    (same ``cached_at`` and fingerprint) - so a shallower card never
+    overwrites a deeper one another request just stored, and two requests
+    of different depths cannot keep overwriting each other.
 
     Parameters
     ----------
@@ -408,20 +821,30 @@ def store_cached(
         empty (the default) stores a final card.
     only_if : CachedCard, optional
         The row the caller read. When given, an existing row is replaced
-        only if its ``cached_at``, ``evidence_fingerprint`` and
-        ``deferred_shas`` still equal this card's (all three, because
+        only if, in addition, its ``cached_at``, ``evidence_fingerprint``
+        and ``deferred_shas`` still equal this card's (all three, because
         ``cached_at`` has second resolution and cannot tell a partial row
         from a final one written the same second).
+    seen : CachedCard, optional
+        The row this request's lookup rejected (:attr:`CacheLookup.seen`);
+        ``None`` when there was none.
+    depth : int, optional
+        The card's depth level, 0 ``low`` .. 3 ``xhigh``; default the
+        depth of :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`.
+    context_shas : str, optional
+        Space-joined SHAs of the context commits the card rendered.
 
     Returns
     -------
     str or None
-        The new ``cached_at``; ``None`` when ``only_if`` was given and the
-        row had moved, in which case nothing was written.
+        The new ``cached_at``; ``None`` when nothing was written (a deeper
+        row stands, or ``only_if`` was given and the row had moved). The
+        caller then serves its own card and starts no completion.
     """
-    fp = _fingerprint(evidence)
+    fp = ring0_fingerprint(evidence)
     model_key = _model_key(config_model)
     cached_at = _now_iso()
+    coverage = rationale.coverage
     values = {
         "path": target.path,
         "line_start": target.line_start,
@@ -441,25 +864,36 @@ def store_cached(
         "actual_model": rationale.model,
         "qualified_name": target.qualified_name,
         "deferred_shas": deferred_shas,
+        "depth": depth,
+        "context_shas": context_shas,
+        "coverage": None if coverage is None else json.dumps(coverage.as_dict()),
     }
-    with get_session() as session:
-        if only_if is None:
-            session.merge(RationaleCache(**values))
-            return cached_at
-        pk = ("path", "line_start", "line_end", "provider", "model")
-        stmt = sqlite_insert(RationaleCache).values(**values)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=list(pk),
-            set_={k: v for k, v in values.items() if k not in pk},
-            where=(
-                (col(RationaleCache.cached_at) == only_if.cached_at)
-                & (
-                    col(RationaleCache.evidence_fingerprint)
-                    == only_if.evidence_fingerprint
-                )
-                & (col(RationaleCache.deferred_shas) == only_if.deferred_shas)
-            ),
+    pk = ("path", "line_start", "line_end", "provider", "model")
+    stmt = sqlite_insert(RationaleCache).values(**values)
+    existing_depth = col(RationaleCache.depth)
+    existing_fp = col(RationaleCache.evidence_fingerprint)
+    where = (
+        (stmt.excluded.depth >= existing_depth)
+        | existing_depth.is_(None)
+        | (existing_fp != stmt.excluded.evidence_fingerprint)
+    )
+    if seen is not None:
+        where = where | (
+            (col(RationaleCache.cached_at) == seen.cached_at)
+            & (existing_fp == seen.evidence_fingerprint)
         )
+    if only_if is not None:
+        where = where & (
+            (col(RationaleCache.cached_at) == only_if.cached_at)
+            & (existing_fp == only_if.evidence_fingerprint)
+            & (col(RationaleCache.deferred_shas) == only_if.deferred_shas)
+        )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=list(pk),
+        set_={k: v for k, v in values.items() if k not in pk},
+        where=where,
+    )
+    with get_session() as session:
         result = session.exec(stmt)  # type: ignore[call-overload]
         if not result.rowcount:
             return None
@@ -489,7 +923,7 @@ def update_deferred(
     provider : str
         LLM provider tag from ``Config.cache_identity("rationale")``.
     config_model : str or None
-        Pinned model name (or ``None``), as for :func:`lookup_cached`.
+        Pinned model name (or ``None``), as for :func:`lookup_card`.
     seen : CachedCard
         The card the caller read.
     deferred_shas : str
@@ -505,14 +939,14 @@ def update_deferred(
         result = session.exec(  # type: ignore[call-overload]
             update(RationaleCache)
             .where(
-                col(RationaleCache.path) == target.path,
-                col(RationaleCache.line_start) == target.line_start,
-                col(RationaleCache.line_end) == target.line_end,
-                col(RationaleCache.provider) == provider,
-                col(RationaleCache.model) == model_key,
-                col(RationaleCache.cached_at) == seen.cached_at,
-                col(RationaleCache.evidence_fingerprint) == seen.evidence_fingerprint,
-                col(RationaleCache.deferred_shas) == seen.deferred_shas,
+                *_key_where(
+                    target.path,
+                    target.line_start,
+                    target.line_end,
+                    provider,
+                    model_key,
+                ),
+                *_same_where(seen),
             )
             .values(deferred_shas=deferred_shas)
         )
@@ -841,16 +1275,60 @@ def import_rows(
 _SHA_RE = re.compile(r"[0-9a-f]{7,64}")
 
 
-def _import_deferred(value: Any) -> str:
-    """A record's ``deferred_shas``: absent is ``""`` (final); else SHAs, space-joined."""
+def _import_deferred(value: Any, name: str = "deferred_shas") -> str:
+    """A record's ``deferred_shas`` (or ``context_shas``): absent is ``""``; else SHAs, space-joined."""
     if value is None:
         return ""
     if not isinstance(value, str) or len(value) > _IMPORT_TEXT_MAX:
-        raise ImportFormatError("deferred_shas", "must be space-separated commit SHAs")
+        raise ImportFormatError(name, "must be space-separated commit SHAs")
     tokens = value.split()
     if not all(_SHA_RE.fullmatch(t) for t in tokens):
-        raise ImportFormatError("deferred_shas", "must be space-separated commit SHAs")
+        raise ImportFormatError(name, "must be space-separated commit SHAs")
     return " ".join(tokens)
+
+
+def _import_depth(value: Any) -> int | None:
+    """A record's ``depth``: absent is ``None`` (a legacy row); else 0 .. 3."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value < len(LEVELS)
+    ):
+        raise ImportFormatError(
+            "depth", f"must be an integer from 0 to {len(LEVELS) - 1}"
+        )
+    return value
+
+
+_TRIMMED_RE = re.compile(r"[a-z0-9_]{1,40}")
+_TRIMMED_MAX = 8
+
+
+def _import_coverage(value: Any) -> str | None:
+    """A record's ``coverage`` as the column's JSON; absent is ``None``.
+
+    Only the known keys are kept: the counts as integers in ``0..2**31``,
+    ``trimmed`` as at most eight short ``snake_case`` names.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ImportFormatError("coverage", "must be an object")
+    kept: dict[str, Any] = {}
+    for name in _COVERAGE_COUNTS:
+        if name in value:
+            kept[name] = _import_int(value[name], f"coverage.{name}")
+    trimmed = value.get("trimmed", [])
+    if (
+        not isinstance(trimmed, list | tuple)
+        or len(trimmed) > _TRIMMED_MAX
+        or not all(isinstance(t, str) and _TRIMMED_RE.fullmatch(t) for t in trimmed)
+    ):
+        raise ImportFormatError("coverage.trimmed", "must be a list of short names")
+    kept["trimmed"] = list(trimmed)
+    return json.dumps(kept)
 
 
 def _import_list_element(name: str, element: Any) -> Any:
@@ -942,6 +1420,9 @@ def _check_rationale(
                 items.append(cleaned)
         lists[name] = items
     deferred_shas = _import_deferred(record.get("deferred_shas"))
+    depth = _import_depth(record.get("depth"))
+    context_shas = _import_deferred(record.get("context_shas"), "context_shas")
+    coverage = _import_coverage(record.get("coverage"))
     # Format errors above win over skips; the skips follow.
     if path is None:
         return "denied"
@@ -970,6 +1451,9 @@ def _check_rationale(
         "actual_model": actual_model,
         "qualified_name": qualified_name,
         "deferred_shas": deferred_shas,
+        "depth": depth,
+        "context_shas": context_shas,
+        "coverage": coverage,
     }
 
 

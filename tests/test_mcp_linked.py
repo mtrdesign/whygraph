@@ -763,7 +763,7 @@ def test_mcp_linked_never_creates_whygraph_db(
     monkeypatch.setattr(
         "whygraph.mcp.evidence.backfill_evidence_descriptions", forbidden
     )
-    monkeypatch.setattr("whygraph.mcp.rationale.lookup_cached", forbidden)
+    monkeypatch.setattr("whygraph.mcp.rationale.lookup_card", forbidden)
     monkeypatch.setattr("whygraph.mcp.rationale.store_cached", forbidden)
     monkeypatch.setattr("whygraph.mcp.rationale.collect_evidence", forbidden)
     monkeypatch.setattr("whygraph.mcp.path_history.area_history_commits", forbidden)

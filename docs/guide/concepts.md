@@ -65,11 +65,22 @@ summarizing how many commits, PRs, and issues fed it.
     A card carries those five narrative fields and nothing else - no extra score or rating. The
     rationale is the evidence-grounded explanation, full stop.
 
+### How a card is built
+
+A card's prompt is laid out in rings. The first ring is the commits that wrote the target's own lines
+(every commit that `blame` names, and the commit that created the lines), shown in full with their
+descriptions and, for each, its own pull request once. The next ring is the rest of the file's history,
+in short form: one line per commit, newest first, up to `[rationale].context_max_chars`. A squash or
+merge commit's body is never rendered, and a pull request that only contains a commit is one line.
+This keeps a card small and cheap; the card's `coverage` field says what did not fit.
+
 ### Caching
 
 Cards are **persistently cached**, keyed by content - the target, the evidence bundle, the provider,
 and the model. Generate a card once and the next identical lookup is a sub-second database read. Change
-the underlying code (so the evidence shifts) and the next call regenerates. You pay the LLM cost only
+the lines' own history (so the evidence shifts) and the next call regenerates. One or two newer
+commits elsewhere in the file do not: the card is still served, marked `context_stale`, and three or
+more regenerate it. A card follows its symbol when the lines move. You pay the LLM cost only
 when something actually changed.
 
 ## The CodeGraph split

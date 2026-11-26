@@ -82,11 +82,12 @@ Read the answer:
 - Any other `isError` -> **No rationale** with the error's message as the reason.
 - A card -> judge the hunk against it (Step 4). With GENERATE true, count the cards whose `generated` is true for the Confidence line.
 
-A `cached_only` card also carries `match` and `stale`:
+A `cached_only` card also carries `match`, `stale` and `context_stale`:
 
 - `match: "exact"` - the card was cached for `<sym_start>`-`<sym_end>`.
 - `match: "overlap"` - the card was cached for `card_range`, a range of the same file that overlaps the symbol (usually the same symbol before it moved or changed length). It is still the symbol's rationale: judge the hunk against it as usual. If the hunk falls outside `card_range`, the card may describe a neighbouring symbol, so say so and lower the confidence.
 - `stale: true` - the card was written before the latest commits on those lines. It is the rationale from before the change, which is exactly what a review checks against: judge as usual, and end the verdict line with `(card predates the latest commits on these lines)`.
+- `context_stale: true` - the lines have not changed, but one or two newer commits touched the rest of the file, and the card does not reflect them. The card is still valid for the lines: judge as usual and do not add the `predates` note. `stale` means the lines changed; `context_stale` does not.
 
 ## Step 4 - Judge each hunk
 

@@ -31,3 +31,14 @@ code that still exists.
   comments never do. The new `[rationale].review_threads_max_chars` caps that text, and
   `pr_discussion_max_comments` and `pr_comment_max_chars` now also bound full evidence. See
   [Configuration](../reference/configuration.md).
+- **Smaller, cheaper rationale cards.** Each pull request appears once on a card, squash and merge
+  commit bodies are no longer rendered, and the rest of the file's history is a compact list capped by
+  the new `[rationale].context_max_chars`. The commit that created the lines is always kept, even when
+  a target has many commits. A card's `coverage` says what was left out. See
+  [Concepts](../guide/concepts.md#how-a-card-is-built).
+- **Unrelated commits no longer invalidate a card.** One or two newer commits elsewhere in the file
+  mark the card `context_stale` and it keeps serving; three or more regenerate it. `cached_only`
+  returns `stale` (the lines changed) and `context_stale` separately. Existing cards keep serving
+  and are replaced only when their evidence changes. Cards follow their symbol when the lines move.
+- **Review threads need a unique anchor.** A thread appears on a card only when the code it was
+  written about occurs once in the file.

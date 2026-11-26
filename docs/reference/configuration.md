@@ -101,6 +101,7 @@ max_workers = 4               # parallel LLM calls in the diff-analyzer crawler;
 # pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt, and PR / issue discussion in full evidence
 # pr_comment_max_chars = 500      # each comment clipped to this length, in the prompt and in full evidence
 # review_threads_max_chars = 3000 # review-thread text in one card prompt; 0 keeps threads out
+# context_max_chars = 27000       # short-form history of the file's other commits in one card prompt; 0 keeps it out
 # agent_generations_per_hour = 120  # org setting only, see "Agent limits" below
 # agent_generations_per_member_per_hour = 30  # org setting only, one member's share
 

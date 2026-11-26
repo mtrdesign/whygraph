@@ -672,11 +672,29 @@ def forge_payload(action: str, repo_id: int = API_REPO) -> dict:
     [
         ("pull_request", forge_payload("opened")),
         ("pull_request_review", forge_payload("submitted")),
+        ("pull_request_review", forge_payload("edited")),
+        ("pull_request_review_comment", forge_payload("created")),
+        ("pull_request_review_comment", forge_payload("deleted")),
+        ("issue_comment", forge_payload("created")),
+        ("issue_comment", forge_payload("edited")),
+        ("issue_comment", forge_payload("deleted")),
         ("issues", forge_payload("milestoned")),
         ("milestone", forge_payload("anything")),
         ("push", push("refs/tags/v1.0.0")),
     ],
-    ids=["pr", "review", "issue", "milestone", "tag"],
+    ids=[
+        "pr",
+        "review",
+        "review-edited",
+        "review-comment-created",
+        "review-comment-deleted",
+        "issue-comment-created",
+        "issue-comment-edited",
+        "issue-comment-deleted",
+        "issue",
+        "milestone",
+        "tag",
+    ],
 )
 def test_forge_events_queue_a_forge_run(
     hooked: World, event: str, payload: dict
@@ -693,7 +711,9 @@ def test_forge_events_queue_a_forge_run(
     [
         ("pull_request", "labeled"),
         ("pull_request", "synchronize"),
-        ("pull_request_review", "edited"),
+        ("issue_comment", "pinned"),
+        ("pull_request_review_comment", "edited"),
+        ("pull_request_review_thread", "resolved"),
         ("issues", "labeled"),
     ],
 )

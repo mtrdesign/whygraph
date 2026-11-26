@@ -99,7 +99,15 @@ FORGE_ACTIONS: dict[str, frozenset[str] | None] = {
             "review_request_removed",
         }
     ),
-    "pull_request_review": frozenset({"submitted", "dismissed"}),
+    "pull_request_review": frozenset(
+        {"submitted", "dismissed", "edited"}
+    ),  # a review-body edit moves PR updatedAt (S1)
+    "pull_request_review_comment": frozenset(
+        {"created", "deleted"}
+    ),  # a deletion moves it; thread-comment edits do not
+    "issue_comment": frozenset(
+        {"created", "edited", "deleted"}
+    ),  # also fires for PR conversation comments
     "issues": frozenset(
         {
             "opened",

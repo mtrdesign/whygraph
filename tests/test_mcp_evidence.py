@@ -16,9 +16,16 @@ from sqlmodel import select
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
 from whygraph.mcp.errors import WhyGraphError
-from whygraph.mcp.evidence import _commit_dict, _pr_dict, whygraph_evidence_for
+from whygraph.mcp.evidence import (
+    PUSH_NOT_PUSHED,
+    PushSplit,
+    _commit_dict,
+    _pr_dict,
+    merge_linked_evidence,
+    whygraph_evidence_for,
+)
 from whygraph.scan.refactor_score import BORING_THRESHOLD
-from whygraph.services.git import GitError, Repository
+from whygraph.services.git import BlameHunk, GitError, Repository
 
 
 def _run_git(repo: Path, *args: str) -> str:
@@ -2443,3 +2450,127 @@ def test_evidence_for_full_scopes_threads_to_the_file_and_compact_is_unchanged(
     assert text["review_summaries"] == [{"author": "o", "body": "nice"}]
     assert full["pull_requests"]["5"]["omitted"]["review_threads_elsewhere"] == 1
     assert "anchor" not in json.dumps(full)
+
+
+# ---------------------------------------------------------------------------
+# merge_linked_evidence: the origin guarantee (plan 62 step B1)
+# ---------------------------------------------------------------------------
+
+
+def _msha(n: int) -> str:
+    return f"{n + 1:040x}"
+
+
+def _mday(n: int) -> str:
+    return f"2025-01-{n + 1:02d}T00:00:00+00:00"
+
+
+def _platform_item(n: int, source: str, *, dated: bool = True) -> dict:
+    return {
+        "commit": {"sha": _msha(n), "committed_at": _mday(n) if dated else None},
+        "pull_requests": [],
+        "issues": [],
+        "source": source,
+        "lines": None,
+    }
+
+
+def _local_split(*days: int) -> PushSplit:
+    hunks = tuple(
+        BlameHunk(_msha(n), 1, "Dev", "dev@example.com", f"c{n}", _mday(n))
+        for n in days
+    )
+    return PushSplit(local=tuple((h, PUSH_NOT_PUSHED) for h in hunks))
+
+
+def _merged(items: list[dict]) -> list[tuple[int, str]]:
+    day_of = {_msha(n): n for n in range(31)}
+    return [(day_of[item["commit"]["sha"]], item["source"]) for item in items]
+
+
+def test_merge_linked_evidence_local_items_count_as_line_level() -> None:
+    """Platform ``blame`` / ``pr-origin`` plus two ``local`` hunks exceed the
+    limit only with the locals counted: the old ``blame`` item stays, the
+    newer ``area`` item does not, and the locals are kept newest first."""
+    platform = [
+        _platform_item(0, "blame"),
+        *(_platform_item(n, "pr-origin") for n in (5, 6, 7)),
+        _platform_item(12, "area"),
+    ]
+    got = merge_linked_evidence(platform, [], _local_split(10, 11), limit=4)
+    assert _merged(got) == [
+        (11, "local"),
+        (10, "local"),
+        (7, "pr-origin"),
+        (0, "blame"),
+    ]
+
+
+def test_merge_linked_evidence_oldest_dated_slot() -> None:
+    """The oldest *dated* item survives the cut; an undated one never takes it."""
+    platform = [
+        _platform_item(9, "blame"),
+        _platform_item(20, "blame-walked", dated=False),
+        *(_platform_item(n, "pr-origin") for n in range(1, 6)),
+    ]
+    got = merge_linked_evidence(platform, [], PushSplit(), limit=4)
+    assert _merged(got) == [
+        (9, "blame"),
+        (5, "pr-origin"),
+        (4, "pr-origin"),
+        (1, "pr-origin"),
+    ]
+
+
+def test_merge_linked_evidence_under_limit_without_area_pressure_is_unchanged() -> None:
+    """With room for everything the merge is today's: newest first over all
+    items, ``area`` included."""
+    platform = [
+        _platform_item(0, "blame"),
+        _platform_item(3, "pr-origin"),
+        _platform_item(12, "area"),
+        _platform_item(13, "area"),
+    ]
+    got = merge_linked_evidence(platform, [], _local_split(10), limit=10)
+    assert _merged(got) == [
+        (13, "area"),
+        (12, "area"),
+        (10, "local"),
+        (3, "pr-origin"),
+        (0, "blame"),
+    ]
+
+
+def test_merge_linked_evidence_area_fills_only_the_remaining_slots() -> None:
+    """Under ``limit`` line-level items, newer ``area`` items never push one
+    out: every line-level item stays and area fills what is left, newest
+    first, and the list stays newest first."""
+    platform = [
+        _platform_item(0, "blame"),
+        _platform_item(2, "pr-origin"),
+        _platform_item(14, "area"),
+        _platform_item(13, "area"),
+        _platform_item(12, "area"),
+    ]
+    split = _local_split(1, 10)
+    got = merge_linked_evidence(platform, [], split, limit=5)
+    assert _merged(got) == [
+        (14, "area"),
+        (10, "local"),
+        (2, "pr-origin"),
+        (1, "local"),
+        (0, "blame"),
+    ]
+    # Exactly ``limit`` line-level items: no area slot at all.
+    got = merge_linked_evidence(platform, [], split, limit=4)
+    assert _merged(got) == [(10, "local"), (2, "pr-origin"), (1, "local"), (0, "blame")]
+
+
+def test_merge_linked_evidence_limit_one_keeps_the_newest() -> None:
+    platform = [
+        _platform_item(0, "blame"),
+        _platform_item(3, "pr-origin"),
+        _platform_item(9, "area"),
+    ]
+    got = merge_linked_evidence(platform, [], _local_split(5), limit=1)
+    assert _merged(got) == [(5, "local")]

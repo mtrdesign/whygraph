@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ from _walk_oracle import walk_past_boring_oracle
 
 from whygraph.db import get_session
 from whygraph.db.models import Commit
-from whygraph.mcp import evidence
+from whygraph.mcp import evidence, path_history
 from whygraph.mcp.evidence import EvidenceResult, evidence_from_hunks
 from whygraph.mcp.targets import Target
 from whygraph.scan.refactor_score import BORING_THRESHOLD
@@ -667,3 +668,216 @@ def test_walk_equiv_interleaved_uncommitted_lines(
 
     assert new == [("B", "blame"), ("A", "blame-walked")]
     _assert_equivalent(new, old)
+
+
+# ---------------------------------------------------------------------------
+# The origin guarantee (plan 62 step B1): more line-level items than limit
+# ---------------------------------------------------------------------------
+
+_DAY0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+
+def _gsha(n: int) -> str:
+    return f"{n + 1:040x}"
+
+
+def _day(n: int) -> str:
+    return (_DAY0 + timedelta(days=n)).isoformat()
+
+
+def _guarantee_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    blame: tuple[int, ...] = (),
+    origin: tuple[int, ...] = (),
+    walked: tuple[int, ...] = (),
+    area: tuple[int, ...] = (),
+    undated: frozenset[int] = frozenset(),
+    limit: int = 20,
+) -> tuple[list[tuple[int, str]], list[int]]:
+    """``(day, source)`` per returned item, plus the area fill's ``limit`` calls.
+
+    Each number is a commit dated that many days after ``_DAY0`` (or undated
+    when in ``undated``); the walk, predecessor and squash passes are
+    replaced so exactly these line-level items come back.
+    """
+    hunks = {n: BlameHunk(_gsha(n), 1, None, None, None, None) for n in range(100)}
+    with get_session() as session:
+        for n in (*blame, *origin, *walked):
+            session.add(
+                Commit(
+                    sha=_gsha(n),
+                    parent_shas="",
+                    author_name="Test User",
+                    author_email="tester@example.com",
+                    authored_at=_day(n),
+                    committed_at="" if n in undated else _day(n),
+                    subject=f"c{n}",
+                    body="",
+                    files_changed=1,
+                    insertions=1,
+                    deletions=0,
+                    scanned_at="2026-06-01T00:00:00+00:00",
+                )
+            )
+    monkeypatch.setattr(
+        evidence,
+        "_walk_past_boring",
+        lambda repo, target, *, initial_hunks, blamer=None: (
+            [hunks[n] for n in walked],
+            set(),
+        ),
+    )
+    monkeypatch.setattr(
+        evidence, "_predecessor_blame", lambda repo, target, *, blamer=None: []
+    )
+    monkeypatch.setattr(
+        evidence,
+        "_attribute_squash_origins",
+        lambda repo, target, *, blame_shas, session, blamer=None: [
+            hunks[n] for n in origin
+        ],
+    )
+    area_limits: list[int] = []
+
+    def fake_area(path: str, *, limit: int, exclude_shas: set[str]):
+        area_limits.append(limit)
+        rows = [
+            evidence.CommitEvidence(
+                Commit(
+                    sha=_gsha(n),
+                    parent_shas="",
+                    author_name="Test User",
+                    author_email="tester@example.com",
+                    authored_at=_day(n),
+                    committed_at=_day(n),
+                    subject=f"c{n}",
+                    body="",
+                    files_changed=1,
+                    insertions=1,
+                    deletions=0,
+                    scanned_at="2026-06-01T00:00:00+00:00",
+                ),
+                (),
+                (),
+                source="area",
+            )
+            for n in area
+            if _gsha(n) not in exclude_shas
+        ]
+        return rows[:limit]
+
+    monkeypatch.setattr(path_history, "area_history_commits", fake_area)
+    repo = _Repo(tmp_path / "repo")
+    monkeypatch.chdir(repo.root)
+    result = evidence_from_hunks(
+        Repository(repo.root),
+        Target("f.py", 1, 1, None),
+        [hunks[n] for n in blame],
+        limit=limit,
+    ).evidence
+    day_of = {_gsha(n): n for n in range(100)}
+    return [(day_of[it.commit.sha], it.source) for it in result], area_limits
+
+
+def test_origin_guarantee_keeps_the_oldest_dated_line_commit(
+    tmp_path: Path, whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """21 line-level commits, limit 20: the oldest one (the commit that
+    created the lines) survives; the next-oldest is the one dropped."""
+    got, area_limits = _guarantee_bundle(
+        tmp_path,
+        monkeypatch,
+        blame=(25,),
+        origin=tuple(range(10, 20)),
+        walked=tuple(range(0, 10)),
+    )
+    assert len(got) == 20
+    assert got[0] == (25, "blame")
+    assert got[-1] == (0, "blame-walked")
+    assert (1, "blame-walked") not in got
+    assert [day for day, _ in got] == [25, *range(19, 1, -1), 0]
+    assert area_limits == []
+
+
+def test_origin_guarantee_keeps_every_blame_item(
+    tmp_path: Path, whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2 old ``blame`` items and 25 newer ``pr-origin`` items: both blame
+    items stay (today the newest-first cut drops them), newest first."""
+    got, _ = _guarantee_bundle(
+        tmp_path, monkeypatch, blame=(0, 1), origin=tuple(range(2, 27))
+    )
+    assert len(got) == 20
+    assert got[-2:] == [(1, "blame"), (0, "blame")]
+    assert got[:-2] == [(day, "pr-origin") for day in range(26, 8, -1)]
+
+
+def test_origin_guarantee_blame_items_alone_fill_the_limit(
+    tmp_path: Path, whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More ``blame`` items than ``limit``: the newest blame items, nothing else."""
+    got, _ = _guarantee_bundle(
+        tmp_path, monkeypatch, blame=tuple(range(10, 15)), walked=(0,), limit=3
+    )
+    assert got == [(14, "blame"), (13, "blame"), (12, "blame")]
+
+
+@pytest.mark.parametrize("line_level", [20, 3])
+def test_origin_guarantee_at_or_under_limit_is_unchanged(
+    tmp_path: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    line_level: int,
+) -> None:
+    """At or under ``limit`` line-level items the bundle is today's: the
+    newest-first sort (undated last) with the area fill for the rest."""
+    blame = (2,)
+    walked = tuple(n for n in range(0, 21) if n != 2)[: line_level - 1]
+    got, area_limits = _guarantee_bundle(
+        tmp_path,
+        monkeypatch,
+        blame=blame,
+        walked=walked,
+        area=(30, 31, 40),
+        undated=frozenset({0}),
+    )
+    # Today's order: newest first by ``committed_at``, the undated item last.
+    expected_line = sorted((n for n in (*blame, *walked) if n != 0), reverse=True)
+    expected_line.append(0)
+    if line_level == 20:
+        assert area_limits == []
+        assert [day for day, _ in got] == expected_line
+    else:
+        assert area_limits == [17]
+        assert [day for day, _ in got] == [40, 31, 30, *expected_line]
+        assert [src for _, src in got][:3] == ["area"] * 3
+    assert dict(got)[2] == "blame"
+
+
+def test_origin_guarantee_limit_one_keeps_the_newest(
+    tmp_path: Path, whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``limit=1`` keeps the newest line-level item, as today."""
+    got, _ = _guarantee_bundle(
+        tmp_path, monkeypatch, blame=(0,), origin=(1, 2, 3), limit=1
+    )
+    assert got == [(3, "pr-origin")]
+
+
+def test_origin_guarantee_undated_item_never_fills_the_oldest_slot(
+    tmp_path: Path, whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An item without ``committed_at`` sorts last but is not "the oldest":
+    the oldest *dated* item takes the slot."""
+    got, _ = _guarantee_bundle(
+        tmp_path,
+        monkeypatch,
+        blame=(30,),
+        walked=(50, *range(0, 20)),
+        undated=frozenset({50}),
+    )
+    assert len(got) == 20
+    assert 50 not in dict(got)
+    assert [day for day, _ in got] == [30, *range(19, 1, -1), 0]

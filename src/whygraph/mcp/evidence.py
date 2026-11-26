@@ -18,11 +18,11 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -67,6 +67,14 @@ _SOURCE_PRIORITY = {
     "predecessor-blame": 2,
     "area": 3,
 }
+
+# The sources that attribute the target's own lines (everything but "area");
+# :func:`_keep_origin` keeps these over area history.
+_LINE_LEVEL_SOURCES = frozenset(
+    {"blame", "pr-origin", "blame-walked", "predecessor-blame"}
+)
+
+_T = TypeVar("_T")
 
 _log = logging.getLogger(__name__)
 
@@ -294,7 +302,9 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
 
     SHAs that appear under multiple labels are kept once at the strongest
     label (see :data:`_SOURCE_PRIORITY`). The final list is sorted newest
-    first and capped at ``limit``.
+    first and capped at ``limit``; past ``limit`` line-level commits the cut
+    keeps every ``blame`` commit and the oldest dated one first (see
+    :func:`evidence_from_hunks`).
 
     Parameters
     ----------
@@ -355,6 +365,10 @@ def evidence_from_hunks(
         The blame of ``target`` (uncommitted hunks are skipped).
     limit : int, optional
         Cap on the number of commits returned, newest first (default 20).
+        When the line-level commits (every source but ``area``) exceed it,
+        the kept ones are every ``blame`` commit (newest first, up to
+        ``limit``), then the oldest dated line-level commit, then the newest
+        of the rest; at ``limit`` 1 the newest is kept.
     git_budget : int or None, optional
         Cap on the number of blame calls this run may make; ``None``
         (default) means no cap. Calls past it are skipped: hunks stay
@@ -433,7 +447,53 @@ def evidence_from_hunks(
         items.extend(extras)
 
     items.sort(key=lambda item: item.commit.committed_at or "", reverse=True)
-    return EvidenceResult(evidence=items[:limit], unknown=list(unknown.values()))
+    kept = _keep_origin(
+        items,
+        limit,
+        source_of=lambda item: item.source,
+        is_dated=lambda item: bool(item.commit.committed_at),
+        line_level=_LINE_LEVEL_SOURCES,
+    )
+    return EvidenceResult(evidence=kept, unknown=list(unknown.values()))
+
+
+def _keep_origin(
+    ordered: list[_T],
+    limit: int,
+    *,
+    source_of: Callable[[_T], str | None],
+    is_dated: Callable[[_T], bool],
+    line_level: Collection[str],
+) -> list[_T]:
+    """Cut newest-first ``ordered`` to ``limit``, keeping the lines' origin.
+
+    Line-level items always come first: at or under ``limit`` of them, all
+    are kept and the other items (area history) fill only the remaining
+    slots, newest first. Past ``limit``, the kept items are every ``blame``
+    item (newest first, up to ``limit``), then the oldest dated line-level
+    item, then the newest remaining line-level items; at ``limit`` 1 the
+    newest line-level item. Returned in ``ordered``'s order.
+    """
+    if limit < 1:
+        return ordered[:limit]
+    line = [i for i, item in enumerate(ordered) if source_of(item) in line_level]
+    if len(line) <= limit:
+        line_set = set(line)
+        rest = [i for i in range(len(ordered)) if i not in line_set]
+        return [ordered[i] for i in sorted([*line, *rest[: limit - len(line)]])]
+    if limit == 1:
+        return [ordered[line[0]]]
+    kept = [i for i in line if source_of(ordered[i]) == "blame"][:limit]
+    if len(kept) < limit:
+        oldest = next((i for i in reversed(line) if is_dated(ordered[i])), None)
+        if oldest is not None and oldest not in kept:
+            kept.append(oldest)
+    for i in line:
+        if len(kept) >= limit:
+            break
+        if i not in kept:
+            kept.append(i)
+    return [ordered[i] for i in sorted(kept)]
 
 
 def _should_replace(existing: CommitEvidence | None, new_source: str) -> bool:
@@ -2338,7 +2398,10 @@ def merge_linked_evidence(
     -------
     list[dict]
         Newest first by parsed timestamp, one entry per SHA - a platform
-        item always beats a locally built one - capped at ``limit``.
+        item always beats a locally built one - capped at ``limit``. As in
+        :func:`evidence_from_hunks`, line-level items (``local`` counts as
+        one) come first and ``area`` items fill only the remaining slots;
+        past ``limit`` line-level items the cut keeps the lines' origin.
     """
     by_sha: dict[str, dict] = {}
     for item in platform_items:
@@ -2365,7 +2428,15 @@ def merge_linked_evidence(
         key=lambda item: _parsed_time((item.get("commit") or {}).get("committed_at")),
         reverse=True,
     )
-    return items[:limit]
+    return _keep_origin(
+        items,
+        limit,
+        source_of=lambda item: item.get("source"),
+        is_dated=lambda item: (
+            _parsed_time((item.get("commit") or {}).get("committed_at")) != _EPOCH
+        ),
+        line_level=_LINE_LEVEL_SOURCES | {LOCAL_SOURCE},
+    )
 
 
 def blame_target(repo: Repository, target: Target) -> tuple[BlameHunk, ...]:

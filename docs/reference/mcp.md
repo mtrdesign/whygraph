@@ -100,23 +100,46 @@ keyed by number (as a string), however many commits link the same pull request:
   "describing": 0,
   "pull_requests": {
     "847": {
-      "text": { "body": "...", "comments": [{ "author": "jane", "body": "...", "created_at": "..." }] },
+      "text": {
+        "body": "...",
+        "comments": [{ "author": "jane", "body": "...", "created_at": "..." }],
+        "review_summaries": [{ "author": "sam", "state": "APPROVED", "body": "...", "submitted_at": "..." }],
+        "review_threads": [{
+          "path": "src/auth.py", "original_line": 42, "resolved": true, "outdated": false, "current": true,
+          "comments": [{ "author": "sam", "body": "...", "created_at": "..." }]
+        }]
+      },
       "commit_titles": [{ "oid": "4f1c...", "headline": "fix: retry refresh", "author_name": "Jane Doe" }],
+      "review_threads_elsewhere": 2,
+      "review_threads_total": 3,
       "omitted": { "comments": 3, "commit_titles": 0, "body_chars": 0 }
     }
   },
   "issues": {
-    "812": { "text": { "body": "..." } }
+    "812": { "text": { "body": "...", "comments": [{ "author": "ana", "body": "...", "created_at": "..." }] } }
   }
 }
 ```
 
-A pull request entry holds `text.body`, `text.comments` (the first
-`[rationale].pr_discussion_max_comments`, each cut to `pr_comment_max_chars`) and `commit_titles`
-(the first `pr_roster_max_commits`); an issue entry holds `text.body`. Pull request and issue bodies
-are cut at **4000** characters (marked with `...`); commit bodies are not cut. An entry that lost
-anything carries `omitted`: on a pull request `{ "comments": n, "commit_titles": m, "body_chars": k }`,
-on an issue `{ "body_chars": k }`.
+A pull request entry holds `text.body`, `text.comments` (the conversation), `text.review_summaries`
+(the review bodies and their state), `text.review_threads` and `commit_titles` (the first
+`pr_roster_max_commits`); an issue entry holds `text.body` and `text.comments`. Comments and
+review summaries are the oldest first, at most `[rationale].pr_discussion_max_comments` of each, and
+every comment is cut to `pr_comment_max_chars`. Pull request and issue bodies are cut at **4000**
+characters (marked with `...`); commit bodies are not cut. Bot and hidden (minimized) comments are
+not stored, so they never appear, except a bot's or hidden opening comment of a thread a human
+answered (cut short).
+
+`review_threads` holds only the threads on **the target's file** (renames followed), at most
+`pr_discussion_max_comments` comments in all. Each thread carries `current`: `true` when the code it
+was written about still exists in today's file, `false` when it is gone or cannot be placed. The
+threads on other files are not inlined: `review_threads_elsewhere` counts them and
+`whygraph://pr/{n}` carries every file's. `review_threads_total` is GitHub's own count of threads on
+the pull request, which can exceed what was stored (the first 20 threads are kept).
+
+An entry that lost anything carries `omitted`: on a pull request `{ "comments": n, "commit_titles": m,
+"body_chars": k, "review_summaries": a, "review_comments": b, "review_threads_elsewhere": c }`, on an
+issue `{ "body_chars": k, "comments": n }`.
 
 `source` says how the commit was found: `blame`, `pr-origin`, `blame-walked`, `predecessor-blame` or
 `area`. A [linked project](#linked-projects) may add `push_status`.
@@ -296,8 +319,8 @@ Read-only, JSON, addressed by URI.
 | URI | Name | Description |
 |---|---|---|
 | `whygraph://commit/{sha}` | `whygraph_commit` | A scanned commit and the pull requests that contain it (closing issues not inlined). |
-| `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles`, and the first 50 `comments` (the oldest, each body cut to 4,000 characters); when anything was cut, an `omitted` key says how many comments (`comments`) and characters (`comment_chars`). |
-| `whygraph://issue/{number}` | `whygraph_issue` | An issue and the pull requests that close it. |
+| `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles`, and the first 50 `comments` (the oldest, each body cut to 4,000 characters); when anything was cut, an `omitted` key says how many comments (`comments`) and characters (`comment_chars`). Also carries `review_summaries` and the review threads on **every** file (each with its `path`; no `current`, because a resource has no target), plus `review_threads_total`. |
+| `whygraph://issue/{number}` | `whygraph_issue` | An issue and the pull requests that close it. Includes the issue's `comments` (the first 100 stored, oldest first, human only, each cut like a pull request comment). |
 | `whygraph://repo/overview` | `whygraph_repo_overview` | Repo-level summary: row counts, commit date range, scan freshness, LLM-description coverage, top contributors, and a `freshness` block. |
 | `whygraph://plan/{stem}` | `whygraph_plan` | A committed [plan](#plans)'s decision digest, its links and a contents list. Intent, not history. |
 | `whygraph://plan/{stem}/section/{n}` | `whygraph_plan_section` | One section of a plan, at most 8,000 characters. |

@@ -58,6 +58,22 @@ actually run this time, so a Quick rescan shows "Phase 1 of 3" through "Phase 3 
    After a repository's first crawl, the GitHub crawler asks only for the pull requests and issues
    created or updated since the previous crawl (with a 10-minute overlap) and updates the changed
    ones in place.
+
+    The crawl stores a pull request's description, its first 100 conversation comments (oldest
+    first), the last 30 review summaries and its review threads, and an issue's description and
+    first 100 comments, plus GitHub's totals. Review threads come from a separate **thread pass**
+    that reads the first 20 threads of each pull request and stops when the GitHub rate limit is
+    down to a reserve of 1,000 points, then resumes on the next scan, so a large repository can take
+    several scans to finish. Bot comments and minimized (hidden) comments are not stored, except a
+    bot's or hidden opening comment of a thread a human answered. The first GitHub scan after
+    upgrading to a release that added this re-reads every pull request and issue once. Git-hook
+    scans do not run the GitHub crawl, so none of this refreshes from a hook.
+
+    !!! note "Freshness lags"
+        GitHub does not move a pull request's update time when a review thread is resolved or
+        unresolved, or when a review-thread comment is edited or hidden, so those changes appear
+        only after the pull request next changes for another reason. Edits to review summaries,
+        new and deleted review comments, and issue comment changes do refresh it.
 2. **PR-origin recovery** *(optional)* - squash-merge recovery. When a PR was squash-merged, one
    targeted `git fetch` of the PR's original head brings its feature-branch commits into the evidence
    without polluting area history. Needs the network, so it is skipped in a Quick rescan.

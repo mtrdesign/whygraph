@@ -98,8 +98,9 @@ max_workers = 4               # parallel LLM calls in the diff-analyzer crawler;
 # provider = "anthropic"      # which [llm.*] adapter writes the rationale card
 # model = "claude-haiku-4-5"  # override the model for rationale only
 # pr_roster_max_commits = 30      # squashed-commit headlines shown per PR in the prompt
-# pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt
-# pr_comment_max_chars = 500      # each PR comment clipped to this length
+# pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt, and PR / issue discussion in full evidence
+# pr_comment_max_chars = 500      # each comment clipped to this length, in the prompt and in full evidence
+# review_threads_max_chars = 3000 # review-thread text in one card prompt; 0 keeps threads out
 # agent_generations_per_hour = 120  # org setting only, see "Agent limits" below
 # agent_generations_per_member_per_hour = 30  # org setting only, one member's share
 

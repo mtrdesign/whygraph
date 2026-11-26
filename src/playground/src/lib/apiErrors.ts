@@ -401,6 +401,7 @@ export const MESSAGES: Record<string, Resolver> = {
     tone: "info",
     message: "This symbol has no history in the scanned commits, so there is nothing to explain yet.",
   },
+  depth_above_ceiling: "Above your organization's ceiling.",
   generation_not_permitted: "You can read rationale cards here but not generate new ones.",
   generation_limited: (err) => ({
     tone: "warn",

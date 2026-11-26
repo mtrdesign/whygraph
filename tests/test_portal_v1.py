@@ -1408,3 +1408,68 @@ def test_member_limits_are_org_only_keys() -> None:
         assert key in policy.ORG_ONLY_KEYS[section]
         assert policy.DEFAULTS_ALLOWLIST[section][key] is True
         assert key not in policy.PUT_ALLOWLIST[section]
+
+
+@pytest.mark.parametrize("key", ["depth", "max_depth", "org_max_depth"])
+def test_depth_keys_not_importable_from_repo(tmp_path: Path, key: str) -> None:
+    """A repo's ``whygraph.toml`` cannot set any depth key (plan 62 R28)."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "whygraph.toml").write_text(f'[rationale]\n{key} = "low"\n')
+    preview = policy.preview_import(root)
+    assert key not in preview.layer.get("rationale", {})
+    assert f"rationale.{key}" in {entry["key"] for entry in preview.dropped}
+    assert key not in policy.IMPORT_ALLOWLIST["rationale"]
+
+
+def test_depth_allowlists() -> None:
+    """``depth`` / ``max_depth`` are writable by PUT; ``org_max_depth`` only on defaults."""
+    for name in ("PUT_ALLOWLIST", "PRODUCTION_PUT_ALLOWLIST", "DEFAULTS_ALLOWLIST"):
+        rationale = getattr(policy, name)["rationale"]
+        assert rationale["depth"] is True, name
+        assert rationale["max_depth"] is True, name
+    assert "org_max_depth" in policy.ORG_ONLY_KEYS["rationale"]
+    assert policy.DEFAULTS_ALLOWLIST["rationale"]["org_max_depth"] is True
+    for name in ("IMPORT_ALLOWLIST", "PUT_ALLOWLIST", "PRODUCTION_PUT_ALLOWLIST"):
+        assert "org_max_depth" not in getattr(policy, name)["rationale"], name
+
+
+def test_org_max_depth_set_on_defaults_not_per_project(v1: V1World) -> None:
+    assert (
+        set_defaults(v1, {"rationale": {"org_max_depth": "medium"}}).status_code == 200
+    )
+    assert (
+        set_defaults(v1, {"rationale": {"org_max_depth": "xhigh"}}).status_code == 422
+    )
+    assert (
+        set_defaults(v1, {"rationale": {"org_max_depth": "low"}}, who="cy").status_code
+        == 403
+    )
+    signed_in(v1.client, v1.ids["ben"])
+    response = v1.client.put(
+        f"{at(ORG)}/api/projects/{SLUG}/config",
+        json={"config": {"rationale": {"org_max_depth": "low"}}},
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_project_put_depth_and_ceiling(v1: V1World) -> None:
+    """A depth / max_depth PUT works up to the org ceiling, then 422 ``depth_above_ceiling``."""
+    url = f"{at(ORG)}/api/projects/{SLUG}/config"
+    assert (
+        set_defaults(v1, {"rationale": {"org_max_depth": "medium"}}).status_code == 200
+    )
+    signed_in(v1.client, v1.ids["ben"])
+    ok = v1.client.put(
+        url, json={"config": {"rationale": {"depth": "high", "max_depth": "medium"}}}
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["config"]["rationale"] == {"depth": "high", "max_depth": "medium"}
+
+    refused = v1.client.put(url, json={"config": {"rationale": {"max_depth": "high"}}})
+    assert refused.status_code == 422, refused.text
+    body = refused.json()
+    assert body["code"] == "depth_above_ceiling"
+    assert body["ceiling"] == "medium"
+    stored = v1.client.get(url).json()["config"]["rationale"]
+    assert stored["max_depth"] == "medium"

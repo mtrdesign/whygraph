@@ -61,7 +61,14 @@ from whygraph.agents import (
     remove_entry,
     resolve_agent,
 )
-from whygraph.core.config import Config, ConfigError, normalize_v2
+from whygraph.core.config import (
+    DEPTH_LEVELS,
+    OFFERED_DEPTH_LEVELS,
+    Config,
+    ConfigError,
+    RationaleConfig,
+    normalize_v2,
+)
 from whygraph.core.context import ProjectContext, use_project
 from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.db.engine import dispose_engine
@@ -3071,11 +3078,47 @@ def checked_project_layer(
             load_layer(session, project.id, org_id=project.org_id),
         )
     )
+    if not linked:
+        _check_depth_ceiling(session, state, project, kept)
     try:
         save_layer(session, project.id, kept, org_id=project.org_id)
     except ConfigPolicyError as exc:
         raise ApiError(422, str(exc)) from exc
     return kept
+
+
+def _check_depth_ceiling(
+    session: Session, state: PortalState, project: BoundProject, kept: dict
+) -> None:
+    """Refuse a project ``[rationale].max_depth`` above the org's ceiling.
+
+    The ceiling is the org layer's ``org_max_depth`` in production; local
+    mode has no org ceiling, so the default applies. A value that is not
+    an offered level is left to ``Config`` validation.
+
+    Raises
+    ------
+    ApiError
+        ``422 depth_above_ceiling`` with the ``ceiling``.
+    """
+    table = kept.get("rationale")
+    value = table.get("max_depth") if isinstance(table, dict) else None
+    if value not in DEPTH_LEVELS:
+        return
+    ceiling = RationaleConfig().org_max_depth
+    if state.mode == "production":
+        org_table = load_layer(session, None, org_id=project.org_id).get("rationale")
+        stored = org_table.get("org_max_depth") if isinstance(org_table, dict) else None
+        if stored in OFFERED_DEPTH_LEVELS:
+            ceiling = stored
+    if DEPTH_LEVELS.index(value) > DEPTH_LEVELS.index(ceiling):
+        raise ApiError(
+            422,
+            f"rationale.max_depth {value!r} is above your organization's "
+            f"ceiling ({ceiling!r})",
+            code="depth_above_ceiling",
+            ceiling=ceiling,
+        )
 
 
 def finish_project_layer(

@@ -428,6 +428,14 @@ class AnalyzeConfig:
     agent_descriptions_per_member_per_hour: int = 150
 
 
+DEPTH_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
+"""Every rationale depth level, lowest first (plan 62 section 14.1)."""
+
+OFFERED_DEPTH_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+"""The levels ``[rationale]`` accepts today. ``xhigh`` is not offered until
+Part D ships: add it here (use :data:`DEPTH_LEVELS`) and nothing else moves."""
+
+
 @dataclass(frozen=True, slots=True)
 class RationaleConfig:
     """Configuration for the LLM-driven rationale generator.
@@ -486,6 +494,18 @@ class RationaleConfig:
         The same limit per connected-portal member (enforced next to the org
         one, so the lower of the two binds). Org setting; ``0`` to
         ``10000``. Default ``30``.
+    depth : str
+        How deep a card reads: one of :data:`OFFERED_DEPTH_LEVELS` or
+        ``"auto"`` (default). A depth above :attr:`max_depth` is accepted
+        and capped when it is resolved, not refused here.
+    max_depth : str
+        The project's ceiling: one of :data:`OFFERED_DEPTH_LEVELS`.
+        Default ``"high"``. Not importable from a repo's ``whygraph.toml``.
+    org_max_depth : str
+        Production only, **org setting** (owners): the org's ceiling, one
+        of :data:`OFFERED_DEPTH_LEVELS`. Read from the org layer, never
+        from a project's. The effective ceiling is the lower of this and
+        :attr:`max_depth`. Default ``"high"``.
     """
 
     provider: str | None = None
@@ -498,6 +518,9 @@ class RationaleConfig:
     context_max_chars: int = 27000
     agent_generations_per_hour: int = 120
     agent_generations_per_member_per_hour: int = 30
+    depth: str = "auto"
+    max_depth: str = "high"
+    org_max_depth: str = "high"
 
 
 AREA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
@@ -1535,6 +1558,23 @@ class Config:
                 "rationale.context_max_chars must be >= 0, "
                 f"got {self.rationale.context_max_chars}"
             )
+        for name, value, allowed in (
+            ("rationale.depth", self.rationale.depth, (*OFFERED_DEPTH_LEVELS, "auto")),
+            (
+                "rationale.max_depth",
+                self.rationale.max_depth,
+                OFFERED_DEPTH_LEVELS,
+            ),
+            (
+                "rationale.org_max_depth",
+                self.rationale.org_max_depth,
+                OFFERED_DEPTH_LEVELS,
+            ),
+        ):
+            if value not in allowed:
+                raise ConfigError(
+                    f"{name} must be one of {', '.join(allowed)}, got {value!r}"
+                )
         for name, value in (
             (
                 "analyze.agent_descriptions_per_hour",

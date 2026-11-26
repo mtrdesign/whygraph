@@ -20,7 +20,6 @@ from collections.abc import Collection, Iterator, Sequence
 from whygraph.core import Shell, ShellError
 
 from .commands import (
-    PAGE_SIZES,
     GhApiGraphqlCmd,
     floor_for,
     forbidden_under,
@@ -55,7 +54,8 @@ _PR_FIELDS = """\
         }
         closingIssuesReferences(first: 50) { nodes { number } }
         comments(first: 100) {
-          nodes { author { login } body createdAt }
+          totalCount
+          nodes { author { __typename login } body createdAt isMinimized }
         }
         milestone { number }
         assignees(first: 10) { nodes { login } }
@@ -69,12 +69,20 @@ _PR_FIELDS = """\
         reviews(first: 5, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
           nodes { author { login } submittedAt }
         }
+        reviewSummaries: reviews(last: 30, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+          nodes { author { __typename login } state body submittedAt isMinimized }
+        }
+        reviewThreads { totalCount }
         files(first: 100) { nodes { path } }
         additions deletions changedFiles
 """
 
 
-def _list_query(size: int = PAGE_SIZES[0]) -> str:
+PR_PAGE_SIZES = (50, 25, 10, 5)
+"""Page sizes of the PR list query, tried in turn on a 502 / 504."""
+
+
+def _list_query(size: int = PR_PAGE_SIZES[0]) -> str:
     """Return the full PR listing query for a page of ``size`` PRs."""
     return (
         f"""
@@ -121,12 +129,12 @@ DETAILS_BATCH = 20
 """PRs per details request.
 
 20 x (250 commits + 100 comments + 100 files + 50 refs + 20 labels + up
-to 25 reviews and review requests) stays far under GitHub's 500k-node
+to 55 reviews and review requests) stays far under GitHub's 500k-node
 limit; a 502 / 504 halves it (see :data:`MIN_DETAILS_BATCH`).
 """
 
-MIN_DETAILS_BATCH = 5
-"""Smallest details batch a 502 / 504 halves down to (20, 10, 5)."""
+MIN_DETAILS_BATCH = 2
+"""Smallest details batch a 502 / 504 halves down to (20, 10, 5, 2)."""
 
 _COUNT_QUERY = """
 query($owner: String!, $name: String!) {
@@ -219,6 +227,7 @@ class PullRequests(Collection[PullRequest]):
             variables={"owner": self.owner, "name": self.name},
             query_for_size=_list_query,
             tolerate=_TOLERATE,
+            page_sizes=PR_PAGE_SIZES,
         ):
             yield PullRequest.from_graphql_node(node)
 

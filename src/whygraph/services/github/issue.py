@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .pull_request import Comment
+
 
 @dataclass(frozen=True, slots=True)
 class Issue:
@@ -41,6 +43,10 @@ class Issue:
         Logins of the assignees (first 10).
     state_reason : str or None
         ``COMPLETED``, ``NOT_PLANNED``, ``REOPENED`` or ``None``.
+    comments : tuple[Comment, ...]
+        The first 100 comments, oldest first.
+    comments_total : int
+        GitHub's comment count.
     """
 
     number: int
@@ -56,6 +62,8 @@ class Issue:
     milestone: int | None = None
     assignees: tuple[str, ...] = ()
     state_reason: str | None = None
+    comments: tuple[Comment, ...] = ()
+    comments_total: int = 0
 
     @classmethod
     def from_graphql_node(cls, node: dict) -> "Issue":
@@ -80,6 +88,8 @@ class Issue:
         author = node.get("author") or {}
         label_nodes = ((node.get("labels") or {}).get("nodes")) or []
         assignee_nodes = ((node.get("assignees") or {}).get("nodes")) or []
+        comment_conn = node.get("comments") or {}
+        comment_nodes = [c for c in comment_conn.get("nodes") or [] if c]
         return cls(
             number=int(node["number"]),
             title=node.get("title", ""),
@@ -94,4 +104,6 @@ class Issue:
             milestone=(node.get("milestone") or {}).get("number"),
             assignees=tuple(a["login"] for a in assignee_nodes if a and a.get("login")),
             state_reason=node.get("stateReason"),
+            comments=tuple(Comment.from_graphql_node(c) for c in comment_nodes),
+            comments_total=int(comment_conn.get("totalCount") or 0),
         )

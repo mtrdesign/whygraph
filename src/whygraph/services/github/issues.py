@@ -16,17 +16,7 @@ from .exceptions import GitHubError
 from .issue import Issue
 from .token import GH_TOKEN_ENV, token_env
 
-_LIST_QUERY = """
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    issues(
-      first: 100
-      after: $cursor
-      states: [OPEN, CLOSED]
-      orderBy: {field: UPDATED_AT, direction: DESC}
-    ) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
+_ISSUE_FIELDS = """\
         number title body state url
         createdAt updatedAt closedAt
         author { login }
@@ -34,36 +24,64 @@ query($owner: String!, $name: String!, $cursor: String) {
         milestone { number }
         assignees(first: 10) { nodes { login } }
         stateReason
-      }
-    }
-  }
-}
+        comments(first: 100) {
+          totalCount
+          nodes { author { __typename login } body createdAt isMinimized }
+        }
 """
 
-_SINCE_QUERY = """
-query($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {
-  repository(owner: $owner, name: $name) {
+ISSUE_PAGE_SIZES = (100, 50, 25, 10)
+"""Page sizes of the issue list queries, tried in turn on a 502 / 504."""
+
+
+def _list_query(size: int = ISSUE_PAGE_SIZES[0]) -> str:
+    """Return the full issue listing query for a page of ``size`` issues."""
+    return (
+        f"""
+query($owner: String!, $name: String!, $cursor: String) {{
+  repository(owner: $owner, name: $name) {{
     issues(
-      first: 100
+      first: {size}
       after: $cursor
       states: [OPEN, CLOSED]
-      filterBy: {since: $since}
-      orderBy: {field: UPDATED_AT, direction: DESC}
-    ) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        number title body state url
-        createdAt updatedAt closedAt
-        author { login }
-        labels(first: 20) { nodes { name } }
-        milestone { number }
-        assignees(first: 10) { nodes { login } }
-        stateReason
-      }
+      orderBy: {{field: UPDATED_AT, direction: DESC}}
+    ) {{
+      pageInfo {{ hasNextPage endCursor }}
+      nodes {{
+"""
+        + _ISSUE_FIELDS
+        + """      }
     }
   }
 }
 """
+    )
+
+
+def _since_query(size: int = ISSUE_PAGE_SIZES[0]) -> str:
+    """Return the issue query filtered by ``$since`` for a page of ``size``."""
+    return (
+        f"""
+query($owner: String!, $name: String!, $cursor: String, $since: DateTime!) {{
+  repository(owner: $owner, name: $name) {{
+    issues(
+      first: {size}
+      after: $cursor
+      states: [OPEN, CLOSED]
+      filterBy: {{since: $since}}
+      orderBy: {{field: UPDATED_AT, direction: DESC}}
+    ) {{
+      pageInfo {{ hasNextPage endCursor }}
+      nodes {{
+"""
+        + _ISSUE_FIELDS
+        + """      }
+    }
+  }
+}
+"""
+    )
+
 
 _COUNT_QUERY = """
 query($owner: String!, $name: String!) {
@@ -147,9 +165,11 @@ class Issues(Collection[Issue]):
     def __iter__(self) -> Iterator[Issue]:
         for node in paginate_graphql(
             self._shell,
-            query=_LIST_QUERY,
+            query="",
             path=("repository", "issues"),
             variables={"owner": self.owner, "name": self.name},
+            query_for_size=_list_query,
+            page_sizes=ISSUE_PAGE_SIZES,
         ):
             yield Issue.from_graphql_node(node)
 
@@ -177,9 +197,11 @@ class Issues(Collection[Issue]):
         since = format_github_ts(floor_for(watermark))
         for node in paginate_graphql(
             self._shell,
-            query=_SINCE_QUERY,
+            query="",
             path=("repository", "issues"),
             variables={"owner": self.owner, "name": self.name, "since": since},
+            query_for_size=_since_query,
+            page_sizes=ISSUE_PAGE_SIZES,
         ):
             yield Issue.from_graphql_node(node)
 

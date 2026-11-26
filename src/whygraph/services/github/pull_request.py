@@ -12,12 +12,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from whygraph.core.code_anchor import Anchor, anchor_from_diff_hunk
 from whygraph.services.git import CommitSummary
 
 
 def _nodes(node: dict, key: str) -> list[dict]:
     """Return ``node[key].nodes`` without the null entries."""
     return [n for n in ((node.get(key) or {}).get("nodes")) or [] if n]
+
+
+def _is_bot(author: dict) -> bool:
+    """Return whether a GraphQL ``author`` node is a bot (exact, never a heuristic)."""
+    login = author.get("login") or ""
+    return author.get("__typename") == "Bot" or "[bot]" in login.lower()
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,17 +39,26 @@ class Comment:
         Markdown body of the comment.
     created_at : str
         ISO 8601 timestamp of comment creation.
+    bot : bool
+        Whether the author is a bot (``__typename == "Bot"`` or a
+        ``[bot]`` login). A parse-time flag the crawler uses to decide
+        what to store.
+    minimized : bool
+        Whether GitHub hides the comment (``isMinimized``).
     """
 
     author: str | None
     body: str
     created_at: str
+    bot: bool = False
+    minimized: bool = False
 
     @classmethod
     def from_graphql_node(cls, node: dict) -> "Comment":
         """Build a :class:`Comment` from a GitHub GraphQL ``comment`` node.
 
-        Expects ``author { login }``, ``body``, and ``createdAt``.
+        Expects ``author { __typename login }``, ``body``, ``createdAt``
+        and ``isMinimized``.
         Missing fields degrade to ``None`` (author) or ``""`` (body,
         timestamp) to match the underlying GraphQL nullability.
         """
@@ -51,6 +67,8 @@ class Comment:
             author=author.get("login"),
             body=node.get("body") or "",
             created_at=node.get("createdAt") or "",
+            bot=_is_bot(author),
+            minimized=bool(node.get("isMinimized")),
         )
 
 
@@ -66,11 +84,88 @@ class Review:
         ``APPROVED``, ``CHANGES_REQUESTED``, ``DISMISSED`` or ``COMMENTED``.
     submitted_at : str
         ISO 8601 timestamp of the review.
+    body : str
+        Markdown body of the review summary; ``""`` when empty.
+    bot : bool
+        Whether the reviewer is a bot (see :attr:`Comment.bot`).
+    minimized : bool
+        Whether GitHub hides the review (``isMinimized``).
     """
 
     author: str | None
     state: str
     submitted_at: str
+    body: str = ""
+    bot: bool = False
+    minimized: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewThread:
+    """One inline review thread on a pull request.
+
+    Attributes
+    ----------
+    path : str
+        File the thread is attached to.
+    original_line : int or None
+        Line the first comment was made on; ``None`` for file-level threads.
+    resolved, outdated : bool
+        GitHub's ``isResolved`` / ``isOutdated``.
+    anchor : Anchor or None
+        Content anchor derived from the first comment's ``diffHunk``
+        (``core.code_anchor``); ``None`` for file-level and deleted-line
+        threads. The raw hunk is never stored.
+    comments : tuple[Comment, ...]
+        The thread's comments (first 10), oldest first.
+    comments_total : int
+        GitHub's comment count for the thread.
+    """
+
+    path: str
+    original_line: int | None
+    resolved: bool
+    outdated: bool
+    anchor: Anchor | None
+    comments: tuple[Comment, ...]
+    comments_total: int
+
+    @classmethod
+    def from_graphql_node(cls, node: dict) -> "ReviewThread":
+        """Build a :class:`ReviewThread` from a ``reviewThreads`` node.
+
+        Expects ``path``, ``originalLine``, ``isResolved``, ``isOutdated``,
+        ``subjectType``, ``diffSide`` and ``comments { totalCount nodes }``
+        where the first comment also carries ``diffHunk``.
+
+        Parameters
+        ----------
+        node : dict
+            One node of ``pullRequest.reviewThreads``.
+
+        Returns
+        -------
+        ReviewThread
+            The parsed thread.
+        """
+        conn = node.get("comments") or {}
+        nodes = [c for c in conn.get("nodes") or [] if c]
+        anchor = None
+        if (
+            nodes
+            and node.get("subjectType") == "LINE"
+            and node.get("diffSide") == "RIGHT"
+        ):
+            anchor = anchor_from_diff_hunk(nodes[0].get("diffHunk") or "")
+        return cls(
+            path=node.get("path") or "",
+            original_line=node.get("originalLine"),
+            resolved=bool(node.get("isResolved")),
+            outdated=bool(node.get("isOutdated")),
+            anchor=anchor,
+            comments=tuple(Comment.from_graphql_node(c) for c in nodes),
+            comments_total=int(conn.get("totalCount") or len(nodes)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +261,9 @@ class PullRequest:
     additions: int | None = None
     deletions: int | None = None
     changed_files: int | None = None
+    review_summaries: tuple[Review, ...] = ()
+    review_threads_total: int = 0
+    comments_total: int = 0
 
     @classmethod
     def from_graphql_node(cls, node: dict) -> "PullRequest":
@@ -204,6 +302,7 @@ class PullRequest:
         request_nodes = _nodes(node, "reviewRequests")
         first_nodes = _nodes(node, "reviews")
         file_nodes = _nodes(node, "files")
+        summary_nodes = _nodes(node, "reviewSummaries")
         milestone = node.get("milestone") or {}
         pr_author = author.get("login") if author else None
         submitted = [
@@ -263,4 +362,20 @@ class PullRequest:
             additions=node.get("additions"),
             deletions=node.get("deletions"),
             changed_files=node.get("changedFiles"),
+            review_summaries=tuple(
+                Review(
+                    author=(r.get("author") or {}).get("login"),
+                    state=r.get("state") or "",
+                    submitted_at=r.get("submittedAt") or "",
+                    body=r["body"],
+                    bot=_is_bot(r.get("author") or {}),
+                    minimized=bool(r.get("isMinimized")),
+                )
+                for r in summary_nodes
+                if (r.get("body") or "").strip()
+            ),
+            review_threads_total=int(
+                (node.get("reviewThreads") or {}).get("totalCount") or 0
+            ),
+            comments_total=int((node.get("comments") or {}).get("totalCount") or 0),
         )

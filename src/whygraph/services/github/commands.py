@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from subprocess import CompletedProcess
 from typing import Any
@@ -231,6 +231,7 @@ def paginate_graphql(
     variables: Mapping[str, str],
     query_for_size: Callable[[int], str] | None = None,
     tolerate: Tolerate | None = None,
+    page_sizes: Sequence[int] = PAGE_SIZES,
 ) -> Iterator[dict]:
     """Yield ``nodes`` from a paginated GraphQL connection.
 
@@ -257,13 +258,15 @@ def paginate_graphql(
     query_for_size : Callable[[int], str], optional
         Builds the query for a page size. When given, ``query`` is
         ignored; a ``HTTP 502`` / ``504`` or truncated answer retries the same cursor at the
-        next size of :data:`PAGE_SIZES` (50, 25, 10) and the reduced
-        size stays for the rest of the crawl. Without it a failure
-        raises at once.
+        next size of ``page_sizes`` and the reduced size stays for the
+        rest of the crawl. Without it a failure raises at once.
     tolerate : Callable[[dict], bool], optional
         Checked on the decoded stdout of a failed call before anything
         else (:func:`tolerated_data`); when it accepts the answer, the
         page's ``data`` is used instead of raising.
+    page_sizes : Sequence[int], optional
+        Page sizes tried in turn by ``query_for_size``; defaults to
+        :data:`PAGE_SIZES` (50, 25, 10).
 
     Notes
     -----
@@ -288,7 +291,7 @@ def paginate_graphql(
         request_vars = {**static}
         if cursor is not None:
             request_vars["cursor"] = cursor
-        text = query_for_size(PAGE_SIZES[size_index]) if query_for_size else query
+        text = query_for_size(page_sizes[size_index]) if query_for_size else query
         try:
             data = shell.run(
                 GhApiGraphqlCmd(text, request_vars), env=token_env(GH_TOKEN_ENV)
@@ -300,7 +303,7 @@ def paginate_graphql(
             elif (
                 query_for_size is not None
                 and is_gateway_timeout(exc)
-                and size_index + 1 < len(PAGE_SIZES)
+                and size_index + 1 < len(page_sizes)
             ):
                 size_index += 1
                 continue

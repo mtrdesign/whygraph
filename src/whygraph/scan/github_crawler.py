@@ -11,10 +11,10 @@ a state row too, but its watermark is never used to filter).
 Each kind keeps a ``forge_crawl_state`` row (the repository and the
 newest ``updatedAt`` seen). With a matching row the crawl is
 *incremental*: it asks GitHub only for items updated since that mark,
-downloads PR content only for PRs whose ``updatedAt`` differs from the
-stored one, and rewrites only rows that changed. Without a matching row
-(first crawl, another repository, a database written by the old
-insert-only crawler, or a row stored below :data:`FORGE_FIELDS_VERSION`)
+re-reads and rewrites every PR that listing returns (some discussion edits
+do not move ``updatedAt``), and rewrites only issues that changed. Without
+a matching row (first crawl, another repository, a database written by the
+old insert-only crawler, or a row stored below :data:`FORGE_FIELDS_VERSION`)
 it is a *full walk*, newest-first; the last case also rewrites rows whose
 ``updatedAt`` is unchanged, once.
 
@@ -24,6 +24,15 @@ never held across the network: (a) read the state in a short session,
 transactions and the state rows last, in a transaction of their own. A
 crawl that fails anywhere leaves the state unchanged, so the next one
 re-lists the same items.
+
+After the state is saved, a resumable **thread pass** fetches the review
+threads of PRs that have any and are not synced yet, newest first, writing
+each batch in its own short transaction and stopping at a rate-limit
+floor; the next crawl resumes it. Its stops and errors never fail the crawl.
+
+What is stored follows plan 62's R19: bot and minimized comments are not
+stored, except a review thread's opener (kept, flagged and clipped, as
+context for a human reply).
 """
 
 from __future__ import annotations
@@ -42,11 +51,15 @@ from whygraph.db.models.issue import Issue as IssueRow
 from whygraph.db.models.milestone import Milestone as MilestoneRow
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pull_request import PullRequest as PullRequestRow
-from whygraph.services.github import GitHubClient
+from whygraph.services.github import GitHubClient, GitHubError
 from whygraph.services.github.commands import parse_github_ts
 from whygraph.services.github.issue import Issue as IssueDC
 from whygraph.services.github.milestones import Milestone as MilestoneDC
+from whygraph.services.github.pull_request import Comment as CommentDC
 from whygraph.services.github.pull_request import PullRequest as PullRequestDC
+from whygraph.services.github.pull_request import Review as ReviewDC
+from whygraph.services.github.pull_request import ReviewThread as ReviewThreadDC
+from whygraph.services.github.pull_requests import THREAD_BATCH
 
 from .crawler import Crawler
 
@@ -54,14 +67,28 @@ _T = TypeVar("_T")
 
 WRITE_CHUNK = 500
 
-FORGE_FIELDS_VERSION = 1
+FORGE_FIELDS_VERSION = 2
 """Version of the fields the crawl stores (``forge_crawl_state.fields_version``).
 
 A kind stored below it is walked in full and every row rewritten once,
 bypassing the ``updated_at`` equality skip, so a database written before
 the phase 2 fields (milestone, assignees, reviews, PR files, ...) is
 backfilled by one scan. Bump it whenever a crawl must re-read old rows.
+
+1: milestone, assignees, reviews, PR files and line counts.
+2: review summaries, thread totals, issue comments, comment totals; bot and
+minimized comments no longer stored (R19).
 """
+
+THREAD_PASS_POINT_FLOOR = 1000
+"""Rate-limit points the thread pass leaves unspent (20 % of an hourly budget).
+
+Kept for the installation's other projects and the next forge run; the
+pass stops below it and the next crawl resumes.
+"""
+
+BOT_OPENER_STORE_CHARS = 300
+"""Characters kept of a bot or minimized review-thread opener's body (R19)."""
 
 
 class _State(NamedTuple):
@@ -145,13 +172,18 @@ class GitHubCrawler(Crawler):
         # (b) drain the network with NO session open
         pr_state, issue_state = states.get("pull_request"), states.get("issue")
         full_pr, full_issue = _is_full(pr_state, repo), _is_full(issue_state, repo)
-        force_pr, force_issue = _is_stale(pr_state), _is_stale(issue_state)
+        # An incremental PR run rewrites every PR the listing returns, not only
+        # those whose updatedAt moved: some discussion edits (review-thread
+        # comment edits, bursts of reviews) do not move it (plan 62, risk 3a).
+        # Issues keep the equality skip.
+        force_pr = _is_stale(pr_state) or _incremental(pr_state, repo)
+        force_issue = _is_stale(issue_state)
         if full_pr or full_issue:
             self.set_total(
                 (len(self._client.pull_requests) if full_pr else 0)
                 + (len(self._client.issues) if full_issue else 0)
             )
-        prs, pr_marks = self._drain_prs(pr_state, repo, stored_prs)
+        prs, pr_marks = self._drain_prs(pr_state, repo)
         issues = self._drain(self._iter_issues(issue_state, repo))
         issue_marks = [i.updated_at for i in issues]
         milestones = self._drain(iter(self._client.milestones))
@@ -205,6 +237,67 @@ class GitHubCrawler(Crawler):
                 f"{is_new} new · {is_upd} updated issues · "
                 f"{len(milestones)} milestones"
             )
+        self.summary += self._thread_pass()
+
+    def _thread_pass(self) -> str:
+        """Fetch and store review threads of unsynced PRs; return a summary suffix.
+
+        Runs after the main crawl's rows and state are saved. Selects PRs
+        with ``review_threads_total > 0`` and ``review_threads_synced = 0``,
+        newest ``updated_at`` first, and drains
+        :meth:`PullRequests.review_threads` with no session open; the
+        results are written in groups of :data:`THREAD_BATCH`, each in its
+        own short transaction, between the iterator's network requests, and
+        a PR is yielded only after its whole batch returned, so a stop never
+        writes a partial PR. A floor stop or a :class:`GitHubError` ends the
+        pass without failing the crawl (what was yielded is still written);
+        skipped PRs (a 502 / 504 alone) stay unsynced for the next crawl.
+
+        Returns
+        -------
+        str
+            ``""`` when no PR was due, else ``" · threads: N PRs synced"``
+            plus ``" · M PRs pending (rate limit)"`` or
+            ``" · thread pass stopped: <error>"`` when it stopped.
+        """
+        with get_session() as session:
+            numbers = list(
+                session.exec(
+                    select(PullRequestRow.number)
+                    .where(
+                        col(PullRequestRow.review_threads_total) > 0,
+                        PullRequestRow.review_threads_synced == 0,
+                    )
+                    .order_by(
+                        col(PullRequestRow.updated_at).desc(),
+                        col(PullRequestRow.number).desc(),
+                    )
+                ).all()
+            )
+        if not numbers:
+            return ""
+        run = self._client.pull_requests.review_threads(
+            numbers, point_floor=THREAD_PASS_POINT_FLOOR
+        )
+        synced = 0
+        error: GitHubError | None = None
+        batch: list[tuple[int, tuple[ReviewThreadDC, ...] | None]] = []
+        try:
+            for result in run:
+                batch.append(result)
+                if len(batch) >= THREAD_BATCH:
+                    synced += _write_threads(batch)
+                    batch = []
+        except GitHubError as exc:
+            error = exc
+        if batch:
+            synced += _write_threads(batch)
+        suffix = f" · threads: {synced} PRs synced"
+        if error is not None:
+            suffix += f" · thread pass stopped: {error}"
+        elif run.stopped:
+            suffix += f" · {len(run.pending)} PRs pending (rate limit)"
+        return suffix
 
     def _drain(self, items: Iterator[_T]) -> list[_T]:
         """Collect ``items``, keeping the first per ``number``; advance per kept item."""
@@ -222,7 +315,7 @@ class GitHubCrawler(Crawler):
         return iter(self._client.issues)
 
     def _drain_prs(
-        self, state: _State | None, repo: str, stored: dict[int, str]
+        self, state: _State | None, repo: str
     ) -> tuple[list[PullRequestDC], list[str]]:
         """Fetch the PRs to write and the ``updatedAt`` candidates for the mark."""
         if not _incremental(state, repo):
@@ -233,8 +326,11 @@ class GitHubCrawler(Crawler):
             state.watermark
         ):
             listing.setdefault(number, updated_at)
-        changed = [n for n, u in listing.items() if stored.get(n) != u]
-        prs = self._drain(self._client.pull_requests.by_numbers(changed))
+        # Re-read every listed PR, not only those whose updatedAt changed: the
+        # listing is already bounded by the lookback, and edits that do not
+        # move updatedAt (review-thread comments) are then still picked up
+        # (plan 62, risk 3a).
+        prs = self._drain(self._client.pull_requests.by_numbers(list(listing)))
         return prs, list(listing.values())
 
 
@@ -248,17 +344,25 @@ def _upsert_prs(
 ) -> tuple[int, int]:
     """Write new and changed PRs; return ``(new, updated)``.
 
-    Equal rows are skipped unless ``force`` (a fields backfill rewrites them).
+    Equal rows are skipped unless ``force`` (a fields backfill, or an
+    incremental run, rewrites them). The thread pass owns
+    ``review_threads``: an updated row keeps the stored threads (a transient
+    row would carry the ``'[]'`` default), and every written row gets the
+    sync flag from :func:`_set_thread_sync`.
     """
     new = updated = 0
     for pr in prs:
         if pr.number not in stored:
-            session.add(_pr_to_row(pr, fetched_at=fetched_at))
+            session.add(_set_thread_sync(_pr_to_row(pr, fetched_at=fetched_at)))
             new += 1
         elif not force and stored[pr.number] == pr.updated_at:
             continue
         else:
-            session.merge(_pr_to_row(pr, fetched_at=fetched_at))
+            row = _pr_to_row(pr, fetched_at=fetched_at)
+            existing = session.get(PullRequestRow, pr.number)
+            if existing is not None:
+                row.review_threads = existing.review_threads
+            session.merge(_set_thread_sync(row))
             session.exec(
                 delete(PRIssueLink).where(
                     PRIssueLink.pr_number == pr.number,
@@ -275,6 +379,43 @@ def _upsert_prs(
                 )
             )
     return new, updated
+
+
+def _set_thread_sync(row: PullRequestRow) -> PullRequestRow:
+    """Set the thread-sync state of a PR row about to be written; return it.
+
+    A PR with threads on GitHub is due for the thread pass again
+    (``review_threads_synced = 0``; its stored threads stay until the pass
+    replaces them); one without has nothing to fetch, so its threads are
+    cleared and it counts as synced.
+    """
+    if row.review_threads_total:
+        row.review_threads_synced = 0
+    else:
+        row.review_threads = "[]"
+        row.review_threads_synced = 1
+    return row
+
+
+def _write_threads(
+    results: list[tuple[int, tuple[ReviewThreadDC, ...] | None]],
+) -> int:
+    """Store one group of thread-pass results in one transaction; return the count.
+
+    A not-found PR (``None``) is stored with no threads; either way the row
+    is marked synced. A PR whose row is gone is skipped.
+    """
+    written = 0
+    with get_session() as session:
+        for number, threads in results:
+            row = session.get(PullRequestRow, number)
+            if row is None:
+                continue
+            row.review_threads = json.dumps(_stored_threads(threads or ()))
+            row.review_threads_synced = 1
+            session.add(row)
+            written += 1
+    return written
 
 
 def _upsert_issues(
@@ -378,12 +519,7 @@ def _pr_to_row(dc: PullRequestDC, *, fetched_at: str) -> PullRequestRow:
                 for c in dc.commits
             ]
         ),
-        comments=json.dumps(
-            [
-                {"author": c.author, "body": c.body, "created_at": c.created_at}
-                for c in dc.comments
-            ]
-        ),
+        comments=json.dumps(_stored_comments(dc.comments)),
         milestone=dc.milestone,
         assignees=json.dumps(list(dc.assignees)),
         review_decision=dc.review_decision,
@@ -399,6 +535,9 @@ def _pr_to_row(dc: PullRequestDC, *, fetched_at: str) -> PullRequestRow:
         additions=dc.additions,
         deletions=dc.deletions,
         changed_files=dc.changed_files,
+        review_summaries=json.dumps(_stored_summaries(dc.review_summaries)),
+        review_threads_total=dc.review_threads_total,
+        comments_total=dc.comments_total,
     )
 
 
@@ -418,4 +557,84 @@ def _issue_to_row(dc: IssueDC, *, fetched_at: str) -> IssueRow:
         milestone=dc.milestone,
         assignees=json.dumps(list(dc.assignees)),
         state_reason=dc.state_reason,
+        comments=json.dumps(_stored_comments(dc.comments)),
+        comments_total=dc.comments_total,
     )
+
+
+def _is_human(c: CommentDC | ReviewDC) -> bool:
+    """Whether a parsed comment or review is stored (neither bot nor minimized)."""
+    return not c.bot and not c.minimized
+
+
+def _stored_comments(comments: tuple[CommentDC, ...]) -> list[dict]:
+    """Conversation comments (PR or issue) as stored: human, non-minimized only.
+
+    Stored without ``bot`` / ``minimized`` keys (R19).
+    """
+    return [
+        {"author": c.author, "body": c.body, "created_at": c.created_at}
+        for c in comments
+        if _is_human(c)
+    ]
+
+
+def _stored_summaries(reviews: tuple[ReviewDC, ...]) -> list[dict]:
+    """Review summaries as stored: human, non-minimized only, without flags (R19)."""
+    return [
+        {
+            "author": r.author,
+            "state": r.state,
+            "body": r.body,
+            "submitted_at": r.submitted_at,
+        }
+        for r in reviews
+        if _is_human(r)
+    ]
+
+
+def _stored_threads(threads: tuple[ReviewThreadDC, ...]) -> list[dict]:
+    """Review threads as stored (R19).
+
+    Bot and minimized comments are dropped except the opener, and a thread
+    with no human, non-minimized comment among those fetched (the first
+    10) is not stored. The opener always carries ``bot`` and ``minimized``;
+    a bot or minimized opener's body is clipped to
+    :data:`BOT_OPENER_STORE_CHARS`. Other comments carry no flags. The
+    anchor is stored as ``{"lines": [...], "added": bool}`` or ``None``;
+    no raw diff hunk is stored.
+    """
+    stored: list[dict] = []
+    for t in threads:
+        if not t.comments or not any(_is_human(c) for c in t.comments):
+            continue
+        opener, rest = t.comments[0], t.comments[1:]
+        body = (
+            opener.body if _is_human(opener) else opener.body[:BOT_OPENER_STORE_CHARS]
+        )
+        comments = [
+            {
+                "author": opener.author,
+                "body": body,
+                "created_at": opener.created_at,
+                "bot": opener.bot,
+                "minimized": opener.minimized,
+            }
+        ]
+        comments += _stored_comments(rest)
+        stored.append(
+            {
+                "path": t.path,
+                "original_line": t.original_line,
+                "anchor": (
+                    {"lines": list(t.anchor.lines), "added": t.anchor.added}
+                    if t.anchor is not None
+                    else None
+                ),
+                "resolved": t.resolved,
+                "outdated": t.outdated,
+                "comments": comments,
+                "comments_total": t.comments_total,
+            }
+        )
+    return stored

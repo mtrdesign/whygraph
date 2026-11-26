@@ -715,3 +715,72 @@ def test_chat_branching_backfills_parents_and_leaf(
         assert conn.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 3
     finally:
         conn.close()
+
+
+def test_forge_discussion_round_trip_keeps_rows(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The plan 62 discussion columns land on a v1 DB and downgrade, keeping rows."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    script = ScriptDirectory.from_config(alembic_config())
+    assert len(script.get_heads()) == 1
+    assert script.get_revision("d2c8e4a7f1b3").down_revision == "b6f2a9c4d815"
+
+    pr_new = {
+        "review_summaries",
+        "review_threads",
+        "review_threads_total",
+        "review_threads_synced",
+        "comments_total",
+    }
+    issue_new = {"comments", "comments_total"}
+    command.upgrade(alembic_config(), "b6f2a9c4d815")
+    assert not pr_new & _column_names(db_path, "pull_request")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO pull_request (number, title, state, draft, created_at, "
+            "updated_at, head_sha, base_ref, html_url, labels, fetched_at, comments) "
+            "VALUES (7, 't', 'open', 0, 'x', 'x', 'h', 'main', 'u', '[]', 'x', "
+            '\'[{"author": "a"}]\')'
+        )
+        conn.execute(
+            "INSERT INTO issue (number, title, state, created_at, updated_at, "
+            "html_url, labels, fetched_at) "
+            "VALUES (8, 't', 'open', 'x', 'x', 'u', '[]', 'x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert pr_new <= _column_names(db_path, "pull_request")
+    assert issue_new <= _column_names(db_path, "issue")
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT comments, review_summaries, review_threads, review_threads_total, "
+            "review_threads_synced, comments_total FROM pull_request WHERE number = 7"
+        ).fetchone()
+        assert row == ('[{"author": "a"}]', "[]", "[]", None, 0, None)
+        assert conn.execute(
+            "SELECT comments, comments_total FROM issue WHERE number = 8"
+        ).fetchone() == ("[]", None)
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "b6f2a9c4d815")
+    assert not pr_new & _column_names(db_path, "pull_request")
+    assert not issue_new & _column_names(db_path, "issue")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT comments FROM pull_request WHERE number = 7"
+        ).fetchone() == ('[{"author": "a"}]',)
+        assert conn.execute("SELECT COUNT(*) FROM issue").fetchone()[0] == 1
+    finally:
+        conn.close()

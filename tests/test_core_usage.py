@@ -26,6 +26,7 @@ from whygraph.core.usage import (
     record_usage,
     set_scope_field,
     usage_blocked,
+    usage_pressure,
     use_usage_sink,
 )
 from whygraph.db.models import Commit
@@ -164,6 +165,43 @@ def test_usage_blocked_returns_the_sink_scope() -> None:
     sink = CollectingSink(blocked="project")
     with use_usage_sink(sink):
         assert usage_blocked() == "project"
+
+
+@dataclass
+class _PressureSink(CollectingSink):
+    """A sink with the optional ``pressure_scope`` the portal's has."""
+
+    pressure: str | None = None
+
+    def pressure_scope(self) -> str | None:
+        return self.pressure
+
+
+class _RaisingPressureSink(CollectingSink):
+    def pressure_scope(self) -> str | None:
+        raise RuntimeError("budget map down")
+
+
+def test_usage_pressure_is_none_unbound_and_without_the_method() -> None:
+    assert usage_pressure() is None
+    with use_usage_sink(CollectingSink(blocked="org")):  # no pressure_scope
+        assert usage_pressure() is None
+
+
+def test_usage_pressure_returns_the_sink_scope() -> None:
+    with use_usage_sink(_PressureSink(pressure="member")):
+        assert usage_pressure() == "member"
+    with use_usage_sink(_PressureSink()):
+        assert usage_pressure() is None
+
+
+def test_a_raising_pressure_check_never_raises(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(logging.getLogger("whygraph"), "propagate", True)
+    with use_usage_sink(_RaisingPressureSink()):
+        assert usage_pressure() is None
+    assert "could not read the usage budget pressure" in caplog.text
 
 
 def test_set_scope_field_is_seen_across_context_copies() -> None:

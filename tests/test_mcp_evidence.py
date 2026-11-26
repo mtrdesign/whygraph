@@ -745,8 +745,15 @@ def test_evidence_for_full_groups_prose_under_text_and_caps_it(
     assert comments[0]["body"] == "x" * 500 + "..."  # pr_comment_max_chars
     assert comments[1] == {"author": "bob", "body": "c0", "created_at": "t"}
     assert len(pr["commit_titles"]) == 30  # pr_roster_max_commits
-    assert pr["omitted"] == {"comments": 2, "commit_titles": 1, "body_chars": 0}
-    assert result["issues"] == {"9": {"text": {"body": "Issue body."}}}
+    assert pr["omitted"] == {
+        "comments": 2,
+        "commit_titles": 1,
+        "body_chars": 0,
+        "review_summaries": 0,
+        "review_comments": 0,
+        "review_threads_elsewhere": 0,
+    }
+    assert result["issues"] == {"9": {"text": {"body": "Issue body.", "comments": []}}}
     # A commit with no PR has nothing to omit.
     assert by_sha[oldest]["pull_requests"] == []
 
@@ -829,10 +836,17 @@ def test_full_caps_pr_and_issue_bodies() -> None:
 
     pr_out = shaped["pull_requests"]["1"]
     assert pr_out["text"]["body"] == "p" * PROSE_BODY_MAX_CHARS + "..."
-    assert pr_out["omitted"] == {"comments": 0, "commit_titles": 0, "body_chars": 7}
+    assert pr_out["omitted"] == {
+        "comments": 0,
+        "commit_titles": 0,
+        "body_chars": 7,
+        "review_summaries": 0,
+        "review_comments": 0,
+        "review_threads_elsewhere": 0,
+    }
     issue_out = shaped["issues"]["2"]
     assert issue_out["text"]["body"] == "i" * PROSE_BODY_MAX_CHARS + "..."
-    assert issue_out["omitted"] == {"body_chars": 3}
+    assert issue_out["omitted"] == {"body_chars": 3, "comments": 0}
     # The commit body is unique per item and stays whole.
     assert shaped["evidence"][0]["text"]["body"] == commit.body
 
@@ -2008,3 +2022,424 @@ def test_drain_never_joins_a_describe_thread_before_it_starts(
     monkeypatch.setattr(threading.Thread, "start", original_start)
     assert ev.drain_describes(timeout=5)
     assert errors == []
+
+
+# ---- review discussion (plan 62 section 4.6) -----------------------------
+
+
+def _thread(path: str, anchor: list[str] | None, *bodies: str, **kw) -> dict:
+    """A stored review thread (the section 5 shape) with one comment per body."""
+    return {
+        "path": path,
+        "original_line": 3,
+        "anchor": None if anchor is None else {"lines": anchor, "added": True},
+        "resolved": kw.get("resolved", False),
+        "outdated": kw.get("outdated", False),
+        "comments": [
+            {"author": "jane", "body": body, "created_at": "2026-01-02T00:00:00Z"}
+            for body in bodies
+        ],
+        "comments_total": kw.get("comments_total", len(bodies)),
+    }
+
+
+def _discussed_pr(number: int = 5, **fields) -> PullRequest:
+    import json
+
+    pr = _db_pr(number=number, merge_commit_sha=f"m{number}")
+    for key, value in fields.items():
+        setattr(pr, key, json.dumps(value) if isinstance(value, list) else value)
+    return pr
+
+
+_PR_KEYS = [
+    "number",
+    "title",
+    "body",
+    "state",
+    "merged_at",
+    "author",
+    "html_url",
+    "labels",
+    "commit_titles",
+    "comments",
+    "review_summaries",
+    "review_threads",
+    "review_threads_elsewhere",
+    "review_threads_total",
+]
+
+
+def test_review_scope_reads_the_file_and_follows_renames(
+    tmp_path: Path, whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.db.models import CommitFileChange
+    from whygraph.mcp import path_history
+    from whygraph.mcp.evidence import review_scope
+
+    monkeypatch.setattr(path_history, "current_branch_scope", lambda: None)
+    root = tmp_path / "checkout"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("one\ntwo\n")
+    with get_session() as session:
+        session.add(_db_commit("r1", committed_at="2026-01-01T00:00:00+00:00"))
+        session.add(
+            CommitFileChange(
+                commit_sha="r1",
+                path="src/a.py",
+                change_type="R",
+                renamed_from="src/old.py",
+                similarity=100,
+            )
+        )
+    with get_session() as session:
+        scope = review_scope(session, root, "src/a.py")
+        exact = review_scope(session, root, "src/a.py", include_renames=False)
+        missing = review_scope(session, root, "src/gone.py")
+    assert scope.paths == frozenset({"src/a.py", "src/old.py"})
+    assert scope.current_lines == ("one", "two", "")
+    assert exact.paths == frozenset({"src/a.py"})
+    assert missing.paths == frozenset({"src/gone.py"})
+    assert missing.current_lines == ()
+
+
+def test_review_scope_reader_keeps_blame_line_numbers(tmp_path: Path) -> None:
+    from whygraph.mcp.evidence import ANCHOR_FILE_MAX_BYTES, _current_file_lines
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    (root / "crlf.py").write_bytes(b"a\r\nb\r\n")
+    (root / "odd.py").write_bytes("x y\fz\nlast\n".encode())
+    (root / "bin.dat").write_bytes(b"abc\0def")
+    (root / "big.txt").write_bytes(b"x" * (ANCHOR_FILE_MAX_BYTES + 1))
+    (root / "bad.py").write_bytes(b"ok\n\xff\n")
+    outside = tmp_path / "secret.py"
+    outside.write_text("secret\n")
+    (root / "link.py").symlink_to(outside)
+
+    assert _current_file_lines(root, "crlf.py") == ("a\r", "b\r", "")
+    # Only "\n" splits, so U+2028 and \f stay inside their line (as in git).
+    assert _current_file_lines(root, "odd.py") == ("x y\fz", "last", "")
+    assert _current_file_lines(root, "bad.py") == ("ok", "�", "")
+    assert _current_file_lines(root, "missing.py") == ()
+    assert _current_file_lines(root, "bin.dat") is None
+    assert _current_file_lines(root, "big.txt") is None
+    assert _current_file_lines(root, "link.py") is None
+    assert _current_file_lines(root, "../secret.py") is None
+
+
+def test_pr_dict_emits_the_review_keys_in_order_without_anchor() -> None:
+    from whygraph.mcp.evidence import ReviewScope
+
+    lines = ("def f(x):", "    return compute_the_value(x)", "", "y = f(1)")
+    gone = ["return something_removed_long_ago(x)"]
+    pr = _discussed_pr(
+        review_summaries=[
+            {"author": "omar", "state": "APPROVED", "body": "ok", "submitted_at": "t"}
+        ],
+        review_threads=[
+            _thread("src/a.py", ["def f(x):", "return compute_the_value(x)"], "why"),
+            _thread("src/a.py", gone, "gone"),
+            _thread("src/a.py", None, "file level"),
+            _thread("src/ab.py", ["def f(x):"], "sibling"),
+            _thread("src/old.py", ["return compute_the_value(x)"], "renamed"),
+        ],
+        review_threads_total=7,
+    )
+    scope = ReviewScope(frozenset({"src/a.py", "src/old.py"}), lines)
+
+    out = _pr_dict(pr, scope)
+
+    assert list(out) == _PR_KEYS
+    assert out["review_summaries"][0]["body"] == "ok"
+    threads = out["review_threads"]
+    assert [t["comments"][0]["body"] for t in threads] == [
+        "why",
+        "gone",
+        "file level",
+        "renamed",
+    ]
+    assert [t["current"] for t in threads] == [True, False, None, True]
+    assert all("anchor" not in t for t in threads)
+    assert list(threads[0]) == [
+        "path",
+        "original_line",
+        "resolved",
+        "outdated",
+        "current",
+        "comments",
+        "comments_total",
+    ]
+    # `src/ab.py` shares a prefix with `src/a.py` but is another file.
+    assert out["review_threads_elsewhere"] == 1
+    assert out["review_threads_total"] == 7
+
+
+def test_pr_dict_current_is_null_for_a_repeated_anchor_or_unread_file() -> None:
+    from whygraph.mcp.evidence import ReviewScope
+
+    anchor = ["return compute_the_value(x)"]
+    pr = _discussed_pr(review_threads=[_thread("a.py", anchor, "c")])
+    twice = ReviewScope(frozenset({"a.py"}), (anchor[0], "x", anchor[0]))
+    unread = ReviewScope(frozenset({"a.py"}), None)
+    missing = ReviewScope(frozenset({"a.py"}), ())
+
+    assert _pr_dict(pr, twice)["review_threads"][0]["current"] is None
+    assert _pr_dict(pr, unread)["review_threads"][0]["current"] is None
+    assert _pr_dict(pr, missing)["review_threads"][0]["current"] is False
+
+
+def test_pr_and_issue_dicts_without_scope_or_totals() -> None:
+    from whygraph.mcp.evidence import _issue_dict
+
+    pr = _discussed_pr(review_threads=[_thread("a.py", None, "c"), _thread("b", None)])
+    issue = _db_issue(number=9)
+    issue.comments = '[{"author": "a", "body": "hi", "created_at": "t"}]'
+
+    out = _pr_dict(pr)
+    issue_out = _issue_dict(issue)
+
+    assert out["review_summaries"] == [] and out["review_threads"] == []
+    assert out["review_threads_elsewhere"] == 0
+    # A row not re-crawled yet (NULL total) reports the stored length.
+    assert pr.review_threads_total is None and out["review_threads_total"] == 2
+    assert list(issue_out)[-2:] == ["comments", "comments_total"]
+    assert issue_out["comments"] == [{"author": "a", "body": "hi", "created_at": "t"}]
+    assert issue_out["comments_total"] == 1
+
+
+def test_pr_dict_bounds_the_discussion_per_pr() -> None:
+    from whygraph.mcp.evidence import (
+        PR_COMMENTS_MAX,
+        PROSE_BODY_MAX_CHARS,
+        ReviewScope,
+        _issue_dict,
+    )
+
+    long = "b" * (PROSE_BODY_MAX_CHARS + 5)
+    pr = _discussed_pr(
+        review_summaries=[{"author": "o", "body": long}] * (PR_COMMENTS_MAX + 10),
+        review_threads=[_thread("a.py", None, *["c"] * 10) for _ in range(6)],
+        review_threads_total=6,
+    )
+    issue = _db_issue(number=9)
+    issue.comments = '[{"author": "a", "body": "' + long + '"}]'
+    issue.comments_total = 130
+
+    out = _pr_dict(pr, ReviewScope(frozenset({"a.py"}), ()))
+
+    assert len(out["review_summaries"]) == PR_COMMENTS_MAX
+    assert out["review_summaries"][0]["body"] == "b" * PROSE_BODY_MAX_CHARS + "..."
+    kept = [len(t["comments"]) for t in out["review_threads"]]
+    assert sum(kept) == PR_COMMENTS_MAX and kept == [10, 10, 10, 10, 10]
+    assert out["review_threads"][0]["comments_total"] == 10
+    issue_out = _issue_dict(issue)
+    assert issue_out["comments"][0]["body"].endswith("...")
+    assert issue_out["comments_total"] == 130  # GitHub's, not what is stored
+
+
+def test_pr_dict_serves_old_rows_as_stored() -> None:
+    """Rows written before the v2 crawl keep their bot comments (no filter here)."""
+    pr = _discussed_pr(
+        comments=[{"author": "dependabot", "body": "rebased", "created_at": "t"}]
+    )
+    assert _pr_dict(pr)["comments"][0]["author"] == "dependabot"
+
+
+def _items_sharing(pr: PullRequest, issue: Issue, count: int) -> list:
+    from whygraph.analyze import CommitEvidence
+
+    return [
+        CommitEvidence(
+            commit=_db_commit(f"s{n}", committed_at="2026-01-01T00:00:00+00:00"),
+            pull_requests=(pr,),
+            issues=(issue,),
+        )
+        for n in range(count)
+    ]
+
+
+def test_evidence_dicts_fill_each_discussion_once() -> None:
+    from whygraph.mcp.evidence import ReviewScope, evidence_dicts
+
+    pr = _discussed_pr(
+        comments=[{"author": "a", "body": "conv"}],
+        review_summaries=[{"author": "o", "body": "summary"}],
+        review_threads=[
+            _thread("a.py", ["x" * 30], "in scope"),
+            _thread("b.py", None, "elsewhere"),
+        ],
+        review_threads_total=4,
+    )
+    issue = _db_issue(number=9)
+    issue.comments = '[{"author": "a", "body": "issue talk"}]'
+    issue.comments_total = 3
+
+    first, second = evidence_dicts(
+        _items_sharing(pr, issue, 2), ReviewScope(frozenset({"a.py"}), ())
+    )
+
+    assert first["pull_requests"][0]["review_threads"][0]["comments"][0]["body"] == (
+        "in scope"
+    )
+    assert first["issues"][0]["comments"][0]["body"] == "issue talk"
+    repeat_pr, repeat_issue = second["pull_requests"][0], second["issues"][0]
+    assert list(repeat_pr) == _PR_KEYS
+    assert repeat_pr["review_summaries"] == [] and repeat_pr["review_threads"] == []
+    assert repeat_pr["review_threads_elsewhere"] == 1
+    assert repeat_pr["review_threads_total"] == 4
+    assert repeat_pr["comments"] == [{"author": "a", "body": "conv"}]  # unchanged
+    assert repeat_issue["comments"] == [] and repeat_issue["comments_total"] == 3
+
+
+def test_evidence_dicts_cap_the_discussion_per_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import whygraph.mcp.evidence as ev
+    from whygraph.analyze import CommitEvidence
+
+    monkeypatch.setattr(ev, "DISCUSSION_RESPONSE_MAX_CHARS", 25)
+    prs = [
+        _discussed_pr(
+            n,
+            review_summaries=[{"author": "o", "body": "s" * 10}],
+            review_threads=[_thread("a.py", None, "t" * 10, "u" * 10)],
+            review_threads_total=1,
+        )
+        for n in (1, 2)
+    ]
+    issue = _db_issue(number=9)
+    issue.comments = '[{"author": "a", "body": "i"}]'
+    issue.comments_total = 1
+    items = [
+        CommitEvidence(
+            commit=_db_commit(f"s{n}", committed_at="2026-01-01T00:00:00+00:00"),
+            pull_requests=(pr,),
+            issues=(issue,) if n else (),
+        )
+        for n, pr in enumerate(prs)
+    ]
+
+    first, second = ev.evidence_dicts(items, ev.ReviewScope(frozenset({"a.py"}), ()))
+
+    kept = first["pull_requests"][0]
+    assert [s["body"] for s in kept["review_summaries"]] == ["s" * 10]
+    # 10 + 10 fit; the second thread comment would pass 25: spent from here on.
+    assert [c["body"] for c in kept["review_threads"][0]["comments"]] == ["t" * 10]
+    late = second["pull_requests"][0]
+    assert late["review_summaries"] == [] and late["review_threads"] == []
+    assert late["review_threads_total"] == 1
+    assert second["issues"][0]["comments"] == []
+    assert second["issues"][0]["comments_total"] == 1
+
+
+def test_shape_evidence_keeps_the_copy_with_the_most_discussion() -> None:
+    from whygraph.mcp.evidence import shape_evidence
+
+    empty = {"number": 3, "body": "one", "review_summaries": [], "review_threads": []}
+    full = {
+        "number": 3,
+        "body": "two",
+        "review_summaries": [{"author": "o", "body": "s"}],
+        "review_threads": [],
+    }
+    issue_empty = {"number": 4, "body": "first", "comments": []}
+    issue_full = {"number": 4, "body": "second", "comments": [{"body": "c"}]}
+    items = [
+        {"commit": {"sha": "a"}, "pull_requests": [empty], "issues": [issue_empty]},
+        {"commit": {"sha": "b"}, "pull_requests": [full], "issues": [issue_full]},
+        {"commit": {"sha": "c"}, "pull_requests": [{**full, "body": "tie"}]},
+    ]
+
+    shaped = shape_evidence(items, "full")
+
+    assert shaped["pull_requests"]["3"]["text"]["body"] == "two"
+    assert shaped["issues"]["4"]["text"]["body"] == "second"
+
+
+def test_full_prose_caps_review_discussion_and_counts_it() -> None:
+    from whygraph.mcp.evidence import ReviewScope, evidence_dicts, shape_evidence
+
+    pr = _discussed_pr(
+        review_summaries=[{"author": "o", "body": "s" * 600}] * 22,
+        review_threads=[
+            _thread("a.py", None, *["c" * 600] * 8),
+            _thread("a.py", None, *["d"] * 8),
+            _thread("a.py", None, *["e"] * 8),
+            _thread("b.py", None, "x"),
+        ],
+        review_threads_total=4,
+    )
+    issue = _db_issue(number=9)
+    issue.comments = (
+        "["
+        + ",".join('{"author": "a", "body": "' + "i" * 600 + '"}' for _ in range(21))
+        + "]"
+    )
+    [item] = evidence_dicts(
+        _items_sharing(pr, issue, 1), ReviewScope(frozenset({"a.py"}), ())
+    )
+
+    shaped = shape_evidence([item], "full")
+
+    text = shaped["pull_requests"]["5"]["text"]
+    assert len(text["review_summaries"]) == 20
+    assert text["review_summaries"][0]["body"] == "s" * 500 + "..."
+    per_thread = [len(t["comments"]) for t in text["review_threads"]]
+    assert per_thread == [8, 8, 4]  # 20 thread comments in total
+    assert text["review_threads"][0]["comments"][0]["body"] == "c" * 500 + "..."
+    assert "current" in text["review_threads"][0]
+    assert shaped["pull_requests"]["5"]["omitted"] == {
+        "comments": 0,
+        "commit_titles": 0,
+        "body_chars": 0,
+        "review_summaries": 2,
+        "review_comments": 4,
+        "review_threads_elsewhere": 1,
+    }
+    issue_out = shaped["issues"]["9"]
+    assert len(issue_out["text"]["comments"]) == 20
+    assert issue_out["text"]["comments"][0]["body"] == "i" * 500 + "..."
+    assert issue_out["omitted"] == {"body_chars": 0, "comments": 1}
+
+
+def test_evidence_for_full_scopes_threads_to_the_file_and_compact_is_unchanged(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 3: threads only for the file; compact output is untouched."""
+    import json
+
+    newest, _ = _seed_pr_world(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    compact_before = json.dumps(
+        whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+    )
+    with get_session() as session:
+        pr = session.get(PullRequest, 5)
+        pr.review_summaries = json.dumps([{"author": "o", "body": "nice"}])
+        pr.review_threads = json.dumps(
+            [
+                _thread("sample.py", ["line one", "line two", "line three"], "why"),
+                _thread("sample.py", ["no such code in this file"], "stale"),
+                _thread("other.py", None, "elsewhere"),
+            ]
+        )
+        pr.review_threads_total = 3
+        session.add(pr)
+
+    compact_after = json.dumps(
+        whygraph_evidence_for(path="sample.py", line_start=1, line_end=3)
+    )
+    full = whygraph_evidence_for(
+        path="sample.py", line_start=1, line_end=3, detail="full"
+    )
+
+    assert compact_after == compact_before
+    text = full["pull_requests"]["5"]["text"]
+    assert [t["path"] for t in text["review_threads"]] == ["sample.py", "sample.py"]
+    assert [t["current"] for t in text["review_threads"]] == [True, False]
+    assert text["review_summaries"] == [{"author": "o", "body": "nice"}]
+    assert full["pull_requests"]["5"]["omitted"]["review_threads_elsewhere"] == 1
+    assert "anchor" not in json.dumps(full)

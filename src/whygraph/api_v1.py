@@ -361,7 +361,13 @@ class CommitOut(_Out):
 
 
 class PullRequestOut(_Out):
-    """A pull request (``mcp.evidence._pr_dict``)."""
+    """A pull request (``mcp.evidence._pr_dict``).
+
+    The review fields (plan 62) default to empty, so an older platform's
+    answer still parses; the platform always sends them, the totals never
+    ``None``. ``review_threads`` holds only the threads on the request's
+    file (and its rename aliases), each with ``current``.
+    """
 
     number: int
     title: str
@@ -373,10 +379,18 @@ class PullRequestOut(_Out):
     labels: list[Any] = Field(default_factory=list)
     commit_titles: list[Any] = Field(default_factory=list)
     comments: list[Any] = Field(default_factory=list)
+    review_summaries: list[Any] = Field(default_factory=list)
+    review_threads: list[Any] = Field(default_factory=list)
+    review_threads_elsewhere: int = 0
+    review_threads_total: int = 0
 
 
 class IssueOut(_Out):
-    """An issue (``mcp.evidence._issue_dict``)."""
+    """An issue (``mcp.evidence._issue_dict``).
+
+    ``comments`` / ``comments_total`` (plan 62) default to empty, so an
+    older platform's answer still parses.
+    """
 
     number: int
     title: str
@@ -385,6 +399,8 @@ class IssueOut(_Out):
     author: str | None = None
     html_url: str
     labels: list[Any] = Field(default_factory=list)
+    comments: list[Any] = Field(default_factory=list)
+    comments_total: int = 0
 
 
 class EvidenceOut(_Out):

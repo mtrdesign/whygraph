@@ -22,6 +22,7 @@ from pydantic import Field
 
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
+from whygraph.db import get_session
 from whygraph.services.git import Repository
 
 from .descriptions import (
@@ -33,10 +34,11 @@ from .errors import WhyGraphError, log_tool_errors
 from .evidence import (
     MAX_BACKFILL_PER_CALL,
     Detail,
-    _evidence_dict,
     backfill_evidence_descriptions,
     default_remote_refs,
+    evidence_dicts,
     path_tracked_at,
+    review_scope,
     shape_evidence,
 )
 from .path_history import area_history_commits
@@ -173,8 +175,9 @@ def area_history_payload(
     -------
     dict
         ``{"path", "include_renames", "evidence", "describing"}`` — the
-        ``evidence`` items use :func:`~whygraph.mcp.evidence._evidence_dict`'s
-        shape, ``describing`` counts the commits left undescribed. A
+        ``evidence`` items use :func:`~whygraph.mcp.evidence.evidence_dicts`'
+        shape (review threads on ``path`` and, with ``include_renames``, its
+        earlier names), ``describing`` counts the commits left undescribed. A
         project linked to a WhyGraph platform is answered by
         :func:`linked_area_history`, which adds a ``platform`` block.
 
@@ -204,10 +207,14 @@ def area_history_payload(
     describing = backfill_evidence_descriptions(
         items, target_path=path, max_commits=MAX_BACKFILL_PER_CALL if describe else 0
     ).left
+    with get_session() as session:
+        scope = review_scope(
+            session, repo_root(), path, include_renames=include_renames
+        )
     return {
         "path": path,
         "include_renames": include_renames,
-        "evidence": [_evidence_dict(item) for item in items],
+        "evidence": evidence_dicts(items, scope),
         "describing": describing,
     }
 

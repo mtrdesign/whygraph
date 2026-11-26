@@ -75,12 +75,14 @@ from whygraph.api_v1 import (
 from whygraph.core import get_config
 from whygraph.core.config import AnalyzeConfig, RationaleConfig, is_agent_limit
 from whygraph.core.usage import BUDGET_EXCEEDED, count_agent_call
+from whygraph.db import get_session
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import (
-    _evidence_dict,
     backfill_evidence_descriptions,
     collect_evidence,
+    evidence_dicts,
     evidence_from_hunks,
+    review_scope,
 )
 from whygraph.mcp.path_history import area_history_commits
 from whygraph.mcp.plans import _plan_resource, _plan_section_resource, plans_for
@@ -504,8 +506,10 @@ def post_evidence(
             target_path=target.path,
             allow=_description_budget(state, project.org_id, principal.user_id),
         )
+        with get_session() as session:
+            scope = review_scope(session, project.root, target.path)
     return {
-        "evidence": [_evidence_dict(item) for item in result.evidence],
+        "evidence": evidence_dicts(result.evidence, scope),
         "unknown_shas": [hunk.sha for hunk in result.unknown],
         "project": status,
     }
@@ -573,10 +577,14 @@ def get_history(
             target_path=path,
             allow=_description_budget(state, project.org_id, principal.user_id),
         )
+        with get_session() as session:
+            scope = review_scope(
+                session, project.root, path, include_renames=include_renames
+            )
     return {
         "path": path,
         "include_renames": include_renames,
-        "evidence": [_evidence_dict(item) for item in items],
+        "evidence": evidence_dicts(items, scope),
         "project": status,
     }
 

@@ -902,6 +902,100 @@ def test_chat_reads_the_full_evidence_shape(monkeypatch: pytest.MonkeyPatch) -> 
     assert [call["detail"] for call in seen] == ["full", "full"]
 
 
+def test_chat_evidence_cut_drops_pr_prose_before_the_issues_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 9: 3 PRs at the prose caps and 2 issues; the issues stay whole.
+
+    Chat cuts a result at ``MAX_RESULT_CHARS`` from the end, so its evidence
+    tools put ``issues`` before ``pull_requests`` (the MCP tools do not).
+    """
+    from whygraph.analyze import CommitEvidence
+    from whygraph.db.models import Commit, Issue, PullRequest
+    from whygraph.mcp.evidence import ReviewScope, evidence_dicts, shape_evidence
+
+    def comments(count: int, size: int = 600) -> list[dict]:
+        return [
+            {"author": f"u{n}", "body": "x" * size, "created_at": "2026-01-01T00:00Z"}
+            for n in range(count)
+        ]
+
+    def thread() -> dict:
+        return {
+            "path": "a.py",
+            "original_line": 1,
+            "anchor": None,
+            "resolved": False,
+            "outdated": False,
+            "comments": comments(10),
+            "comments_total": 10,
+        }
+
+    stamp = "2026-01-01T00:00:00+00:00"
+    issues = tuple(
+        Issue(
+            number=n,
+            title=f"Issue {n}",
+            body="i" * 1000,
+            state="closed",
+            created_at=stamp,
+            updated_at=stamp,
+            html_url=f"https://example.com/issue/{n}",
+            fetched_at=stamp,
+            comments=json.dumps(comments(10)),
+            comments_total=10,
+        )
+        for n in (8, 9)
+    )
+    items = []
+    for n in (1, 2, 3):
+        pr = PullRequest(
+            number=n,
+            title=f"PR {n}",
+            body="p" * 4000,
+            state="merged",
+            created_at=stamp,
+            updated_at=stamp,
+            html_url=f"https://example.com/pr/{n}",
+            fetched_at=stamp,
+            comments=json.dumps(comments(30)),
+            review_summaries=json.dumps(comments(30)),
+            review_threads=json.dumps([thread() for _ in range(3)]),
+            review_threads_total=3,
+        )
+        commit = Commit(
+            sha=f"{n:040x}",
+            parent_shas="",
+            author_name="T",
+            author_email="t@example.com",
+            authored_at=stamp,
+            committed_at=stamp,
+            subject="s",
+            body="",
+            files_changed=1,
+            insertions=1,
+            deletions=0,
+            scanned_at=stamp,
+        )
+        items.append(CommitEvidence(commit, (pr,), issues if n == 1 else ()))
+    nested = evidence_dicts(items, ReviewScope(frozenset({"a.py"}), ()))
+    mcp_result = {
+        "target": {"path": "a.py", "line_start": 1, "line_end": 2},
+        **shape_evidence(nested, "full"),
+        "describing": 0,
+    }
+    assert list(mcp_result).index("pull_requests") < list(mcp_result).index("issues")
+    monkeypatch.setattr(chat_tools, "whygraph_evidence_for", lambda **_: mcp_result)
+
+    result = chat_tools._get_evidence("run_turn")
+    encoded = chat_tools._encode(result)
+
+    assert list(result)[-2:] == ["issues", "pull_requests"]
+    assert len(encoded) > chat_tools.MAX_RESULT_CHARS  # the cut happens
+    assert all(len(i["text"]["comments"]) == 10 for i in result["issues"].values())
+    assert json.dumps(result["issues"], default=str) in encoded
+
+
 # ---------------------------------------------------------------------------
 # File tools: the clamp (§10, AC #6)
 # ---------------------------------------------------------------------------
@@ -2045,6 +2139,54 @@ def test_work_in_flight_long_threads_fall_back_to_updated_at(
         session.commit()
     pr = next(p for p in _wip()["pull_requests"] if p["number"] == 415)
     assert pr["last_activity_at"] == "2026-10-26T10:00:00Z"
+
+
+def test_work_in_flight_uses_github_comment_total(in_flight: Path) -> None:
+    """Plan 62 G7: a bot-free stored list is judged by GitHub's total.
+
+    Bots are no longer stored, so a short list can stand for a PR with more
+    than 100 comments on GitHub (fall back to ``updated_at``), and exactly
+    100 comments on GitHub are all fetched (the newest human one counts).
+    """
+    from whygraph.db import get_session
+
+    human = [
+        {"author": "alice", "body": "x", "created_at": "2026-10-02T00:00:00Z"},
+        {"author": "bob", "body": "y", "created_at": "2026-10-05T00:00:00Z"},
+    ]
+    page = [
+        {"author": "alice", "body": "x", "created_at": "2026-10-02T00:00:00Z"}
+    ] * 99 + [{"author": "bob", "body": "y", "created_at": "2026-10-07T00:00:00Z"}]
+    with get_session() as session:
+        session.add(
+            _pr(
+                416,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(human),
+                comments_total=140,
+            )
+        )
+        session.add(
+            _pr(
+                417,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(page),
+                comments_total=100,
+            )
+        )
+        session.add(
+            _pr(
+                418,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(human),
+                comments_total=2,
+            )
+        )
+        session.commit()
+    prs = {p["number"]: p for p in _wip()["pull_requests"]}
+    assert prs[416]["last_activity_at"] == "2026-10-26T10:00:00Z"
+    assert prs[417]["last_activity_at"] == "2026-10-07T00:00:00Z"
+    assert prs[418]["last_activity_at"] == "2026-10-05T00:00:00Z"
 
 
 def test_work_in_flight_freshness(

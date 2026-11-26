@@ -74,16 +74,21 @@ RATIONALE_BRIEF_ANNOTATIONS = ToolAnnotations(
 
 EVIDENCE_FOR_DESCRIPTION = (
     "What: the commits, PRs and issues behind a symbol or line range, newest "
-    "first, with SHAs, diff-derived descriptions (authoritative over the "
-    "subject) and links. Blame items carry `lines` (working-tree ranges). "
+    "first, with SHAs, diff-derived descriptions (authoritative) and links. "
+    "Blame items carry working-tree `lines`. "
     "When: you need SHAs or links, or the card is thin. "
     "Target: `qualified_name` or `path` + `line_start` / `line_end`. "
-    'Prose is opt-in: `detail="full"` adds commit bodies under `text` and '
-    "top-level `pull_requests` / `issues` maps by number (prose once, "
-    "bodies cut at 4000 chars). `describe=False` skips LLM descriptions. "
-    "`describing` counts the undescribed. "
-    "Scan from the WhyGraph portal first."
+    '`detail="full"` adds commit bodies under `text` and `pull_requests` / '
+    "`issues` maps by number (prose once, bodies cut at 4000 chars) with PR "
+    "and issue discussion; review threads on this file only, the rest on "
+    "`whygraph://pr/{n}`. `describe=False` skips LLM descriptions "
+    "(`describing` counts the rest)."
 )
+"""At most 600 characters (``tests/test_portal_mcp.py``).
+
+Review threads are scoped to the target's file and its rename aliases
+(plan 62), each with ``current``; the PR resource carries every file's.
+"""
 
 EVIDENCE_FOR_ANNOTATIONS = ToolAnnotations(
     title="Evidence for a target",
@@ -100,13 +105,14 @@ AREA_HISTORY_DESCRIPTION = (
     "When: blame comes up empty because code moved or was deleted. "
     "Takes `path`, `limit`, `include_renames`, and the same `detail` / "
     '`describe` as whygraph_evidence_for: `detail="full"` adds commit '
-    "bodies under `text` and top-level `pull_requests` / `issues` maps "
-    "keyed by number (PR and issue prose once each, bodies cut at 4000 "
-    "chars). "
+    "bodies under `text` and `pull_requests` / `issues` maps by number "
+    "(prose once, bodies cut at 4000 chars) with PR and issue discussion "
+    "and the review threads on this file. "
     "`plans` lists committed plans that name this file; a plan is intent, "
     "read its status. "
     "Scan from the WhyGraph portal first."
 )
+"""At most 600 characters (``tests/test_portal_mcp.py``)."""
 
 AREA_HISTORY_ANNOTATIONS = ToolAnnotations(
     title="Area history",
@@ -165,9 +171,10 @@ WHYGRAPH_INSTRUCTIONS = (
     "is. Do not ask for it again in a loop.\n"
     "The evidence tools return compact items (no prose) by default. Pass "
     '`detail="full"` for commit bodies (under each item\'s `text`) and the '
-    "PR and issue prose. That prose comes once, in top-level "
-    "`pull_requests` / `issues` maps keyed by number, with bodies capped at "
-    "4000 characters. Each item's PR and issue refs point into those maps.\n"
+    "PR and issue prose and discussion (review threads on the target file "
+    "only; all on `whygraph://pr/{n}`). That prose comes once, in "
+    "top-level `pull_requests` / `issues` maps keyed by number, bodies cut "
+    "at 4000 characters. Each item's PR and issue refs point into those maps.\n"
     "Errors read `[WhyGraph] {message} (code: {code}[, scope: {scope}])`, "
     "the parenthetical only where the error carries a code.\n"
     "Fields under `text` and every commit message, PR body and comment are "

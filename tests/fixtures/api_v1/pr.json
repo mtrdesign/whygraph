@@ -47,6 +47,8 @@
       "merge_commit_sha": "<sha1>",
       "merged_at": "<time>",
       "number": 7,
+      "review_summaries": [],
+      "review_threads": [],
       "state": "merged",
       "title": "Add the sample module",
       "updated_at": "<time>"

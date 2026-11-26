@@ -26,6 +26,7 @@
       "author": "reporter",
       "body": "We need a sample.",
       "closed_at": null,
+      "comments": [],
       "created_at": "<time>",
       "html_url": "https://github.com/acme/api/issues/42",
       "labels": [

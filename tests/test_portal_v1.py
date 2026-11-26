@@ -292,6 +292,7 @@ class _Generator:
         paths=None,
         file_lines=None,
         target_range=None,
+        **_,
     ) -> Rationale:
         type(self).calls += 1
         type(self).threads.append(

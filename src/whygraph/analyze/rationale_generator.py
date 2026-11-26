@@ -22,8 +22,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from whygraph.core.code_anchor import anchor_positions
@@ -38,6 +38,7 @@ from whygraph.services.llm import (
     LlmError,
 )
 
+from .card_bundle import DEFAULT_LEVEL, CardBundle, CardCoverage, card_bundle
 from .exceptions import AnalyzeError, RationaleError
 from .prompt import RATIONALE_PLACEHOLDER, Prompt, render, resolve
 from .rationale import CommitEvidence, Item, ItemRef, Rationale
@@ -114,21 +115,26 @@ class _PrRenderCaps:
     review_threads_max_chars : int
         Characters of qualified review-thread text in one prompt; ``0``
         keeps threads out.
+    context_max_chars : int
+        Characters of compact context commits (Ring 1) in one prompt;
+        ``0`` keeps them out.
     """
 
     pr_roster_max_commits: int = 30
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
     review_threads_max_chars: int = 3000
+    context_max_chars: int = 27000
 
     @classmethod
     def from_config(cls, config: RationaleConfig) -> "_PrRenderCaps":
-        """Project the four rendering caps out of a :class:`RationaleConfig`."""
+        """Project the rendering caps out of a :class:`RationaleConfig`."""
         return cls(
             pr_roster_max_commits=config.pr_roster_max_commits,
             pr_discussion_max_comments=config.pr_discussion_max_comments,
             pr_comment_max_chars=config.pr_comment_max_chars,
             review_threads_max_chars=config.review_threads_max_chars,
+            context_max_chars=config.context_max_chars,
         )
 
 
@@ -137,22 +143,43 @@ def _indent_block(text: str, prefix: str) -> str:
     return "\n".join(prefix + line for line in text.splitlines())
 
 
-def _format_commit(commit: Commit) -> list[str]:
+def _summary_line(commit: Commit, missing_reason: str | None) -> str | None:
+    """The ``Summary:`` line: the raw description, else why there is none (R25)."""
+    if commit.llm_description:
+        return f"  Summary: {commit.llm_description}"
+    if missing_reason is not None:
+        return f"  Summary: (no description: {missing_reason})"
+    return None
+
+
+def _format_commit(
+    commit: Commit,
+    *,
+    missing_reason: str | None = None,
+    body_note: str | None = None,
+) -> list[str]:
     """Render one commit as the lines of an evidence block.
 
-    The ``llm_description`` diff summary and a blank ``body`` are omitted so
-    the bundle only carries narratives that exist.
+    The ``llm_description`` diff summary is rendered raw, never clipped
+    (plan 62 R25); without one, ``missing_reason`` renders
+    ``Summary: (no description: <reason>)`` and ``None`` omits the line. A
+    blank ``body`` is omitted; ``body_note`` replaces a non-blank one (a
+    merge or squash commit's body, which repeats its PR's commits).
     """
     lines = [
         f"COMMIT {_short_sha(commit.sha)}  {commit.committed_at}  "
         f"by {commit.author_name}"
     ]
-    if commit.llm_description:
-        lines.append(f"  Summary: {commit.llm_description}")
+    summary = _summary_line(commit, missing_reason)
+    if summary is not None:
+        lines.append(summary)
     lines.append(f"  Subject: {commit.subject}")
     if commit.body.strip():
-        lines.append("  Body:")
-        lines.append(_indent_block(commit.body.strip(), "    "))
+        if body_note is not None:
+            lines.append(f"  {body_note}")
+        else:
+            lines.append("  Body:")
+            lines.append(_indent_block(commit.body.strip(), "    "))
     return lines
 
 
@@ -198,6 +225,18 @@ def _format_pr(
     return lines
 
 
+def _format_pr_title(pr: PullRequest) -> str:
+    """One own PR the card does not show in full, as its single title line."""
+    when = f"merged {pr.merged_at}" if pr.merged_at else pr.state
+    author = f"by {pr.author}" if pr.author else "by unknown"
+    return f"  PR #{pr.number} (title only)  {author}  {when}: {pr.title}"
+
+
+def _full_pr_chars(caps: _PrRenderCaps) -> Callable[[PullRequest], int]:
+    """Stopper 1's measure: the characters :func:`_format_pr` renders for a PR."""
+    return lambda pr: len("\n".join(_format_pr(pr, caps)))
+
+
 def _format_issue(issue: Issue) -> list[str]:
     """Render one issue as the indented lines of an evidence block."""
     author = f"by {issue.author}" if issue.author else "by unknown"
@@ -232,7 +271,12 @@ _THREADS_PER_PR_CHARS = 1200
 _THREAD_COMMENT_MAX_CHARS = 400
 _THREAD_AUTHOR_MIN_CHARS = 60
 _THREAD_OUTDATED = "(code changed after this comment)"
-_DISCUSSION_SHOWN_ABOVE = "    (discussion shown above)"
+
+# Plan 62 Part B rendering (section 13.2, 13.4).
+_NO_DESCRIPTION = "not generated yet"
+_CONTEXT_HEADER = (
+    "CONTEXT: commits that touched this file but not these lines, newest first."
+)
 
 # Agent or bot text posted from a ``User`` account: an HTML-comment marker
 # (``<!-- cookie-review``), an agent signature, or an agent severity label.
@@ -325,12 +369,14 @@ def _anchor_owned(
     file_lines: Sequence[str],
     target_range: tuple[int, int],
 ) -> bool:
-    """Rule 4 (R21, R22): the thread's code is inside the target and still the PR's.
+    """Rule 4 (R21, R22, R46): the thread's code is inside the target and still the PR's.
 
-    The anchor's commented line must lie inside ``target_range`` at a
-    position that blame ties to the PR: for an ``added`` line, a ``blame``
-    item covering it is linked to this PR; for a context line, the anchor
-    occurs once in the whole file and the ``blame`` item covering it was
+    The anchor must occur exactly once in the whole file (R46: identical
+    code written by one PR in several places would otherwise carry a
+    thread about one copy onto every copy's card), and its commented line
+    must lie inside ``target_range`` at a position that blame ties to the
+    PR: for an ``added`` line, a ``blame`` item covering it is linked to
+    this PR; for a context line, the ``blame`` item covering it was
     committed before the PR was created.
     """
     anchor = thread.get("anchor")
@@ -345,7 +391,7 @@ def _anchor_owned(
     start, end = target_range
     added = anchor.get("added") is True
     created = _parse_time(pr.created_at)
-    if not added and (len(positions) != 1 or created is None):
+    if len(positions) != 1 or (not added and created is None):
         return False
     for y in positions:
         if not start <= y <= end:
@@ -427,29 +473,51 @@ def _thread_lines(thread: _Thread) -> list[str]:
     return [f"      - {first}", *(f"        {entry}" for entry in rest)]
 
 
+def _qualified_threads(
+    pr: PullRequest,
+    paths: frozenset[str],
+    blame: Sequence[CommitEvidence],
+    file_lines: Sequence[str],
+    target_range: tuple[int, int],
+) -> list[_Thread]:
+    """The stored threads of ``pr`` that qualify for the prompt, in stored order."""
+    return [
+        thread
+        for raw in _json_list(pr.review_threads)
+        if (thread := _qualify_thread(raw, pr, paths, blame, file_lines, target_range))
+        is not None
+    ]
+
+
 def _select_threads(
-    evidence: Sequence[CommitEvidence],
+    full_prs: Sequence[PullRequest],
+    ring0_all: Sequence[CommitEvidence],
     paths: frozenset[str] | None,
     file_lines: Sequence[str] | None,
     target_range: tuple[int, int] | None,
     caps: _PrRenderCaps,
 ) -> dict[int, _RenderedThreads]:
-    """The review threads a bundle's prompt shows, per PR number (plan 62 section 4.9a).
+    """The review threads a card's prompt shows, per PR number (plan 62 section 4.9a).
 
-    The one selection that both :func:`_format_evidence` and
-    :func:`_evidence_sources` use, so what is rendered and what may be
-    quoted cannot drift. A thread qualifies only when its opener is human
-    text, the PR author wrote a substantive rendered comment, its PR is
-    linked to a line-level evidence item, and its anchor lies inside the
-    target's lines at a position blame ties to the PR. Qualified threads
-    fill :data:`_THREADS_PER_PR_CHARS` per PR and
-    ``caps.review_threads_max_chars`` per card in bundle order, stopping at
-    the first thread that does not fit.
+    The one selection that both the rendering and :func:`_evidence_sources`
+    use, so what is rendered and what may be quoted cannot drift. Runs once,
+    after both stoppers, over the PRs that render in full (plan 62 section
+    13.4): a demoted PR's threads neither render nor use the budget. A
+    thread qualifies only when its opener is human text, the PR author
+    wrote a substantive rendered comment, its PR is linked to a line-level
+    evidence item, and its anchor lies inside the target's lines at a
+    position blame ties to the PR (R22, checked against every line-level
+    item collected, whatever the level renders). Qualified threads fill
+    :data:`_THREADS_PER_PR_CHARS` per PR and ``caps.review_threads_max_chars``
+    per card in ``full_prs`` order, stopping at the first thread that does
+    not fit.
 
     Parameters
     ----------
-    evidence : Sequence[CommitEvidence]
-        The bundle, in prompt order.
+    full_prs : Sequence[PullRequest]
+        The PRs rendered in full, in Ring 0 priority order.
+    ring0_all : Sequence[CommitEvidence]
+        Every line-level item collected (:attr:`CardBundle.ring0_all`).
     paths : frozenset[str] or None
         The target file and its rename aliases.
     file_lines : Sequence[str] or None
@@ -475,31 +543,18 @@ def _select_threads(
         return {}
     line_linked = {
         pr.number
-        for item in evidence
+        for item in ring0_all
         if item.source in _LINE_SOURCES
         for pr in item.pull_requests
     }
-    blame = [item for item in evidence if item.source == "blame" and item.lines]
-    prs: dict[int, PullRequest] = {}
-    for item in evidence:
-        for pr in item.pull_requests:
-            prs.setdefault(pr.number, pr)
+    blame = [item for item in ring0_all if item.source == "blame" and item.lines]
     card_left = caps.review_threads_max_chars
     card_full = False
     selected: dict[int, _RenderedThreads] = {}
-    for number, pr in prs.items():
-        if number not in line_linked or not pr.author:
+    for pr in full_prs:
+        if pr.number in selected or pr.number not in line_linked or not pr.author:
             continue
-        qualified = [
-            thread
-            for raw in _json_list(pr.review_threads)
-            if (
-                thread := _qualify_thread(
-                    raw, pr, paths, blame, file_lines, target_range
-                )
-            )
-            is not None
-        ]
+        qualified = _qualified_threads(pr, paths, blame, file_lines, target_range)
         if not qualified:
             continue
         pr_left = _THREADS_PER_PR_CHARS
@@ -520,16 +575,231 @@ def _select_threads(
         omitted = len(qualified) - len(shown)
         if omitted:
             lines.append(f"    ({omitted} more review threads omitted)")
-        selected[number] = _RenderedThreads(
+        selected[pr.number] = _RenderedThreads(
             tuple(lines),
             tuple(text for thread in shown for text in thread.author_texts),
         )
     return selected
 
 
-def _has_discussion(pr: PullRequest, caps: _PrRenderCaps) -> bool:
-    """Whether :func:`_format_pr` renders a ``Discussion:`` block for ``pr``."""
-    return bool(_json_list(pr.comments)[: caps.pr_discussion_max_comments])
+def _threads_lost(
+    demoted: Sequence[PullRequest],
+    ring0_all: Sequence[CommitEvidence],
+    paths: frozenset[str] | None,
+    file_lines: Sequence[str] | None,
+    target_range: tuple[int, int] | None,
+    caps: _PrRenderCaps,
+) -> int:
+    """How many ``demoted`` PRs had at least one qualified review thread."""
+    if (
+        paths is None
+        or file_lines is None
+        or target_range is None
+        or caps.review_threads_max_chars <= 0
+    ):
+        return 0
+    blame = [item for item in ring0_all if item.source == "blame" and item.lines]
+    return sum(
+        1
+        for pr in demoted
+        if pr.author and _qualified_threads(pr, paths, blame, file_lines, target_range)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _Layout:
+    """What one prompt renders: a bundle plus the generator's own cuts.
+
+    Attributes
+    ----------
+    bundle : CardBundle
+        The card's selection (:func:`~whygraph.analyze.card_bundle.card_bundle`).
+    full : frozenset[int]
+        The PR numbers rendered in full: the bundle's full PRs minus those
+        stopper 2 demoted.
+    context : tuple[CommitEvidence, ...]
+        The Ring 1 commits rendered, newest first.
+    reasons : Mapping[str, str]
+        Why a commit has no description, by SHA.
+    """
+
+    bundle: CardBundle
+    full: frozenset[int]
+    context: tuple[CommitEvidence, ...]
+    reasons: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def full_prs(self) -> tuple[PullRequest, ...]:
+        """The PRs rendered in full, in Ring 0 priority order."""
+        return tuple(pr for pr in self.bundle.full_prs if pr.number in self.full)
+
+    @property
+    def demoted(self) -> tuple[PullRequest, ...]:
+        """Own PRs selected for a full block that render as a title line."""
+        lost = [pr for pr in self.bundle.full_prs if pr.number not in self.full]
+        return (*self.bundle.demoted, *lost)
+
+    @property
+    def rendered(self) -> tuple[CommitEvidence, ...]:
+        """Every commit the prompt renders: Ring 0, then the context commits."""
+        return (*self.bundle.ring0, *self.context)
+
+    def reason(self, commit: Commit) -> str:
+        """Why ``commit`` has no description (:data:`_NO_DESCRIPTION`)."""
+        return self.reasons.get(commit.sha, _NO_DESCRIPTION)
+
+
+def _format_context_commit(item: CommitEvidence, missing_reason: str) -> list[str]:
+    """Render one Ring 1 (context) commit compactly (plan 62 section 13.2).
+
+    ``sha8  date  author: subject``, the ``Source:`` line, the raw
+    description (or why there is none), and one ``(PR #n: title)`` line per
+    linked PR; no body, no PR block.
+    """
+    commit = item.commit
+    lines = [
+        f"{_short_sha(commit.sha)}  {commit.committed_at}  "
+        f"{commit.author_name}: {commit.subject}",
+        f"  Source: {_SOURCE_LABELS.get(item.source, item.source)}",
+    ]
+    summary = _summary_line(commit, missing_reason)
+    if summary is not None:
+        lines.append(summary)
+    lines.extend(f"  (PR #{pr.number}: {pr.title})" for pr in item.pull_requests)
+    return lines
+
+
+def _fit_context(
+    bundle: CardBundle, caps: _PrRenderCaps, reasons: Mapping[str, str]
+) -> tuple[CommitEvidence, ...]:
+    """The context commits that fit ``caps.context_max_chars``, newest first.
+
+    Whole commits only, description included; adding stops at the first
+    commit that does not fit (plan 62 section 13.2).
+    """
+    left = caps.context_max_chars
+    kept: list[CommitEvidence] = []
+    for item in bundle.ring1:
+        size = len(
+            "\n".join(
+                _format_context_commit(
+                    item, reasons.get(item.commit.sha, _NO_DESCRIPTION)
+                )
+            )
+        )
+        if size > left:
+            break
+        kept.append(item)
+        left -= size
+    return tuple(kept)
+
+
+def _body_note(item: CommitEvidence, layout: _Layout) -> str | None:
+    """What replaces a merge or squash commit's body, or ``None`` for any other commit."""
+    sha = item.commit.sha
+    pr = next((p for p in item.pull_requests if p.merge_commit_sha == sha), None)
+    if pr is None:
+        return None
+    if pr.number in layout.full:
+        return f"(body: the PR's squashed commits, see PR #{pr.number})"
+    count = len(_json_list(pr.commit_titles))
+    if layout.bundle.caps.feature_commits:
+        return f"(squash of {count} commits)"
+    return f"(squash of {count} commits; shown from high)"
+
+
+def _render(
+    layout: _Layout,
+    caps: _PrRenderCaps,
+    threads: dict[int, _RenderedThreads] | None = None,
+) -> str:
+    """Render a card's evidence as the text payload of the rationale prompt.
+
+    Ring 0 commits render in the bundle's order, each followed by its own
+    PRs - in full (once per prompt; a later commit of the PR says
+    ``PR #n (shown above)``), or as a title line - then one ``also in N
+    other PRs`` line for the PRs that hold the commit only through their
+    roster, then its issues. Each commit block carries a ``Source:`` line
+    describing how the row reached the bundle. Context commits follow,
+    compact (:func:`_format_context_commit`), ending with how many file
+    commits were not shown.
+    """
+    threads = threads or {}
+    bundle = layout.bundle
+    rendered = layout.rendered
+    n_prs = len({pr.number for item in rendered for pr in item.pull_requests})
+    n_issues = len({i.number for item in bundle.ring0 for i in item.issues})
+    header = f"Evidence: {len(rendered)} commit(s), {n_prs} PR(s), {n_issues} issue(s)."
+    demoted = len(layout.demoted)
+    if demoted:
+        header += (
+            f"\n({demoted} PR(s) of these commits shown by title only: "
+            "this card's full-PR budget was reached)"
+        )
+    blocks = [header]
+    shown: set[int] = set()
+    for item in bundle.ring0:
+        commit = item.commit
+        lines = _format_commit(
+            commit,
+            missing_reason=layout.reason(commit),
+            body_note=_body_note(item, layout),
+        )
+        label = _SOURCE_LABELS.get(item.source, item.source)
+        # Insert the source line right after the COMMIT header so the
+        # LLM sees it before subject/body content.
+        lines.insert(1, f"  Source: {label}")
+        own = bundle.own.get(commit.sha, frozenset())
+        roster: list[int] = []
+        for pr in item.pull_requests:
+            if pr.number not in own:
+                roster.append(pr.number)
+                continue
+            lines.append("")
+            if pr.number in shown:
+                lines.append(f"  PR #{pr.number} (shown above)")
+                continue
+            shown.add(pr.number)
+            if pr.number in layout.full:
+                lines.extend(_format_pr(pr, caps))
+                block = threads.get(pr.number)
+                if block is not None:
+                    lines.extend(block.lines)
+            else:
+                lines.append(_format_pr_title(pr))
+        if roster:
+            numbers = ", ".join(f"#{n}" for n in roster)
+            lines.append("")
+            lines.append(f"  also in {len(roster)} other PRs ({numbers})")
+        for issue in item.issues:
+            lines.append("")
+            lines.extend(_format_issue(issue))
+        blocks.append("\n".join(lines))
+    if layout.context:
+        blocks.append(_CONTEXT_HEADER)
+        for item in layout.context:
+            blocks.append(
+                "\n".join(_format_context_commit(item, layout.reason(item.commit)))
+            )
+    omitted = bundle.context_total - len(layout.context)
+    if omitted:
+        blocks.append(
+            f"({omitted} more file commits not shown)"
+            if layout.context
+            else f"({omitted} file commits that touched the file but not these "
+            "lines not shown)"
+        )
+    return "\n\n".join(blocks)
+
+
+def _default_layout(evidence: Sequence[CommitEvidence], caps: _PrRenderCaps) -> _Layout:
+    """The layout of ``evidence`` at :data:`DEFAULT_LEVEL`, without stopper 2."""
+    bundle = card_bundle(evidence, DEFAULT_LEVEL, pr_chars=_full_pr_chars(caps))
+    return _Layout(
+        bundle,
+        frozenset(pr.number for pr in bundle.full_prs),
+        _fit_context(bundle, caps, {}),
+    )
 
 
 def _format_evidence(
@@ -537,55 +807,15 @@ def _format_evidence(
     caps: _PrRenderCaps = _PrRenderCaps(),
     threads: dict[int, _RenderedThreads] | None = None,
 ) -> str:
-    """Render an evidence bundle as the text payload for the rationale prompt.
+    """Render an evidence bundle the way a default-level card's prompt shows it.
 
-    Commits are formatted in the order given — the caller controls
-    ordering. Each commit block is followed by its linked pull requests
-    and issues. The JSON-encoded ``labels`` columns are decoded here.
-
-    Each commit block also carries a ``Source:`` line describing *how*
-    the row reached this bundle (line-blame, area-history, etc.), so the
-    LLM can weight precision-vs-coverage signals when synthesising the
-    rationale.
-
-    ``caps`` bounds the per-PR roster / discussion rendering (see
-    :func:`_format_pr`). ``threads`` (:func:`_select_threads`) adds a PR's
-    review-thread block after its discussion. A PR's discussion and threads
-    render once per bundle: later occurrences of the PR keep the rest of
-    the block and say ``(discussion shown above)`` instead, when the first
-    showed any.
+    ``evidence`` goes through :func:`~whygraph.analyze.card_bundle.card_bundle`
+    at :data:`DEFAULT_LEVEL` and the context budget, then :func:`_render`;
+    ``caps`` bounds each PR's roster / discussion rendering (see
+    :func:`_format_pr`) and ``threads`` (:func:`_select_threads`) adds a
+    full PR's review-thread block after its discussion.
     """
-    threads = threads or {}
-    n_prs = sum(len(item.pull_requests) for item in evidence)
-    n_issues = sum(len(item.issues) for item in evidence)
-    blocks = [
-        f"Evidence: {len(evidence)} commit(s), {n_prs} PR(s), {n_issues} issue(s)."
-    ]
-    # PR number -> whether its first occurrence showed a discussion or threads.
-    shown: dict[int, bool] = {}
-    for item in evidence:
-        lines = _format_commit(item.commit)
-        label = _SOURCE_LABELS.get(item.source, item.source)
-        # Insert the source line right after the COMMIT header so the
-        # LLM sees it before subject/body content.
-        lines.insert(1, f"  Source: {label}")
-        for pr in item.pull_requests:
-            lines.append("")
-            if pr.number in shown:
-                lines.extend(_format_pr(pr, caps, discussion=False))
-                if shown[pr.number]:
-                    lines.append(_DISCUSSION_SHOWN_ABOVE)
-                continue
-            lines.extend(_format_pr(pr, caps))
-            block = threads.get(pr.number)
-            if block is not None:
-                lines.extend(block.lines)
-            shown[pr.number] = _has_discussion(pr, caps) or block is not None
-        for issue in item.issues:
-            lines.append("")
-            lines.extend(_format_issue(issue))
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
+    return _render(_default_layout(evidence, caps), caps, threads)
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -624,36 +854,53 @@ def _source(ref: ItemRef, texts: Sequence[str]) -> _Source:
 
 
 def _evidence_sources(
-    evidence: Sequence[CommitEvidence],
+    layout: _Layout,
     caps: _PrRenderCaps = _PrRenderCaps(),
     threads: dict[int, _RenderedThreads] | None = None,
 ) -> dict[tuple[str, str], _Source]:
     """Index the evidence a card item may cite, by ``(kind, id)``.
 
-    Built beside :func:`_format_evidence` and kept in memory only. A commit's
-    texts are its subject and body, not its ``llm_description``: the diff
-    summary is model output, so a quote from it proves nothing. A PR's texts
-    are its title, body, squashed-commit headlines and discussion, plus the
-    PR author's rendered review-thread comments from ``threads`` (the same
+    Built beside :func:`_render` from the same layout and kept in memory
+    only, so a source is what the prompt shows. A Ring 0 commit's texts are
+    its subject and body (a merge or squash commit's body too, though the
+    prompt replaces it with a note), not its ``llm_description``: the diff
+    summary is model output, so a quote from it proves nothing. A context
+    commit's text is its subject. A PR rendered in full offers its title,
+    body, squashed-commit headlines and discussion, plus the PR author's
+    rendered review-thread comments from ``threads`` (the same
     :func:`_select_threads` result the prompt renders; reviewer comments are
-    never a source); an issue's its title and body.
+    never a source); a PR shown as a title line offers its title; a PR
+    named only in an ``also in`` line can be cited but offers no text. An
+    issue of a Ring 0 commit offers its title and body.
     """
     threads = threads or {}
     sources: dict[tuple[str, str], _Source] = {}
-    for item in evidence:
+    titled = {pr.number for item in layout.context for pr in item.pull_requests}
+    titled |= {pr.number for pr in layout.bundle.title_prs}
+    titled |= {pr.number for pr in layout.demoted}
+    context_ids = {id(item) for item in layout.context}
+
+    def pr_texts(pr: PullRequest) -> list[str]:
+        if pr.number in layout.full:
+            block = threads.get(pr.number)
+            author_texts = block.author_texts if block is not None else ()
+            return [*_pr_texts(pr, caps), *author_texts]
+        return [pr.title] if pr.number in titled else []
+
+    for item in layout.rendered:
         commit = item.commit
+        context = id(item) in context_ids
         key = ("commit", commit.sha)
         if key not in sources:
-            sources[key] = _source(
-                ItemRef("commit", commit.sha), (commit.subject, commit.body)
-            )
+            texts = (commit.subject,) if context else (commit.subject, commit.body)
+            sources[key] = _source(ItemRef("commit", commit.sha), texts)
         for pr in item.pull_requests:
             key = ("pr", str(pr.number))
             if key not in sources:
                 ref = ItemRef("pr", str(pr.number), pr.html_url or None)
-                block = threads.get(pr.number)
-                author_texts = block.author_texts if block is not None else ()
-                sources[key] = _source(ref, [*_pr_texts(pr, caps), *author_texts])
+                sources[key] = _source(ref, pr_texts(pr))
+        if context:
+            continue
         for issue in item.issues:
             key = ("issue", str(issue.number))
             if key not in sources:
@@ -900,6 +1147,85 @@ def _parse_rationale_json(text: str) -> dict:
     return parsed
 
 
+def _fit_prompt(
+    bundle: CardBundle,
+    caps: _PrRenderCaps,
+    reasons: Mapping[str, str],
+    *,
+    size: Callable[[_Layout], int],
+) -> tuple[_Layout, tuple[str, ...]]:
+    """The context budget, then stopper 2 (plan 62 section 13.2).
+
+    Parameters
+    ----------
+    bundle : CardBundle
+        The card's selection; its stopper 1 already ran.
+    caps : _PrRenderCaps
+        The rendering caps (``context_max_chars``).
+    reasons : Mapping[str, str]
+        Why a commit has no description, by SHA.
+    size : callable
+        The prompt's size in characters for a layout.
+
+    Returns
+    -------
+    tuple[_Layout, tuple[str, ...]]
+        The layout to render and ``coverage.trimmed``.
+    """
+    full = [pr.number for pr in bundle.full_prs]
+    context = list(_fit_context(bundle, caps, reasons))
+    trimmed: list[str] = ["full_pr_budget"] if bundle.demoted else []
+    cap = bundle.caps.total_max_chars
+
+    def layout() -> _Layout:
+        return _Layout(bundle, frozenset(full), tuple(context), reasons)
+
+    if size(layout()) <= cap:
+        return layout(), tuple(trimmed)
+    if context:
+        trimmed.append("prompt_cap_context")
+        while context and size(layout()) > cap:
+            context.pop()
+    if full and size(layout()) > cap:
+        trimmed.append("prompt_cap_full_prs")
+        while full and size(layout()) > cap:
+            full.pop()
+    if size(layout()) > cap:
+        trimmed.append("ring0_over_cap")
+    return layout(), tuple(trimmed)
+
+
+def card_bundle_for(
+    evidence: Sequence[CommitEvidence],
+    config: RationaleConfig,
+    level: str = DEFAULT_LEVEL,
+) -> CardBundle:
+    """What a card at ``level`` includes, measured the way the generator renders.
+
+    :func:`~whygraph.analyze.card_bundle.card_bundle` with this module's PR
+    block size as stopper 1's measure, so the MCP tool (which needs the
+    bundle before the description backfill) and
+    :meth:`RationaleGenerator.generate` select the same commits and PRs.
+
+    Parameters
+    ----------
+    evidence : Sequence[CommitEvidence]
+        The target's collected evidence, newest first.
+    config : RationaleConfig
+        The ``[rationale]`` config (its PR rendering caps).
+    level : str, optional
+        The depth level; default
+        :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`.
+
+    Returns
+    -------
+    CardBundle
+        The card's selection.
+    """
+    caps = _PrRenderCaps.from_config(config)
+    return card_bundle(evidence, level, pr_chars=_full_pr_chars(caps))
+
+
 class RationaleGenerator:
     """Turn an evidence bundle into a structured rationale card.
 
@@ -1013,6 +1339,8 @@ class RationaleGenerator:
         paths: frozenset[str] | None = None,
         file_lines: Sequence[str] | None = None,
         target_range: tuple[int, int] | None = None,
+        bundle: CardBundle | None = None,
+        missing_descriptions: Mapping[str, str] | None = None,
     ) -> Rationale:
         """Generate a rationale card for one evidence bundle.
 
@@ -1042,11 +1370,32 @@ class RationaleGenerator:
             The target's inclusive line range in ``file_lines``. Review
             threads render only when ``paths``, ``file_lines`` and
             ``target_range`` are all given; any ``None`` keeps them out.
+        bundle : CardBundle, optional
+            What the card includes (:func:`card_bundle_for` over
+            ``evidence``, plan 62 section 13.4); ``None`` (default) selects
+            it here at :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`.
+        missing_descriptions : Mapping[str, str], optional
+            Why a commit has no description, by SHA; a commit without one
+            and without an entry renders ``(no description: not generated
+            yet)``.
 
         Returns
         -------
         Rationale
-            The model's structured explanation plus provenance.
+            The model's structured explanation plus provenance, and its
+            ``coverage`` (:class:`~whygraph.analyze.card_bundle.CardCoverage`).
+
+        Notes
+        -----
+        After the bundle's own stopper 1, the context character budget
+        (``caps.context_max_chars``) fills the context commits newest first,
+        and stopper 2 checks the whole prompt (system and task text, plus
+        ``caps.review_threads_max_chars`` held for review threads when they
+        can render) against the level's total cap: over it, context commits
+        go from the oldest, then full PRs become title lines from the end of
+        the Ring 0 order; Ring 0 commits and their descriptions are never
+        removed. Review threads are selected once, after both stoppers, over
+        the PRs still rendered in full.
 
         Raises
         ------
@@ -1061,17 +1410,63 @@ class RationaleGenerator:
         if not evidence:
             raise AnalyzeError("empty evidence: nothing to explain")
 
-        # TODO: capping bundle size belongs to the future evidence-bundle
-        # builder — the generator neither truncates nor chunks its input.
-        # One thread selection for both the prompt and the quote sources.
-        threads = _select_threads(evidence, paths, file_lines, target_range, self._caps)
-        bundle = _format_evidence(evidence, self._caps, threads)
+        caps = self._caps
+        if bundle is None:
+            bundle = card_bundle(evidence, DEFAULT_LEVEL, pr_chars=_full_pr_chars(caps))
+        reasons = dict(missing_descriptions or {})
+        graph = (
+            None if symbol_context is None else _format_symbol_context(symbol_context)
+        )
+        threads_possible = (
+            paths is not None
+            and file_lines is not None
+            and target_range is not None
+            and caps.review_threads_max_chars > 0
+        )
+        reserve = caps.review_threads_max_chars if threads_possible else 0
+
+        def task_for(layout: _Layout, threads: dict[int, _RenderedThreads]) -> str:
+            text = _render(layout, caps, threads)
+            if graph is not None:
+                text = f"{graph}\n\n{text}"
+            return render(
+                self._rationale_prompt.task, text, placeholder=RATIONALE_PLACEHOLDER
+            )
+
+        layout, trimmed = _fit_prompt(
+            bundle,
+            caps,
+            reasons,
+            size=lambda lay: (
+                len(self._rationale_prompt.system) + len(task_for(lay, {})) + reserve
+            ),
+        )
+        # One thread selection, after both stoppers, for both the prompt and
+        # the quote sources.
+        threads = _select_threads(
+            layout.full_prs, bundle.ring0_all, paths, file_lines, target_range, caps
+        )
+        task = task_for(layout, threads)
         # The text of each piece of evidence, by id, to judge the items' quotes.
-        sources = _evidence_sources(evidence, self._caps, threads)
-        if symbol_context is not None:
-            bundle = f"{_format_symbol_context(symbol_context)}\n\n{bundle}"
-        task = render(
-            self._rationale_prompt.task, bundle, placeholder=RATIONALE_PLACEHOLDER
+        sources = _evidence_sources(layout, caps, threads)
+        rendered_context = {item.commit.sha for item in layout.context}
+        coverage = CardCoverage(
+            line_commits=len(bundle.ring0),
+            context_commits=len(layout.context),
+            context_omitted=bundle.context_total - len(layout.context),
+            full_prs_demoted=len(layout.demoted),
+            threads_lost=_threads_lost(
+                layout.demoted, bundle.ring0_all, paths, file_lines, target_range, caps
+            ),
+            trimmed=trimmed,
+            descriptions_missing=sum(
+                1 for item in layout.rendered if not item.commit.llm_description
+            ),
+            omitted_shas=frozenset(
+                item.commit.sha
+                for item in bundle.ring1
+                if item.commit.sha not in rendered_context
+            ),
         )
         request = CompletionRequest.of(
             task,
@@ -1105,4 +1500,5 @@ class RationaleGenerator:
             provider=response.provider,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
+            coverage=coverage,
         )

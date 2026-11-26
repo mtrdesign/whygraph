@@ -16,6 +16,10 @@ Public API
   with the pull requests and issues linked to it.
 * :class:`Rationale` — the value object returned by
   :meth:`RationaleGenerator.generate`.
+* :func:`card_bundle_for` (over :mod:`.card_bundle`), :class:`CardBundle`,
+  :class:`CardCoverage` — what one card includes (plan 62 Part B): the
+  evidence rings and the full-PR selection, chosen before the description
+  backfill, and what the card's prompt left out.
 * :class:`Item`, :class:`ItemRef` — one constraint or risk of a
   :class:`Rationale`, with the evidence it names and its basis.
 * :class:`Prompt`, :func:`resolve_prompt`, :func:`render_prompt`,
@@ -66,6 +70,7 @@ from .backfill import (
     backfill_file_description,
     bulk_commit_stub,
 )
+from .card_bundle import CardBundle, CardCoverage
 from .description import Description
 from .exceptions import AnalyzeError, RationaleError
 from .llm_descriptor import LlmDescriptor
@@ -78,13 +83,15 @@ from .prompt import (
     resolve as resolve_prompt,
 )
 from .rationale import CommitEvidence, Item, ItemRef, Rationale
-from .rationale_generator import RationaleGenerator
+from .rationale_generator import RationaleGenerator, card_bundle_for
 
 __all__ = [
     "PLACEHOLDER",
     "RATIONALE_PLACEHOLDER",
     "SYNTHESIS_PLACEHOLDER",
     "AnalyzeError",
+    "CardBundle",
+    "CardCoverage",
     "CommitEvidence",
     "Description",
     "Item",
@@ -97,6 +104,7 @@ __all__ = [
     "backfill_commit_description",
     "backfill_file_description",
     "bulk_commit_stub",
+    "card_bundle_for",
     "render_prompt",
     "resolve_prompt",
 ]

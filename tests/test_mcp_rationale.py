@@ -7,6 +7,7 @@ provider SDK or ``claude`` CLI is touched.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -62,6 +63,7 @@ class _FakeGenerator:
         paths: frozenset[str] | None = None,
         file_lines: Sequence[str] | None = None,
         target_range: tuple[int, int] | None = None,
+        **_: object,
     ) -> Rationale:
         return Rationale(
             purpose="Holds two sample lines.",
@@ -177,6 +179,7 @@ def test_rationale_brief_wraps_generator_failure(
             paths: frozenset[str] | None = None,
             file_lines: Sequence[str] | None = None,
             target_range: tuple[int, int] | None = None,
+            **_: object,
         ) -> Rationale:
             raise AnalyzeError("model unavailable")
 
@@ -1157,6 +1160,7 @@ def _counting_generator(monkeypatch: pytest.MonkeyPatch) -> list[int]:
             paths: frozenset[str] | None = None,
             file_lines: Sequence[str] | None = None,
             target_range: tuple[int, int] | None = None,
+            **_: object,
         ) -> Rationale:
             calls.append(len(evidence))
             return super().generate(evidence)
@@ -1632,6 +1636,7 @@ def _recording_generator(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
             paths: frozenset[str] | None = None,
             file_lines: Sequence[str] | None = None,
             target_range: tuple[int, int] | None = None,
+            **_: object,
         ) -> Rationale:
             seen.append((paths, file_lines, target_range))
             return super().generate(evidence)
@@ -1700,3 +1705,85 @@ def test_a_completion_reuses_the_requests_review_scope(
     assert drain_describes(timeout=30)
 
     assert seen == [(scope.paths, scope.current_lines, (1, 3))] * 2
+
+
+# ---- plan 62 Part B: the card bundle decides what is described (B2) --------
+
+
+def _bundle_evidence() -> list[CommitEvidence]:
+    """One blame item and eight area items, newest first (``medium`` shows four)."""
+    items = [
+        CommitEvidence(
+            _db_commit("b" * 40, committed_at="2026-03-01T00:00:00+00:00"),
+            source="blame",
+            lines=((1, 3),),
+        )
+    ]
+    for day in range(28, 20, -1):
+        items.append(
+            CommitEvidence(
+                _db_commit(
+                    f"{day:02d}" * 20, committed_at=f"2026-02-{day}T00:00:00+00:00"
+                ),
+                source="area",
+            )
+        )
+    return items
+
+
+def test_only_bundle_commits_are_described_and_counted(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.analyze import CardCoverage
+    from whygraph.mcp import rationale as module
+    from whygraph.mcp.evidence import DescribeOutcome
+    from whygraph.mcp.targets import Target
+
+    evidence = _bundle_evidence()
+    bundle_shas = {"b" * 40, *(f"{day:02d}" * 20 for day in (28, 27, 26, 25))}
+    described: list[tuple[set[str], int]] = []
+
+    def backfill(items, *, max_commits, **_):  # noqa: ANN001, ANN003, ANN202
+        described.append(({i.commit.sha for i in items}, max_commits))
+        # The blame commit waits, and so does a context commit the card omits.
+        return DescribeOutcome(0, frozenset(), frozenset({"b" * 40, "25" * 20}))
+
+    seen: dict[str, object] = {}
+
+    class _Recording(_FakeGenerator):
+        def generate(self, evidence, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            seen.update(kwargs)
+            card = super().generate(evidence)
+            return dataclasses.replace(
+                card,
+                coverage=CardCoverage(
+                    line_commits=1,
+                    context_commits=3,
+                    context_omitted=5,
+                    omitted_shas=frozenset({"25" * 20}),
+                ),
+            )
+
+    monkeypatch.setattr(module, "backfill_evidence_descriptions", backfill)
+    monkeypatch.setattr(module, "RationaleGenerator", _Recording)
+    monkeypatch.setattr(module, "_start_completion", lambda *a, **k: False)
+
+    card = module.rationale_card(
+        Target(path="sample.py", line_start=1, line_end=3, qualified_name=None),
+        evidence,
+        mark_generated=True,
+    )
+
+    assert described == [(bundle_shas, 5)]
+    assert {i.commit.sha for i in seen["bundle"].items} == bundle_shas
+    assert seen["missing_descriptions"] == {
+        "b" * 40: "not generated yet",
+        "25" * 20: "not generated yet",
+    }
+    assert card["evidence_count"]["commits"] == 5
+    assert len(card["evidence"]) == 5
+    assert card["evidence"][0]["sha"] == "b" * 40
+    # The omitted context commit is not waited for.
+    assert card["describing"] == 1
+    assert card["coverage"]["context_omitted"] == 5
+    assert "omitted_shas" not in card["coverage"]

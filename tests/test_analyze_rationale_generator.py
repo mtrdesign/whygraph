@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from whygraph.analyze import card_bundle as card_bundle_module
 from whygraph.analyze import (
     AnalyzeError,
     CommitEvidence,
@@ -23,12 +24,14 @@ from whygraph.analyze import (
     Rationale,
     RationaleError,
     RationaleGenerator,
+    card_bundle_for,
 )
 from whygraph.analyze.rationale_generator import (
     _PrRenderCaps,
     _format_evidence,
     _format_pr,
     _format_symbol_context,
+    _select_threads,
 )
 from whygraph.core.config import Config, RationaleConfig
 from whygraph.db.models import Commit, Issue, PullRequest
@@ -468,10 +471,18 @@ def _sourced_evidence() -> list[CommitEvidence]:
                 body=_BODY,
                 llm_description="Lowers the retry count in fetch.",
             ),
-            pull_requests=(_pr(number=5, title="Retry cap", body="alpha reason"),),
+            pull_requests=(
+                _own(_pr(number=5, title="Retry cap", body="alpha reason")),
+            ),
             issues=(_issue(number=5, title="Lockouts", body="beta report"),),
         )
     ]
+
+
+def _own(pr: PullRequest, sha: str = _SHA) -> PullRequest:
+    """``pr`` as the own PR (its ``head_sha``) of the commit ``sha``."""
+    pr.head_sha = sha
+    return pr
 
 
 def _with_items(constraints: list, risks: list | None = None) -> Rationale:
@@ -666,7 +677,9 @@ def test_format_evidence_renders_commit_pr_and_issue() -> None:
         [
             CommitEvidence(
                 _commit(subject="add cache", llm_description="adds a dict"),
-                pull_requests=(_pr(number=12, title="Cache prompts"),),
+                pull_requests=(
+                    _own(_pr(number=12, title="Cache prompts"), "a1b2c3d4e5f6"),
+                ),
                 issues=(_issue(number=7, title="Scans are slow"),),
             )
         ]
@@ -687,10 +700,11 @@ def test_format_evidence_decodes_json_labels() -> None:
     assert "[perf, regression]" in bundle
 
 
-def test_format_evidence_omits_absent_llm_description() -> None:
+def test_format_evidence_names_an_absent_llm_description() -> None:
+    """R25: a commit without a description says so instead of hiding it."""
     bundle = _format_evidence([CommitEvidence(_commit(llm_description=None))])
 
-    assert "Summary:" not in bundle
+    assert "  Summary: (no description: not generated yet)\n" in bundle
 
 
 def test_format_evidence_renders_source_label_per_commit() -> None:
@@ -928,10 +942,13 @@ def test_from_config_forwards_configured_model_to_factory() -> None:
 
 
 def _byte_identity_evidence() -> list[CommitEvidence]:
-    """A bundle with no repeated PR: blame + area items, roster, discussion, issue.
+    """A bundle of line-level items only, one commit per PR, each PR its own.
 
-    The PR also stores review threads and summaries, which must not reach the
-    prompt when ``generate`` is given no ``paths``.
+    Each PR's ``head_sha`` is its commit (its own PR, plan 62 section 13.2),
+    no commit is a PR's merge commit and every commit has a description, so
+    the Part B rendering must leave this prompt exactly as it was before
+    plan 62. The first PR also stores review threads and summaries, which
+    must not reach the prompt when ``generate`` is given no ``paths``.
     """
     thread = {
         "path": "src/retry.py",
@@ -957,10 +974,13 @@ def _byte_identity_evidence() -> list[CommitEvidence]:
         commit_titles=_commit_titles("first commit", "second commit"),
         comments=_comments(("alice", "looks good"), ("bob", "  ship it  ")),
     )
+    pr.head_sha = "a1b2c3d4e5f6a7b8"
     pr.review_threads = json.dumps([thread])
     pr.review_summaries = json.dumps(
         [{"author": "alice", "state": "APPROVED", "body": "LGTM", "submitted_at": "x"}]
     )
+    other = _pr(number=13, title="Other", body=None)
+    other.head_sha = "0011223344556677"
     return [
         CommitEvidence(
             _commit(sha="a1b2c3d4e5f6a7b8", subject="add prompt cache"),
@@ -974,11 +994,11 @@ def _byte_identity_evidence() -> list[CommitEvidence]:
                 sha="0011223344556677",
                 subject="touch the file",
                 body="",
-                llm_description=None,
+                llm_description="Renames a local.",
                 author_name="Bob",
             ),
-            pull_requests=(_pr(number=13, title="Other", body=None),),
-            source="area",
+            pull_requests=(other,),
+            source="blame-walked",
         ),
     ]
 
@@ -1028,7 +1048,8 @@ _BYTE_IDENTITY_PROMPT = (
     "      Profiling shows disk I/O.\n"
     "\n"
     "COMMIT 00112233  2026-05-01T12:00:00Z  by Bob\n"
-    "  Source: area-history (touched the file but not these lines)\n"
+    "  Source: line-blame (skipped a refactor commit)\n"
+    "  Summary: Renames a local.\n"
     "  Subject: touch the file\n"
     "\n"
     "  PR #13  by octocat  merged 2026-05-02T09:00:00Z  [perf]\n"
@@ -1128,9 +1149,17 @@ def _blame(
     source: str = "blame",
     committed_at: str = "2026-05-01T12:00:00Z",
 ) -> CommitEvidence:
-    """An evidence item owning ``lines`` and linked to ``prs``."""
+    """An evidence item owning ``lines`` and linked to ``prs``.
+
+    A PR still on the ``_pr`` placeholder ``head_sha`` becomes this
+    commit's own PR (plan 62 section 13.2), so the first item that names a
+    PR is the one that shows it in full.
+    """
     commit = _commit(sha=sha)
     commit.committed_at = committed_at
+    for pr in prs:
+        if pr.head_sha == "deadbeef":
+            pr.head_sha = sha
     return CommitEvidence(commit, pull_requests=prs, source=source, lines=lines)
 
 
@@ -1566,30 +1595,27 @@ def test_a_prs_discussion_renders_once_per_bundle() -> None:
     ]
     prompt, _ = _prompt(evidence)
 
-    assert prompt.count("    Title: Cache prompts") == 2
+    # The first commit owns the PR; the second holds it through its roster.
+    assert prompt.count("    Title: Cache prompts") == 1
     assert prompt.count("    Discussion:") == 1
     assert prompt.count("Review threads on these lines") == 1
-    assert prompt.count("    (discussion shown above)") == 1
+    assert prompt.count("  also in 1 other PRs (#12)") == 1
 
 
-def test_discussion_shown_above_only_when_something_was_shown() -> None:
-    pr = _pr(number=12)
-    bundle = _format_evidence(
-        [CommitEvidence(_commit(), (pr,)), CommitEvidence(_commit(), (pr,))]
-    )
-
-    assert bundle.count("PR #12") == 2
-    assert "discussion shown above" not in bundle
-
-
-def test_discussion_shown_above_without_thread_inputs() -> None:
+def test_a_full_pr_block_renders_once_per_bundle() -> None:
+    """Section 13.4: a later commit of the same PR says ``PR #n (shown above)``."""
     pr = _pr(number=12, comments=_comments(("bob", "ship it")))
+    pr.head_sha, pr.merge_commit_sha = "1111111111111111", "2222222222222222"
     bundle = _format_evidence(
-        [CommitEvidence(_commit(), (pr,)), CommitEvidence(_commit(), (pr,))]
+        [
+            CommitEvidence(_commit(sha="1111111111111111"), (pr,)),
+            CommitEvidence(_commit(sha="2222222222222222"), (pr,), source="blame"),
+        ]
     )
 
+    assert bundle.count("    Title: Cache prompts") == 1
     assert bundle.count("[bob] ship it") == 1
-    assert bundle.count("    (discussion shown above)") == 1
+    assert bundle.count("  PR #12 (shown above)") == 1
 
 
 # ---- R14: only the PR author's rendered thread words are quote sources -----
@@ -1657,3 +1683,353 @@ def test_system_prompt_labels_reviewer_comments_as_opinions() -> None:
         "never base a constraint, risk or tradeoff on a reviewer comment alone"
         in system
     )
+
+
+# ---- plan 62 Part B: rings, full PRs, stoppers, coverage (section 13.7 B2) --
+
+
+def _bundle_prompt(
+    evidence: list[CommitEvidence],
+    level: str = "medium",
+    *,
+    caps: _PrRenderCaps | None = None,
+    missing: dict[str, str] | None = None,
+    reply: str = _VALID_JSON,
+    **thread_inputs: Any,
+) -> tuple[str, Rationale]:
+    """The prompt and card at ``level``, the bundle chosen as the MCP tool does."""
+    config = RationaleConfig()
+    if caps is not None:
+        config = RationaleConfig(
+            review_threads_max_chars=caps.review_threads_max_chars,
+            context_max_chars=caps.context_max_chars,
+        )
+    client = _StubClient(text=reply)
+    card = RationaleGenerator(client, caps=caps).generate(
+        evidence,
+        bundle=card_bundle_for(evidence, config, level),
+        missing_descriptions=missing,
+        **(
+            {"paths": _PATHS, "file_lines": _FILE, "target_range": _RANGE}
+            | thread_inputs
+        ),
+    )
+    return client.requests[0].messages[1].content, card
+
+
+def _area(
+    sha: str, day: int, *prs: PullRequest, description: str = "ctx"
+) -> CommitEvidence:
+    """An ``area`` (context) item of day ``day`` in April 2026."""
+    commit = _commit(sha=sha, subject=f"touch {sha[:4]}", llm_description=description)
+    commit.committed_at = f"2026-04-{day:02d}T00:00:00Z"
+    return CommitEvidence(commit, pull_requests=prs, source="area")
+
+
+def _rich_evidence() -> list[CommitEvidence]:
+    """A blame item with a threaded PR, a walked item, a predecessor item, context."""
+    threaded = _thread_pr(_thread(), number=12)
+    walked = _pr(number=21, title="Walked PR")
+    older = _pr(number=22, title="Predecessor PR")
+    return [
+        _blame(threaded),
+        _blame(
+            walked,
+            sha="3333333333333333",
+            lines=None,
+            source="blame-walked",
+            committed_at="2026-04-20T00:00:00Z",
+        ),
+        _blame(
+            older,
+            sha="4444444444444444",
+            lines=None,
+            source="predecessor-blame",
+            committed_at="2026-03-01T00:00:00Z",
+        ),
+        *(_area(f"{9 - i}" * 16, 20 - i, _pr(number=30 + i)) for i in range(6)),
+    ]
+
+
+def _titles(prompt: str) -> set[str]:
+    return {
+        line.strip()
+        for line in prompt.splitlines()
+        if line.strip().startswith("Title:")
+    }
+
+
+def test_each_level_is_a_superset_of_the_one_below_with_threads() -> None:
+    """R24 while stopper 2 does not bind: full PRs, threads and context only grow."""
+    prompts = {
+        level: _bundle_prompt(_rich_evidence(), level)[0]
+        for level in ("low", "medium", "high", "xhigh")
+    }
+
+    for shallow, deep in (("low", "medium"), ("medium", "high"), ("high", "xhigh")):
+        assert _titles(prompts[shallow]) <= _titles(prompts[deep])
+        shallow_lines = {
+            ln for ln in prompts[shallow].splitlines() if "PR author]" in ln
+        }
+        deep_lines = {ln for ln in prompts[deep].splitlines() if "PR author]" in ln}
+        assert shallow_lines <= deep_lines
+        for sha in ("a1b2c3d4", "33333333", "44444444"):
+            assert f"COMMIT {sha}" in prompts[shallow]
+    assert "Review threads on these lines" in prompts["low"]
+    assert "PR #21 (title only)" in prompts["low"]
+    assert "Title: Walked PR" in prompts["medium"]
+    assert prompts["low"].count("  Source: area-history") == 0
+    assert prompts["medium"].count("  Source: area-history") == 4
+    assert prompts["high"].count("  Source: area-history") == 6
+
+
+def test_a_long_description_is_rendered_whole() -> None:
+    long = "Describes the change. " * 3000  # 66,000 characters
+    item = _blame(_thread_pr())
+    item.commit.llm_description = long
+
+    prompt, card = _bundle_prompt([item])
+
+    assert f"  Summary: {long}\n" in prompt
+    assert card.coverage.descriptions_missing == 0
+
+
+def test_an_undescribed_commit_names_its_reason_and_is_counted() -> None:
+    item = _blame(_thread_pr())
+    item.commit.llm_description = None
+    ctx = _area("9" * 16, 3, description=None)
+
+    prompt, card = _bundle_prompt(
+        [item, ctx], missing={"9" * 16: "the diff cannot be described"}
+    )
+
+    assert "  Summary: (no description: not generated yet)\n" in prompt
+    assert "  Summary: (no description: the diff cannot be described)" in prompt
+    assert card.coverage.descriptions_missing == 2
+
+
+def test_roster_only_prs_share_one_line() -> None:
+    item = _blame(_pr(number=12))
+    release_a, release_b = _pr(number=40), _pr(number=41)
+    release_a.head_sha = release_b.head_sha = "elsewhere"
+    item = CommitEvidence(
+        item.commit, (*item.pull_requests, release_a, release_b), (), "blame", ((1, 6),)
+    )
+
+    prompt, _ = _bundle_prompt([item])
+
+    assert "  also in 2 other PRs (#40, #41)" in prompt
+    assert "PR #40  by" not in prompt
+    assert prompt.count("    Title: ") == 1
+
+
+def _squash(full: bool) -> tuple[list[CommitEvidence], PullRequest]:
+    pr = _pr(
+        number=7,
+        title="Squashed PR",
+        body="PR body words",
+        commit_titles=_commit_titles("one", "two", "three"),
+    )
+    pr.merge_commit_sha = "5555555555555555"
+    item = _blame(pr, sha="5555555555555555")
+    item.commit.body = "* one\n* two\n* three squash body words"
+    evidence = [item]
+    if not full:
+        # A bigger, newer blame unit fills stopper 1's character budget first.
+        big = _pr(number=8, body="x" * 39_900)
+        evidence.insert(
+            0, _blame(big, sha="6666666666666666", committed_at="2026-06-01T00:00:00Z")
+        )
+    return evidence, pr
+
+
+def test_a_squash_commit_body_never_renders_when_its_pr_is_full() -> None:
+    evidence, _ = _squash(full=True)
+
+    prompt, _ = _bundle_prompt(evidence)
+
+    assert "squash body words" not in prompt
+    assert "  (body: the PR's squashed commits, see PR #7)" in prompt
+    assert "    Title: Squashed PR" in prompt
+
+
+def test_a_squash_commit_body_never_renders_when_its_pr_is_a_title_line() -> None:
+    evidence, _ = _squash(full=False)
+    reply = json.dumps(
+        {
+            "purpose": "p",
+            "why": "w",
+            "tradeoffs": [],
+            "risks": [],
+            "constraints": [
+                {"text": "a", "refs": ["55555555"], "quote": "three squash body words"},
+                {"text": "b", "refs": ["PR #7"], "quote": "PR body words"},
+            ],
+        }
+    )
+
+    prompt, card = _bundle_prompt(evidence, reply=reply)
+
+    assert "squash body words" not in prompt
+    assert "  (squash of 3 commits; shown from high)" in prompt
+    assert "  PR #7 (title only)" in prompt
+    # The squash body stays a quote source; a demoted PR's body does not.
+    assert [item.basis for item in card.constraints] == ["quoted", "cited"]
+    assert card.coverage.full_prs_demoted == 1
+    assert card.coverage.trimmed == ("full_pr_budget",)
+
+
+def test_stopper_1_demotes_and_counts_lost_threads(monkeypatch) -> None:
+    monkeypatch.setitem(card_bundle_module.FULL_PR_MAX_COUNT, "low", 1)
+    monkeypatch.setitem(card_bundle_module.FULL_PR_MAX_COUNT, "medium", 1)
+    newer = _blame(
+        _pr(number=8),
+        sha="6666666666666666",
+        lines=((7, 9),),
+        committed_at="2026-06-01T00:00:00Z",
+    )
+    threaded = _blame(_thread_pr(_thread()))
+
+    prompt, card = _bundle_prompt([newer, threaded])
+
+    assert "  PR #12 (title only)" in prompt
+    assert "Review threads" not in prompt
+    assert "(1 PR(s) of these commits shown by title only" in prompt
+    assert card.coverage.as_dict() | {"trimmed": None} == {
+        "full_prs_demoted": 1,
+        "threads_lost": 1,
+        "trimmed": None,
+        "descriptions_missing": 0,
+        "line_commits": 2,
+        "context_commits": 0,
+        "context_omitted": 0,
+    }
+    assert card.coverage.trimmed == ("full_pr_budget",)
+
+
+def test_stopper_2_drops_context_then_demotes_full_prs(monkeypatch) -> None:
+    evidence = _rich_evidence()
+    full, _ = _bundle_prompt(_rich_evidence())
+    monkeypatch.setitem(card_bundle_module.TOTAL_MAX_CHARS, "low", 100)
+    monkeypatch.setitem(card_bundle_module.TOTAL_MAX_CHARS, "medium", 100)
+
+    prompt, card = _bundle_prompt(evidence)
+
+    # Ring 0 commits and their descriptions are never removed.
+    for sha in ("a1b2c3d4", "33333333", "44444444"):
+        assert f"COMMIT {sha}" in prompt
+    assert prompt.count("  Summary: Adds an in-memory cache keyed by name.") == 3
+    assert "Source: area-history" not in prompt
+    assert "Review threads" not in prompt
+    assert card.coverage.trimmed == (
+        "prompt_cap_context",
+        "prompt_cap_full_prs",
+        "ring0_over_cap",
+    )
+    assert card.coverage.full_prs_demoted == 3
+    assert card.coverage.threads_lost == 1
+    assert card.coverage.context_commits == 0
+    assert card.coverage.context_omitted == 6
+    assert len(card.coverage.omitted_shas) == 4
+    assert len(prompt) < len(full)
+
+
+def test_stopper_2_stops_trimming_once_the_prompt_fits(monkeypatch) -> None:
+    evidence = _rich_evidence()
+    client = _StubClient()
+    RationaleGenerator(client).generate(
+        evidence, bundle=card_bundle_for(evidence, RationaleConfig())
+    )
+    request = client.requests[0]
+    size = len(request.messages[0].content) + len(request.messages[1].content)
+    # Room for everything but about one context commit.
+    monkeypatch.setitem(card_bundle_module.TOTAL_MAX_CHARS, "low", size - 10)
+    monkeypatch.setitem(card_bundle_module.TOTAL_MAX_CHARS, "medium", size - 10)
+
+    _, card = _bundle_prompt(evidence, paths=None)
+
+    assert card.coverage.trimmed == ("prompt_cap_context",)
+    assert card.coverage.context_commits == 3
+
+
+def test_context_commits_render_compactly_within_their_budget() -> None:
+    evidence = [
+        _blame(_pr(number=12)),
+        *(_area(f"{i}" * 16, 20 - i, _pr(number=30 + i)) for i in range(1, 7)),
+    ]
+    one = len(
+        "\n".join(
+            [
+                "11111111  2026-04-19T00:00:00Z  Jane Dev: touch 1111",
+                "  Source: area-history (touched the file but not these lines)",
+                "  Summary: ctx",
+                "  (PR #31: Cache prompts)",
+            ]
+        )
+    )
+    caps = _PrRenderCaps(context_max_chars=2 * one + 5)
+
+    prompt, card = _bundle_prompt(evidence, caps=caps)
+
+    assert (
+        "11111111  2026-04-19T00:00:00Z  Jane Dev: touch 1111\n"
+        "  Source: area-history (touched the file but not these lines)\n"
+        "  Summary: ctx\n"
+        "  (PR #31: Cache prompts)"
+    ) in prompt
+    assert "22222222  " in prompt
+    assert "33333333  " not in prompt
+    assert "(4 more file commits not shown)" in prompt
+    assert card.coverage.context_commits == 2
+    assert card.coverage.context_omitted == 4
+    assert card.coverage.omitted_shas == {"3" * 16, "4" * 16}
+
+
+def test_context_max_chars_zero_keeps_context_out() -> None:
+    evidence = [_blame(_pr(number=12)), _area("1" * 16, 9)]
+
+    prompt, card = _bundle_prompt(evidence, caps=_PrRenderCaps(context_max_chars=0))
+
+    assert "Source: area-history" not in prompt
+    assert (
+        "(1 file commits that touched the file but not these lines not shown)" in prompt
+    )
+    assert card.coverage.context_omitted == 1
+
+
+def test_r22_ownership_is_checked_against_ring0_all() -> None:
+    """A squash unit at ``medium``: its originals are not rendered but still own lines."""
+    pr = _thread_pr(_thread())
+    owner = _blame(pr, sha="5555555555555555", lines=((3, 6),))
+
+    selected = _select_threads([pr], [owner], _PATHS, _FILE, _RANGE, _PrRenderCaps())
+    unowned = _select_threads([pr], [], _PATHS, _FILE, _RANGE, _PrRenderCaps())
+
+    assert 12 in selected
+    assert unowned == {}
+
+
+def test_r46_an_anchor_written_twice_by_the_same_pr_renders_on_neither_card() -> None:
+    twice = (
+        "def fetch(url):",
+        "    while attempts < MAX_ATTEMPTS:",
+        "        attempts += 1",
+        "        response = client.get(url, timeout=TIMEOUT)",
+        "",
+        "def fetch_again(url):",
+        "    while attempts < MAX_ATTEMPTS:",
+        "        attempts += 1",
+        "        response = client.get(url, timeout=TIMEOUT)",
+    )
+    for target in ((1, 4), (6, 9)):
+        pr = _thread_pr(_thread())
+        prompt, _ = _prompt(
+            [_blame(pr, lines=((1, 9),))], file_lines=twice, target_range=target
+        )
+        assert "Review threads" not in prompt
+
+
+def test_r46_a_unique_added_anchor_still_renders() -> None:
+    prompt, _ = _prompt([_blame(_thread_pr(_thread()))])
+
+    assert "Review threads on these lines" in prompt

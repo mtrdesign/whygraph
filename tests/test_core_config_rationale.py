@@ -138,6 +138,29 @@ def test_rationale_review_threads_max_chars_negative_raises(tmp_path: Path) -> N
         Config.from_toml(config)
 
 
+def test_rationale_context_max_chars_default() -> None:
+    """Plan 62 R45: the B0-measured default."""
+    assert RationaleConfig().context_max_chars == 27000
+
+
+@pytest.mark.parametrize("value", [0, 27000, 50000])
+def test_rationale_context_max_chars_accepted(tmp_path: Path, value: int) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\ncontext_max_chars = {value}\n",
+    )
+    assert Config.from_toml(config).rationale.context_max_chars == value
+
+
+def test_rationale_context_max_chars_negative_raises(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[rationale]\ncontext_max_chars = -1\n",
+    )
+    with pytest.raises(ConfigError, match="context_max_chars"):
+        Config.from_toml(config)
+
+
 def test_rationale_config_is_frozen() -> None:
     cfg = RationaleConfig()
     with pytest.raises(Exception):  # FrozenInstanceError

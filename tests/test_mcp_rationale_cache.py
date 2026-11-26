@@ -112,6 +112,7 @@ class _CountingGenerator:
         paths: frozenset[str] | None = None,
         file_lines: Sequence[str] | None = None,
         target_range: tuple[int, int] | None = None,
+        **_: object,
     ) -> Rationale:
         type(self).calls += 1
         return Rationale(

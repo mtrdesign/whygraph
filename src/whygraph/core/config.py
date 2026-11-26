@@ -472,6 +472,10 @@ class RationaleConfig:
     review_threads_max_chars : int
         Characters of qualified review-thread text in one card prompt;
         ``0`` keeps threads out. Must be ``>= 0``.
+    context_max_chars : int
+        Characters of compact context commits (commits that touched the
+        target's file but not its lines) in one card prompt, filled newest
+        first by whole commits; ``0`` keeps them out. Must be ``>= 0``.
     agent_generations_per_hour : int
         Production only, **org setting** (owners): how many uncached
         rationale cards connected portals' agents (``/api/v1``) may
@@ -491,6 +495,7 @@ class RationaleConfig:
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
     review_threads_max_chars: int = 3000
+    context_max_chars: int = 27000
     agent_generations_per_hour: int = 120
     agent_generations_per_member_per_hour: int = 30
 
@@ -1474,7 +1479,8 @@ class Config:
             any of the ``rationale`` PR-rendering caps
             (``pr_roster_max_commits``, ``pr_discussion_max_comments``,
             ``pr_comment_max_chars``) is less than ``1``, or if
-            ``rationale.review_threads_max_chars`` is negative.
+            ``rationale.review_threads_max_chars`` or
+            ``rationale.context_max_chars`` is negative.
         """
         try:
             LogLevel[self.log_level.upper()]
@@ -1523,6 +1529,11 @@ class Config:
             raise ConfigError(
                 "rationale.review_threads_max_chars must be >= 0, "
                 f"got {self.rationale.review_threads_max_chars}"
+            )
+        if self.rationale.context_max_chars < 0:
+            raise ConfigError(
+                "rationale.context_max_chars must be >= 0, "
+                f"got {self.rationale.context_max_chars}"
             )
         for name, value in (
             (

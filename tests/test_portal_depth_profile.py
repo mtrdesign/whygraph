@@ -185,10 +185,13 @@ def test_a_failed_sample_answers_once_then_computes_again(
     env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, no_llm: SimpleNamespace
 ) -> None:
     runs = []
+    first_seen = threading.Event()
 
     def flaky(root, config, **kwargs):
         runs.append(1)
         if len(runs) == 1:
+            # Fail only after the first answer was read, so it is "computing".
+            first_seen.wait(5)
             raise RuntimeError("boom")
         return _raw()
 
@@ -197,6 +200,7 @@ def test_a_failed_sample_answers_once_then_computes_again(
         assert (
             client.get("/api/rationale/depth-profile").json()["status"] == "computing"
         )
+        first_seen.set()
         for _ in range(100):
             response = client.get("/api/rationale/depth-profile")
             if response.status_code != 200:
@@ -204,11 +208,13 @@ def test_a_failed_sample_answers_once_then_computes_again(
             time.sleep(0.05)
         assert response.status_code == 500
         assert response.json()["code"] == "depth_profile_failed"
-        # The failure was handed out once: Retry computes again.
-        assert (
-            client.get("/api/rationale/depth-profile").json()["status"] == "computing"
-        )
+        # The failure was handed out once: Retry computes again (the second
+        # sample returns at once, so it may already be ready).
+        retry = client.get("/api/rationale/depth-profile")
+        assert retry.status_code == 200
+        assert retry.json()["status"] in {"computing", "ready"}
         assert _wait_ready(client)["status"] == "ready"
+        assert len(runs) == 2
 
 
 def test_sample_profile_measures_each_level_over_the_most_referenced_files(

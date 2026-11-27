@@ -23,7 +23,10 @@ that project's context. Every answer carries ``project`` - the
   Explorer does - so every checkout shares one cache row and the hunks are
   ignored; otherwise from the hunks over the request's range. A cache miss
   needs a configured rationale key (``409 no_llm_key``) and spends the org's
-  card budget first; a hit is served either way.
+  card budget first; a hit is served either way. The optional ``intent``,
+  ``depth`` and ``cached_only`` choose the card's depth with the platform
+  project's settings (plan 62 section 14.4); a ``cached_only`` miss answers
+  ``{"status": "not_cached", "target"}``.
 * ``GET /history``, ``/commits/{sha}``, ``/prs/{number}``,
   ``/issues/{number}``, ``/overview`` - the MCP resource bodies.
 
@@ -93,6 +96,7 @@ from whygraph.mcp.rationale import (
     RationaleGenerationError,
     rationale_card,
 )
+from whygraph.mcp.rationale_depth import effective_ceiling, resolve_for_target
 from whygraph.mcp.resources import (
     _DB_UNSCANNED_MESSAGE,
     _commit_resource,
@@ -452,7 +456,13 @@ def _status(project: BoundProject, principal: Principal) -> dict:
     out = status.model_dump(mode="json")
     # Plans (plan 61 section 4.7): the bound project's merged [plans].dir, which
     # v1_status (portal rows only) cannot see; "" when indexing is off.
-    out["plans_dir"] = get_config().plans.dir
+    config = get_config()
+    out["plans_dir"] = config.plans.dir
+    # Depth (plan 62 section 14.5): the merged project setting and the
+    # effective ceiling (the org's org_max_depth applied), for a linked
+    # project's read-only view.
+    out["rationale_depth"] = config.rationale.depth
+    out["rationale_max_depth"] = effective_ceiling(config.rationale)
     return out
 
 
@@ -531,7 +541,8 @@ def post_rationale(
         name = body.target.qualified_name
         target = indexed_symbol_target(name) if name else None
         scope = None
-        if target is not None:
+        own_range = target is not None
+        if own_range:
             # As the Explorer: the platform's range, its own blame of it, so
             # review threads are checked against the clone's lines.
             evidence = collect_evidence(target, limit=20)
@@ -548,9 +559,26 @@ def post_rationale(
                 limit=20,
                 git_budget=GIT_BUDGET,
             ).evidence
+        # The platform project's own depth settings (plan 62 section 14.4),
+        # resolved before the cache lookup; the caller count only on the
+        # clone's own range of the symbol.
+        resolution = (
+            resolve_for_target(
+                target,
+                evidence,
+                intent=body.intent,
+                depth=body.depth,
+                cached_only=body.cached_only,
+                count_callers=own_range,
+            )
+            if evidence
+            else None
+        )
         card = rationale_card(
             target,
             evidence,
+            cached_only=resolution.cached_only if resolution is not None else False,
+            resolution=resolution,
             before_generate=lambda: _before_generate(
                 state, project.org_id, principal.user_id
             ),

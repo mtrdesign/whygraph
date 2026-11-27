@@ -1498,7 +1498,7 @@ def test_brief_tool_linked_project_gets_no_notes(
     monkeypatch.setattr(
         rationale,
         "linked_rationale",
-        lambda r, t: {"purpose": "platform", "target": {}},
+        lambda r, t, **depth_inputs: {"purpose": "platform", "target": {}},
     )
     with use_project(_context(project.root, project.db, remote=remote)):
         card = rationale._rationale_brief_tool(**_brief_args())

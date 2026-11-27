@@ -117,8 +117,37 @@ class RemoteProject(Protocol):
         """
         ...
 
-    def rationale(self, target: Target, hunks: Sequence[BlameHunk]) -> dict:
-        """The rationale card of ``target``, from the platform's shared cache."""
+    def rationale(
+        self,
+        target: Target,
+        hunks: Sequence[BlameHunk],
+        *,
+        intent: str | None = None,
+        depth: str | None = None,
+        cached_only: bool | None = None,
+    ) -> dict:
+        """The rationale card of ``target``, from the platform's shared cache.
+
+        Parameters
+        ----------
+        target : Target
+            Already reduced to what may be sent.
+        hunks : Sequence[BlameHunk]
+            The pushed hunks only.
+        intent, depth, cached_only : optional
+            The card's task, an explicit level and the cache-only switch
+            (plan 62 section 14.4), resolved on the platform with its
+            settings. Sent only to a platform that offers depth levels; an
+            older one gets none of them and answers its default card.
+
+        Returns
+        -------
+        dict
+            The card (``depth``, ``coverage``, ``deeper`` and each item's
+            ``check`` when the platform sends them), or
+            ``{"status": "not_cached", "target"}`` for a ``cached_only``
+            miss.
+        """
         ...
 
     def history(self, path: str, limit: int, include_renames: bool) -> list[dict]:

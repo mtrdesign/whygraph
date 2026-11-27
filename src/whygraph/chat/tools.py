@@ -52,7 +52,6 @@ from collections.abc import Callable
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from whygraph.analyze.card_bundle import DEFAULT_LEVEL
 from whygraph.core import get_config
 from whygraph.core.context import current_actor, current_project
 from whygraph.core.config import AreaConfig
@@ -73,9 +72,11 @@ from whygraph.mcp.rationale import (
     _card_items,
     _format_response,
     _partial_fields,
+    _with_depth,
     whygraph_rationale_brief,
 )
 from whygraph.mcp.rationale_cache import lookup_cached
+from whygraph.mcp.rationale_depth import resolve_for_target
 from whygraph.mcp.resources import (
     _area_owners_resource,
     _commit_resource,
@@ -1122,6 +1123,10 @@ def _get_repo_overview() -> dict:
     return overview
 
 
+CHAT_RATIONALE_INTENT = "explain"
+"""The ``intent`` of every ``get_rationale`` card (plan 62 section 14.3)."""
+
+
 def _is_linked() -> bool:
     """Whether the bound project is linked (it has no notes)."""
     project = current_project()
@@ -1495,6 +1500,10 @@ class ToolRegistry:
         not the chat session's: the cache key includes provider and model,
         so generating under the chat provider would write a row the
         Explorer and MCP would still see as missing.
+
+        The card's task is :data:`CHAT_RATIONALE_INTENT` (plan 62 section
+        14.3): under ``auto`` the cheapest level, ``low``. The cache read
+        asks for the level it resolves to, as the brief does.
         """
         if not qualified_name:
             return {"error": "qualified_name is required"}
@@ -1511,29 +1520,37 @@ class ToolRegistry:
                 "notes": notes,
             }
 
+        resolution = resolve_for_target(target, evidence, intent=CHAT_RATIONALE_INTENT)
         provider, pinned_model = get_config().cache_identity("rationale")
         cached = lookup_cached(
-            target, evidence, provider, pinned_model, min_depth=DEFAULT_LEVEL
+            target, evidence, provider, pinned_model, min_depth=resolution.resolved
         )
         if cached is not None:
             fields = _partial_fields(cached)
             if fields["partial"] and self.generations_used < self._generation_budget:
                 # The brief serves the cached card at once and may start a
                 # background completion; only a started one spends budget.
-                card = whygraph_rationale_brief(qualified_name=qualified_name)
+                card = whygraph_rationale_brief(
+                    qualified_name=qualified_name, intent=CHAT_RATIONALE_INTENT
+                )
                 if card.get("completing"):
                     self.generations_used += 1
                 return {"status": "cached", "generated": False, **card, "notes": notes}
             return {
                 "status": "cached",
                 "generated": False,
-                **_format_response(
-                    target,
-                    cached.rationale,
-                    _card_items(evidence, cached.level),
-                    cached.cached_at,
-                    context_stale=cached.context_stale,
-                    **fields,
+                **_with_depth(
+                    _format_response(
+                        target,
+                        cached.rationale,
+                        _card_items(evidence, cached.level),
+                        cached.cached_at,
+                        context_stale=cached.context_stale,
+                        **fields,
+                    ),
+                    resolution,
+                    cached.level,
+                    evidence,
                 ),
                 "notes": notes,
             }
@@ -1553,7 +1570,9 @@ class ToolRegistry:
             self.generations_used,
             self._generation_budget,
         )
-        card = whygraph_rationale_brief(qualified_name=qualified_name)
+        card = whygraph_rationale_brief(
+            qualified_name=qualified_name, intent=CHAT_RATIONALE_INTENT
+        )
         return {"status": "cached", "generated": True, **card, "notes": notes}
 
     def _propose_note(

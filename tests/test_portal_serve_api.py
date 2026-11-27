@@ -445,7 +445,24 @@ def test_rationale_post_calls_brief_verbatim(serve_client, monkeypatch) -> None:
 
     assert body["status"] == "cached"
     assert body["purpose"] == "generated purpose"
-    gen.assert_called_once_with(qualified_name="pkg.a.A.m")
+    gen.assert_called_once_with(qualified_name="pkg.a.A.m", depth=None)
+
+
+def test_rationale_post_generate_deeper_passes_an_offered_depth(
+    serve_client, monkeypatch
+) -> None:
+    """R41: an optional `depth` (capped by the resolver); `xhigh` is not offered."""
+    gen = mock.Mock(return_value={"target": {}, "purpose": "deeper"})
+    monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
+
+    ok = serve_client.post("/api/node/rationale?qualified_name=pkg.a.A.m&depth=high")
+    assert ok.status_code == 200, ok.text
+    gen.assert_called_once_with(qualified_name="pkg.a.A.m", depth="high")
+    refused = serve_client.post(
+        "/api/node/rationale?qualified_name=pkg.a.A.m&depth=xhigh"
+    )
+    assert refused.status_code == 422
+    assert gen.call_count == 1
 
 
 # ---- static fallback -----------------------------------------------------

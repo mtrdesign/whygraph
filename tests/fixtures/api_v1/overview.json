@@ -35,6 +35,8 @@
       "name": "Api project",
       "plans_dir": "docs/plans",
       "project_role": "admin",
+      "rationale_depth": "auto",
+      "rationale_max_depth": "high",
       "role": "owner",
       "slug": "api"
     },

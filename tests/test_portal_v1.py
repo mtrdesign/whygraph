@@ -579,6 +579,48 @@ def test_rationale_cache_shared_across_working_trees(
     assert second.json()["risks"] == first.json()["risks"]
 
 
+def test_rationale_depth_inputs_resolve_with_the_platform_projects_settings(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """Plan 62 section 14.4: `intent`, `depth` and `cached_only` reach the card."""
+    target = target_body(name="sample.fn")
+    miss = call(v1, "POST", "/rationale", json={"target": target, "intent": "review"})
+    assert miss.status_code == 200, miss.text
+    assert RationaleOut.model_validate(miss.json()).status == "not_cached"
+    assert set(miss.json()) == {"status", "target", "project"}
+    assert generator.calls == 0
+
+    low = call(v1, "POST", "/rationale", json={"target": target, "depth": "low"})
+    assert low.status_code == 200, low.text
+    card = RationaleOut.model_validate(low.json())
+    assert card.depth is not None
+    assert (card.depth.requested, card.depth.resolved) == ("low", "low")
+    assert generator.calls == 1
+
+    # A review accepts any cached depth; an explicit cached_only=false too.
+    again = call(
+        v1,
+        "POST",
+        "/rationale",
+        json={"target": target, "intent": "review", "cached_only": False},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["depth"]["resolved"] == "low"
+    assert generator.calls == 1
+
+    # Not offered until Part D, and strict: refused, never coerced.
+    for bad in ({"depth": "xhigh"}, {"cached_only": "true"}, {"intent": "guess"}):
+        refused = call(v1, "POST", "/rationale", json={"target": target, **bad})
+        assert refused.status_code == 422, refused.text
+
+    status = call(v1, "GET", "")
+    assert status.status_code == 200, status.text
+    assert (
+        status.json()["rationale_depth"],
+        status.json()["rationale_max_depth"],
+    ) == ("auto", "high")
+
+
 def test_rationale_without_a_symbol_uses_the_requested_range(
     v1: V1World, generator: type[_Generator]
 ) -> None:

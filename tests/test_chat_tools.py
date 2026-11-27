@@ -720,7 +720,8 @@ def test_rationale_cache_miss_calls_the_mcp_tool_verbatim_once(
     registry = ToolRegistry(max_rationale_generations=2)
     result = _result(registry, "get_rationale", qualified_name="pkg.a.run_turn")
 
-    assert calls == [{"qualified_name": "pkg.a.run_turn"}]
+    # Chat's card is an `explain` card (plan 62 section 14.3).
+    assert calls == [{"qualified_name": "pkg.a.run_turn", "intent": "explain"}]
     assert result["status"] == "cached"
     assert result["generated"] is True
     for key, value in sentinel.items():
@@ -734,7 +735,8 @@ def test_rationale_third_miss_in_one_turn_degrades_without_generating(
     """AC #4: over budget → not_generated, and the spy is NOT invoked again."""
     calls: list[str] = []
 
-    def _spy(*, qualified_name):
+    def _spy(*, qualified_name, intent):
+        assert intent == "explain"
         calls.append(qualified_name)
         return {"purpose": "p"}
 
@@ -823,6 +825,37 @@ def test_rationale_cache_hit_never_generates(
     assert result["risks"] == [
         {"text": "no network here", "basis": "inferred", "refs": []}
     ]
+
+
+def test_rationale_cache_read_asks_for_the_explain_level(
+    chat_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 62 section 14.3: an `explain` card, `low` under auto; a deeper hit serves."""
+    from whygraph.analyze import Rationale
+
+    asked: list[str] = []
+
+    def _lookup(*args, min_depth):
+        asked.append(min_depth)
+        return SimpleNamespace(
+            rationale=Rationale("p", "w", (), (), (), "m", "anthropic"),
+            cached_at="2026-07-29T00:00:00+00:00",
+            deferred_shas="",
+            level="medium",
+            context_stale=False,
+        )
+
+    monkeypatch.setattr(
+        chat_tools, "collect_evidence", lambda target, limit=20: [_fake_evidence_item()]
+    )
+    monkeypatch.setattr(chat_tools, "lookup_cached", _lookup)
+    registry = ToolRegistry(max_rationale_generations=2)
+    result = _result(registry, "get_rationale", qualified_name="pkg.a.run_turn")
+    assert asked == ["low"]
+    assert result["depth"]["requested"] == "auto"
+    assert result["depth"]["resolved"] == "medium"
+    assert result["depth"]["reason"].endswith("A cached Medium card was served.")
+    assert result["deeper"]["level"] == "high"
 
 
 def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:

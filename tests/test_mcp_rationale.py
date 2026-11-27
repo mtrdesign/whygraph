@@ -845,6 +845,89 @@ def test_cached_only_never_generates(
     assert len(calls) == 1
 
 
+def test_rationale_brief_reports_its_depth_and_what_deeper_adds(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 62 section 14.4: no intent is `medium` under auto; `high` adds the check."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    card = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
+    assert card["depth"]["requested"] == "auto"
+    assert card["depth"]["resolved"] == "medium"
+    assert card["depth"]["reason"].startswith(
+        "Auto chose Medium because no task was given."
+    )
+    assert card["deeper"] == {
+        "level": "high",
+        "adds": "Checks each constraint and risk against today's code.",
+    }
+
+
+def test_review_intent_is_cached_only_and_accepts_any_cached_depth(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`review` defaults `cached_only` to true; a deeper card serves it (R26, R27)."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    calls: list[int] = []
+
+    class _CountingGenerator(_FakeGenerator):
+        def generate(self, evidence, **kwargs):  # noqa: ANN001, ANN003
+            calls.append(1)
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+    miss = whygraph_rationale_brief(**args, intent="review")
+    assert set(miss) == {"status", "target"} and calls == []
+
+    # GENERATE mode passes cached_only=False: a `low` card.
+    low = whygraph_rationale_brief(**args, intent="review", cached_only=False)
+    assert low["generated"] is True and low["depth"]["resolved"] == "low"
+    # Two blamed commits and no PR: `medium` would add nothing here.
+    assert low["deeper"] is None
+    # No intent asks for `medium`: the `low` card does not satisfy it.
+    medium = whygraph_rationale_brief(**args)
+    assert medium["generated"] is True and medium["depth"]["resolved"] == "medium"
+    assert len(calls) == 2
+    # A review is served the deeper card, and says so.
+    again = whygraph_rationale_brief(**args, intent="review")
+    assert again["match"] == "exact" and len(calls) == 2
+    assert again["depth"]["requested"] == "auto"
+    assert again["depth"]["resolved"] == "medium"
+    assert again["depth"]["reason"].endswith("A cached Medium card was served.")
+
+
+def test_an_unverified_high_card_reports_the_level_it_was_stored_at(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit `high` whose verification fails is stored, and reported, as `medium`."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+
+    class _FailingVerifier(_FakeGenerator):
+        def verify(self, rationale, source, **kwargs):  # noqa: ANN001, ANN003
+            raise AnalyzeError("verifier down")
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FailingVerifier)
+    card = whygraph_rationale_brief(
+        path="sample.py", line_start=1, line_end=3, depth="high"
+    )
+    assert card["coverage"]["verification"] == "failed"
+    assert card["depth"]["requested"] == "high"
+    assert card["depth"]["resolved"] == "medium"
+    assert "Stored at Medium: the verification pass" in card["depth"]["reason"]
+    assert card["deeper"]["level"] == "high"
+
+
 def _add_commit_on_line_two(repo_root: Path) -> None:
     """Rewrite line 2 of ``sample.py`` in a new, scanned commit."""
     import subprocess

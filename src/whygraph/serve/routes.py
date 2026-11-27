@@ -35,6 +35,7 @@ from whygraph.mcp.rationale import (
 )
 from whygraph.mcp.plans import card_plan_shas, guarded_plans_for
 from whygraph.mcp.rationale_cache import lookup_cached
+from whygraph.mcp.rationale_depth import OfferedDepth
 from whygraph.mcp.resources import _commit_resource, _issue_resource, _pr_resource
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
@@ -228,14 +229,21 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
 
 
 @generate_router.post("/node/rationale")
-def rationale_generate(qualified_name: str = Query(...)) -> dict:
+def rationale_generate(
+    qualified_name: str = Query(...),
+    depth: OfferedDepth | None = Query(None),
+) -> dict:
     """Generate + cache a rationale card (the explicit "Generate" action).
 
     Runs :func:`whygraph_rationale_brief` verbatim — the same generate-and-cache
     flow the MCP tool performs — so the card can never drift from the MCP's. Slow
     (one LLM call); runs in the threadpool so the event loop is not blocked.
+
+    No intent (``medium`` under ``auto``, plan 62 section 14.3). ``depth``
+    is "Generate deeper" (R41): an offered level, capped at the effective
+    ceiling rather than refused, behind the same permission as Generate.
     """
-    card = whygraph_rationale_brief(qualified_name=qualified_name)
+    card = whygraph_rationale_brief(qualified_name=qualified_name, depth=depth)
     try:
         target = resolve_target(
             path=None, line_start=None, line_end=None, qualified_name=qualified_name

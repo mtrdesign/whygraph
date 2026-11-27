@@ -481,6 +481,82 @@ def test_rationale_item_out_refuses_an_unknown_basis_or_ref_kind() -> None:
         RationaleOut.model_validate({**card, "constraints": ["a plain string"]})
 
 
+def test_rationale_out_mirrors_a_card_with_depth_coverage_deeper_and_checks() -> None:
+    """Plan 62 section 14.4: the additive card fields round-trip unchanged."""
+    from dataclasses import replace
+
+    from whygraph.analyze.card_bundle import CardCoverage
+    from whygraph.analyze.rationale import ItemCheck
+
+    checked = replace(ITEMS[0], check=ItemCheck("holds", "line 2 still does it"))
+    rationale = Rationale(
+        purpose="p",
+        why="w",
+        constraints=(checked, ITEMS[2]),
+        tradeoffs=(),
+        risks=(ITEMS[1],),
+        model="m",
+        provider="stub",
+        coverage=CardCoverage(
+            line_commits=1, trimmed=("full_pr_budget",), verification="verified"
+        ),
+    )
+    payload = {
+        **_format_response(
+            Target("a.py", 1, 2, None),
+            rationale,
+            [_evidence()],
+            "2026-01-01T00:00:00+00:00",
+        ),
+        "depth": {"requested": "auto", "resolved": "high", "reason": "r"},
+        "deeper": {"level": "xhigh", "adds": "More."},
+    }
+    assert payload["constraints"][0]["check"]["verdict"] == "holds"
+    model = RationaleOut.model_validate(payload)
+    assert model.model_dump(mode="json") == payload
+    # None is left out, as an older platform's card never had them.
+    bare = RationaleOut.model_validate({**payload, "deeper": None, "coverage": None})
+    assert {"deeper", "coverage"}.isdisjoint(bare.model_dump(mode="json"))
+    with pytest.raises(ValidationError):
+        RationaleItemOut.model_validate(
+            {"text": "x", "basis": "inferred", "check": {"verdict": "maybe"}}
+        )
+
+
+def test_rationale_out_is_a_card_or_a_not_cached_miss() -> None:
+    target = {"path": "a.py", "line_start": 1, "line_end": 2}
+    miss = RationaleOut.model_validate({"status": "not_cached", "target": target})
+    assert miss.status == "not_cached" and miss.purpose is None
+    with pytest.raises(ValidationError, match="a card needs purpose"):
+        RationaleOut.model_validate({"target": target, "why": "w"})
+
+
+def test_rationale_in_depth_fields() -> None:
+    """Optional, strict, left out of the body when unset (an older platform refuses them)."""
+    from typing import get_args
+
+    from whygraph.api_v1 import DepthLevel, Intent
+    from whygraph.core.config import OFFERED_DEPTH_LEVELS
+    from whygraph.mcp.rationale_depth import INTENTS
+
+    assert get_args(Intent) == INTENTS
+    assert get_args(DepthLevel) == OFFERED_DEPTH_LEVELS
+    bare = RationaleIn(target=_target())
+    assert set(bare.model_dump(mode="json")) == {"target", "hunks"}
+    full = RationaleIn(
+        target=_target(), intent="review", depth="low", cached_only=False
+    )
+    assert full.model_dump(mode="json")["cached_only"] is False
+    for bad in (
+        {"depth": "xhigh"},  # not offered until Part D: refused
+        {"intent": "guess"},
+        {"cached_only": "true"},
+        {"cached_only": 1},
+    ):
+        with pytest.raises(ValidationError):
+            RationaleIn.model_validate({"target": _target(), **bad})
+
+
 def test_api_version_is_2() -> None:
     """Plan 54 D5: card items became objects, so the contract version moved."""
     assert API_VERSION == 2

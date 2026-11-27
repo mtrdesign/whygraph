@@ -15,14 +15,16 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 import anyio.from_thread
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import Field
 
 from whygraph.analyze import AnalyzeError, RationaleGenerator, card_bundle_for
 from whygraph.analyze.card_bundle import (
     DEFAULT_LEVEL,
+    LEVELS,
     LINE_LEVEL_SOURCES,
     UNVERIFIED_LEVEL,
     CardBundle,
@@ -67,6 +69,18 @@ from .evidence import (
     pushed_target,
     review_scope,
     split_by_push_status,
+)
+from .rationale_depth import (
+    SERVED_CACHED,
+    SERVED_KEPT,
+    SERVED_UNVERIFIED,
+    DepthResolution,
+    Intent,
+    OfferedDepth,
+    deeper,
+    depth_block,
+    effective_ceiling,
+    resolve_for_target,
 )
 from .rationale_cache import (
     CachedCard,
@@ -176,6 +190,30 @@ class RationaleItem(_RationaleItemRequired, total=False):
     check: RationaleItemCheck
 
 
+class RationaleDepth(TypedDict):
+    """The card's ``depth`` (plan 62 section 14.3).
+
+    ``requested`` is what the caller or the project asked for (``"auto"``
+    or a level); ``resolved`` the level of the card returned; ``reason`` a
+    short sentence saying why (:func:`~whygraph.mcp.rationale_depth.depth_block`).
+    """
+
+    requested: str
+    resolved: str
+    reason: str
+
+
+class RationaleDeeper(TypedDict):
+    """The card's ``deeper``: the next level and what it would add for this target.
+
+    ``level`` is the next level's name; ``adds`` one sentence
+    (:func:`~whygraph.mcp.rationale_depth.deeper`).
+    """
+
+    level: str
+    adds: str
+
+
 class _RationaleCardRequired(TypedDict):
     target: dict[str, Any]
 
@@ -225,6 +263,13 @@ class RationaleCard(_RationaleCardRequired, total=False):
     ``context_stale`` (plan 62 section 13.5) says one or two commits touched
     the target's file (not its lines) since the card was written; three or
     more regenerate it. Every local card carries it.
+
+    ``depth`` (:class:`RationaleDepth`, plan 62 section 14.4) says which
+    level the card is and why; ``deeper`` (:class:`RationaleDeeper` or
+    ``None`` at the ceiling, or when the next level would add nothing) what
+    the next level would add. A card served by the MCP tool, Chat, the
+    Explorer's Generate and ``/api/v1`` carries both (a linked card only
+    when its platform sends them); a ``not_cached`` miss carries neither.
     """
 
     status: str
@@ -250,6 +295,8 @@ class RationaleCard(_RationaleCardRequired, total=False):
     plans: list[dict[str, Any]]
     coverage: dict[str, Any]
     context_stale: bool
+    depth: RationaleDepth
+    deeper: RationaleDeeper | None
 
 
 def card_evidence_refs(evidence: list[CommitEvidence]) -> list[dict]:
@@ -503,13 +550,22 @@ _NOT_PUSHED_MESSAGE = (
 )
 
 
-def linked_rationale(remote: RemoteProject, target: Target) -> dict:
+def linked_rationale(
+    remote: RemoteProject,
+    target: Target,
+    *,
+    intent: str | None = None,
+    depth: str | None = None,
+    cached_only: bool | None = None,
+) -> dict:
     """``whygraph_rationale_brief``'s answer for a project linked to a platform.
 
     The card is built, cached and paid for **on the platform** (M2e plan
     section 4.5), so every checkout of the repository shares one cache row:
     nothing here reads the local rationale cache or calls an LLM. Only the
-    pushed hunks are sent, and with none there is no request at all.
+    pushed hunks are sent, and with none there is no request at all. The
+    depth is resolved on the platform, with its settings (plan 62 section
+    14.5).
 
     Parameters
     ----------
@@ -517,6 +573,9 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
         The project's platform.
     target : Target
         The locally resolved target.
+    intent, depth, cached_only : optional
+        Passed to the platform as they are; one that predates depth levels
+        gets none of them (:meth:`RemoteProject.rationale`).
 
     Returns
     -------
@@ -539,10 +598,18 @@ def linked_rationale(remote: RemoteProject, target: Target) -> dict:
     if sendable is None:
         raise NoEvidenceError(_NOT_PUSHED_MESSAGE, code="no_evidence")
     try:
-        card = remote.rationale(sendable, split.pushed)
+        card = remote.rationale(
+            sendable,
+            split.pushed,
+            intent=intent,
+            depth=depth,
+            cached_only=cached_only,
+        )
     except RemoteError as exc:
         raise WhyGraphError(str(exc)) from exc
     result = {**card, "platform": platform_block(remote)}
+    if card.get("status") == "not_cached":
+        return result  # as the local tool: no plans on a cached_only miss
     # Plans beside the card (plan 61 section 4.8): only what this call just
     # sent - the pushed hunks' SHAs (first distinct, blame order) and the
     # sendable path; the target only when its path is the asked-for one,
@@ -997,7 +1064,7 @@ def _cached_only_card(
     pinned_model: str | None,
     *,
     mark_generated: bool,
-) -> dict | None:
+) -> tuple[dict, str] | None:
     """The looser lookup behind ``cached_only``: a stale or overlapping card.
 
     Reads only the cache and git - no LLM call, no backfill, no store.
@@ -1011,11 +1078,12 @@ def _cached_only_card(
 
     Returns
     -------
-    dict or None
+    tuple[dict, str] or None
         The card plus ``match``, ``stale``, ``context_stale`` and (overlap)
-        ``card_range``; ``None`` when no row matches. ``partial`` /
-        ``describing`` come from the row; nothing is started to complete
-        it. Counts and refs are over the bundle at the row's level.
+        ``card_range``, and the row's level; ``None`` when no row matches.
+        ``partial`` / ``describing`` come from the row; nothing is started
+        to complete it. Counts and refs are over the bundle at the row's
+        level.
     """
     generated = False if mark_generated else None
     row = lookup_exact(target, provider, pinned_model)
@@ -1029,7 +1097,7 @@ def _cached_only_card(
             context_stale=row.context_newer(evidence) > 0,
             **_partial_fields(row),
         )
-        return {**card, "match": "exact", "stale": row.is_stale(evidence)}
+        return {**card, "match": "exact", "stale": row.is_stale(evidence)}, row.level
     row = lookup_overlapping(target, provider, pinned_model)
     if row is None:
         return None
@@ -1059,6 +1127,24 @@ def _cached_only_card(
         "match": "overlap",
         "stale": row.is_stale(card_evidence),
         "card_range": {"line_start": row.line_start, "line_end": row.line_end},
+    }, row.level
+
+
+def _with_depth(
+    card: dict,
+    resolution: DepthResolution | None,
+    level: str,
+    evidence: list[CommitEvidence],
+    served: str = SERVED_CACHED,
+) -> dict:
+    """``card`` plus ``depth`` and ``deeper`` (plan 62 section 14.4); as is without a resolution."""
+    if resolution is None:
+        return card
+    ceiling = effective_ceiling(get_config().rationale)
+    return {
+        **card,
+        "depth": depth_block(resolution, level, served),
+        "deeper": deeper(level, ceiling, evidence),
     }
 
 
@@ -1076,6 +1162,7 @@ def rationale_card(
     review_scope: ReviewScope | None = None,
     target_range: tuple[int, int] | None = None,
     level: str = DEFAULT_LEVEL,
+    resolution: DepthResolution | None = None,
 ) -> dict:
     """The rationale card of ``target`` from ``evidence``: cached, or generated and cached.
 
@@ -1135,6 +1222,14 @@ def rationale_card(
         verification pass (:func:`_verified`): a partial draft is stored
         ``pending`` and checked by its completion, a failed or skipped pass
         stores the card as ``medium``.
+    resolution : DepthResolution, optional
+        The resolver's answer
+        (:func:`~whygraph.mcp.rationale_depth.resolve_for_target`, run by
+        the caller before this lookup). When given it replaces ``level``
+        with its ``resolved`` level, accepts a cached card of any depth for
+        ``any_cached_depth``, and the card gains ``depth`` and ``deeper``
+        (a ``not_cached`` miss does not). The caller passes its
+        ``cached_only`` as ``cached_only``.
 
     Returns
     -------
@@ -1176,6 +1271,11 @@ def rationale_card(
     if not evidence:
         raise NoEvidenceError(_NO_EVIDENCE_MESSAGE, code="no_evidence")
 
+    min_depth = level
+    if resolution is not None:
+        level = min_depth = resolution.resolved
+        if resolution.any_cached_depth:
+            min_depth = LEVELS[0]
     depth_of(level)  # an unknown level raises before anything is read
     config = get_config()
     provider, pinned_model = config.cache_identity("rationale")
@@ -1185,7 +1285,9 @@ def rationale_card(
         # regenerated at its own depth below, never overwritten shallower.
         seen = lookup_exact(target, provider, pinned_model)
     else:
-        found = lookup_card(target, evidence, provider, pinned_model, min_depth=level)
+        found = lookup_card(
+            target, evidence, provider, pinned_model, min_depth=min_depth
+        )
         cached, seen = found.card, found.seen
     if cached is not None:
         if note is not None:
@@ -1215,6 +1317,7 @@ def rationale_card(
             context_stale=cached.context_stale,
             **fields,
         )
+        card = _with_depth(card, resolution, cached.level, evidence)
         return {**card, "match": "exact", "stale": False} if cached_only else card
     if cached_only and not force_refresh:
         loose = _cached_only_card(
@@ -1224,10 +1327,12 @@ def rationale_card(
             note(
                 "rationale cache miss"
                 if loose is None
-                else f"rationale cache hit ({loose['match']}"
-                + (", stale)" if loose["stale"] else ")")
+                else f"rationale cache hit ({loose[0]['match']}"
+                + (", stale)" if loose[0]["stale"] else ")")
             )
-        return loose or {"status": "not_cached", "target": target_dict(target)}
+        if loose is None:
+            return {"status": "not_cached", "target": target_dict(target)}
+        return _with_depth(loose[0], resolution, loose[1], evidence)
     if note is not None:
         note("rationale cache " + ("bypassed" if force_refresh else "miss"))
 
@@ -1348,7 +1453,7 @@ def rationale_card(
                 target_range=target_range,
             )
         )
-    return _format_response(
+    card = _format_response(
         target,
         rationale,
         items,
@@ -1359,6 +1464,8 @@ def rationale_card(
         completing=completing,
         context_stale=False,
     )
+    served = SERVED_UNVERIFIED if stored != level else SERVED_KEPT
+    return _with_depth(card, resolution, stored, evidence, served)
 
 
 def _client_channel(
@@ -1417,13 +1524,40 @@ def _client_channel(
     return progress, note
 
 
+INTENT_HELP = (
+    "The task the card is for. Under the project's auto depth it picks the "
+    "level: explain or review -> low (the lines' own commits); plan or edit "
+    "-> medium (plus nearby commits to the file); refactor or delete -> high "
+    "(plus each claim checked against today's code). One level up for a "
+    "symbol with many callers, one down near the budget limit. review also "
+    "accepts a cached card of any depth and makes cached_only default to "
+    "true. Omit when none fits."
+)
+"""The ``intent`` input's description (the tool's ``inputSchema``)."""
+
+DEPTH_HELP = (
+    "A level instead of auto: low, medium or high (see intent). Capped at "
+    "the project's ceiling, never refused. Omit unless the card's `deeper` "
+    "says the next level adds what the task needs."
+)
+"""The ``depth`` input's description (the tool's ``inputSchema``)."""
+
+IntentInput = Annotated[Intent | None, Field(description=INTENT_HELP)]
+"""The tool's optional ``intent`` (plan 62 section 14.4)."""
+
+DepthInput = Annotated[OfferedDepth | None, Field(description=DEPTH_HELP)]
+"""The tool's optional ``depth``: an offered level, so ``xhigh`` is refused."""
+
+
 def whygraph_rationale_brief(
     path: str | None = None,
     line_start: int | None = None,
     line_end: int | None = None,
     qualified_name: str | None = None,
     force_refresh: bool = False,
-    cached_only: bool = False,
+    cached_only: bool | None = None,
+    intent: str | None = None,
+    depth: str | None = None,
     ctx: Context | None = None,
 ) -> RationaleCard:
     """MCP tool — a rationale card for a chunk of code.
@@ -1438,7 +1572,17 @@ def whygraph_rationale_brief(
     key's card with a stale fingerprint (``stale: true``) or the card of
     an overlapping range (``match: "overlap"``, ``card_range``), and
     returns ``{"status": "not_cached", "target"}`` only when there is
-    none (a linked project's card is the platform's, which ignores it).
+    none (a linked project sends it to its platform; one that predates
+    depth levels ignores it). ``None`` (the default) means ``True`` for
+    ``intent="review"`` and ``False`` otherwise.
+
+    ``intent`` (one of :data:`~whygraph.mcp.rationale_depth.INTENTS`) and
+    ``depth`` (a level) choose the card's depth through
+    :func:`~whygraph.mcp.rationale_depth.resolve_for_target`, before the
+    cache lookup (plan 62 section 14.3); the card reports it as ``depth``
+    and what the next level would add as ``deeper``. A ``depth`` above the
+    project's ceiling, or not offered yet (``xhigh``), is capped.
+
     The card carries the top
     :data:`CARD_EVIDENCE_REFS` commits as ``evidence`` and ``generated``
     (whether this call paid for it).
@@ -1461,11 +1605,15 @@ def whygraph_rationale_brief(
     )
     ctx = current_project()
     if ctx is not None and ctx.remote is not None:
-        return linked_rationale(ctx.remote, target)
+        return linked_rationale(
+            ctx.remote, target, intent=intent, depth=depth, cached_only=cached_only
+        )
     return _brief(
         target,
         force_refresh=force_refresh,
         cached_only=cached_only,
+        intent=intent,
+        depth=depth,
         progress=progress,
         note=note,
     )
@@ -1475,10 +1623,12 @@ def _brief(
     target: Target,
     *,
     force_refresh: bool,
-    cached_only: bool,
+    cached_only: bool | None,
     progress: Callable[[int, str], None] | None,
     note: Callable[[str], None] | None,
     evidence: list[CommitEvidence] | None = None,
+    intent: str | None = None,
+    depth: str | None = None,
 ) -> RationaleCard:
     """The non-linked half of :func:`whygraph_rationale_brief`.
 
@@ -1486,7 +1636,9 @@ def _brief(
     ----------
     target : Target
         The resolved target.
-    force_refresh, cached_only : bool
+    force_refresh : bool
+        As for :func:`whygraph_rationale_brief`.
+    cached_only : bool or None
         As for :func:`whygraph_rationale_brief`.
     progress, note : callable or None
         The client channel from :func:`_client_channel`.
@@ -1494,6 +1646,9 @@ def _brief(
         ``collect_evidence(target, limit=20)`` when the caller already
         has it (so plans and the card share one list); collected here
         otherwise.
+    intent, depth : str or None, optional
+        As for :func:`whygraph_rationale_brief`; resolved here, after the
+        evidence and before the cache lookup.
 
     Returns
     -------
@@ -1509,12 +1664,21 @@ def _brief(
         evidence = collect_evidence(target, limit=20)
     if progress is not None:
         progress(1, f"evidence collected ({len(evidence)} commits)")
+    # No evidence raises in rationale_card before anything is resolved.
+    resolution = (
+        resolve_for_target(
+            target, evidence, intent=intent, depth=depth, cached_only=cached_only
+        )
+        if evidence
+        else None
+    )
     # Local blame reads the working tree, so the anchors are checked on it.
     return rationale_card(
         target,
         evidence,
         force_refresh=force_refresh,
-        cached_only=cached_only,
+        cached_only=resolution.cached_only if resolution is not None else False,
+        resolution=resolution,
         mark_generated=True,
         progress=progress,
         note=note,
@@ -1529,12 +1693,17 @@ def _rationale_brief_tool(
     line_end: int | None = None,
     qualified_name: str | None = None,
     force_refresh: bool = False,
-    cached_only: bool = False,
+    cached_only: bool | None = None,
+    intent: IntentInput = None,
+    depth: DepthInput = None,
     ctx: Context | None = None,
 ) -> RationaleCard:
     """The registered ``whygraph_rationale_brief``: the card plus ``notes``.
 
-    Same signature and behaviour as :func:`whygraph_rationale_brief`, then
+    Same signature and behaviour as :func:`whygraph_rationale_brief` (its
+    ``intent`` and ``depth`` carry their guidance in the input schema,
+    :data:`INTENT_HELP` and :data:`DEPTH_HELP`; input validation refuses a
+    level that is not offered), then
     every non-linked outcome gains the target's confirmed notes (data the
     members wrote, never fed into the card). A linked project gets the
     platform's card unchanged. Code with no commits raises
@@ -1553,7 +1722,13 @@ def _rationale_brief_tool(
     )
     project = current_project()
     if project is not None and project.remote is not None:
-        return linked_rationale(project.remote, target)
+        return linked_rationale(
+            project.remote,
+            target,
+            intent=intent,
+            depth=depth,
+            cached_only=cached_only,
+        )
     notes = notes_for_target(target)
     evidence = collect_evidence(target, limit=20)
     plans = guarded_plans_for(
@@ -1564,6 +1739,8 @@ def _rationale_brief_tool(
             target,
             force_refresh=force_refresh,
             cached_only=cached_only,
+            intent=intent,
+            depth=depth,
             progress=progress,
             note=note,
             evidence=evidence,

@@ -533,7 +533,37 @@ def test_tools_declare_an_output_schema() -> None:
     assert set(ref["required"]) == {"kind", "id"}
     assert ref["properties"]["kind"]["enum"] == ["commit", "pr", "issue"]
     assert "note" in tools["whygraph_propose_note"].outputSchema["properties"]
-    assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
+    # The card's depth and what the next level adds (plan 62 section 14.4).
+    assert {"depth", "deeper", "coverage"} <= set(props)
+    assert set(defs["RationaleDepth"]["required"]) == {
+        "requested",
+        "resolved",
+        "reason",
+    }
+    assert set(defs["RationaleDeeper"]["required"]) == {"level", "adds"}
+    assert props["deeper"]["anyOf"] == [
+        {"$ref": "#/$defs/RationaleDeeper"},
+        {"type": "null"},
+    ]
+    brief_inputs = tools["whygraph_rationale_brief"].inputSchema["properties"]
+    assert "cached_only" in brief_inputs
+    assert {"type": "null"} in brief_inputs["cached_only"]["anyOf"]
+    # intent and depth carry their guidance in the input schema; xhigh is
+    # not offered until Part D, so validation refuses it.
+    assert brief_inputs["intent"]["anyOf"][0]["enum"] == [
+        "explain",
+        "edit",
+        "refactor",
+        "delete",
+        "review",
+        "plan",
+    ]
+    assert brief_inputs["depth"]["anyOf"][0]["enum"] == ["low", "medium", "high"]
+    for name in ("intent", "depth"):
+        assert brief_inputs[name]["description"]
+        assert name not in tools["whygraph_rationale_brief"].inputSchema.get(
+            "required", []
+        )
     supersedes = tools["whygraph_propose_note"].inputSchema["properties"][
         "supersedes_id"
     ]

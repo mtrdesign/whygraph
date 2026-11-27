@@ -26,6 +26,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    StrictBool,
     StrictInt,
     StrictStr,
     field_validator,
@@ -33,7 +34,7 @@ from pydantic import (
     model_validator,
 )
 
-from whygraph.core.config import PLANS_DIR_RE
+from whygraph.core.config import OFFERED_DEPTH_LEVELS, PLANS_DIR_RE
 from whygraph.services.git import BlameHunk, BlameOrigin
 
 API_VERSION = 2
@@ -91,6 +92,21 @@ Basis = Literal["quoted", "cited", "inferred", "unknown"]
 
 RefKind = Literal["commit", "pr", "issue"]
 """What a constraint's or risk's ref points at (``analyze.REF_KINDS``)."""
+
+Intent = Literal["explain", "edit", "refactor", "delete", "review", "plan"]
+"""The task a card is for (``mcp.rationale_depth.INTENTS``, plan 62 section 14.3)."""
+
+DepthLevel = Literal[OFFERED_DEPTH_LEVELS]  # type: ignore[valid-type]
+"""A depth a request may ask for: the offered levels only (``xhigh`` refused
+until Part D ships). Answers carry a level as a plain string, so a client
+never refuses a card of a level it does not know yet."""
+
+Verdict = Literal["holds", "contradicted", "cannot_tell"]
+"""A verification verdict on a constraint or risk (plan 62 section 14.2)."""
+
+RATIONALE_DEPTH_CAPABILITY = "rationale_depth"
+"""The ``meta`` capability of a platform whose ``/rationale`` takes ``intent``,
+``depth`` and ``cached_only`` (plan 62 section 14.4)."""
 
 
 PLAN_STEM_PATTERN = r"[a-z0-9][a-z0-9-]{0,79}"
@@ -273,10 +289,38 @@ class RationaleIn(_In):
         The code chunk.
     hunks : list[HunkIn]
         Its pushed, committed blame hunks (at most :data:`MAX_HUNKS`).
+    intent : str or None
+        The task the card is for (:data:`Intent`); the platform resolves
+        the depth from it under its ``auto`` setting.
+    depth : str or None
+        An explicit level (:data:`DepthLevel`), capped at the platform
+        project's ceiling.
+    cached_only : bool or None
+        Never generate; ``None`` means ``True`` for ``intent="review"`` and
+        ``False`` otherwise.
+
+    Notes
+    -----
+    The three are sent only to a platform whose ``meta`` lists
+    :data:`RATIONALE_DEPTH_CAPABILITY` (an older one refuses an unknown
+    field), and a ``None`` one is left out of the body.
     """
 
     target: TargetIn
     hunks: list[HunkIn] = Field(default_factory=list, max_length=MAX_HUNKS)
+    intent: Intent | None = None
+    depth: DepthLevel | None = None
+    cached_only: StrictBool | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset_depth_inputs(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        data = handler(self)
+        for key in ("intent", "depth", "cached_only"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class PlansTargetIn(_In):
@@ -493,6 +537,13 @@ class RationaleItemRefOut(_Out):
         return data
 
 
+class RationaleItemCheckOut(_Out):
+    """The verification pass's verdict on one item (``mcp.rationale.RationaleItemCheck``)."""
+
+    verdict: Verdict
+    reason: str = ""
+
+
 class RationaleItemOut(_Out):
     """One constraint or risk of a card, with its source (``analyze.Item.as_dict``).
 
@@ -506,12 +557,16 @@ class RationaleItemOut(_Out):
         The named sources found in the evidence.
     quote : str
         The checked quote; omitted when empty.
+    check : RationaleItemCheckOut or None
+        The verification verdict of a ``high`` card; omitted when ``None``
+        (a shallower card, or a platform that predates it).
     """
 
     text: str
     basis: Basis
     refs: list[RationaleItemRefOut] = Field(default_factory=list)
     quote: str = ""
+    check: RationaleItemCheckOut | None = None
 
     @model_serializer(mode="wrap")
     def _drop_empty_quote(
@@ -520,27 +575,138 @@ class RationaleItemOut(_Out):
         data = handler(self)
         if not data.get("quote"):
             data.pop("quote", None)
+        if data.get("check") is None:
+            data.pop("check", None)
         return data
 
 
+class RationaleDepthOut(_Out):
+    """A card's ``depth`` (``mcp.rationale.RationaleDepth``).
+
+    ``requested`` is ``"auto"`` or a level, ``resolved`` the card's level;
+    both are plain strings, so a level a client does not know yet parses.
+    """
+
+    requested: str
+    resolved: str
+    reason: str = ""
+
+
+class RationaleDeeperOut(_Out):
+    """A card's ``deeper``: the next level and what it would add (``mcp.rationale.RationaleDeeper``)."""
+
+    level: str
+    adds: str = ""
+
+
+class RationaleCoverageOut(_Out):
+    """A card's ``coverage``: what its prompt left out (``analyze.CardCoverage.as_dict``).
+
+    ``verification`` and ``source`` are omitted when ``None``; a key a
+    newer platform adds is ignored.
+    """
+
+    full_prs_demoted: int = 0
+    threads_lost: int = 0
+    trimmed: list[str] = Field(default_factory=list)
+    descriptions_missing: int = 0
+    line_commits: int = 0
+    context_commits: int = 0
+    context_omitted: int = 0
+    verification: str | None = None
+    source: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _drop_unset(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        for key in ("verification", "source"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+NOT_CACHED = "not_cached"
+"""The ``status`` of a ``cached_only`` miss: ``{"status", "target"}`` only."""
+
+
 class RationaleOut(_Out):
-    """A rationale card (``mcp.rationale._format_response``)."""
+    """A rationale card (``mcp.rationale._format_response``), or a ``cached_only`` miss.
+
+    A card carries every required field; a miss (``status`` is
+    :data:`NOT_CACHED`, only for a request with ``cached_only``) carries
+    ``target`` alone. ``depth``, ``coverage`` and ``deeper`` (plan 62
+    section 14.4) are ``None`` from a platform that predates them, and a
+    ``None`` one is left out when serialized (:data:`_OPTIONAL_CARD_KEYS`),
+    as a connected portal leaves out a ``None`` ``partial``. ``match``,
+    ``stale`` and ``card_range`` come with a ``cached_only`` card.
+    """
 
     target: TargetOut
-    purpose: str
-    why: str
+    status: str | None = None
+    purpose: str | None = None
+    why: str | None = None
     constraints: list[RationaleItemOut] = Field(default_factory=list)
     tradeoffs: list[str] = Field(default_factory=list)
     risks: list[RationaleItemOut] = Field(default_factory=list)
-    model: str
-    provider: str
-    cached_at: str
-    evidence_count: EvidenceCountOut
+    model: str | None = None
+    provider: str | None = None
+    cached_at: str | None = None
+    evidence_count: EvidenceCountOut | None = None
     # None from a platform that predates them, so it never reports a card
     # it built under the old 5-commit bound as final.
     partial: bool | None = None
     describing: int | None = None
     completing: bool | None = None
+    depth: RationaleDepthOut | None = None
+    coverage: RationaleCoverageOut | None = None
+    deeper: RationaleDeeperOut | None = None
+    match: str | None = None
+    stale: bool | None = None
+    card_range: dict[str, int] | None = None
+
+    @model_validator(mode="after")
+    def _a_card_or_a_miss(self) -> RationaleOut:
+        if self.status == NOT_CACHED:
+            return self
+        missing = [
+            name
+            for name in (
+                "purpose",
+                "why",
+                "model",
+                "provider",
+                "cached_at",
+                "evidence_count",
+            )
+            if getattr(self, name) is None
+        ]
+        if missing:
+            raise ValueError(f"a card needs {', '.join(missing)}")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _drop_unset(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        for key in _OPTIONAL_CARD_KEYS:
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
+
+
+_OPTIONAL_CARD_KEYS = (
+    "status",
+    "depth",
+    "coverage",
+    "deeper",
+    "match",
+    "stale",
+    "card_range",
+)
+""":class:`RationaleOut` keys left out of its dump when ``None``.
+
+``partial`` / ``describing`` / ``completing`` are not among them: the
+connected portal drops those itself (``LinkedProject.rationale``).
+"""
 
 
 class StatusOut(_Out):
@@ -575,6 +741,13 @@ class StatusOut(_Out):
         checkout's ``.whygraph/portal.env`` can name the folder to publish
         into. A value a one-line ``portal.env`` entry cannot hold is
         refused (plan 61 section 4.16).
+    rationale_depth : str or None
+        The project's ``[rationale].depth`` (``"auto"`` or a level;
+        ``None`` from a platform that predates depth levels), shown
+        read-only on a linked project (plan 62 section 14.5).
+    rationale_max_depth : str or None
+        The **effective** ceiling: the lower of the project's ``max_depth``
+        and its org's ``org_max_depth``.
     """
 
     slug: str
@@ -590,6 +763,8 @@ class StatusOut(_Out):
     plans_dir: str | None = Field(
         default=None, pattern=f"^(?:{PLANS_DIR_RE.pattern})?$"
     )
+    rationale_depth: str | None = Field(default=None, max_length=16)
+    rationale_max_depth: str | None = Field(default=None, max_length=16)
 
 
 class ErrorOut(_Out):
@@ -877,18 +1052,22 @@ __all__ = [
     "MAX_PLAN_PATHS",
     "MAX_PLAN_SECTION",
     "MAX_QUALIFIED_NAME",
+    "NOT_CACHED",
     "PLAN_SECTION_TEXT_MAX",
     "PLAN_STEM_PATTERN",
     "PLAN_TITLE_MAX",
     "PLATFORM_BUDGET_MESSAGE",
+    "RATIONALE_DEPTH_CAPABILITY",
     "Basis",
     "CommitOut",
+    "DepthLevel",
     "ErrorOut",
     "EvidenceCountOut",
     "EvidenceIn",
     "EvidenceOut",
     "EvidenceReplyOut",
     "HunkIn",
+    "Intent",
     "IssueOut",
     "MetaOut",
     "OriginIn",
@@ -906,7 +1085,11 @@ __all__ = [
     "ProjectRoleName",
     "PullRequestOut",
     "PushStatus",
+    "RationaleCoverageOut",
+    "RationaleDeeperOut",
+    "RationaleDepthOut",
     "RationaleIn",
+    "RationaleItemCheckOut",
     "RationaleItemOut",
     "RationaleItemRefOut",
     "RationaleOut",
@@ -919,6 +1102,7 @@ __all__ = [
     "TargetIn",
     "TargetOut",
     "TokenReply",
+    "Verdict",
     "blame_hunks_from_in",
     "hunk_in_from_blame",
 ]

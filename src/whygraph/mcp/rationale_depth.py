@@ -25,26 +25,49 @@ Step                   Rule
 
 The signal it needs from the index, :func:`distinct_callers`, is not pure:
 it reads the bound project's CodeGraph index and never raises.
+:func:`resolve_for_target` gathers the signals for one target and calls
+:func:`resolve_depth`; :func:`depth_block` and :func:`deeper` shape the
+card's ``depth`` and ``deeper`` (plan 62 section 14.4).
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, get_args
 
+from whygraph.analyze.card_bundle import LINE_LEVEL_SOURCES, level_caps, verifies
 from whygraph.core import get_config
 from whygraph.core.config import DEPTH_LEVELS, OFFERED_DEPTH_LEVELS, RationaleConfig
+from whygraph.core.usage import usage_pressure
 
 from .plans import _innermost
 from .targets import repo_root
+
+if TYPE_CHECKING:
+    from whygraph.analyze import CommitEvidence
+
+    from .targets import Target
 
 _log = logging.getLogger(__name__)
 
 AUTO = "auto"
 """The project depth that lets :func:`resolve_depth` choose per call."""
 
-INTENTS: tuple[str, ...] = ("explain", "edit", "refactor", "delete", "review", "plan")
+Intent = Literal["explain", "edit", "refactor", "delete", "review", "plan"]
+"""The ``intent`` input of the tool and of ``/api/v1`` (``api_v1.Intent``)."""
+
+INTENTS: tuple[str, ...] = get_args(Intent)
 """The tasks a caller may name (``intent``)."""
+
+OfferedDepth = Literal[OFFERED_DEPTH_LEVELS]  # type: ignore[valid-type]
+"""The ``depth`` input a caller may pass: the offered levels only.
+
+Built from :data:`~whygraph.core.config.OFFERED_DEPTH_LEVELS`, so input
+validation refuses ``xhigh`` until Part D ships (plan 62 section 14.1) and
+follows that tuple when it does.
+"""
 
 IMPORTANT_CALLERS = 5
 """Distinct callers at which a symbol counts as important (one level up)."""
@@ -321,3 +344,186 @@ def distinct_callers(path: str, line_start: int, line_end: int) -> int | None:
     except Exception:  # noqa: BLE001 - no index, a stale index: unknown
         _log.debug("rationale depth: no caller count for %s", path, exc_info=True)
         return None
+
+
+def resolve_for_target(
+    target: Target,
+    evidence: Sequence[CommitEvidence],
+    *,
+    intent: str | None = None,
+    depth: str | None = None,
+    cached_only: bool | None = None,
+    count_callers: bool = True,
+) -> DepthResolution:
+    """Resolve the depth of ``target``'s card from the bound project's config.
+
+    Reads the merged ``[rationale]`` section (its ``depth`` and the
+    effective ceiling) and, under ``auto`` for any intent but ``review``,
+    the two signals: :func:`distinct_callers` and
+    :func:`~whygraph.core.usage.usage_pressure`. Run before the cache
+    lookup (plan 62 section 14.3).
+
+    Parameters
+    ----------
+    target : Target
+        The resolved target.
+    evidence : Sequence[CommitEvidence]
+        Its evidence; one commit with no PR is "thin history".
+    intent : str or None, optional
+        One of :data:`INTENTS`, or ``None``.
+    depth : str or None, optional
+        The caller's explicit level, or ``None``.
+    cached_only : bool or None, optional
+        The caller's ``cached_only`` (``None``: decided by ``intent``).
+    count_callers : bool, optional
+        ``False`` when ``target``'s lines are not this repository's (the
+        platform's answer to a requester's working-tree range): the caller
+        count is then unknown.
+
+    Returns
+    -------
+    DepthResolution
+        The resolved level and why.
+
+    Raises
+    ------
+    ValueError
+        For an unknown level or intent.
+    """
+    rationale = get_config().rationale
+    signals = depth is None and rationale.depth == AUTO and intent != "review"
+    callers = None
+    pressure = None
+    if signals:
+        if count_callers:
+            callers = distinct_callers(target.path, target.line_start, target.line_end)
+        pressure = usage_pressure()
+    thin = len(evidence) == 1 and not evidence[0].pull_requests
+    return resolve_depth(
+        depth=depth,
+        project_depth=rationale.depth,
+        intent=intent,
+        ceiling=effective_ceiling(rationale),
+        callers=callers,
+        pressure=pressure,
+        cached_only=cached_only,
+        thin_history=thin,
+    )
+
+
+SERVED_CACHED = "cached"
+"""A cached card of another level was served (:func:`depth_block`)."""
+
+SERVED_KEPT = "kept"
+"""The card was rebuilt at a deeper row's level, never replacing it shallower."""
+
+SERVED_UNVERIFIED = "unverified"
+"""The verification pass did not complete, so the card was stored lower."""
+
+
+def depth_block(
+    resolution: DepthResolution, level: str, served: str = SERVED_CACHED
+) -> dict[str, str]:
+    """The card's ``depth``: ``{requested, resolved, reason}`` for the card served.
+
+    ``resolved`` is the level of the card actually returned. When that is
+    not the resolver's level - a deeper cached card satisfied the request,
+    ``review`` accepted a shallower one, a deeper row was rebuilt at its
+    own level, or a ``high`` draft was stored lower - ``resolved`` is the
+    card's level and ``reason`` gains a sentence saying why.
+
+    Parameters
+    ----------
+    resolution : DepthResolution
+        What :func:`resolve_depth` chose.
+    level : str
+        The level of the card returned.
+    served : str, optional
+        Why the levels differ: :data:`SERVED_CACHED` (default),
+        :data:`SERVED_KEPT` or :data:`SERVED_UNVERIFIED`.
+
+    Returns
+    -------
+    dict[str, str]
+        JSON-ready.
+    """
+    block = resolution.as_dict()
+    if level == resolution.resolved:
+        return block
+    label = _LABELS[level]
+    sentence = {
+        SERVED_CACHED: f"A cached {label} card was served.",
+        SERVED_KEPT: f"Built at {label} to keep the deeper card of these lines.",
+        SERVED_UNVERIFIED: (
+            f"Stored at {label}: the verification pass did not complete."
+        ),
+    }[served]
+    block["resolved"] = level
+    block["reason"] = f"{block['reason']} {sentence}"
+    return block
+
+
+def deeper(
+    level: str, ceiling: str, evidence: Sequence[CommitEvidence]
+) -> dict[str, str] | None:
+    """What a card one level deeper would add for this target, or ``None``.
+
+    The next level's differences from ``level`` (plan 62 section 14.1),
+    kept to the ones this target's evidence would show: the verification
+    pass, more of the file's other commits, the PRs of earlier commits of
+    the lines, the draft commits of a squash-merged PR.
+
+    Parameters
+    ----------
+    level : str
+        The level of the card returned.
+    ceiling : str
+        The effective ceiling (:func:`effective_ceiling`).
+    evidence : Sequence[CommitEvidence]
+        The target's evidence.
+
+    Returns
+    -------
+    dict[str, str] or None
+        ``{"level", "adds"}`` (``adds`` one sentence); ``None`` at the
+        ceiling (or the highest offered level), or when the next level
+        would add nothing for this target.
+    """
+    top = min(DEPTH_LEVELS.index(ceiling), DEPTH_LEVELS.index(OFFERED_DEPTH_LEVELS[-1]))
+    index = DEPTH_LEVELS.index(level)
+    if index >= top:
+        return None
+    nxt = DEPTH_LEVELS[index + 1]
+    here, there = level_caps(level), level_caps(nxt)
+    parts: list[str] = []
+    if verifies(nxt) and not verifies(level):
+        parts.append("checks each constraint and risk against today's code")
+    if nxt == "medium" and any(
+        item.source in LINE_LEVEL_SOURCES
+        and item.source not in ("blame", "pr-origin")
+        and item.pull_requests
+        for item in evidence
+    ):
+        parts.append("reads the PRs of the earlier commits that shaped these lines")
+    context = sum(1 for item in evidence if item.source not in LINE_LEVEL_SOURCES)
+    shown, more = (
+        min(context, here.context_commits),
+        min(context, there.context_commits),
+    )
+    if more > shown:
+        of = f"of the {context} other commits to this file"
+        parts.append(
+            f"reads {more} {of}"
+            if not shown
+            else f"reads {more} instead of {shown} {of}"
+        )
+    if (
+        there.feature_commits
+        and not here.feature_commits
+        and any(item.source == "pr-origin" for item in evidence)
+    ):
+        parts.append("shows the draft commits of squash-merged PRs")
+    if not parts:
+        return None
+    text = _join(parts)
+    return {"level": nxt, "adds": f"{text[0].upper()}{text[1:]}."}

@@ -8,6 +8,7 @@ fixture.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,10 +19,14 @@ from whygraph.core.context import ProjectContext, use_project
 from whygraph.mcp.rationale_depth import (
     IMPORTANT_CALLERS,
     DepthResolution,
+    deeper,
+    depth_block,
     distinct_callers,
     effective_ceiling,
     resolve_depth,
+    resolve_for_target,
 )
+from whygraph.mcp.targets import Target
 
 _BASE: dict[str, Any] = {
     "depth": None,
@@ -445,3 +450,117 @@ def test_distinct_callers_without_an_index_is_unknown(tmp_path: Path) -> None:
     )
     with use_project(ctx):
         assert distinct_callers("src/pkg/m.py", 12, 14) is None
+
+
+# ---------------------------------------------------------------------------
+# The card's depth and deeper (plan 62 section 14.4)
+# ---------------------------------------------------------------------------
+
+
+def _item(source: str, *, prs: int = 0) -> SimpleNamespace:
+    """A stand-in for one ``CommitEvidence``: its ``source`` and PR count."""
+    return SimpleNamespace(source=source, pull_requests=[object()] * prs)
+
+
+def _target() -> Target:
+    return Target(path="src/pkg/m.py", line_start=12, line_end=14, qualified_name=None)
+
+
+def test_resolve_for_target_reads_the_bound_config_and_callers(bound: None) -> None:
+    """Under auto, the index's distinct callers and the project's ceiling count."""
+    resolution = resolve_for_target(_target(), [_item("blame")], intent="refactor")
+    # Box.put has callers: xhigh, mapped to high (not offered yet).
+    assert resolution.resolved == "high"
+    assert "History is thin" in resolution.reason
+    review = resolve_for_target(_target(), [_item("blame", prs=1)], intent="review")
+    assert (review.resolved, review.cached_only, review.any_cached_depth) == (
+        "low",
+        True,
+        True,
+    )
+
+
+def test_resolve_for_target_without_own_lines_counts_no_callers(
+    bound: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.mcp import rationale_depth
+
+    def _never(*args: object) -> int:  # pragma: no cover - must not run
+        raise AssertionError("callers counted on a requester's range")
+
+    monkeypatch.setattr(rationale_depth, "distinct_callers", _never)
+    resolution = resolve_for_target(
+        _target(), [_item("blame", prs=1)], intent="edit", count_callers=False
+    )
+    assert resolution.resolved == "medium"
+    assert UNKNOWN in resolution.reason
+    # Fixed depths read no signal at all.
+    fixed = resolve_for_target(_target(), [_item("blame")], depth="low")
+    assert fixed.resolved == "low"
+
+
+def test_resolve_for_target_caps_at_the_effective_ceiling(tmp_path: Path) -> None:
+    config = Config(
+        rationale=RationaleConfig(max_depth="high", org_max_depth="medium"),
+        codegraph_db=tmp_path / "absent.db",
+    )
+    with use_project(ProjectContext(slug="demo", root=tmp_path, config=config)):
+        resolution = resolve_for_target(_target(), [_item("blame")], depth="high")
+    assert resolution.resolved == "medium"
+    assert "Capped at Medium by the depth ceiling." in resolution.reason
+
+
+@pytest.mark.parametrize(
+    ("level", "served", "resolved", "sentence"),
+    [
+        ("medium", "cached", "medium", None),
+        ("high", "cached", "high", "A cached High card was served."),
+        ("high", "kept", "high", "Built at High to keep the deeper card"),
+        ("low", "unverified", "low", "Stored at Low: the verification pass"),
+    ],
+)
+def test_depth_block_reports_the_card_served(
+    level: str, served: str, resolved: str, sentence: str | None
+) -> None:
+    resolution = DepthResolution("auto", "medium", "Auto chose Medium.")
+    block = depth_block(resolution, level, served)
+    assert set(block) == {"requested", "resolved", "reason"}
+    assert block["resolved"] == resolved
+    if sentence is None:
+        assert block["reason"] == "Auto chose Medium."
+    else:
+        assert block["reason"].startswith("Auto chose Medium. " + sentence)
+
+
+def test_deeper_names_what_the_next_level_adds() -> None:
+    evidence = [
+        _item("blame", prs=1),
+        _item("blame-walked", prs=1),
+        _item("pr-origin"),
+        *[_item("area") for _ in range(9)],
+    ]
+    low = deeper("low", "high", evidence)
+    assert low == {
+        "level": "medium",
+        "adds": "Reads the PRs of the earlier commits that shaped these lines "
+        "and reads 4 of the 9 other commits to this file.",
+    }
+    medium = deeper("medium", "high", evidence)
+    assert medium == {
+        "level": "high",
+        "adds": "Checks each constraint and risk against today's code, reads 6 "
+        "instead of 4 of the 9 other commits to this file and shows the draft "
+        "commits of squash-merged PRs.",
+    }
+
+
+def test_deeper_is_none_at_the_ceiling_or_with_nothing_to_add() -> None:
+    lines_only = [_item("blame", prs=1)]
+    assert deeper("high", "high", lines_only) is None  # xhigh is not offered
+    assert deeper("medium", "medium", lines_only) is None  # the ceiling
+    assert deeper("low", "high", lines_only) is None  # medium adds nothing here
+    # The verification pass always adds something.
+    assert deeper("medium", "high", lines_only) == {
+        "level": "high",
+        "adds": "Checks each constraint and risk against today's code.",
+    }

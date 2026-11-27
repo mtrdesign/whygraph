@@ -118,7 +118,7 @@ CAPABILITIES: tuple[str, ...] = (
 
 ``rationale_depth`` (plan 62 section 14.4) is not a route family: it says
 ``/rationale`` takes ``intent``, ``depth`` and ``cached_only`` and answers
-``depth``, ``coverage``, ``deeper`` and each item's ``check``
+``depth``, ``coverage`` and ``deeper``
 (:data:`~whygraph.api_v1.RATIONALE_DEPTH_CAPABILITY`)."""
 
 REDIRECT_URI_RE = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/connect/callback")

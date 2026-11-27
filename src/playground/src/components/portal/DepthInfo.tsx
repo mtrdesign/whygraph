@@ -137,7 +137,7 @@ export function DepthPanel({ withPrices = true }: { withPrices?: boolean }) {
   );
 }
 
-const CONTENT = "w-[40rem] max-w-[calc(100vw-2rem)]";
+const CONTENT = "w-2xl max-w-[calc(100vw-2rem)]";
 
 /**
  * The (i) beside a depth label: a ghost icon button that opens the comparison on

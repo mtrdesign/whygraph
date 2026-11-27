@@ -92,7 +92,7 @@ export interface ConfigFormValues {
   depth: string;
   /** `[rationale].max_depth` of this layer; "" = not set here. */
   maxDepth: string;
-  /** `[rationale].org_max_depth`, the org defaults only; "" = the default (High). */
+  /** `[rationale].org_max_depth`, the org defaults only; "" = the default (Medium). */
   orgMaxDepth: string;
 }
 

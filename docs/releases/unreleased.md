@@ -39,7 +39,9 @@ code that still exists.
 - **Unrelated commits no longer invalidate a card.** One or two newer commits elsewhere in the file
   mark the card `context_stale` and it keeps serving; three or more regenerate it. `cached_only`
   returns `stale` (the lines changed) and `context_stale` separately. Existing cards keep serving
-  and are replaced only when their evidence changes. Cards follow their symbol when the lines move.
+  until their evidence changes. A card of code in a file with more than 20 commits is rebuilt once
+  on first use, because its evidence now keeps every commit that wrote the lines instead of the 20
+  newest commits to the file. Cards follow their symbol when the lines move.
 - **Review threads need a unique anchor.** A thread appears on a card only when the code it was
   written about occurs once in the file.
 - **Depth levels and `auto`.** A rationale card is now built at a depth: `low` (the lines' own

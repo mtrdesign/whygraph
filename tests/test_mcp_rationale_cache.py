@@ -808,6 +808,26 @@ def test_a_followed_row_too_shallow_moves_and_is_the_seen_row(
     assert lookup_exact(moved, "fake", None).rationale.purpose == "low"
 
 
+def test_a_row_with_todays_ring0_is_never_replaced_by_following(
+    whygraph_db_initialized: Path,
+) -> None:
+    """A deeper row that misses on depth or context stays; nothing follows over it."""
+    moved = replace(_T, line_start=14, line_end=24)
+    _store(moved, _LINES, depth=1, purpose="medium here")
+    _store(_T, _LINES, depth=0, purpose="low elsewhere")
+
+    found = _lookup(moved, _LINES, "medium")
+    assert found.card is not None and found.card.rationale.purpose == "medium here"
+
+    # The medium row misses on too many newer context commits: no follow.
+    newer = [_area(i, i) for i in range(1, 4)]
+    found = _lookup(moved, [*newer, *_LINES], "low")
+    assert found.card is None
+    assert found.seen is not None and found.seen.rationale.purpose == "medium here"
+    assert lookup_exact(moved, "fake", None).rationale.purpose == "medium here"
+    assert lookup_exact(_T, "fake", None).rationale.purpose == "low elsewhere"
+
+
 def test_store_cached_round_trips_depth_context_and_coverage(
     whygraph_db_initialized: Path,
 ) -> None:

@@ -509,7 +509,7 @@ export function ConfigForm({
   const orgRationale = (orgLayer?.rationale ?? {}) as Record<string, unknown>;
   const inheritedDepth = isLevel(orgRationale.depth) || orgRationale.depth === DEFAULT_DEPTH ? String(orgRationale.depth) : DEFAULT_DEPTH;
   const inheritedMax = isLevel(orgRationale.max_depth) ? orgRationale.max_depth : DEFAULT_CEILING;
-  // Local mode has no organization ceiling; in production the org layer's, High until set.
+  // Local mode has no organization ceiling; in production the org layer's, Medium until set.
   const orgCeiling = isProject && production ? (isLevel(orgRationale.org_max_depth) ? orgRationale.org_max_depth : DEFAULT_CEILING) : null;
   const missingKey = project.data?.missing_key ?? null;
   const importReport = isProject ? (view.import ?? null) : null;

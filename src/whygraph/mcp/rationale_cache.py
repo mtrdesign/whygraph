@@ -669,11 +669,15 @@ def lookup_card(
             hit = _judge(seen, evidence, need)
             if hit is not None:
                 return CacheLookup(hit)
-        if target.qualified_name is None:
+        ring0 = ring0_fingerprint(evidence)
+        # Follow only when the lines moved: a row here with today's Ring 0 is
+        # this symbol's card that missed on depth or context, and following
+        # could replace it with a shallower row of an older range.
+        if target.qualified_name is None or (
+            seen is not None and seen.evidence_fingerprint == ring0
+        ):
             return CacheLookup(None, seen)
-        moved = _follow(
-            session, target, provider, model_key, ring0_fingerprint(evidence), seen
-        )
+        moved = _follow(session, target, provider, model_key, ring0, seen)
         if moved is None:
             return CacheLookup(None, seen)
         hit = _judge(moved, evidence, need)

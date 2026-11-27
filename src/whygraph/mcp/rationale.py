@@ -890,6 +890,7 @@ def _complete_partial(
             model,
             deferred_shas="",
             only_if=seen,
+            seen=seen,
             depth=depth_of(level),
             context_shas=_rendered_context(bundle, rationale),
         )

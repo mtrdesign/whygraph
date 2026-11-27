@@ -2873,6 +2873,7 @@ def _remove_project(
     dispose_engine(project.db_path)
     state.migrations.forget(project.db_path)
     state.contexts.invalidate(project.id)
+    state.depth_profiles.discard(project.id)
 
     hooks = None
     if root_ok:

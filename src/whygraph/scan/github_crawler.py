@@ -51,7 +51,7 @@ from whygraph.db.models.issue import Issue as IssueRow
 from whygraph.db.models.milestone import Milestone as MilestoneRow
 from whygraph.db.models.pr_issue_link import PRIssueLink
 from whygraph.db.models.pull_request import PullRequest as PullRequestRow
-from whygraph.services.github import GitHubClient, GitHubError
+from whygraph.services.github import GitHubClient
 from whygraph.services.github.commands import parse_github_ts
 from whygraph.services.github.issue import Issue as IssueDC
 from whygraph.services.github.milestones import Milestone as MilestoneDC
@@ -280,7 +280,7 @@ class GitHubCrawler(Crawler):
             numbers, point_floor=THREAD_PASS_POINT_FLOOR
         )
         synced = 0
-        error: GitHubError | None = None
+        error: Exception | None = None
         batch: list[tuple[int, tuple[ReviewThreadDC, ...] | None]] = []
         try:
             for result in run:
@@ -288,7 +288,7 @@ class GitHubCrawler(Crawler):
                 if len(batch) >= THREAD_BATCH:
                     synced += _write_threads(batch)
                     batch = []
-        except GitHubError as exc:
+        except Exception as exc:  # noqa: BLE001 - the thread pass never fails the crawl
             error = exc
         if batch:
             synced += _write_threads(batch)

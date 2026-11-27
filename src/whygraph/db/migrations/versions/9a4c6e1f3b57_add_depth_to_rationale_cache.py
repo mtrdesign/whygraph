@@ -5,7 +5,7 @@ Revises: d2c8e4a7f1b3
 Create Date: 2026-11-27 09:00:00.000000
 
 Plan 62 (Part B, section 13.5): ``rationale_cache`` gains ``depth`` (the
-card's depth level, 0 ``low`` .. 3 ``xhigh``; ``NULL`` marks a row written
+card's depth level, 0 ``low``, 1 ``medium``; ``NULL`` marks a row written
 before this revision, whose fingerprint is the old whole-bundle hash),
 ``context_shas`` (the space-joined SHAs of the context commits the card
 rendered; ``NOT NULL DEFAULT ''``, like ``deferred_shas``) and ``coverage``

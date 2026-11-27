@@ -71,12 +71,13 @@ you come from:
   to get the new `/whygraph-claude-md`. See [WhyGraph 2.8.0](../releases/2.8.0.md).
 - **From 2.8.0**, `whygraph update`; each project's database is upgraded on first use. Run **Update
   agent files** in each project to get the plan publish step. See [WhyGraph 2.9.0](../releases/2.9.0.md).
-- **From 2.9.0**, `whygraph update`; nothing to do. The first GitHub scan of each project afterwards
-  re-reads every pull request and issue once (review summaries, review threads, issue comments),
-  and the thread pass may take several scans on a large repository. On a production platform you
-  can also subscribe the GitHub App to **Issue comment** and **Pull request review comment** (see
-  [The GitHub App](../deploy/production.md#the-github-app)); it works without them. See the
-  [release notes](../releases/unreleased.md).
+- **From 2.9.0**, `whygraph update`; each project's database is upgraded on first use. Run **Update
+  agent files** in each project so agents pass the new rationale `intent`. The first GitHub scan of
+  each project afterwards re-reads every pull request and issue once (review summaries, review
+  threads, issue comments), and the thread pass may take several scans on a large repository. On a
+  production platform you can also subscribe the GitHub App to **Issue comment** and **Pull request
+  review comment** (see [The GitHub App](../deploy/production.md#the-github-app)); it works without
+  them. See [WhyGraph 2.10.0](../releases/2.10.0.md).
 - **Agent files in your repositories** are not rewritten by an upgrade. Open each project's Settings >
   Agents and use **Update agent files**, once per project: it adds the `codegraph` MCP entry, files you
   have not edited update silently and edited ones are listed first (a project set up before the

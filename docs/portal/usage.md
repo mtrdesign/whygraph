@@ -246,6 +246,20 @@ value. Overrides apply to calls made **from then on**: past rows keep the price 
 with. The first-scan estimate on a project uses the same table and your overrides, and says "your
 organization's prices" when an override applied.
 
+## What a card costs at each depth { #depth-estimate }
+
+In a project's **Settings**, the info button beside **Depth** opens a panel that compares the
+levels and shows an estimate of the price of one card at each, for the project's rationale model.
+It is computed from the prompt a card would send for a sample of the project's most-referenced code,
+with **no model call**, so it costs nothing and is cached per project and `HEAD`. It also says what a
+commit without a description yet costs to describe, once. Without a pinned rationale model it uses
+the one recent cards were served by, and says "Price unknown" when there is none.
+
+A `high` card makes two model calls (the draft and the verification pass), and each is recorded as
+its own usage row against the project's [budget](#budgets-and-the-hard-stop). On a connected
+machine's agents, the card counts twice (once per model call) against the organization's
+[hourly card limit](../deploy/production.md#agent-limits).
+
 ## Agent calls that count as failed
 
 The call counters of [Agent activity](agents.md#agent-activity) are separate from this ledger: they

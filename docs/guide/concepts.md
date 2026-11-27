@@ -74,6 +74,25 @@ in short form: one line per commit, newest first, up to `[rationale].context_max
 merge commit's body is never rendered, and a pull request that only contains a commit is one line.
 This keeps a card small and cheap; the card's `coverage` field says what did not fit.
 
+### Depth levels { #depth-levels }
+
+A card is built at one of three depths. **Low** answers "who wrote these lines, and why?": the
+commits that own them and the one that created them, their pull requests in full, and the author's
+review replies. **Medium** adds what has been happening around them: more pull requests and the
+file's recent history in short form. **High** asks "is each claim still true of today's code?": it
+adds the feature-branch commits of squash PRs and a second model call that checks every constraint
+and risk against the target's current code, marking each `holds`, `contradicted` or `cannot_tell`
+(nothing is removed). Every level reads the description of each commit it includes. The project's
+default is `auto`, which picks a level per request; see
+[Depth and intent](../reference/mcp.md#depth-and-intent) and
+[Configuration](../reference/configuration.md#rationale-depth).
+
+The draft prompt also includes the target's current source, up to 8,000 characters (a longer target
+gets none, and the card says so in `coverage.source`), so the model can check a claim against the
+code; it is told not to describe it. **That source goes to the project's rationale provider**, as
+commit diffs already do for descriptions. Caller and callee lists are labelled as matched by name,
+and draft commits recovered from a squash PR are labelled as never having reached the default branch.
+
 ### Caching
 
 Cards are **persistently cached**, keyed by content - the target, the evidence bundle, the provider,

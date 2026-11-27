@@ -676,6 +676,13 @@ that is used up with the hard stop on answers `403 budget_exceeded`, also with a
 **only** as organization defaults: they are never set per project and never imported from a
 repository. See [Configuration](../reference/configuration.md#agent-limits-organization-only).
 
+**Depth ceiling.** An owner can also cap how deep any project's cards go with
+`[rationale].org_max_depth` (default `high`), in the same **Settings** page. It is organization-only
+like the limits above: never per project, never imported from a repository. A project's own ceiling
+cannot exceed it (`422 depth_above_ceiling`), and lowering it later caps projects rather than
+rewriting them. A `high` card makes two model calls (the draft and the verification pass) and counts as two cards against the hourly card limit.
+See [Configuration](../reference/configuration.md#rationale-depth).
+
 Beyond the limits, each token is rate limited, at most two evidence or rationale requests run at
 once per organization (a third is answered `503 busy` rather than queued), and one request does a
 bounded amount of `git` work.

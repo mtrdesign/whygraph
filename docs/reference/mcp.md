@@ -210,7 +210,9 @@ switching `[rationale].provider` or `model` regenerates rather than returning th
 | `line_end` | int | Last line of the chunk. |
 | `qualified_name` | str | Fully-qualified symbol name, instead of `path`/lines. |
 | `force_refresh` | bool (default `false`) | Skip the cache and generate a new card (still stored; the same permission and budget checks apply). |
-| `cached_only` | bool (default `false`) | Never generate: no generation, no description backfill, no LLM spend. Use it to read what is already known. It is looser than a normal lookup: it also returns a card whose lines changed since it was written, or the card of an overlapping range, and `{ "status": "not_cached", "target": {...} }` only when there is none (see [Cached-only lookups](#cached-only-lookups)). Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
+| `intent` | `explain`, `edit`, `refactor`, `delete`, `review` or `plan` (optional) | The task the card is for. Under the project's `auto` depth it picks the level (see [Depth and intent](#depth-and-intent)). |
+| `depth` | `low`, `medium` or `high` (optional) | A level instead of `auto`. Capped at the project's ceiling, never refused. Omit it unless the card's `deeper` says the next level adds what the task needs. |
+| `cached_only` | bool (default by `intent`) | Never generate: no generation, no description backfill, no LLM spend. It defaults to `true` for `intent="review"` and `false` otherwise. Use it to read what is already known. It is looser than a normal lookup: it also returns a card whose lines changed since it was written, or the card of an overlapping range, and `{ "status": "not_cached", "target": {...} }` only when there is none (see [Cached-only lookups](#cached-only-lookups)). Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
 
 Returns the card:
 
@@ -278,6 +280,32 @@ line because of the size limits), `threads_lost` (review threads that did not fi
 was cut to fit), `descriptions_missing` (commits without a description), `line_commits` and
 `context_commits` (how many commits were used) and `context_omitted` (file-history commits that did
 not fit). A card cached before this version has no `coverage`.
+
+#### Depth and intent { #depth-and-intent }
+
+A card is built at one of three levels (see [Concepts](../guide/concepts.md#depth-levels)); the card's
+`depth` says which: `{requested, resolved, reason}`, where `requested` is what was asked (`auto` or a
+level), `resolved` is the level used and `reason` is a short sentence saying why. Under `auto`:
+
+| `intent` | Level |
+|---|---|
+| `explain`, `review` | `low`. `review` also accepts a cached card of any depth. |
+| `plan`, `edit`, none | `medium` |
+| `refactor`, `delete` | `high` |
+
+One level up when the symbol has five or more distinct callers (matched by name), one level down when
+a budget that covers the caller is at 75 % or more of its limit, and never above the ceiling. An
+explicit `depth` skips all of that except the ceiling. A cached card of the resolved level is served;
+a shallower one is regenerated at the resolved level, a deeper one is served as it is.
+
+`deeper`, when present, is `{level, adds}`: what the next level would add for this target. Ask for it
+at most once, with `depth`, and only when the task needs what it adds. `coverage` gains
+`verification` (`verified`; `skipped` or `failed`, in which case the card is stored at `medium` and a
+later `high` request regenerates it; `pending` on a partial card, verified when it completes;
+`no_source`) and `source` (`included`, `omitted` for a target over 8,000 characters, or
+`unavailable`). From `high`, each item of `constraints` and `risks` carries `check`:
+`{verdict, reason}` with `verdict` `holds`, `contradicted` or `cannot_tell`. A `contradicted` item is
+kept and marked, never removed. A card cached before depth levels has none of these fields.
 
 #### Cached-only lookups { #cached-only-lookups }
 

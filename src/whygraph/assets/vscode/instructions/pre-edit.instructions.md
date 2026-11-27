@@ -16,6 +16,8 @@ The tool accepts two ways to identify the chunk — pass one, not both:
 - **By name** (preferred when CodeGraph resolves it): `qualified_name` (e.g. `auth.session.refresh_token`).
 - **By location** (fallback): `path` + `line_start` + `line_end`, when the name does not resolve.
 
+- `intent` - `edit` for a change to a body; `refactor` for a rename, move or signature change; `delete` for a deletion or "can I delete this?"; `explain` for "why does this exist?".
+
 Other useful args:
 
 - `force_refresh=True` — bypass the rationale cache (use when the underlying code has clearly changed since the last brief).
@@ -40,6 +42,7 @@ Apply it like this:
 - **Tradeoffs** explain why an obvious-looking improvement may have already been considered and rejected. Weigh them before "fixing" something.
 - **Risks** are flagged to the user *before* the change, not after.
 - `plans` are pointers to what a plan intended; never a finding and never a constraint.
+- **`deeper`**: If the card carries `deeper` and the task is a refactor or delete on a card whose constraints are not verified, you may call once more with `depth: <deeper.level>`; never loop.
 - **Empty `evidence_count`**: the chunk has no meaningful git history yet (e.g. brand-new code). The brief will be thin — proceed with your own judgment.
 
 If the tool returns `isError: true`, the cause is one of:

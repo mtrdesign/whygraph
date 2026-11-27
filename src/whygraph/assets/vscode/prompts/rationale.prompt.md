@@ -18,7 +18,9 @@ Parse the user's input as `<target> [--force]`:
 
 If no target was provided, respond with: `Usage: /rationale <qualified_name | path:line_start-line_end> [--force]` and stop.
 
-Otherwise call the MCP tool `whygraph_rationale_brief` with those arguments, then present the result verbatim. The tool returns a structured object with `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Render it as readable markdown — do not paraphrase or editorialise the rationale fields themselves.
+Otherwise call the MCP tool `whygraph_rationale_brief` with those arguments and `intent: "explain"`, then present the result verbatim. The tool returns a structured object with `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Render it as readable markdown — do not paraphrase or editorialise the rationale fields themselves.
+
+If the card carries `deeper`, mention what it `adds` and offer it; pass `depth: <deeper.level>` only if the user asks, once, never in a loop.
 
 If the tool returns `isError: true`, print the error message verbatim and stop. If it is `code: budget_exceeded` or `generation_not_permitted`, do not retry: say that generation is paused for this project and that `whygraph_evidence_for` still lists the raw commits and PRs.
 

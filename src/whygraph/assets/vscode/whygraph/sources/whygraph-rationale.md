@@ -11,7 +11,7 @@ consent: false
 
 *Question:* which constraints and risks from the rationale does this change endanger?
 
-1. For each working-set node, read the `constraints` and `risks` the planner inlined in your prompt (verbatim from its card). Each item of a card's `constraints` and `risks` is an object, and its `text` is what you quote. The prompt holds only the `text`: to tag a quote, call `whygraph_rationale_brief` with `cached_only=True` once for that symbol and read the item's `basis` and `refs`. Quote verbatim.
+1. For each working-set node, read the `constraints` and `risks` the planner inlined in your prompt (verbatim from its card). Each item of a card's `constraints` and `risks` is an object, and its `text` is what you quote. The prompt holds only the `text`: to tag a quote, call `whygraph_rationale_brief` with `intent="plan"` and `cached_only=True` once for that symbol and read the item's `basis` and `refs`. Quote verbatim.
 2. For each constraint, judge whether the user's task is likely to violate it. Quote the constraint verbatim; state the conflict in one line.
 3. For each risk, prioritise ones the change is likely to trigger. Quote verbatim.
 4. Treat thinly evidenced cards (only a commit or two behind them) as hints, not directives - note explicitly when you cite them.
@@ -23,4 +23,4 @@ A confirmed note may carry a `check`: a fixed text that must be absent from, or 
 
 A card with `partial: true` was built while some commits had no description yet: treat it as usable but thinner, and say so when you cite it.
 
-For a symbol outside the working set, call `whygraph_rationale_brief` with `cached_only=True`. If a call errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; use `whygraph_evidence_for` and say so under Limitations.
+For a symbol outside the working set, call `whygraph_rationale_brief` with `intent="plan"` and `cached_only=True`. If a call errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; use `whygraph_evidence_for` and say so under Limitations.

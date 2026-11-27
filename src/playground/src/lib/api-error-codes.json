@@ -51,6 +51,8 @@
   "confirm_user",
   "connect_expired",
   "connect_failed",
+  "depth_above_ceiling",
+  "depth_profile_failed",
   "duplicate",
   "duplicate_grant",
   "effort_unsupported",

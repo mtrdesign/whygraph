@@ -150,6 +150,10 @@ shared by everyone on the project: an agent that asks for a card nobody has gene
 organization's [hourly agent limit](../deploy/production.md#agent-limits), and an organization can set
 it to zero so agents get only cards that exist.
 
+Which depth a card is built at is the platform's choice too: the project's **Depth** and **Ceiling**
+show in its Settings read-only, and `intent` and `depth` are passed to the platform when it supports
+them (an older platform ignores them). See [Configuration](../reference/configuration.md#rationale-depth).
+
 ### Plans { #plans }
 
 The platform indexes your team's [committed plans](../guide/planning.md#sharing-plans) in its own

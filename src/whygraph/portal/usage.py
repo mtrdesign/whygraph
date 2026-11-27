@@ -241,7 +241,8 @@ class PortalUsageSink:
     prices : PriceBook
         The org price overrides, read per call.
     budgets : BudgetBook, optional
-        The budget map :meth:`blocked_scope` reads; ``None`` blocks nothing.
+        The budget map :meth:`blocked_scope` and :meth:`pressure_scope`
+        read; ``None`` blocks nothing and reports no pressure.
     calls : AgentCallBook, optional
         Where :meth:`count_call` counts agent calls; ``None`` counts nothing.
     """
@@ -344,6 +345,24 @@ class PortalUsageSink:
             return None
         a = self.attribution
         return self._budgets.blocked_scope(a.org_id, a.project_id, a.user_id)
+
+    def pressure_scope(self) -> str | None:
+        """The covering budget scope at 75 % or more of its month, if any.
+
+        Read from the budget map on every call (O(1)), like
+        :meth:`blocked_scope`; :func:`whygraph.core.usage.usage_pressure`
+        reaches it (plan 62 section 14.3, step 4).
+
+        Returns
+        -------
+        str or None
+            ``"member"``, ``"project"`` or ``"org"``; ``None`` when no
+            covering budget is that far spent, or with no budget map.
+        """
+        if self._budgets is None:
+            return None
+        a = self.attribution
+        return self._budgets.pressure_scope(a.org_id, a.project_id, a.user_id)
 
     def count_call(
         self,

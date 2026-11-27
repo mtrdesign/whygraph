@@ -39,6 +39,24 @@ class PullRequest(WhygraphTable, table=True):
         JSON list of changed file paths (first 100).
     additions, deletions, changed_files : int or None
         Diff totals as GitHub reports them.
+    comments : str
+        JSON list of the conversation comments (first 100); from forge
+        fields version 2 on, human, non-minimized comments only.
+    review_summaries : str
+        JSON list of the review summaries with a body (from the last 30
+        reviews); human, non-minimized reviews only.
+    review_threads : str
+        JSON list of the first 20 review threads, written only by the
+        thread pass; a thread with no human, non-minimized comment is not
+        stored.
+    review_threads_total : int or None
+        GitHub's review-thread count; ``None`` until a crawl re-reads the row.
+    review_threads_synced : int
+        1 once the thread pass stored this PR's threads, 0 while they are
+        due (0/1, like ``draft``).
+    comments_total : int or None
+        GitHub's conversation-comment count (includes comments not stored);
+        ``None`` until a crawl re-reads the row.
     """
 
     number: int = Field(primary_key=True, nullable=True)
@@ -82,3 +100,14 @@ class PullRequest(WhygraphTable, table=True):
     additions: int | None = Field(default=None)
     deletions: int | None = Field(default=None)
     changed_files: int | None = Field(default=None)
+    review_summaries: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    review_threads: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    review_threads_total: int | None = Field(default=None)
+    review_threads_synced: int = Field(
+        default=0, sa_column_kwargs={"server_default": text("0")}
+    )
+    comments_total: int | None = Field(default=None)

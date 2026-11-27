@@ -334,6 +334,35 @@ def usage_blocked() -> str | None:
         return None
 
 
+def usage_pressure() -> str | None:
+    """The bound sink's budget scope at 75 % or more of its month, if any.
+
+    Calls the bound sink's optional ``pressure_scope()`` (plan 62 section
+    14.3, step 4: ``auto`` depth steps down one level under pressure). It
+    is not part of the :class:`UsageSink` protocol, so a sink without it (a
+    scan child's, a test fake) reports no pressure.
+
+    Returns
+    -------
+    str or None
+        ``"member"``, ``"project"`` or ``"org"`` when a covering budget's
+        month-to-date spend is at least 75 % of it; ``None`` when unbound,
+        when no budget is that far, when the sink has no such method, or
+        when it fails to answer (logged).
+    """
+    sink = _sink.get()
+    if sink is None:
+        return None
+    pressure = getattr(sink, "pressure_scope", None)
+    if pressure is None:
+        return None
+    try:
+        return pressure()
+    except Exception:  # noqa: BLE001 -- never fail the caller over a check
+        _log.exception("could not read the usage budget pressure")
+        return None
+
+
 CallOutcome = Literal["ok", "error", "internal"]
 """How a counted call ended: ``error`` = the tool reported a failure;
 ``internal`` = an exception escaped."""
@@ -414,5 +443,6 @@ __all__ = [
     "record_usage",
     "set_scope_field",
     "usage_blocked",
+    "usage_pressure",
     "use_usage_sink",
 ]

@@ -65,11 +65,39 @@ summarizing how many commits, PRs, and issues fed it.
     A card carries those five narrative fields and nothing else - no extra score or rating. The
     rationale is the evidence-grounded explanation, full stop.
 
+### How a card is built
+
+A card's prompt is laid out in rings. The first ring is the commits that wrote the target's own lines
+(every commit that `blame` names, and the commit that created the lines), shown in full with their
+descriptions and, for each, its own pull request once. The next ring is the rest of the file's history,
+in short form: one line per commit, newest first, up to `[rationale].context_max_chars`. A squash or
+merge commit's body is never rendered, and a pull request that only contains a commit is one line.
+This keeps a card small and cheap; the card's `coverage` field says what did not fit.
+
+### Depth levels { #depth-levels }
+
+A card is built at one of two depths. **Low** answers "who wrote these lines, and why?": the
+commits that own them and the one that created them, their pull requests in full, and the author's
+review replies. **Medium** adds what has been happening around them: more pull requests and the
+file's recent history in short form. Every level reads the description of
+each commit it includes and makes one model call. The project's
+default is `auto`, which picks a level per request; see
+[Depth and intent](../reference/mcp.md#depth-and-intent) and
+[Configuration](../reference/configuration.md#rationale-depth).
+
+The draft prompt also includes the target's current source, up to 8,000 characters (a longer target
+gets none, and the card says so in `coverage.source`), so the model can check a claim against the
+code; it is told not to describe it. **That source goes to the project's rationale provider**, as
+commit diffs already do for descriptions. Caller and callee lists are labelled as matched by name,
+and draft commits recovered from a squash PR are labelled as never having reached the default branch.
+
 ### Caching
 
 Cards are **persistently cached**, keyed by content - the target, the evidence bundle, the provider,
 and the model. Generate a card once and the next identical lookup is a sub-second database read. Change
-the underlying code (so the evidence shifts) and the next call regenerates. You pay the LLM cost only
+the lines' own history (so the evidence shifts) and the next call regenerates. One or two newer
+commits elsewhere in the file do not: the card is still served, marked `context_stale`, and three or
+more regenerate it. A card follows its symbol when the lines move. You pay the LLM cost only
 when something actually changed.
 
 ## The CodeGraph split

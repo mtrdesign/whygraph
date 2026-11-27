@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import { DEPTH_COPY, DEPTH_LEVELS, callsText, levelDescription } from "../lib/rationaleDepth";
 
 const SRC = resolve(import.meta.dirname, "..");
 const EM_DASH = "—";
@@ -70,5 +71,22 @@ describe("UI copy", () => {
           .map((t) => `${relative(SRC, f)}: ${t.trim().slice(0, 80)}`),
       );
     expect(hits).toEqual([]);
+  });
+
+  it("keeps the depth level copy in one constant the panel and the hints share (R31)", () => {
+    // The levels are `low` and `medium` (R49, R51).
+    expect(DEPTH_LEVELS).toEqual(["low", "medium"]);
+    expect(Object.keys(DEPTH_COPY.levels)).toEqual(["low", "medium"]);
+    expect(JSON.stringify(DEPTH_COPY)).not.toMatch(/[Vv]erif|High/);
+    expect(DEPTH_COPY.footer).toBe("Every level reads the LLM description of each commit it includes.");
+    for (const level of DEPTH_LEVELS) {
+      const row = DEPTH_COPY.levels[level];
+      const text = levelDescription(level);
+      expect(text).toContain(row.question);
+      expect(text.endsWith(callsText(row.calls))).toBe(true);
+      expect(text).not.toContain(EM_DASH);
+    }
+    expect(callsText(1)).toBe("1 model call.");
+    expect(callsText(2)).toBe("2 model calls.");
   });
 });

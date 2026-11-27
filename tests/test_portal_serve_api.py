@@ -361,7 +361,7 @@ def _fake_evidence() -> SimpleNamespace:
     return SimpleNamespace(
         pull_requests=[],
         issues=[],
-        commit=SimpleNamespace(sha="a" * 40),
+        commit=SimpleNamespace(sha="a" * 40, committed_at="2026-01-01T00:00:00+00:00"),
         source="blame",
     )
 
@@ -417,6 +417,8 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
             rationale=rationale,
             cached_at="2026-01-01T00:00:00+00:00",
             deferred_shas="a" * 40 + " " + "b" * 40,
+            level="medium",
+            context_stale=False,
         ),
     )
     gen = mock.Mock()
@@ -428,6 +430,10 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
     assert body["purpose"] == "the purpose"
     assert body["constraints"] == [{"text": "c1", "basis": "inferred", "refs": []}]
     assert (body["partial"], body["describing"], body["completing"]) == (True, 2, False)
+    # The row's level, with no resolver and no reason; nothing deeper is
+    # offered at medium, the highest offered level (R49).
+    assert body["depth"] == {"requested": "auto", "resolved": "medium", "reason": ""}
+    assert body["deeper"] is None
     gen.assert_not_called()  # cache read is still LLM-free
 
 
@@ -443,7 +449,25 @@ def test_rationale_post_calls_brief_verbatim(serve_client, monkeypatch) -> None:
 
     assert body["status"] == "cached"
     assert body["purpose"] == "generated purpose"
-    gen.assert_called_once_with(qualified_name="pkg.a.A.m")
+    gen.assert_called_once_with(qualified_name="pkg.a.A.m", depth=None)
+
+
+def test_rationale_post_generate_deeper_passes_an_offered_depth(
+    serve_client, monkeypatch
+) -> None:
+    """R41: an optional `depth` (capped by the resolver); `high` and `xhigh` are not offered (R49)."""
+    gen = mock.Mock(return_value={"target": {}, "purpose": "deeper"})
+    monkeypatch.setattr(routes, "whygraph_rationale_brief", gen)
+
+    ok = serve_client.post("/api/node/rationale?qualified_name=pkg.a.A.m&depth=medium")
+    assert ok.status_code == 200, ok.text
+    gen.assert_called_once_with(qualified_name="pkg.a.A.m", depth="medium")
+    for level in ("high", "xhigh"):
+        refused = serve_client.post(
+            f"/api/node/rationale?qualified_name=pkg.a.A.m&depth={level}"
+        )
+        assert refused.status_code == 422
+    assert gen.call_count == 1
 
 
 # ---- static fallback -----------------------------------------------------

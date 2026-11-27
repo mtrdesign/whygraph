@@ -87,6 +87,7 @@ from whygraph.services.git import GitError, Repository, git_env
 
 from .errors import WhyGraphError
 from .evidence import (
+    PR_COMMENTS_MAX,
     PROSE_BODY_MAX_CHARS,
     _clip,
     _json_list,
@@ -98,8 +99,9 @@ from .targets import repo_root
 
 _log = logging.getLogger(__name__)
 
-# The scan stores GitHub's first 100 comments; the resource keeps the first 50.
-PR_COMMENTS_MAX = 50
+_DISCUSSION_BODY_MAX_CHARS = 1000
+"""Characters of a review summary, review-thread comment or issue comment a
+resource keeps (conversation comments keep :data:`PROSE_BODY_MAX_CHARS`)."""
 
 _DB_UNSCANNED_MESSAGE = (
     "WhyGraph DB is missing or unscanned — scan from the WhyGraph portal first"
@@ -141,6 +143,50 @@ def _hydrate_commit(commit: Commit) -> dict:
     }
 
 
+def _clipped_entries(entries: list, limit: int, max_chars: int) -> tuple[list, int]:
+    """The first ``limit`` entries with bodies clipped, and the characters cut."""
+    out = []
+    clipped = 0
+    for entry in entries[:limit]:
+        if isinstance(entry, dict):
+            body = entry.get("body")
+            new = _clip(body, max_chars)
+            if new != body:
+                clipped += len(body) - max_chars
+            entry = {**entry, "body": new}
+        out.append(entry)
+    return out, clipped
+
+
+def _hydrate_threads(raw: str | None) -> tuple[list[dict], int, int]:
+    """A PR's stored review threads for a resource: every file, no ``anchor``.
+
+    At most :data:`PR_COMMENTS_MAX` comments in total, each clipped to
+    :data:`_DISCUSSION_BODY_MAX_CHARS`; a thread left with none once they
+    are used up is dropped. Flagged openers (``bot`` / ``minimized``) stay
+    as stored. Returns the threads, the comments cut and the characters
+    clipped.
+    """
+    room = PR_COMMENTS_MAX
+    out: list[dict] = []
+    cut = clipped = 0
+    for thread in _json_list(raw):
+        if not isinstance(thread, dict):
+            continue
+        comments = thread.get("comments")
+        comments = comments if isinstance(comments, list) else []
+        kept, chars = _clipped_entries(
+            comments, max(0, room), _DISCUSSION_BODY_MAX_CHARS
+        )
+        room -= len(kept)
+        cut += len(comments) - len(kept)
+        clipped += chars
+        if kept or not comments:
+            shown = {k: v for k, v in thread.items() if k not in ("anchor", "current")}
+            out.append({**shown, "comments": kept})
+    return out, cut, clipped
+
+
 def _hydrate_pr(pr: PullRequest, *, nested: bool = False) -> dict:
     """Serialize a :class:`PullRequest` row to a JSON-ready dict.
 
@@ -149,11 +195,23 @@ def _hydrate_pr(pr: PullRequest, *, nested: bool = False) -> dict:
     pr : PullRequest
         The pull request row to hydrate.
     nested : bool, optional
-        When ``True``, drops the two heavy JSON blob columns
-        (``commit_titles`` and ``comments``) so the row stays compact
-        inside another resource's payload. Direct reads of
-        ``whygraph://pr/{number}`` use ``nested=False`` and include
-        both blobs decoded as lists.
+        When ``True``, drops the heavy JSON blob columns (``commit_titles``,
+        ``review_summaries``, ``review_threads`` and ``comments``) so the
+        row stays compact inside another resource's payload. Direct reads
+        of ``whygraph://pr/{number}`` use ``nested=False`` and include them
+        decoded as lists.
+
+    Notes
+    -----
+    The review summaries and the review threads (on every file, without
+    the stored ``anchor``; a resource has no target, so no ``current``)
+    come **before** ``comments``, so a reader that cuts the payload short
+    (Chat's result cap) drops old conversation comments first. At most
+    :data:`PR_COMMENTS_MAX` conversation comments (clipped to
+    :data:`PROSE_BODY_MAX_CHARS`), review summaries and thread comments (in
+    total) are kept, the review bodies clipped to
+    :data:`_DISCUSSION_BODY_MAX_CHARS`; ``omitted`` counts what was cut
+    when anything was.
     """
     payload: dict = {
         "number": pr.number,
@@ -175,30 +233,45 @@ def _hydrate_pr(pr: PullRequest, *, nested: bool = False) -> dict:
     }
     if not nested:
         payload["commit_titles"] = _json_list(pr.commit_titles)
+        summaries = _json_list(pr.review_summaries)
+        payload["review_summaries"], summary_chars = _clipped_entries(
+            summaries, PR_COMMENTS_MAX, _DISCUSSION_BODY_MAX_CHARS
+        )
+        payload["review_threads"], thread_cut, thread_chars = _hydrate_threads(
+            pr.review_threads
+        )
         comments = _json_list(pr.comments)
-        kept = comments[:PR_COMMENTS_MAX]
-        clipped = 0
-        out = []
-        for c in kept:
-            if isinstance(c, dict):
-                body = c.get("body")
-                new = _clip(body, PROSE_BODY_MAX_CHARS)
-                if new != body:
-                    clipped += len(body) - PROSE_BODY_MAX_CHARS
-                c = {**c, "body": new}
-            out.append(c)
-        payload["comments"] = out
-        if len(comments) > len(kept) or clipped:
-            payload["omitted"] = {
-                "comments": len(comments) - len(kept),
-                "comment_chars": clipped,
-            }
+        payload["comments"], clipped = _clipped_entries(
+            comments, PR_COMMENTS_MAX, PROSE_BODY_MAX_CHARS
+        )
+        omitted = {
+            "comments": len(comments) - len(payload["comments"]),
+            "comment_chars": clipped,
+            "review_summaries": len(summaries) - len(payload["review_summaries"]),
+            "review_comments": thread_cut,
+            "review_comment_chars": summary_chars + thread_chars,
+        }
+        if any(omitted.values()):
+            payload["omitted"] = omitted
     return payload
 
 
-def _hydrate_issue(issue: Issue) -> dict:
-    """Serialize an :class:`Issue` row to a JSON-ready dict."""
-    return {
+def _hydrate_issue(issue: Issue, *, nested: bool = False) -> dict:
+    """Serialize an :class:`Issue` row to a JSON-ready dict.
+
+    Parameters
+    ----------
+    issue : Issue
+        The issue row to hydrate.
+    nested : bool, optional
+        When ``True`` (an issue inside another resource's payload), leaves
+        out ``comments``. Direct reads of ``whygraph://issue/{number}`` use
+        ``nested=False`` and add the stored comments: at most
+        :data:`PR_COMMENTS_MAX`, each clipped to
+        :data:`_DISCUSSION_BODY_MAX_CHARS`, with ``omitted`` counting what
+        was cut when anything was.
+    """
+    payload: dict = {
         "number": issue.number,
         "title": issue.title,
         "body": issue.body,
@@ -210,6 +283,18 @@ def _hydrate_issue(issue: Issue) -> dict:
         "html_url": issue.html_url,
         "labels": _json_list(issue.labels),
     }
+    if not nested:
+        comments = _json_list(issue.comments)
+        payload["comments"], clipped = _clipped_entries(
+            comments, PR_COMMENTS_MAX, _DISCUSSION_BODY_MAX_CHARS
+        )
+        omitted = {
+            "comments": len(comments) - len(payload["comments"]),
+            "comment_chars": clipped,
+        }
+        if any(omitted.values()):
+            payload["omitted"] = omitted
+    return payload
 
 
 # ---- linkage helpers -----------------------------------------------------
@@ -387,7 +472,9 @@ def _pr_resource(number: int) -> dict:
             issues = _closing_issues_for_pr(session, number)
             return {
                 "pull_request": _hydrate_pr(pr),
-                "closing_issues": [_hydrate_issue(issue) for issue in issues],
+                "closing_issues": [
+                    _hydrate_issue(issue, nested=True) for issue in issues
+                ],
             }
     except OperationalError as exc:
         raise WhyGraphError(_DB_UNSCANNED_MESSAGE) from exc
@@ -1048,9 +1135,11 @@ _WIP_MAX_LIMIT = 50
 """Upper clamp on the per-category ``limit`` of ``get_work_in_flight``."""
 
 _WIP_COMMENT_PAGE = 100
-"""The crawl stores ``comments(first: 100)``, oldest first: a PR holding this
-many may have newer comments the crawl never saw, so its last activity falls
-back to ``updated_at``."""
+"""The crawl fetches ``comments(first: 100)``, oldest first: a PR with more
+than this many comments on GitHub (its stored ``comments_total``) may have
+newer comments the crawl never saw, so its last activity falls back to
+``updated_at``. On a row without a total (not re-crawled since plan 62), a
+full page of stored comments is the same signal."""
 
 _WIP_NOT_TRACKED = (
     "team_review_requests",
@@ -1074,14 +1163,22 @@ def _clamp(value: int | None, default: int, high: int) -> int:
 
 
 def _pr_last_activity(pr: PullRequest) -> str:
-    """A PR's last activity: its newest non-bot comment, else ``updated_at``.
+    """A PR's last activity: its newest human comment, else ``updated_at``.
 
     ``updated_at`` moves on bot comments and label edits, so a comment is the
-    better signal when there is one. Stored comments carry only the author
-    login, so a bot is recognized by its ``[bot]`` suffix alone.
+    better signal when there is one. The crawl stores no bot or hidden
+    comment (plan 62 R19), so every stored comment is human; rows written
+    before that still hold bot comments, which the ``[bot]``-suffix check
+    drops where the login carries one. A PR with more than
+    :data:`_WIP_COMMENT_PAGE` comments on GitHub uses ``updated_at``.
     """
     comments = _json_list(pr.comments)
-    if len(comments) >= _WIP_COMMENT_PAGE:
+    page_full = (
+        pr.comments_total > _WIP_COMMENT_PAGE
+        if pr.comments_total is not None
+        else len(comments) >= _WIP_COMMENT_PAGE
+    )
+    if page_full:
         return pr.updated_at
     human = [
         (parsed, c["created_at"])
@@ -1212,8 +1309,9 @@ def _work_in_flight_resource(
     team requests are not crawled), first review time, assignees, milestone
     and diff size; each issue its assignees and milestone.
 
-    A PR's ``last_activity_at`` is its newest non-bot comment, else
-    ``updated_at`` (see :func:`_pr_last_activity`). Drafts are never
+    A PR's ``last_activity_at`` is its newest human comment (bot and hidden
+    comments are not stored), else ``updated_at``; a PR with more than 100
+    comments on GitHub uses ``updated_at`` (see :func:`_pr_last_activity`). Drafts are never
     ``stale``; an idle draft counts in ``summary.stale_drafts``. Both lists
     are sorted by ``idle_days``, longest first.
 
@@ -2358,15 +2456,19 @@ def register(mcp: FastMCP) -> None:
         "whygraph://pr/{number}",
         name="whygraph_pull_request",
         description=(
-            "A pull request and the issues it closes. Includes full "
-            "`commit_titles` and `comments` blobs."
+            "A pull request and the issues it closes. Includes "
+            "`commit_titles`, review summaries, review threads on every "
+            "file, and `comments` (capped, `omitted` counts cuts)."
         ),
         mime_type="application/json",
     )(_pr_resource)
     mcp.resource(
         "whygraph://issue/{number}",
         name="whygraph_issue",
-        description="An issue and the pull requests that close it.",
+        description=(
+            "An issue, its comments (capped, `omitted` counts cuts) and the "
+            "pull requests that close it."
+        ),
         mime_type="application/json",
     )(_issue_resource)
     mcp.resource(

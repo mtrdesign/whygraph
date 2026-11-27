@@ -93,6 +93,7 @@ from .authz import (
 from .context import ContextCache, ProjectNotFound, resolve_root
 from . import connections, sessions
 from .db import InstanceLock, data_dir, get_session
+from .depth_profile import DepthProfiles
 from .github_app import UserTokens
 from .hosts import BaseUrl, classify
 from .instance_settings import InstanceSettings
@@ -419,6 +420,9 @@ class PortalState:
         Validated shared folders.
     contexts : ContextCache
         Built project contexts; invalidate on every config / secret write.
+    depth_profiles : DepthProfiles
+        Each project's depth estimate sample, single-flight and cached per
+        ``HEAD`` (plan 62 section 14.5a).
     migrations : ProjectMigrations
         The per-project migration owner.
     runner : ScanRunner
@@ -621,6 +625,7 @@ class PortalState:
         # Read lazily: `platform_transport` is set below, and tests replace
         # it after start-up.
         self.contexts = ContextCache(transport=lambda: self.platform_transport)
+        self.depth_profiles = DepthProfiles()
         self.migrations = ProjectMigrations()
         self.runner = runner
         self.discovery = DiscoveryCache()

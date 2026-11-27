@@ -428,6 +428,12 @@ class AnalyzeConfig:
     agent_descriptions_per_member_per_hour: int = 150
 
 
+DEPTH_LEVELS: tuple[str, ...] = ("low", "medium")
+"""Every rationale depth level, lowest first (plan 62 section 14.1; R49 and R51
+removed ``high`` and ``xhigh``). A level added here is followed by the
+validation, the tool, ``/api/v1`` and the UI."""
+
+
 @dataclass(frozen=True, slots=True)
 class RationaleConfig:
     """Configuration for the LLM-driven rationale generator.
@@ -463,10 +469,19 @@ class RationaleConfig:
         when a squash collapsed a long feature branch. Must be ``>= 1``.
     pr_discussion_max_comments : int
         Cap on how many PR comments are rendered into a single PR block
-        in the rationale prompt. Must be ``>= 1``.
+        in the rationale prompt, and on PR and issue discussion in
+        ``detail="full"`` evidence. Must be ``>= 1``.
     pr_comment_max_chars : int
         Per-comment body clip applied before rendering a PR comment into
-        the rationale prompt. Must be ``>= 1``.
+        the rationale prompt, and before PR and issue discussion in
+        ``detail="full"`` evidence. Must be ``>= 1``.
+    review_threads_max_chars : int
+        Characters of qualified review-thread text in one card prompt;
+        ``0`` keeps threads out. Must be ``>= 0``.
+    context_max_chars : int
+        Characters of compact context commits (commits that touched the
+        target's file but not its lines) in one card prompt, filled newest
+        first by whole commits; ``0`` keeps them out. Must be ``>= 0``.
     agent_generations_per_hour : int
         Production only, **org setting** (owners): how many uncached
         rationale cards connected portals' agents (``/api/v1``) may
@@ -477,6 +492,18 @@ class RationaleConfig:
         The same limit per connected-portal member (enforced next to the org
         one, so the lower of the two binds). Org setting; ``0`` to
         ``10000``. Default ``30``.
+    depth : str
+        How deep a card reads: one of :data:`DEPTH_LEVELS` or
+        ``"auto"`` (default). A depth above :attr:`max_depth` is accepted
+        and capped when it is resolved, not refused here.
+    max_depth : str
+        The project's ceiling: one of :data:`DEPTH_LEVELS`.
+        Default ``"medium"``. Not importable from a repo's ``whygraph.toml``.
+    org_max_depth : str
+        Production only, **org setting** (owners): the org's ceiling, one
+        of :data:`DEPTH_LEVELS`. Read from the org layer, never
+        from a project's. The effective ceiling is the lower of this and
+        :attr:`max_depth`. Default ``"medium"``.
     """
 
     provider: str | None = None
@@ -485,8 +512,13 @@ class RationaleConfig:
     pr_roster_max_commits: int = 30
     pr_discussion_max_comments: int = 20
     pr_comment_max_chars: int = 500
+    review_threads_max_chars: int = 3000
+    context_max_chars: int = 27000
     agent_generations_per_hour: int = 120
     agent_generations_per_member_per_hour: int = 30
+    depth: str = "auto"
+    max_depth: str = "medium"
+    org_max_depth: str = "medium"
 
 
 AREA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
@@ -1467,7 +1499,9 @@ class Config:
             or ``analyze.pr_origin_min_commits`` is less than ``1``, or if
             any of the ``rationale`` PR-rendering caps
             (``pr_roster_max_commits``, ``pr_discussion_max_comments``,
-            ``pr_comment_max_chars``) is less than ``1``.
+            ``pr_comment_max_chars``) is less than ``1``, or if
+            ``rationale.review_threads_max_chars`` or
+            ``rationale.context_max_chars`` is negative.
         """
         try:
             LogLevel[self.log_level.upper()]
@@ -1512,6 +1546,33 @@ class Config:
                 "rationale.pr_comment_max_chars must be >= 1, "
                 f"got {self.rationale.pr_comment_max_chars}"
             )
+        if self.rationale.review_threads_max_chars < 0:
+            raise ConfigError(
+                "rationale.review_threads_max_chars must be >= 0, "
+                f"got {self.rationale.review_threads_max_chars}"
+            )
+        if self.rationale.context_max_chars < 0:
+            raise ConfigError(
+                "rationale.context_max_chars must be >= 0, "
+                f"got {self.rationale.context_max_chars}"
+            )
+        for name, value, allowed in (
+            ("rationale.depth", self.rationale.depth, (*DEPTH_LEVELS, "auto")),
+            (
+                "rationale.max_depth",
+                self.rationale.max_depth,
+                DEPTH_LEVELS,
+            ),
+            (
+                "rationale.org_max_depth",
+                self.rationale.org_max_depth,
+                DEPTH_LEVELS,
+            ),
+        ):
+            if value not in allowed:
+                raise ConfigError(
+                    f"{name} must be one of {', '.join(allowed)}, got {value!r}"
+                )
         for name, value in (
             (
                 "analyze.agent_descriptions_per_hour",

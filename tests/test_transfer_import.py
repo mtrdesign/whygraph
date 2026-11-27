@@ -109,6 +109,41 @@ def test_rationale_deferred_shas_travel_and_a_missing_key_is_final(project):
         assert b.deferred_shas == ""
 
 
+def test_rationale_depth_and_context_travel_and_a_missing_key_is_legacy(project):
+    """Plan 62 section 13.5: an older bundle's card stays a legacy row."""
+    coverage = {"line_commits": 2, "trimmed": ["full_pr_budget"], "unknown": "x"}
+    with_it = _card(depth=3, context_shas=f"{'a' * 40}  {'b' * 7}", coverage=coverage)
+    without = _card(line_start=2)
+    assert _rows([with_it, without]).inserted == 2
+    with get_session() as session:
+        a = session.get(RationaleCache, ("src/a.py", 1, 10, "openai", "default"))
+        b = session.get(RationaleCache, ("src/a.py", 2, 10, "openai", "default"))
+        assert (a.depth, a.context_shas) == (3, f"{'a' * 40} {'b' * 7}")
+        assert json.loads(a.coverage) == {
+            "line_commits": 2,
+            "trimmed": ["full_pr_budget"],
+        }
+        assert (b.depth, b.context_shas, b.coverage) == (None, "", None)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"depth": 4},
+        {"depth": -1},
+        {"depth": True},
+        {"depth": "high"},
+        {"context_shas": "not a sha!"},
+        {"coverage": ["x"]},
+        {"coverage": {"line_commits": -1}},
+        {"coverage": {"trimmed": ["Not Allowed"]}},
+    ],
+)
+def test_rationale_bad_depth_context_or_coverage_refuses(project, bad):
+    with pytest.raises(ImportFormatError):
+        _rows([_card(**bad)])
+
+
 def test_rationale_bad_deferred_shas_refuses(project):
     with pytest.raises(ImportFormatError):
         _rows([_card(deferred_shas="not a sha!")])

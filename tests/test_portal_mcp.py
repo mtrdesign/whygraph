@@ -379,7 +379,7 @@ def test_rationale_progress_reaches_the_client_over_stateless_http(
         def from_config(cls, config: object) -> "_Generator":
             return cls()
 
-        def generate(self, evidence, *, symbol_context=None, subject=None):  # noqa: ANN001
+        def generate(self, evidence, *, symbol_context=None, subject=None, **_):  # noqa: ANN001, ANN003
             return Rationale(
                 purpose="p",
                 why="w",
@@ -515,6 +515,8 @@ def test_tools_declare_an_output_schema() -> None:
     item = defs["RationaleItem"]
     assert set(item["required"]) == {"text", "basis", "refs"}
     assert set(item["properties"]) == {"text", "basis", "refs", "quote"}
+    # The verification pass is gone (R49): no verdict type is left.
+    assert "RationaleItemCheck" not in defs
     assert item["properties"]["basis"]["enum"] == [
         "quoted",
         "cited",
@@ -525,7 +527,37 @@ def test_tools_declare_an_output_schema() -> None:
     assert set(ref["required"]) == {"kind", "id"}
     assert ref["properties"]["kind"]["enum"] == ["commit", "pr", "issue"]
     assert "note" in tools["whygraph_propose_note"].outputSchema["properties"]
-    assert "cached_only" in tools["whygraph_rationale_brief"].inputSchema["properties"]
+    # The card's depth and what the next level adds (plan 62 section 14.4).
+    assert {"depth", "deeper", "coverage"} <= set(props)
+    assert set(defs["RationaleDepth"]["required"]) == {
+        "requested",
+        "resolved",
+        "reason",
+    }
+    assert set(defs["RationaleDeeper"]["required"]) == {"level", "adds"}
+    assert props["deeper"]["anyOf"] == [
+        {"$ref": "#/$defs/RationaleDeeper"},
+        {"type": "null"},
+    ]
+    brief_inputs = tools["whygraph_rationale_brief"].inputSchema["properties"]
+    assert "cached_only" in brief_inputs
+    assert {"type": "null"} in brief_inputs["cached_only"]["anyOf"]
+    # intent and depth carry their guidance in the input schema; high and
+    # xhigh are not offered (R49), so validation refuses them.
+    assert brief_inputs["intent"]["anyOf"][0]["enum"] == [
+        "explain",
+        "edit",
+        "refactor",
+        "delete",
+        "review",
+        "plan",
+    ]
+    assert brief_inputs["depth"]["anyOf"][0]["enum"] == ["low", "medium"]
+    for name in ("intent", "depth"):
+        assert brief_inputs[name]["description"]
+        assert name not in tools["whygraph_rationale_brief"].inputSchema.get(
+            "required", []
+        )
     supersedes = tools["whygraph_propose_note"].inputSchema["properties"][
         "supersedes_id"
     ]

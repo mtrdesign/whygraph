@@ -18,11 +18,11 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict, TypeVar
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -30,9 +30,11 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, col, select
 
 from whygraph.analyze import CommitEvidence
+from whygraph.core.code_anchor import anchor_status
 from whygraph.core.config import RationaleConfig
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
+from whygraph.core.safe_paths import UnsafePathError, check_inside
 from whygraph.core.usage import usage_blocked
 from whygraph.db import get_session
 from whygraph.db.models import Commit, CommitFileChange, Issue, PRIssueLink, PullRequest
@@ -65,6 +67,14 @@ _SOURCE_PRIORITY = {
     "predecessor-blame": 2,
     "area": 3,
 }
+
+# The sources that attribute the target's own lines (everything but "area");
+# :func:`_keep_origin` keeps these over area history.
+_LINE_LEVEL_SOURCES = frozenset(
+    {"blame", "pr-origin", "blame-walked", "predecessor-blame"}
+)
+
+_T = TypeVar("_T")
 
 _log = logging.getLogger(__name__)
 
@@ -104,6 +114,32 @@ PROSE_BODY_MAX_CHARS = 4000
 The rest is cut (marked with ``...``) and counted in that entry's
 ``omitted.body_chars``. Commit bodies are not capped.
 """
+
+PR_COMMENTS_MAX = 50
+"""Entries of one discussion list an agent-facing PR or issue keeps.
+
+The scan stores GitHub's first 100 conversation comments; the
+``whygraph://pr/{n}`` resource keeps the first 50. The same number bounds
+a PR's review summaries and its review-thread comments (in total), and an
+issue's comments, in :func:`_pr_dict` / :func:`_issue_dict` and the
+resources.
+"""
+
+ANCHOR_FILE_MAX_BYTES = 2 * 1024 * 1024
+"""Largest file :func:`review_scope` reads to check review-thread anchors."""
+
+DISCUSSION_RESPONSE_MAX_CHARS = 262_144
+"""Characters of discussion bodies one response carries (plan 62 R18).
+
+:func:`evidence_dicts` fills the PRs' ``review_summaries`` /
+``review_threads`` and the issues' ``comments`` in item order until this
+many body characters are used; later PRs and issues get empty lists (their
+integer totals stay). Keeps a 50-item ``/api/v1`` answer well under the
+linked client's response cap.
+"""
+
+_BINARY_SNIFF_BYTES = 8192
+"""A NUL byte in this many leading bytes marks a file as binary."""
 
 
 class _EvidenceToolRequired(TypedDict):
@@ -266,7 +302,9 @@ def collect_evidence(target: Target, *, limit: int = 20) -> list[CommitEvidence]
 
     SHAs that appear under multiple labels are kept once at the strongest
     label (see :data:`_SOURCE_PRIORITY`). The final list is sorted newest
-    first and capped at ``limit``.
+    first and capped at ``limit``; past ``limit`` line-level commits the cut
+    keeps every ``blame`` commit and the oldest dated one first (see
+    :func:`evidence_from_hunks`).
 
     Parameters
     ----------
@@ -327,6 +365,10 @@ def evidence_from_hunks(
         The blame of ``target`` (uncommitted hunks are skipped).
     limit : int, optional
         Cap on the number of commits returned, newest first (default 20).
+        When the line-level commits (every source but ``area``) exceed it,
+        the kept ones are every ``blame`` commit (newest first, up to
+        ``limit``), then the oldest dated line-level commit, then the newest
+        of the rest; at ``limit`` 1 the newest is kept.
     git_budget : int or None, optional
         Cap on the number of blame calls this run may make; ``None``
         (default) means no cap. Calls past it are skipped: hunks stay
@@ -405,7 +447,53 @@ def evidence_from_hunks(
         items.extend(extras)
 
     items.sort(key=lambda item: item.commit.committed_at or "", reverse=True)
-    return EvidenceResult(evidence=items[:limit], unknown=list(unknown.values()))
+    kept = _keep_origin(
+        items,
+        limit,
+        source_of=lambda item: item.source,
+        is_dated=lambda item: bool(item.commit.committed_at),
+        line_level=_LINE_LEVEL_SOURCES,
+    )
+    return EvidenceResult(evidence=kept, unknown=list(unknown.values()))
+
+
+def _keep_origin(
+    ordered: list[_T],
+    limit: int,
+    *,
+    source_of: Callable[[_T], str | None],
+    is_dated: Callable[[_T], bool],
+    line_level: Collection[str],
+) -> list[_T]:
+    """Cut newest-first ``ordered`` to ``limit``, keeping the lines' origin.
+
+    Line-level items always come first: at or under ``limit`` of them, all
+    are kept and the other items (area history) fill only the remaining
+    slots, newest first. Past ``limit``, the kept items are every ``blame``
+    item (newest first, up to ``limit``), then the oldest dated line-level
+    item, then the newest remaining line-level items; at ``limit`` 1 the
+    newest line-level item. Returned in ``ordered``'s order.
+    """
+    if limit < 1:
+        return ordered[:limit]
+    line = [i for i, item in enumerate(ordered) if source_of(item) in line_level]
+    if len(line) <= limit:
+        line_set = set(line)
+        rest = [i for i in range(len(ordered)) if i not in line_set]
+        return [ordered[i] for i in sorted([*line, *rest[: limit - len(line)]])]
+    if limit == 1:
+        return [ordered[line[0]]]
+    kept = [i for i in line if source_of(ordered[i]) == "blame"][:limit]
+    if len(kept) < limit:
+        oldest = next((i for i in reversed(line) if is_dated(ordered[i])), None)
+        if oldest is not None and oldest not in kept:
+            kept.append(oldest)
+    for i in line:
+        if len(kept) >= limit:
+            break
+        if i not in kept:
+            kept.append(i)
+    return [ordered[i] for i in sorted(kept)]
 
 
 def _should_replace(existing: CommitEvidence | None, new_source: str) -> bool:
@@ -1393,17 +1481,177 @@ def _commit_dict(commit: Commit) -> dict:
     }
 
 
-def _pr_dict(pr: PullRequest) -> dict:
+@dataclass(frozen=True)
+class ReviewScope:
+    """Which review threads a response carries, and the file to check them on.
+
+    Attributes
+    ----------
+    paths : frozenset[str]
+        The target file and its rename aliases: a stored thread is in
+        scope when its ``path`` is one of these exactly.
+    current_lines : tuple[str, ...] or None
+        The target file's current lines (split on ``"\\n"`` only, so line
+        numbers match ``git blame``'s); ``()`` for a missing file and
+        ``None`` when it could not be read (unsafe path, too large,
+        binary, or a read error).
+    """
+
+    paths: frozenset[str]
+    current_lines: tuple[str, ...] | None
+
+
+def _current_file_lines(root: Path, path: str) -> tuple[str, ...] | None:
+    """``path``'s lines under ``root`` for anchor checks (see :class:`ReviewScope`)."""
+    try:
+        file = check_inside(root, path)
+    except UnsafePathError:
+        return None
+    try:
+        with file.open("rb") as handle:
+            data = handle.read(ANCHOR_FILE_MAX_BYTES + 1)
+    except (FileNotFoundError, NotADirectoryError):
+        return ()
+    except OSError:
+        return None
+    if len(data) > ANCHOR_FILE_MAX_BYTES or b"\0" in data[:_BINARY_SNIFF_BYTES]:
+        return None
+    return tuple(data.decode("utf-8", errors="replace").split("\n"))
+
+
+def review_scope(
+    session: Session, root: Path, path: str, *, include_renames: bool = True
+) -> ReviewScope:
+    """The review-thread scope of one file target, computed once per request.
+
+    Parameters
+    ----------
+    session : Session
+        An open WhyGraph session (for the rename walk).
+    root : Path
+        The checkout the request blames under: ``repo_root()`` locally, the
+        project's clone on the platform. The file is read only through
+        :func:`~whygraph.core.safe_paths.check_inside`.
+    path : str
+        The target's file path, relative to ``root``.
+    include_renames : bool, optional
+        When ``True`` (default), threads on the file's earlier names (the
+        default branch's renames, plus the current branch's) are in scope
+        too; ``False`` keeps the exact path only.
+
+    Returns
+    -------
+    ReviewScope
+        The paths and the file's current lines (at most
+        :data:`ANCHOR_FILE_MAX_BYTES`, decoded as UTF-8 with replacement).
+    """
+    paths = frozenset({path})
+    if include_renames:
+        # Lazy import: path_history reuses _linked_prs / _linked_issues from
+        # this module, so an eager import would create a cycle.
+        from .path_history import current_branch_scope, resolve_path_aliases
+
+        aliases = resolve_path_aliases(
+            session, path, current_branch=current_branch_scope()
+        )
+        paths = frozenset(aliases) or paths
+    return ReviewScope(paths=paths, current_lines=_current_file_lines(root, path))
+
+
+def _dict_entries(raw: str | None) -> list[dict]:
+    """The dict entries of a JSON-list column (anything else dropped)."""
+    return [entry for entry in _json_list(raw) if isinstance(entry, dict)]
+
+
+def _bounded_bodies(entries: Sequence[dict], limit: int) -> list[dict]:
+    """The first ``limit`` entries, each body clipped to :data:`PROSE_BODY_MAX_CHARS`."""
+    return [
+        {**entry, "body": _clip(entry.get("body"), PROSE_BODY_MAX_CHARS)}
+        for entry in entries[:limit]
+    ]
+
+
+def _thread_current(thread: dict, lines: tuple[str, ...] | None) -> bool | None:
+    """Whether a stored thread's anchor occurs exactly once in ``lines`` (R22)."""
+    anchor = thread.get("anchor")
+    anchor_lines = anchor.get("lines") if isinstance(anchor, dict) else None
+    if not anchor_lines or not isinstance(anchor_lines, list):
+        return None
+    return anchor_status(anchor_lines, lines)
+
+
+def _scoped_threads(
+    stored: Sequence[dict], scope: ReviewScope
+) -> tuple[list[dict], int]:
+    """The in-scope threads in the wire shape, and how many are elsewhere.
+
+    At most :data:`PR_COMMENTS_MAX` comments in total, each clipped to
+    :data:`PROSE_BODY_MAX_CHARS`; once they are used up, later threads are
+    left out. The stored ``anchor`` is not emitted; ``current`` is.
+    """
+    inside = [t for t in stored if t.get("path") in scope.paths]
+    out: list[dict] = []
+    room = PR_COMMENTS_MAX
+    for thread in inside:
+        if room <= 0:
+            break
+        comments = [c for c in thread.get("comments") or [] if isinstance(c, dict)]
+        kept = _bounded_bodies(comments, room)
+        room -= len(kept)
+        total = thread.get("comments_total")
+        out.append(
+            {
+                "path": thread.get("path"),
+                "original_line": thread.get("original_line"),
+                "resolved": thread.get("resolved"),
+                "outdated": thread.get("outdated"),
+                "current": _thread_current(thread, scope.current_lines),
+                "comments": kept,
+                "comments_total": total if isinstance(total, int) else len(comments),
+            }
+        )
+    return out, len(stored) - len(inside)
+
+
+def _pr_dict(pr: PullRequest, scope: ReviewScope | None = None) -> dict:
     """Serialize a pull request to a JSON-ready dict.
+
+    Parameters
+    ----------
+    pr : PullRequest
+        The row.
+    scope : ReviewScope or None, optional
+        Which review threads to emit. ``None`` (default) emits none
+        (``review_threads`` ``[]``, ``review_threads_elsewhere`` ``0``).
+
+    Returns
+    -------
+    dict
+        The existing keys, then always, in this order: ``review_summaries``
+        (as stored), ``review_threads`` (the stored threads whose ``path``
+        is in ``scope.paths``, each with ``current``: ``True`` when the
+        code it was written about occurs exactly once in today's file,
+        ``False`` when it is gone, ``None`` when it occurs several times or
+        the thread or the file has no anchor / lines; the stored ``anchor``
+        is not emitted), ``review_threads_elsewhere`` (stored threads on
+        other paths) and ``review_threads_total`` (GitHub's count, or the
+        stored list's length on a row not re-crawled yet; never ``None``).
 
     Notes
     -----
     ``commit_titles`` and ``comments`` are emitted **uncapped**: the
     consumer of ``whygraph_evidence_for`` is an agent that can handle the
-    full lists. The size caps in :class:`RationaleConfig` apply only to the
-    LLM *rationale prompt* (see ``analyze.rationale_generator._format_pr``),
-    not to this raw tool output.
+    full lists. The review discussion is **bounded per PR**: at most
+    :data:`PR_COMMENTS_MAX` review summaries and :data:`PR_COMMENTS_MAX`
+    thread comments in total, each body clipped to
+    :data:`PROSE_BODY_MAX_CHARS`; :func:`evidence_dicts` also caps it per
+    response. The size caps in :class:`RationaleConfig` apply only to the
+    LLM *rationale prompt* (see ``analyze.rationale_generator._format_pr``)
+    and the ``detail="full"`` prose, not to this raw output.
     """
+    stored = _dict_entries(pr.review_threads)
+    threads, elsewhere = ([], 0) if scope is None else _scoped_threads(stored, scope)
+    total = pr.review_threads_total
     return {
         "number": pr.number,
         "title": pr.title,
@@ -1415,11 +1663,25 @@ def _pr_dict(pr: PullRequest) -> dict:
         "labels": _json_list(pr.labels),
         "commit_titles": _json_list(pr.commit_titles),
         "comments": _json_list(pr.comments),
+        "review_summaries": _bounded_bodies(
+            _dict_entries(pr.review_summaries), PR_COMMENTS_MAX
+        ),
+        "review_threads": threads,
+        "review_threads_elsewhere": elsewhere,
+        "review_threads_total": len(stored) if total is None else total,
     }
 
 
 def _issue_dict(issue: Issue) -> dict:
-    """Serialize an issue to a JSON-ready dict."""
+    """Serialize an issue to a JSON-ready dict.
+
+    ``comments`` holds the stored comments (at most
+    :data:`PR_COMMENTS_MAX`, bodies clipped to :data:`PROSE_BODY_MAX_CHARS`);
+    ``comments_total`` is GitHub's count (it includes comments the crawl did
+    not store), or the stored list's length on a row not re-crawled yet.
+    """
+    comments = _dict_entries(issue.comments)
+    total = issue.comments_total
     return {
         "number": issue.number,
         "title": issue.title,
@@ -1428,6 +1690,8 @@ def _issue_dict(issue: Issue) -> dict:
         "author": issue.author,
         "html_url": issue.html_url,
         "labels": _json_list(issue.labels),
+        "comments": _bounded_bodies(comments, PR_COMMENTS_MAX),
+        "comments_total": len(comments) if total is None else total,
     }
 
 
@@ -1451,14 +1715,131 @@ def hunk_lines(hunk: BlameHunk) -> tuple[tuple[int, int], ...] | None:
     return tuple(merged)
 
 
-def _evidence_dict(item: CommitEvidence) -> dict:
-    """Serialize one :class:`CommitEvidence` to a JSON-ready dict."""
+def _evidence_dict(item: CommitEvidence, scope: ReviewScope | None = None) -> dict:
+    """Serialize one :class:`CommitEvidence` to a JSON-ready dict.
+
+    ``scope`` selects the PRs' review threads (see :func:`_pr_dict`). A
+    response of several items is built with :func:`evidence_dicts`, which
+    also fills each PR's and issue's discussion only once.
+    """
     return {
         "commit": _commit_dict(item.commit),
-        "pull_requests": [_pr_dict(pr) for pr in item.pull_requests],
+        "pull_requests": [_pr_dict(pr, scope) for pr in item.pull_requests],
         "issues": [_issue_dict(issue) for issue in item.issues],
         "source": item.source,
     }
+
+
+_PR_DISCUSSION_KEYS = ("review_summaries", "review_threads")
+"""A PR's list keys :func:`evidence_dicts` fills once per response."""
+
+_ISSUE_DISCUSSION_KEYS = ("comments",)
+"""An issue's list keys :func:`evidence_dicts` fills once per response."""
+
+
+def _body_chars(entry: dict) -> int:
+    """Characters of an entry's ``body`` (0 for a non-string)."""
+    body = entry.get("body")
+    return len(body) if isinstance(body, str) else 0
+
+
+def _within_budget(entry: dict, keys: Sequence[str], room: int) -> int:
+    """Trim ``entry``'s list ``keys`` in place to ``room`` body characters.
+
+    Entries are kept in order until one does not fit; from then on every
+    list is emptied (a thread keeps the comments that fit, and is dropped
+    when none did). Returns the room left, ``-1`` once the budget is spent.
+    """
+    for key in keys:
+        kept: list[dict] = []
+        for value in entry.get(key) or []:
+            if room < 0:
+                break
+            if key != "review_threads":
+                size = _body_chars(value)
+                if size > room:
+                    room = -1
+                    break
+                kept.append(value)
+                room -= size
+                continue
+            comments: list[dict] = []
+            for comment in value.get("comments") or []:
+                size = _body_chars(comment)
+                if size > room:
+                    room = -1
+                    break
+                comments.append(comment)
+                room -= size
+            if comments or not value.get("comments"):
+                kept.append({**value, "comments": comments})
+        entry[key] = kept
+    return room
+
+
+def evidence_dicts(
+    items: Sequence[CommitEvidence], scope: ReviewScope | None
+) -> list[dict]:
+    """Serialize a response's evidence items, each discussion once.
+
+    Parameters
+    ----------
+    items : Sequence[CommitEvidence]
+        The bundle, in response order.
+    scope : ReviewScope or None
+        The review-thread scope of the target file (:func:`review_scope`);
+        ``None`` emits no threads.
+
+    Returns
+    -------
+    list[dict]
+        One :func:`_evidence_dict` per item, except that (a) a PR's
+        ``review_summaries`` / ``review_threads`` and an issue's
+        ``comments`` are filled only on that PR's or issue's first
+        occurrence and are ``[]`` on repeats (the integer keys are always
+        filled; a PR's existing ``comments`` key is unchanged), and (b) the
+        bodies in those lists are capped at
+        :data:`DISCUSSION_RESPONSE_MAX_CHARS` per response, filled in item
+        order: once spent, later PRs and issues get empty lists with their
+        totals kept (plan 62 R18).
+    """
+    room = DISCUSSION_RESPONSE_MAX_CHARS
+    first_prs: dict[int, dict] = {}
+    seen_issues: set[int] = set()
+    out: list[dict] = []
+    for item in items:
+        prs: list[dict] = []
+        for pr in item.pull_requests:
+            first = first_prs.get(pr.number)
+            if first is None:
+                entry = _pr_dict(pr, scope)
+                room = _within_budget(entry, _PR_DISCUSSION_KEYS, room)
+                first_prs[pr.number] = entry
+            else:
+                # A repeat: no thread or anchor work, the counts of the first.
+                entry = _pr_dict(pr)
+                entry["review_summaries"] = []
+                for key in ("review_threads_elsewhere", "review_threads_total"):
+                    entry[key] = first[key]
+            prs.append(entry)
+        issues: list[dict] = []
+        for issue in item.issues:
+            entry = _issue_dict(issue)
+            if issue.number in seen_issues:
+                entry["comments"] = []
+            else:
+                seen_issues.add(issue.number)
+                room = _within_budget(entry, _ISSUE_DISCUSSION_KEYS, room)
+            issues.append(entry)
+        out.append(
+            {
+                "commit": _commit_dict(item.commit),
+                "pull_requests": prs,
+                "issues": issues,
+                "source": item.source,
+            }
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1491,40 +1872,116 @@ def _body_overflow(body: object) -> int:
     return 0
 
 
+def _dicts(values: object) -> list[dict]:
+    """The dict entries of a wire list (``[]`` for a missing or odd value)."""
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, dict)]
+
+
+def _capped_comments(entries: list[dict], caps: RationaleConfig) -> list[dict]:
+    """The first ``pr_discussion_max_comments``, clipped to ``pr_comment_max_chars``."""
+    return [
+        {**c, "body": _clip(c.get("body"), caps.pr_comment_max_chars)}
+        for c in entries[: caps.pr_discussion_max_comments]
+    ]
+
+
+def _capped_threads(threads: list[dict], caps: RationaleConfig) -> tuple[list, int]:
+    """Threads with their comments up to ``pr_discussion_max_comments`` in total.
+
+    Each comment is clipped to ``pr_comment_max_chars``; a thread left with
+    no comment once the cap is used up is dropped. Returns the threads and
+    how many comments the cap cut.
+    """
+    room = caps.pr_discussion_max_comments
+    out: list[dict] = []
+    cut = 0
+    for thread in threads:
+        comments = _dicts(thread.get("comments"))
+        kept = comments[: max(0, room)]
+        room -= len(kept)
+        cut += len(comments) - len(kept)
+        if kept or not comments:
+            out.append(
+                {
+                    **thread,
+                    "comments": [
+                        {**c, "body": _clip(c.get("body"), caps.pr_comment_max_chars)}
+                        for c in kept
+                    ],
+                }
+            )
+    return out, cut
+
+
 def _pr_prose(pr: dict, caps: RationaleConfig) -> dict:
-    """One PR's ``full`` entry: capped body and comments, the roster, ``omitted``."""
-    comments = [c for c in pr.get("comments") or [] if isinstance(c, dict)]
+    """One PR's ``full`` entry: capped body and discussion, the roster, ``omitted``.
+
+    ``text`` holds the body, the first ``pr_discussion_max_comments``
+    conversation comments and review summaries, and the in-scope review
+    threads with up to ``pr_discussion_max_comments`` comments in total,
+    every comment clipped to ``pr_comment_max_chars``. ``omitted`` (only
+    when anything was left out) counts what those caps cut and the review
+    threads on other files (``review_threads_elsewhere``).
+    """
+    comments = _dicts(pr.get("comments"))
+    summaries = _dicts(pr.get("review_summaries"))
+    threads, thread_cut = _capped_threads(_dicts(pr.get("review_threads")), caps)
     titles = list(pr.get("commit_titles") or [])
-    kept = comments[: caps.pr_discussion_max_comments]
     body = pr.get("body")
     out: dict = {
         "text": {
             "body": _clip(body, PROSE_BODY_MAX_CHARS),
-            "comments": [
-                {**c, "body": _clip(c.get("body"), caps.pr_comment_max_chars)}
-                for c in kept
-            ],
+            "comments": _capped_comments(comments, caps),
+            "review_summaries": _capped_comments(summaries, caps),
+            "review_threads": threads,
         },
         "commit_titles": titles[: caps.pr_roster_max_commits],
     }
+    elsewhere = pr.get("review_threads_elsewhere")
     omitted = {
-        "comments": len(comments) - len(kept),
+        "comments": len(comments) - len(out["text"]["comments"]),
         "commit_titles": len(titles) - len(out["commit_titles"]),
         "body_chars": _body_overflow(body),
+        "review_summaries": len(summaries) - len(out["text"]["review_summaries"]),
+        "review_comments": thread_cut,
+        "review_threads_elsewhere": elsewhere if isinstance(elsewhere, int) else 0,
     }
     if any(omitted.values()):
         out["omitted"] = omitted
     return out
 
 
-def _issue_prose(issue: dict) -> dict:
-    """One issue's ``full`` entry: its capped body and ``omitted`` when cut."""
+def _issue_prose(issue: dict, caps: RationaleConfig) -> dict:
+    """One issue's ``full`` entry: capped body and comments, ``omitted`` when cut.
+
+    ``text.comments`` holds the first ``pr_discussion_max_comments``
+    comments, each clipped to ``pr_comment_max_chars``.
+    """
     body = issue.get("body")
-    out: dict = {"text": {"body": _clip(body, PROSE_BODY_MAX_CHARS)}}
-    overflow = _body_overflow(body)
-    if overflow:
-        out["omitted"] = {"body_chars": overflow}
+    comments = _dicts(issue.get("comments"))
+    kept = _capped_comments(comments, caps)
+    out: dict = {"text": {"body": _clip(body, PROSE_BODY_MAX_CHARS), "comments": kept}}
+    omitted = {
+        "body_chars": _body_overflow(body),
+        "comments": len(comments) - len(kept),
+    }
+    if any(omitted.values()):
+        out["omitted"] = omitted
     return out
+
+
+def _discussion_size(entry: dict) -> int:
+    """How much discussion a PR's or issue's copy carries (see :func:`shape_evidence`)."""
+    return sum(
+        len(value) if isinstance(value, list) else 0
+        for value in (
+            entry.get("review_summaries"),
+            entry.get("review_threads"),
+            entry.get("comments"),
+        )
+    )
 
 
 def shape_evidence_item(item: dict, detail: Detail = "compact") -> dict:
@@ -1582,14 +2039,19 @@ def shape_evidence(items: list[dict], detail: Detail = "compact") -> dict:
         ``"compact"`` (default) returns only ``evidence``. ``"full"`` also
         returns ``pull_requests`` and ``issues``: maps keyed by the number
         as a string, one entry per PR or issue however many items link it
-        (the first item's copy wins). A PR entry holds the untrusted prose
-        under ``text`` (its ``body`` clipped to
-        :data:`PROSE_BODY_MAX_CHARS`, its first ``pr_discussion_max_comments``
-        comments, each clipped to ``pr_comment_max_chars``), its first
+        (the copy with the most discussion wins, the first on a tie: a
+        response fills a discussion once, and a linked project's merge
+        re-sorts items). A PR entry holds the untrusted prose under
+        ``text`` (its ``body`` clipped to :data:`PROSE_BODY_MAX_CHARS`; its
+        first ``pr_discussion_max_comments`` comments and review summaries
+        and its in-scope review threads with that many comments in total,
+        each clipped to ``pr_comment_max_chars``), its first
         ``pr_roster_max_commits`` ``commit_titles`` and, when anything was
-        cut, ``omitted`` (``comments``, ``commit_titles``, ``body_chars``);
-        an issue entry holds ``text.body`` (clipped the same way) and
-        ``omitted.body_chars`` when cut.
+        left out, ``omitted`` (``comments``, ``commit_titles``,
+        ``body_chars``, ``review_summaries``, ``review_comments``,
+        ``review_threads_elsewhere``); an issue entry holds ``text.body``
+        and ``text.comments`` (capped the same way) and ``omitted``
+        (``body_chars``, ``comments``) when cut.
 
     Returns
     -------
@@ -1603,19 +2065,19 @@ def shape_evidence(items: list[dict], detail: Detail = "compact") -> dict:
     from whygraph.core import get_config
 
     caps = get_config().rationale
-    prs: dict[str, dict] = {}
-    issues: dict[str, dict] = {}
+    prs: dict[str, tuple[int, dict]] = {}
+    issues: dict[str, tuple[int, dict]] = {}
     for item in items:
-        for pr in item.get("pull_requests") or []:
-            key = str(pr.get("number"))
-            if key not in prs:
-                prs[key] = _pr_prose(pr, caps)
-        for issue in item.get("issues") or []:
-            key = str(issue.get("number"))
-            if key not in issues:
-                issues[key] = _issue_prose(issue)
-    out["pull_requests"] = prs
-    out["issues"] = issues
+        for kind, best in (("pull_requests", prs), ("issues", issues)):
+            for entry in item.get(kind) or []:
+                key = str(entry.get("number"))
+                size = _discussion_size(entry)
+                if key not in best or size > best[key][0]:
+                    best[key] = (size, entry)
+    out["pull_requests"] = {key: _pr_prose(pr, caps) for key, (_, pr) in prs.items()}
+    out["issues"] = {
+        key: _issue_prose(issue, caps) for key, (_, issue) in issues.items()
+    }
     return out
 
 
@@ -1936,7 +2398,10 @@ def merge_linked_evidence(
     -------
     list[dict]
         Newest first by parsed timestamp, one entry per SHA - a platform
-        item always beats a locally built one - capped at ``limit``.
+        item always beats a locally built one - capped at ``limit``. As in
+        :func:`evidence_from_hunks`, line-level items (``local`` counts as
+        one) come first and ``area`` items fill only the remaining slots;
+        past ``limit`` line-level items the cut keeps the lines' origin.
     """
     by_sha: dict[str, dict] = {}
     for item in platform_items:
@@ -1963,7 +2428,15 @@ def merge_linked_evidence(
         key=lambda item: _parsed_time((item.get("commit") or {}).get("committed_at")),
         reverse=True,
     )
-    return items[:limit]
+    return _keep_origin(
+        items,
+        limit,
+        source_of=lambda item: item.get("source"),
+        is_dated=lambda item: (
+            _parsed_time((item.get("commit") or {}).get("committed_at")) != _EPOCH
+        ),
+        line_level=_LINE_LEVEL_SOURCES | {LOCAL_SOURCE},
+    )
 
 
 def blame_target(repo: Repository, target: Target) -> tuple[BlameHunk, ...]:
@@ -2053,7 +2526,8 @@ def evidence_payload(
     -------
     dict
         ``{"target", "evidence", "describing"}``: items in the
-        :func:`_evidence_dict` shape plus ``lines``; ``describing`` counts
+        :func:`evidence_dicts` shape (review threads scoped to the target's
+        file and its rename aliases) plus ``lines``; ``describing`` counts
         the commits still waiting for a description (the bound, a refusal,
         a failure, or ``describe=False``), never one that cannot get one. A project linked to a WhyGraph platform is
         answered by :func:`linked_evidence`, which adds a ``platform``
@@ -2090,14 +2564,13 @@ def evidence_payload(
         target_path=target.path,
         max_commits=MAX_BACKFILL_PER_CALL if describe else 0,
     ).left
+    with get_session() as session:
+        scope = review_scope(session, repo_root(), target.path)
     return {
         "target": target_dict(target),
         "evidence": [
-            {
-                **_evidence_dict(item),
-                "lines": [list(r) for r in item.lines or ()] or None,
-            }
-            for item in evidence
+            {**entry, "lines": [list(r) for r in item.lines or ()] or None}
+            for entry, item in zip(evidence_dicts(evidence, scope), evidence)
         ],
         "describing": describing,
     }

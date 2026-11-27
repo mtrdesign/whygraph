@@ -2,6 +2,7 @@ import { ApiError, getErrorMode, type ErrorMode } from "../api";
 import { budgetNoticeText } from "./budgetBanner";
 import { revokedLabel } from "./connections";
 import { formatUsd } from "./format";
+import { depthShortName } from "./rationaleDepth";
 
 // The one error-code registry (M2f-3 plan section 4.3, Appendix C). Every code
 // the backend can return (`api-error-codes.json`, kept equal to the backend by
@@ -401,6 +402,11 @@ export const MESSAGES: Record<string, Resolver> = {
     tone: "info",
     message: "This symbol has no history in the scanned commits, so there is nothing to explain yet.",
   },
+  depth_above_ceiling: (err) =>
+    typeof err.extra.ceiling === "string"
+      ? `Above your organization's ceiling (${depthShortName(err.extra.ceiling)}).`
+      : "Above your organization's ceiling.",
+  depth_profile_failed: { message: "The price estimate could not be computed. Try again.", action: RETRY },
   generation_not_permitted: "You can read rationale cards here but not generate new ones.",
   generation_limited: (err) => ({
     tone: "warn",

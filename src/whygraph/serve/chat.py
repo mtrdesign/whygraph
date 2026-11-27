@@ -980,7 +980,12 @@ class _ReferenceLookups:
     by primary key, and the rationale cache by its exact key with the target
     from :func:`~whygraph.mcp.targets.indexed_symbol_target` (never
     ``resolve_target``, which may re-sync CodeGraph - a write in a read
-    path). CodeGraph is opened on first use; :meth:`close` releases it.
+    path). The cache hint is deliberately not
+    :func:`~whygraph.mcp.rationale_cache.lookup_cached`: that needs the
+    symbol's evidence (a git blame per symbol) inside the pre-pass's
+    1.5-second budget, and may write (it follows the symbol); a card at an
+    older range shows as not cached until a real lookup moves it. CodeGraph
+    is opened on first use; :meth:`close` releases it.
     """
 
     def __init__(self) -> None:
@@ -1015,6 +1020,8 @@ class _ReferenceLookups:
         if target is None:
             return False
         identity = get_config().cache_identity("rationale")
+        # A card of any depth: Chat's own cards are usually `low` (intent
+        # "explain"), and a deeper card serves a shallower request.
         return lookup_exact(target, *identity) is not None
 
     def note_count(self, symbol: Symbol) -> int:

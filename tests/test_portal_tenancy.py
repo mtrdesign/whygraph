@@ -1187,6 +1187,9 @@ ROUTE_REQUESTS: dict[tuple[str, str], Call] = {
         200, shows=lambda o: [f"{o.mark}-model"]
     ),
     ("GET", "/api/projects/{slug}/chat/modes"): Call(200),
+    # The depth estimate (plan 62): computed off the request, so the first ask
+    # is `computing` (or `no_index`); it carries no project data of its own.
+    ("GET", "/api/projects/{slug}/rationale/depth-profile"): Call(200),
     # Committed plans (plan 61): no plans are seeded, so the list is empty and
     # one stem is a 404 (the REST cases live in test_portal_plans_routes.py).
     ("GET", "/api/projects/{slug}/plans"): Call(200),

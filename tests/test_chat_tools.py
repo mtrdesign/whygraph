@@ -678,10 +678,16 @@ def test_rationale_no_evidence_is_a_status_not_an_error(
 def _fake_evidence_item():
     """A stand-in for one ``CommitEvidence``.
 
-    ``_format_response`` counts ``pull_requests`` / ``issues``, so the stub
-    needs those two attributes and nothing else.
+    ``_format_response`` counts ``pull_requests`` / ``issues`` over the
+    card's bundle, which reads each item's ``source`` and its commit's
+    ``sha`` / ``committed_at``; the stub carries those and nothing else.
     """
-    return SimpleNamespace(pull_requests=[], issues=[])
+    return SimpleNamespace(
+        pull_requests=[],
+        issues=[],
+        commit=SimpleNamespace(sha="a" * 40, committed_at="2026-01-01T00:00:00+00:00"),
+        source="blame",
+    )
 
 
 @pytest.fixture
@@ -714,7 +720,8 @@ def test_rationale_cache_miss_calls_the_mcp_tool_verbatim_once(
     registry = ToolRegistry(max_rationale_generations=2)
     result = _result(registry, "get_rationale", qualified_name="pkg.a.run_turn")
 
-    assert calls == [{"qualified_name": "pkg.a.run_turn"}]
+    # Chat's card is an `explain` card (plan 62 section 14.3).
+    assert calls == [{"qualified_name": "pkg.a.run_turn", "intent": "explain"}]
     assert result["status"] == "cached"
     assert result["generated"] is True
     for key, value in sentinel.items():
@@ -728,7 +735,8 @@ def test_rationale_third_miss_in_one_turn_degrades_without_generating(
     """AC #4: over budget → not_generated, and the spy is NOT invoked again."""
     calls: list[str] = []
 
-    def _spy(*, qualified_name):
+    def _spy(*, qualified_name, intent):
+        assert intent == "explain"
         calls.append(qualified_name)
         return {"purpose": "p"}
 
@@ -796,6 +804,8 @@ def test_rationale_cache_hit_never_generates(
             ),
             cached_at="2026-07-29T00:00:00+00:00",
             deferred_shas="",
+            level="medium",
+            context_stale=False,
         ),
     )
 
@@ -815,6 +825,38 @@ def test_rationale_cache_hit_never_generates(
     assert result["risks"] == [
         {"text": "no network here", "basis": "inferred", "refs": []}
     ]
+
+
+def test_rationale_cache_read_asks_for_the_explain_level(
+    chat_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan 62 section 14.3: an `explain` card, `low` under auto; a deeper hit serves."""
+    from whygraph.analyze import Rationale
+
+    asked: list[str] = []
+
+    def _lookup(*args, min_depth):
+        asked.append(min_depth)
+        return SimpleNamespace(
+            rationale=Rationale("p", "w", (), (), (), "m", "anthropic"),
+            cached_at="2026-07-29T00:00:00+00:00",
+            deferred_shas="",
+            level="medium",
+            context_stale=False,
+        )
+
+    monkeypatch.setattr(
+        chat_tools, "collect_evidence", lambda target, limit=20: [_fake_evidence_item()]
+    )
+    monkeypatch.setattr(chat_tools, "lookup_cached", _lookup)
+    registry = ToolRegistry(max_rationale_generations=2)
+    result = _result(registry, "get_rationale", qualified_name="pkg.a.run_turn")
+    assert asked == ["low"]
+    assert result["depth"]["requested"] == "auto"
+    assert result["depth"]["resolved"] == "medium"
+    assert result["depth"]["reason"].endswith("A cached Medium card was served.")
+    # Medium is the highest offered level (R49): nothing deeper.
+    assert result["deeper"] is None
 
 
 def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:
@@ -838,6 +880,8 @@ def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:
             ),
             cached_at="2026-07-29T00:00:00+00:00",
             deferred_shas="a" * 40 + " " + "b" * 40,
+            level="medium",
+            context_stale=False,
         ),
     )
     monkeypatch.setattr(chat_tools, "whygraph_rationale_brief", spy)
@@ -900,6 +944,100 @@ def test_chat_reads_the_full_evidence_shape(monkeypatch: pytest.MonkeyPatch) -> 
     chat_tools._get_evidence("run_turn")
     chat_tools._get_area_history("a.py")
     assert [call["detail"] for call in seen] == ["full", "full"]
+
+
+def test_chat_evidence_cut_drops_pr_prose_before_the_issues_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 9: 3 PRs at the prose caps and 2 issues; the issues stay whole.
+
+    Chat cuts a result at ``MAX_RESULT_CHARS`` from the end, so its evidence
+    tools put ``issues`` before ``pull_requests`` (the MCP tools do not).
+    """
+    from whygraph.analyze import CommitEvidence
+    from whygraph.db.models import Commit, Issue, PullRequest
+    from whygraph.mcp.evidence import ReviewScope, evidence_dicts, shape_evidence
+
+    def comments(count: int, size: int = 600) -> list[dict]:
+        return [
+            {"author": f"u{n}", "body": "x" * size, "created_at": "2026-01-01T00:00Z"}
+            for n in range(count)
+        ]
+
+    def thread() -> dict:
+        return {
+            "path": "a.py",
+            "original_line": 1,
+            "anchor": None,
+            "resolved": False,
+            "outdated": False,
+            "comments": comments(10),
+            "comments_total": 10,
+        }
+
+    stamp = "2026-01-01T00:00:00+00:00"
+    issues = tuple(
+        Issue(
+            number=n,
+            title=f"Issue {n}",
+            body="i" * 1000,
+            state="closed",
+            created_at=stamp,
+            updated_at=stamp,
+            html_url=f"https://example.com/issue/{n}",
+            fetched_at=stamp,
+            comments=json.dumps(comments(10)),
+            comments_total=10,
+        )
+        for n in (8, 9)
+    )
+    items = []
+    for n in (1, 2, 3):
+        pr = PullRequest(
+            number=n,
+            title=f"PR {n}",
+            body="p" * 4000,
+            state="merged",
+            created_at=stamp,
+            updated_at=stamp,
+            html_url=f"https://example.com/pr/{n}",
+            fetched_at=stamp,
+            comments=json.dumps(comments(30)),
+            review_summaries=json.dumps(comments(30)),
+            review_threads=json.dumps([thread() for _ in range(3)]),
+            review_threads_total=3,
+        )
+        commit = Commit(
+            sha=f"{n:040x}",
+            parent_shas="",
+            author_name="T",
+            author_email="t@example.com",
+            authored_at=stamp,
+            committed_at=stamp,
+            subject="s",
+            body="",
+            files_changed=1,
+            insertions=1,
+            deletions=0,
+            scanned_at=stamp,
+        )
+        items.append(CommitEvidence(commit, (pr,), issues if n == 1 else ()))
+    nested = evidence_dicts(items, ReviewScope(frozenset({"a.py"}), ()))
+    mcp_result = {
+        "target": {"path": "a.py", "line_start": 1, "line_end": 2},
+        **shape_evidence(nested, "full"),
+        "describing": 0,
+    }
+    assert list(mcp_result).index("pull_requests") < list(mcp_result).index("issues")
+    monkeypatch.setattr(chat_tools, "whygraph_evidence_for", lambda **_: mcp_result)
+
+    result = chat_tools._get_evidence("run_turn")
+    encoded = chat_tools._encode(result)
+
+    assert list(result)[-2:] == ["issues", "pull_requests"]
+    assert len(encoded) > chat_tools.MAX_RESULT_CHARS  # the cut happens
+    assert all(len(i["text"]["comments"]) == 10 for i in result["issues"].values())
+    assert json.dumps(result["issues"], default=str) in encoded
 
 
 # ---------------------------------------------------------------------------
@@ -2047,6 +2185,54 @@ def test_work_in_flight_long_threads_fall_back_to_updated_at(
     assert pr["last_activity_at"] == "2026-10-26T10:00:00Z"
 
 
+def test_work_in_flight_uses_github_comment_total(in_flight: Path) -> None:
+    """Plan 62 G7: a bot-free stored list is judged by GitHub's total.
+
+    Bots are no longer stored, so a short list can stand for a PR with more
+    than 100 comments on GitHub (fall back to ``updated_at``), and exactly
+    100 comments on GitHub are all fetched (the newest human one counts).
+    """
+    from whygraph.db import get_session
+
+    human = [
+        {"author": "alice", "body": "x", "created_at": "2026-10-02T00:00:00Z"},
+        {"author": "bob", "body": "y", "created_at": "2026-10-05T00:00:00Z"},
+    ]
+    page = [
+        {"author": "alice", "body": "x", "created_at": "2026-10-02T00:00:00Z"}
+    ] * 99 + [{"author": "bob", "body": "y", "created_at": "2026-10-07T00:00:00Z"}]
+    with get_session() as session:
+        session.add(
+            _pr(
+                416,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(human),
+                comments_total=140,
+            )
+        )
+        session.add(
+            _pr(
+                417,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(page),
+                comments_total=100,
+            )
+        )
+        session.add(
+            _pr(
+                418,
+                updated_at="2026-10-26T10:00:00Z",
+                comments=json.dumps(human),
+                comments_total=2,
+            )
+        )
+        session.commit()
+    prs = {p["number"]: p for p in _wip()["pull_requests"]}
+    assert prs[416]["last_activity_at"] == "2026-10-26T10:00:00Z"
+    assert prs[417]["last_activity_at"] == "2026-10-07T00:00:00Z"
+    assert prs[418]["last_activity_at"] == "2026-10-05T00:00:00Z"
+
+
 def test_work_in_flight_freshness(
     in_flight: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2931,6 +3117,8 @@ def test_get_rationale_carries_notes_on_every_return(
             rationale=SimpleNamespace(),
             cached_at="2026-01-01T00:00:00+00:00",
             deferred_shas="",
+            level="medium",
+            context_stale=False,
         ),
     )
     monkeypatch.setattr(

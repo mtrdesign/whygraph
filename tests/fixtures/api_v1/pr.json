@@ -26,6 +26,8 @@
       "name": "Api project",
       "plans_dir": "docs/plans",
       "project_role": "admin",
+      "rationale_depth": "auto",
+      "rationale_max_depth": "medium",
       "role": "owner",
       "slug": "api"
     },
@@ -47,6 +49,8 @@
       "merge_commit_sha": "<sha1>",
       "merged_at": "<time>",
       "number": 7,
+      "review_summaries": [],
+      "review_threads": [],
       "state": "merged",
       "title": "Add the sample module",
       "updated_at": "<time>"

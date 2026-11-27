@@ -151,6 +151,8 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("GET", f"/api/projects/{SLUG}/node", None),
     ("GET", f"/api/projects/{SLUG}/node/evidence", None),
     ("POST", f"/api/projects/{SLUG}/node/rationale", {}),
+    # The depth estimate is about this project's cards, which the platform builds.
+    ("GET", f"/api/projects/{SLUG}/rationale/depth-profile", None),
     ("GET", f"/api/projects/{SLUG}/history", None),
     ("GET", f"/api/projects/{SLUG}/commit/abc", None),
     ("GET", f"/api/projects/{SLUG}/pr/1", None),
@@ -660,7 +662,7 @@ def test_pending_reports_no_reconnect_for_another_link_target(
 def test_summary_carries_the_link_block(
     portal: TestClient, fake: FakePlatform, env: SimpleNamespace
 ) -> None:
-    """``_summary.link`` is exactly the ten fields the SPA reads."""
+    """``_summary.link`` is exactly the twelve fields the SPA reads."""
     linked_project(portal, fake, env)
     block = summary(portal)["link"]
     assert block == {
@@ -671,6 +673,8 @@ def test_summary_carries_the_link_block(
         "status_reason": None,
         "last_platform_head": status_body()["last_scanned_head"],
         "project_role": "contributor",
+        "rationale_depth": None,
+        "rationale_max_depth": None,
         "explorer_url": f"{HOME}/explorer",
         "chat_url": f"{HOME}/chat",
         "manage_url": HOME,
@@ -680,6 +684,19 @@ def test_summary_carries_the_link_block(
     local = make_repo(env.shared, "plain", remote=None)
     portal.post("/api/projects", json={"source": "local", "path": str(local)})
     assert summary(portal, "plain")["link"] is None
+
+
+def test_link_block_shows_the_platforms_rationale_depth(
+    portal: TestClient, fake: FakePlatform, env: SimpleNamespace
+) -> None:
+    """A status answer's depth and ceiling reach ``link``, read-only, in memory."""
+    linked_project(portal, fake, env)
+    fake.projects[SLUG] = status_body(
+        rationale_depth="auto", rationale_max_depth="high"
+    )
+    refresh_links(transport=transport_of(portal))
+    block = summary(portal)["link"]
+    assert (block["rationale_depth"], block["rationale_max_depth"]) == ("auto", "high")
 
 
 MAPPING: list[tuple[dict, tuple[str, str | None]]] = [

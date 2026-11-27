@@ -7,6 +7,7 @@ provider SDK or ``claude`` CLI is touched.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -59,6 +60,10 @@ class _FakeGenerator:
         *,
         symbol_context: SymbolContext | None = None,
         subject: str | None = None,
+        paths: frozenset[str] | None = None,
+        file_lines: Sequence[str] | None = None,
+        target_range: tuple[int, int] | None = None,
+        **_: object,
     ) -> Rationale:
         return Rationale(
             purpose="Holds two sample lines.",
@@ -171,6 +176,10 @@ def test_rationale_brief_wraps_generator_failure(
             *,
             symbol_context: SymbolContext | None = None,
             subject: str | None = None,
+            paths: frozenset[str] | None = None,
+            file_lines: Sequence[str] | None = None,
+            target_range: tuple[int, int] | None = None,
+            **_: object,
         ) -> Rationale:
             raise AnalyzeError("model unavailable")
 
@@ -590,7 +599,7 @@ def test_force_refresh_skips_the_cache_and_stores_the_new_card(
     calls: list[int] = []
 
     class _CountingGenerator(_FakeGenerator):
-        def generate(self, evidence, *, symbol_context=None, subject=None):
+        def generate(self, evidence, *, symbol_context=None, subject=None, **_):
             calls.append(1)
             return super().generate(
                 evidence, symbol_context=symbol_context, subject=subject
@@ -815,7 +824,7 @@ def test_cached_only_never_generates(
     calls: list[int] = []
 
     class _CountingGenerator(_FakeGenerator):
-        def generate(self, evidence, *, symbol_context=None, subject=None):
+        def generate(self, evidence, *, symbol_context=None, subject=None, **_):
             calls.append(1)
             return super().generate(
                 evidence, symbol_context=symbol_context, subject=subject
@@ -834,6 +843,97 @@ def test_cached_only_never_generates(
     hit = whygraph_rationale_brief(**args, cached_only=True)
     assert hit["generated"] is False and "purpose" in hit
     assert len(calls) == 1
+
+
+def test_rationale_brief_reports_its_depth_and_what_deeper_adds(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 62 section 14.4: no intent is `medium` under auto, the top offered level (R49)."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _FakeGenerator)
+    card = whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
+    assert card["depth"]["requested"] == "auto"
+    assert card["depth"]["resolved"] == "medium"
+    assert card["depth"]["reason"].startswith(
+        "Auto chose Medium because no task was given."
+    )
+    assert card["deeper"] is None
+
+
+def test_review_intent_is_cached_only_and_accepts_any_cached_depth(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`review` defaults `cached_only` to true; a deeper card serves it (R26, R27)."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    calls: list[int] = []
+
+    class _CountingGenerator(_FakeGenerator):
+        def generate(self, evidence, **kwargs):  # noqa: ANN001, ANN003
+            calls.append(1)
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _CountingGenerator)
+    args = {"path": "sample.py", "line_start": 1, "line_end": 3}
+
+    miss = whygraph_rationale_brief(**args, intent="review")
+    assert set(miss) == {"status", "target"} and calls == []
+
+    # GENERATE mode passes cached_only=False: a `low` card.
+    low = whygraph_rationale_brief(**args, intent="review", cached_only=False)
+    assert low["generated"] is True and low["depth"]["resolved"] == "low"
+    # Two blamed commits and no PR: `medium` would add nothing here.
+    assert low["deeper"] is None
+    # No intent asks for `medium`: the `low` card does not satisfy it.
+    medium = whygraph_rationale_brief(**args)
+    assert medium["generated"] is True and medium["depth"]["resolved"] == "medium"
+    assert len(calls) == 2
+    # A review is served the deeper card, and says so.
+    again = whygraph_rationale_brief(**args, intent="review")
+    assert again["match"] == "exact" and len(calls) == 2
+    assert again["depth"]["requested"] == "auto"
+    assert again["depth"]["resolved"] == "medium"
+    assert again["depth"]["reason"].endswith("A cached Medium card was served.")
+
+
+@pytest.mark.parametrize("intent", ["refactor", "delete"])
+def test_a_refactor_or_delete_under_auto_is_medium_for_the_task(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    intent: str,
+) -> None:
+    """R49: no "not offered" note and no caller talk, one call, nothing deeper."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    calls: list[str] = []
+
+    class _Counting(_FakeGenerator):
+        def generate(self, evidence, *, bundle=None, **kwargs):  # noqa: ANN001, ANN003
+            calls.append(bundle.level)
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Counting)
+    monkeypatch.setattr(
+        "whygraph.mcp.rationale_depth.distinct_callers", lambda *args: 12
+    )
+    card = whygraph_rationale_brief(
+        path="sample.py", line_start=1, line_end=3, intent=intent
+    )
+    assert calls == ["medium"]
+    assert card["depth"]["resolved"] == "medium"
+    assert card["depth"]["reason"].startswith(
+        f'Auto chose Medium because the task was "{intent}".'
+    )
+    assert "offered" not in card["depth"]["reason"]
+    assert "callers" not in card["depth"]["reason"]
+    assert card["deeper"] is None
+    assert "verification" not in card.get("coverage", {})
 
 
 def _add_commit_on_line_two(repo_root: Path) -> None:
@@ -898,7 +998,7 @@ def _cache_card(
 class _NoGenerator(_FakeGenerator):
     """A generator a cached_only call must never reach."""
 
-    def generate(self, evidence, *, symbol_context=None, subject=None):
+    def generate(self, evidence, *, symbol_context=None, subject=None, **_):
         raise AssertionError("cached_only must not generate")
 
 
@@ -1148,6 +1248,10 @@ def _counting_generator(monkeypatch: pytest.MonkeyPatch) -> list[int]:
             *,
             symbol_context: SymbolContext | None = None,
             subject: str | None = None,
+            paths: frozenset[str] | None = None,
+            file_lines: Sequence[str] | None = None,
+            target_range: tuple[int, int] | None = None,
+            **_: object,
         ) -> Rationale:
             calls.append(len(evidence))
             return super().generate(evidence)
@@ -1548,7 +1652,9 @@ def test_completions_are_per_project_db(
             config=Config(whygraph_db=tmp_path / slug / "whygraph.db"),
         )
         with use_project(ctx):
-            return rationale._start_completion(_target(), [], "fake", None, None, None)
+            return rationale._start_completion(
+                _target(), [], "fake", None, None, None, depth=1
+            )
 
     try:
         assert start("a") is True
@@ -1604,3 +1710,649 @@ def test_stopping_a_project_mid_completion_recreates_nothing(
 
     assert not history.exists()
     assert calls == [2]
+
+
+# ---- plan 62: the review-thread scope reaches the generator -----------------
+
+
+def _recording_generator(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Patch the generator; return the ``(paths, file_lines, target_range)`` it got."""
+    seen: list[tuple] = []
+
+    class _Recording(_FakeGenerator):
+        def generate(
+            self,
+            evidence: Sequence[CommitEvidence],
+            *,
+            symbol_context: SymbolContext | None = None,
+            subject: str | None = None,
+            paths: frozenset[str] | None = None,
+            file_lines: Sequence[str] | None = None,
+            target_range: tuple[int, int] | None = None,
+            **_: object,
+        ) -> Rationale:
+            seen.append((paths, file_lines, target_range))
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Recording)
+    return seen
+
+
+def test_rationale_brief_passes_the_working_tree_scope(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locally the anchors are checked on the working-tree file blame reads."""
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    seen = _recording_generator(monkeypatch)
+
+    whygraph_rationale_brief(path="sample.py", line_start=1, line_end=3)
+
+    (paths, file_lines, target_range), *_ = seen
+    assert "sample.py" in paths
+    text = (temp_git_repo / "sample.py").read_text()
+    assert file_lines == tuple(text.split("\n"))
+    assert target_range == (1, 3)
+
+
+def test_rationale_card_without_a_scope_passes_no_thread_inputs(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``review_scope=None`` fails closed: the generator gets no thread inputs."""
+    monkeypatch.chdir(temp_git_repo)
+    seen = _recording_generator(monkeypatch)
+    shas = _seed_undescribed(1)
+    with get_session() as session:
+        session.get(Commit, shas[0]).llm_description = "described"
+
+    _card(shas, target_range=(1, 3))
+
+    assert seen == [(None, None, None)]
+
+
+def test_a_completion_reuses_the_requests_review_scope(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The background completion regenerates with the scope of the request."""
+    from whygraph.mcp.evidence import ReviewScope, drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    seen = _recording_generator(monkeypatch)
+    shas = _seed_undescribed(2)
+    scope = ReviewScope(paths=frozenset({"sample.py"}), current_lines=("a", "b"))
+    inputs = {"review_scope": scope, "target_range": (1, 3)}
+
+    fake.unavailable = True
+    assert _card(shas, **inputs)["partial"] is True
+    assert drain_describes(timeout=30)
+    fake.unavailable = False
+    monkeypatch.setattr("whygraph.mcp.rationale.CARD_RETRY_COOLDOWN_SEC", 0)
+    assert _card(shas, **inputs)["completing"] is True
+    assert drain_describes(timeout=30)
+
+    assert seen == [(scope.paths, scope.current_lines, (1, 3))] * 2
+
+
+# ---- plan 62 Part B: the card bundle decides what is described (B2) --------
+
+
+def _bundle_evidence() -> list[CommitEvidence]:
+    """One blame item and eight area items, newest first (``medium`` shows four)."""
+    items = [
+        CommitEvidence(
+            _db_commit("b" * 40, committed_at="2026-03-01T00:00:00+00:00"),
+            source="blame",
+            lines=((1, 3),),
+        )
+    ]
+    for day in range(28, 20, -1):
+        items.append(
+            CommitEvidence(
+                _db_commit(
+                    f"{day:02d}" * 20, committed_at=f"2026-02-{day}T00:00:00+00:00"
+                ),
+                source="area",
+            )
+        )
+    return items
+
+
+def test_only_bundle_commits_are_described_and_counted(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.analyze import CardCoverage
+    from whygraph.mcp import rationale as module
+    from whygraph.mcp.evidence import DescribeOutcome
+    from whygraph.mcp.targets import Target
+
+    evidence = _bundle_evidence()
+    bundle_shas = {"b" * 40, *(f"{day:02d}" * 20 for day in (28, 27, 26, 25))}
+    described: list[tuple[set[str], int]] = []
+
+    def backfill(items, *, max_commits, **_):  # noqa: ANN001, ANN003, ANN202
+        described.append(({i.commit.sha for i in items}, max_commits))
+        # The blame commit waits, and so does a context commit the card omits.
+        return DescribeOutcome(0, frozenset(), frozenset({"b" * 40, "25" * 20}))
+
+    seen: dict[str, object] = {}
+
+    class _Recording(_FakeGenerator):
+        def generate(self, evidence, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            seen.update(kwargs)
+            card = super().generate(evidence)
+            return dataclasses.replace(
+                card,
+                coverage=CardCoverage(
+                    line_commits=1,
+                    context_commits=3,
+                    context_omitted=5,
+                    omitted_shas=frozenset({"25" * 20}),
+                ),
+            )
+
+    monkeypatch.setattr(module, "backfill_evidence_descriptions", backfill)
+    monkeypatch.setattr(module, "RationaleGenerator", _Recording)
+    monkeypatch.setattr(module, "_start_completion", lambda *a, **k: False)
+
+    card = module.rationale_card(
+        Target(path="sample.py", line_start=1, line_end=3, qualified_name=None),
+        evidence,
+        mark_generated=True,
+    )
+
+    assert described == [(bundle_shas, 5)]
+    assert {i.commit.sha for i in seen["bundle"].items} == bundle_shas
+    assert seen["missing_descriptions"] == {
+        "b" * 40: "not generated yet",
+        "25" * 20: "not generated yet",
+    }
+    assert card["evidence_count"]["commits"] == 5
+    assert len(card["evidence"]) == 5
+    assert card["evidence"][0]["sha"] == "b" * 40
+    # The omitted context commit is not waited for.
+    assert card["describing"] == 1
+    assert card["coverage"]["context_omitted"] == 5
+    assert "omitted_shas" not in card["coverage"]
+
+
+# ---- plan 62 Part B: the cache by depth, context and symbol (B3) ----------
+
+
+def _levels_generator(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Patch the generator to record the level of each bundle it renders."""
+    levels: list[str] = []
+
+    class _Levels(_FakeGenerator):
+        def generate(self, evidence, *, bundle=None, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            levels.append(bundle.level)
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Levels)
+    return levels
+
+
+def _ring_evidence(area_days: Sequence[int] = ()) -> list[CommitEvidence]:
+    """A described blame commit (2026-02-01) plus described area commits in March.
+
+    A regenerated card is built now (``cached_at`` is the real clock), after
+    every March commit, so they no longer count against it.
+    """
+    items = [
+        CommitEvidence(
+            _db_commit("b" * 40, committed_at="2026-02-01T00:00:00+00:00"),
+            source="blame",
+            lines=((1, 3),),
+        )
+    ]
+    for day in sorted(area_days, reverse=True):
+        items.append(
+            CommitEvidence(
+                _db_commit(
+                    f"{day:02d}" * 20, committed_at=f"2026-03-{day:02d}T00:00:00+00:00"
+                ),
+                source="area",
+            )
+        )
+    return items
+
+
+def _store_row(
+    evidence,  # noqa: ANN001
+    *,
+    depth: int,
+    purpose: str = "stored",
+    built: str = "2026-02-15T00:00:00+00:00",
+    **kwargs,  # noqa: ANN003
+):  # noqa: ANN202
+    """Store a card as if built at ``built``: after the blame commit, before March."""
+    from unittest import mock
+
+    from whygraph.core import get_config
+    from whygraph.mcp.rationale_cache import store_cached
+
+    rationale = dataclasses.replace(_FakeGenerator().generate([]), purpose=purpose)
+    with mock.patch("whygraph.mcp.rationale_cache._now_iso", lambda: built):
+        return store_cached(
+            _target(),
+            evidence,
+            rationale,
+            *get_config().cache_identity("rationale"),
+            depth=depth,
+            **kwargs,
+        )
+
+
+def _rc(evidence, **kwargs):  # noqa: ANN001, ANN003, ANN202
+    from whygraph.mcp.rationale import rationale_card
+
+    return rationale_card(_target(), evidence, mark_generated=True, **kwargs)
+
+
+def test_a_medium_request_with_only_a_low_card_regenerates_once(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    levels = _levels_generator(monkeypatch)
+    evidence = _ring_evidence()
+    _store_row(evidence, depth=0, purpose="low card")
+
+    first = _rc(evidence)
+    second = _rc(evidence)
+
+    assert levels == ["medium"]
+    assert first["generated"] is True and second["generated"] is False
+    assert _row().depth == 1
+
+
+def test_a_context_stale_deeper_row_regenerates_once_at_its_depth(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance 3: a medium row with 3 newer file commits, a low request."""
+    levels = _levels_generator(monkeypatch)
+    _store_row(_ring_evidence(), depth=1, purpose="medium card")
+    evidence = _ring_evidence([3, 2, 1])
+
+    first = _rc(evidence, level="low")
+    again = _rc(evidence, level="low")
+
+    assert levels == ["medium"]
+    assert first["generated"] is True and first["context_stale"] is False
+    assert again["generated"] is False
+    row = _row()
+    assert row.depth == 1
+    assert row.context_shas.split() == [f"{d:02d}" * 20 for d in (3, 2, 1)]
+
+
+def test_one_or_two_newer_file_commits_serve_the_card_context_stale(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    levels = _levels_generator(monkeypatch)
+    _store_row(_ring_evidence(), depth=1, purpose="kept")
+
+    card = _rc(_ring_evidence([2, 1]))
+
+    assert levels == []
+    assert (card["purpose"], card["generated"]) == ("kept", False)
+    assert card["context_stale"] is True
+    # The counts are over the bundle at the row's level (medium shows 4).
+    assert card["evidence_count"]["commits"] == 3
+
+
+def test_force_refresh_never_stores_a_shallower_card(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    levels = _levels_generator(monkeypatch)
+    evidence = _ring_evidence()
+    _store_row(evidence, depth=1, purpose="medium card")
+
+    card = _rc(evidence, force_refresh=True, level="low")
+
+    assert levels == ["medium"] and card["generated"] is True
+    assert (_row().depth, _row().rationale.purpose) == (1, "Holds two sample lines.")
+
+
+def test_a_deeper_card_stored_meanwhile_wins_and_nothing_completes(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent misses: the shallower store is refused, its card still served."""
+    evidence = _ring_evidence()
+    started: list[object] = []
+
+    class _Racing(_FakeGenerator):
+        def generate(self, evidence, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            _store_row(evidence, depth=1, purpose="deeper, meanwhile")
+            return super().generate(evidence)
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Racing)
+    monkeypatch.setattr(
+        "whygraph.mcp.rationale._start_completion",
+        lambda *a, **k: started.append(a) or True,
+    )
+
+    card = _rc(evidence, level="low")
+
+    assert card["generated"] is True and card["completing"] is False
+    assert card["purpose"] == "Holds two sample lines."
+    assert (_row().depth, _row().rationale.purpose) == (1, "deeper, meanwhile")
+    assert started == []
+
+
+def test_a_partial_deeper_row_is_completed_at_its_own_depth(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp import rationale
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    _fake_describes(monkeypatch)
+    levels = _levels_generator(monkeypatch)
+    monkeypatch.setattr("whygraph.mcp.rationale.CARD_RETRY_COOLDOWN_SEC", 600)
+    shas = _seed_undescribed(2)
+    _store_row(_evidence(shas), depth=1, deferred_shas=" ".join(shas))
+
+    hit = _card(shas, level="low")  # a low request: the medium row satisfies it
+
+    assert (hit["partial"], hit["completing"], hit["generated"]) == (True, True, False)
+    assert drain_describes(timeout=30)
+    assert levels == ["medium"]
+    row = _row()
+    assert (row.depth, row.deferred_shas) == (1, "")
+    assert {key[-1] for key in rationale._completion_attempts} == {1}
+
+
+def test_a_completion_rebuilds_context_commits_that_left_the_evidence(
+    whygraph_db_initialized: Path,
+) -> None:
+    from whygraph.db.models import PullRequest
+    from whygraph.mcp.rationale import _completion_evidence
+
+    gone = "c" * 40
+    with get_session() as session:
+        session.add(_db_commit(gone, committed_at="2026-03-05T00:00:00+00:00"))
+        session.add(
+            PullRequest(
+                number=7,
+                title="t",
+                state="merged",
+                created_at="x",
+                updated_at="x",
+                head_sha="h",
+                base_ref="main",
+                html_url="u",
+                labels="[]",
+                fetched_at="x",
+                merge_commit_sha=gone,
+            )
+        )
+    current = _ring_evidence([9, 1])
+    stored = f"{gone} {'09' * 20} {'d' * 40}"  # the last one is in no table
+
+    items = _completion_evidence(current, stored)
+
+    assert [(i.commit.sha, i.source) for i in items] == [
+        ("09" * 20, "area"),
+        (gone, "area"),
+        ("b" * 40, "blame"),
+    ]
+    assert [pr.number for pr in items[1].pull_requests] == [7]
+
+
+def test_cached_only_reports_context_staleness_apart_from_staleness(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _NoGenerator)
+    _store_row(_ring_evidence(), depth=1)
+
+    one = _rc(_ring_evidence([1]), cached_only=True)
+    three = _rc(_ring_evidence([3, 2, 1]), cached_only=True)
+    lines = [
+        CommitEvidence(
+            _db_commit("e" * 40, committed_at="2026-04-01T00:00:00+00:00"),
+            source="blame",
+        ),
+        *_ring_evidence(),
+    ]
+    changed = _rc(lines, cached_only=True)
+
+    assert (one["match"], one["stale"], one["context_stale"]) == ("exact", False, True)
+    assert (three["stale"], three["context_stale"]) == (False, True)
+    assert (changed["stale"], changed["context_stale"]) == (True, False)
+
+
+def test_a_card_survives_an_edit_above_its_symbol(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 2 end to end: a new line on top, the same symbol one line lower."""
+    import subprocess
+
+    from whygraph.mcp.evidence import collect_evidence
+    from whygraph.mcp.rationale import rationale_card
+    from whygraph.mcp.targets import Target
+
+    _seed_two_commits(temp_git_repo)
+    monkeypatch.chdir(temp_git_repo)
+    levels = _levels_generator(monkeypatch)
+    before = Target("sample.py", 2, 3, "sample.f")
+    rationale_card(before, collect_evidence(before, limit=20))
+
+    (temp_git_repo / "sample.py").write_text("header\nline one\nline two\nline three\n")
+    for args in (["add", "sample.py"], ["commit", "-m", "header"]):
+        subprocess.run(args=["git", *args], cwd=temp_git_repo, check=True)
+    newest = list(Repository(temp_git_repo).commits)[0]
+    with get_session() as session:
+        session.add(_db_commit(newest.sha, committed_at="2026-03-01T00:00:00+00:00"))
+    after = Target("sample.py", 3, 4, "sample.f")
+
+    card = rationale_card(after, collect_evidence(after, limit=20))
+
+    assert levels == ["medium"]
+    assert card["purpose"] == "Holds two sample lines."
+    from whygraph.core import get_config
+    from whygraph.mcp.rationale_cache import lookup_exact
+
+    identity = get_config().cache_identity("rationale")
+    assert lookup_exact(before, *identity) is None
+    assert lookup_exact(after, *identity) is not None
+
+
+# ---- plan 62 Part C: level assembly (C3; the verification pass removed, R49)
+
+
+_SOURCE = ("line one", "line two", "line three", "")
+
+
+def _scope(lines: tuple[str, ...] = _SOURCE):  # noqa: ANN202
+    from whygraph.mcp.evidence import ReviewScope
+
+    return {
+        "review_scope": ReviewScope(
+            paths=frozenset({"sample.py"}), current_lines=lines
+        ),
+        "target_range": (1, 3),
+    }
+
+
+def _level_generator(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Patch the generator with a draft writer; return the call log, ``("generate", level)`` per draft."""
+    from whygraph.analyze import CardCoverage
+
+    log: list[tuple] = []
+
+    class _Levels(_FakeGenerator):
+        def generate(self, evidence, *, bundle=None, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            log.append(("generate", bundle.level))
+            return dataclasses.replace(
+                super().generate(evidence), coverage=CardCoverage(line_commits=1)
+            )
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Levels)
+    return log
+
+
+def test_a_low_request_builds_and_stores_a_low_card(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _level_generator(monkeypatch)
+
+    card = _rc(_ring_evidence([2, 1]), level="low", **_scope())
+
+    assert log == [("generate", "low")]
+    assert _row().depth == 0
+    assert "verification" not in card["coverage"]
+    assert "check" not in card["constraints"][0]
+    assert card["evidence_count"]["commits"] == 1  # no context at low
+
+
+def test_an_unknown_level_raises_before_anything_is_read(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _level_generator(monkeypatch)
+
+    with pytest.raises(ValueError, match="unknown depth level"):
+        _rc(_ring_evidence(), level="huge")
+
+    assert log == [] and _row() is None
+
+
+def test_a_medium_card_is_one_call_and_satisfies_a_low_request(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R49: no second call, no ``check`` and no ``coverage.verification``."""
+    log = _level_generator(monkeypatch)
+    evidence = _ring_evidence()
+
+    card = _rc(evidence, level="medium", **_scope())
+
+    assert log == [("generate", "medium")]
+    assert "verification" not in card["coverage"]
+    assert all("check" not in item for item in card["constraints"] + card["risks"])
+    assert _row().depth == 1
+    for level in ("low", "medium"):
+        assert _rc(evidence, level=level, **_scope())["generated"] is False
+    assert len(log) == 1
+
+
+def test_a_low_request_never_overwrites_a_deeper_row(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``medium`` row stays when a low request refreshes; one call per rebuild."""
+    log = _level_generator(monkeypatch)
+    evidence = _ring_evidence()
+    _rc(evidence, level="medium", **_scope())
+
+    _rc(evidence, level="low", force_refresh=True, **_scope())
+
+    assert log == [("generate", "medium")] * 2
+    assert _row().depth == 1
+
+
+def test_a_row_stored_above_medium_is_served_as_medium(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R51: a dev eval's ``high`` / ``xhigh`` row still loads and never raises."""
+    levels = _levels_generator(monkeypatch)
+    evidence = _ring_evidence()
+    for depth in (2, 3):
+        _store_row(evidence, depth=depth, purpose="deeper card")
+
+        card = _rc(evidence, level="medium", **_scope())
+
+        assert (card["purpose"], card["generated"]) == ("deeper card", False)
+    assert levels == []
+
+
+# ---- plan 62 Part C: grounding the draft (C3a, section 14.2a) -------------
+
+
+def _grounding_client(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The real generator over a scripted client; return each call's task text.
+
+    Every draft answers a card with one constraint and one risk.
+    """
+    import json
+
+    from whygraph.analyze import RationaleGenerator
+    from whygraph.services.llm import CompletionResponse, LlmClient
+
+    tasks: list[str] = []
+    card = {
+        "purpose": "Holds three sample lines.",
+        "why": "Built up in one commit.",
+        "constraints": ["keep it small"],
+        "tradeoffs": [],
+        "risks": ["none worth noting"],
+    }
+
+    class _Scripted(LlmClient):
+        provider = "fake"
+
+        @classmethod
+        def from_config(cls, config, **overrides):  # noqa: ANN001, ANN003, ANN206
+            return cls(model="fake-1")
+
+        def complete(self, request):  # noqa: ANN001, ANN201
+            task = request.messages[-1].content
+            tasks.append(task)
+            text = json.dumps(card)
+            return CompletionResponse(
+                text=text, model="fake-1", provider="fake", input_tokens=1
+            )
+
+    monkeypatch.setattr(
+        "whygraph.mcp.rationale.RationaleGenerator.from_config",
+        classmethod(lambda cls, config: RationaleGenerator(_Scripted(model="fake-1"))),
+    )
+    return tasks
+
+
+@pytest.mark.parametrize("level", ["low", "medium"])
+def test_the_card_prompt_holds_the_targets_source_at_every_level(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    tasks = _grounding_client(monkeypatch)
+
+    card = _rc(_ring_evidence(), level=level, **_scope())
+
+    draft = tasks[0]
+    assert "TARGET SOURCE (sample.py:1-3, as of the card's build)" in draft
+    assert "1  line one\n2  line two\n3  line three" in draft
+    assert card["coverage"]["source"] == "included"
+    assert _row().rationale.coverage.source == "included"
+    assert len(tasks) == 1  # one call at every level (R49)
+
+
+def test_a_card_without_its_files_lines_has_its_source_unavailable(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks = _grounding_client(monkeypatch)
+
+    card = _rc(_ring_evidence(), level="medium")
+
+    assert "TARGET SOURCE" not in tasks[0]
+    assert card["coverage"]["source"] == "unavailable"
+
+
+def test_a_long_target_has_no_source(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.analyze.rationale_generator import TARGET_SOURCE_MAX_CHARS
+
+    tasks = _grounding_client(monkeypatch)
+    long = ("x" * TARGET_SOURCE_MAX_CHARS, "y", "z")
+
+    card = _rc(_ring_evidence(), level="medium", **_scope(long))
+
+    assert len(tasks) == 1
+    assert "TARGET SOURCE" not in tasks[0]
+    assert card["coverage"]["source"] == "omitted"
+    assert "verification" not in card["coverage"]

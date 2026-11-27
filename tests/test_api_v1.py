@@ -6,6 +6,8 @@ response models mirror the MCP tools' dict shapes exactly.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -29,7 +31,7 @@ from whygraph.api_v1 import (
     hunk_in_from_blame,
 )
 from whygraph.db.models import Commit, Issue, PullRequest
-from whygraph.mcp.evidence import _evidence_dict
+from whygraph.mcp.evidence import ReviewScope, _evidence_dict, evidence_dicts
 from whygraph.mcp.rationale import _format_response
 from whygraph.mcp.targets import Target, target_dict
 from whygraph.services.git import BlameHunk, BlameOrigin
@@ -245,6 +247,179 @@ def test_evidence_out_mirrors_evidence_dict_exactly() -> None:
         EvidenceOut.model_validate({**payload, "push_status": "lost"})
 
 
+def _discussed_evidence() -> CommitEvidence:
+    """``_evidence()`` after a v2 crawl: summaries, threads, comments, totals."""
+    item = _evidence()
+    pr, issue = item.pull_requests[0], item.issues[0]
+    pr.review_summaries = json.dumps(
+        [{"author": "omar", "state": "APPROVED", "body": "ok", "submitted_at": "t"}]
+    )
+    pr.review_threads = json.dumps(
+        [
+            {
+                "path": "src/a.py",
+                "original_line": 3,
+                "anchor": {"lines": ["return compute_the_value(x)"], "added": True},
+                "resolved": False,
+                "outdated": False,
+                "comments": [
+                    {"author": "bot", "body": "q", "bot": True, "minimized": False},
+                    {"author": "jane", "body": "because", "created_at": "t"},
+                ],
+                "comments_total": 2,
+            },
+            {"path": "b.py", "original_line": None, "anchor": None, "comments": []},
+        ]
+    )
+    pr.review_threads_total = 4
+    pr.comments_total = 30
+    issue.comments = json.dumps([{"author": "a", "body": "hi", "created_at": "t"}])
+    issue.comments_total = 5
+    return item
+
+
+def test_evidence_out_round_trips_the_review_fields_exactly() -> None:
+    scope = ReviewScope(frozenset({"src/a.py"}), ("return compute_the_value(x)",))
+    payload = _evidence_dict(_discussed_evidence(), scope)
+    model = EvidenceOut.model_validate(payload)
+    assert model.model_dump() == payload
+    assert list(model.model_dump()["pull_requests"][0]) == list(
+        payload["pull_requests"][0]
+    )
+    assert list(model.model_dump()["issues"][0]) == list(payload["issues"][0])
+    pr = model.pull_requests[0]
+    assert pr.review_threads[0]["current"] is True
+    assert (pr.review_threads_elsewhere, pr.review_threads_total) == (1, 4)
+    assert model.issues[0].comments_total == 5
+
+
+def test_an_old_shape_answer_parses_with_the_new_models() -> None:
+    """An older platform sends no review keys: they default, never ``None``."""
+    payload = _evidence_dict(_evidence())
+    for key in (
+        "review_summaries",
+        "review_threads",
+        "review_threads_elsewhere",
+        "review_threads_total",
+    ):
+        del payload["pull_requests"][0][key]
+    del payload["issues"][0]["comments"], payload["issues"][0]["comments_total"]
+    model = EvidenceOut.model_validate(payload)
+    pr, issue = model.pull_requests[0], model.issues[0]
+    assert pr.review_summaries == [] and pr.review_threads == []
+    assert pr.review_threads_elsewhere == 0 and pr.review_threads_total == 0
+    assert issue.comments == [] and issue.comments_total == 0
+
+
+def test_a_new_shape_answer_parses_with_the_old_models() -> None:
+    """A client built before plan 62 ignores the new keys (no API bump, R5)."""
+    from typing import Any
+
+    from pydantic import BaseModel, ConfigDict, Field
+
+    class _OldOut(BaseModel):
+        model_config = ConfigDict(extra="ignore")
+
+    class OldPullRequestOut(_OldOut):
+        number: int
+        title: str
+        body: str | None = None
+        state: str
+        merged_at: str | None = None
+        author: str | None = None
+        html_url: str
+        labels: list[Any] = Field(default_factory=list)
+        commit_titles: list[Any] = Field(default_factory=list)
+        comments: list[Any] = Field(default_factory=list)
+
+    class OldIssueOut(_OldOut):
+        number: int
+        title: str
+        body: str | None = None
+        state: str
+        author: str | None = None
+        html_url: str
+        labels: list[Any] = Field(default_factory=list)
+
+    class OldEvidenceOut(_OldOut):
+        commit: dict
+        pull_requests: list[OldPullRequestOut] = Field(default_factory=list)
+        issues: list[OldIssueOut] = Field(default_factory=list)
+        source: str
+
+    scope = ReviewScope(frozenset({"src/a.py"}), ())
+    payload = _evidence_dict(_discussed_evidence(), scope)
+    old = OldEvidenceOut.model_validate(payload)
+    assert old.pull_requests[0].comments == payload["pull_requests"][0]["comments"]
+    assert old.issues[0].labels == ["bug"]
+
+
+def test_a_fifty_item_evidence_reply_at_every_bound_stays_small() -> None:
+    """Acceptance 9: 50 distinct PRs at every per-PR bound fit in a quarter cap."""
+    from whygraph.api_v1 import EvidenceReplyOut
+    from whygraph.portal.platform_client import MAX_RESPONSE_BYTES
+
+    def comments(count: int) -> list[dict]:
+        return [
+            {
+                "author": f"u{n}",
+                "body": "x" * 5000,
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+            for n in range(count)
+        ]
+
+    thread = {
+        "path": "src/a.py",
+        "original_line": 3,
+        "anchor": {"lines": ["return compute_the_value(x)"], "added": True},
+        "resolved": False,
+        "outdated": False,
+        "comments": comments(10),
+        "comments_total": 14,
+    }
+    items = []
+    for n in range(50):
+        pr = PullRequest(
+            number=100 + n,
+            title=f"PR {n}",
+            state="merged",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-02-01T00:00:00+00:00",
+            html_url=f"https://example.com/pr/{n}",
+            fetched_at="2026-02-02T00:00:00+00:00",
+            review_summaries=json.dumps(
+                [{**c, "state": "COMMENTED"} for c in comments(60)]
+            ),
+            review_threads=json.dumps([thread] * 20),
+            review_threads_total=40,
+        )
+        issue = Issue(
+            number=500 + n,
+            title=f"Issue {n}",
+            state="closed",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-02-01T00:00:00+00:00",
+            html_url=f"https://example.com/issue/{n}",
+            fetched_at="2026-02-02T00:00:00+00:00",
+            comments=json.dumps(comments(100)),
+            comments_total=100,
+        )
+        commit = _commit()
+        commit.sha = f"{n:040x}"
+        items.append(CommitEvidence(commit, (pr,), (issue,), source="blame"))
+    scope = ReviewScope(frozenset({"src/a.py"}), ("return compute_the_value(x)",))
+
+    reply = EvidenceReplyOut.model_validate(
+        {"evidence": evidence_dicts(items, scope), "unknown_shas": []}
+    )
+    size = len(json.dumps(reply.model_dump(mode="json")).encode())
+
+    assert size < MAX_RESPONSE_BYTES // 4
+    last = reply.evidence[-1].pull_requests[0]
+    assert last.review_threads == [] and last.review_threads_total == 40
+
+
 ITEMS = (
     Item(
         "keep it small",
@@ -304,6 +479,87 @@ def test_rationale_item_out_refuses_an_unknown_basis_or_ref_kind() -> None:
     RationaleOut.model_validate(card)
     with pytest.raises(ValidationError):
         RationaleOut.model_validate({**card, "constraints": ["a plain string"]})
+
+
+def test_rationale_out_mirrors_a_card_with_depth_coverage_and_deeper() -> None:
+    """Plan 62 section 14.4: the additive card fields round-trip unchanged."""
+    from whygraph.analyze.card_bundle import CardCoverage
+
+    rationale = Rationale(
+        purpose="p",
+        why="w",
+        constraints=(ITEMS[0], ITEMS[2]),
+        tradeoffs=(),
+        risks=(ITEMS[1],),
+        model="m",
+        provider="stub",
+        coverage=CardCoverage(
+            line_commits=1, trimmed=("full_pr_budget",), source="included"
+        ),
+    )
+    payload = {
+        **_format_response(
+            Target("a.py", 1, 2, None),
+            rationale,
+            [_evidence()],
+            "2026-01-01T00:00:00+00:00",
+        ),
+        "depth": {"requested": "auto", "resolved": "low", "reason": "r"},
+        "deeper": {"level": "medium", "adds": "More."},
+    }
+    model = RationaleOut.model_validate(payload)
+    assert model.model_dump(mode="json") == payload
+    # None is left out, as an older platform's card never had them.
+    bare = RationaleOut.model_validate({**payload, "deeper": None, "coverage": None})
+    assert {"deeper", "coverage"}.isdisjoint(bare.model_dump(mode="json"))
+    # A card from before R49 still parses; its check and verification are dropped.
+    old = {
+        **payload,
+        "constraints": [{**payload["constraints"][0], "check": {"verdict": "holds"}}],
+        "coverage": {**payload["coverage"], "verification": "verified"},
+    }
+    dumped = RationaleOut.model_validate(old).model_dump(mode="json")
+    assert "check" not in dumped["constraints"][0]
+    assert "verification" not in dumped["coverage"]
+    item = RationaleItemOut.model_validate(
+        {"text": "x", "basis": "inferred", "check": {"verdict": "maybe"}}
+    )
+    assert "check" not in item.model_dump(mode="json")
+
+
+def test_rationale_out_is_a_card_or_a_not_cached_miss() -> None:
+    target = {"path": "a.py", "line_start": 1, "line_end": 2}
+    miss = RationaleOut.model_validate({"status": "not_cached", "target": target})
+    assert miss.status == "not_cached" and miss.purpose is None
+    with pytest.raises(ValidationError, match="a card needs purpose"):
+        RationaleOut.model_validate({"target": target, "why": "w"})
+
+
+def test_rationale_in_depth_fields() -> None:
+    """Optional, strict, left out of the body when unset (an older platform refuses them)."""
+    from typing import get_args
+
+    from whygraph.api_v1 import DepthLevel, Intent
+    from whygraph.core.config import DEPTH_LEVELS
+    from whygraph.mcp.rationale_depth import INTENTS
+
+    assert get_args(Intent) == INTENTS
+    assert get_args(DepthLevel) == DEPTH_LEVELS
+    bare = RationaleIn(target=_target())
+    assert set(bare.model_dump(mode="json")) == {"target", "hunks"}
+    full = RationaleIn(
+        target=_target(), intent="review", depth="low", cached_only=False
+    )
+    assert full.model_dump(mode="json")["cached_only"] is False
+    for bad in (
+        {"depth": "high"},  # not offered (R49): refused
+        {"depth": "xhigh"},
+        {"intent": "guess"},
+        {"cached_only": "true"},
+        {"cached_only": 1},
+    ):
+        with pytest.raises(ValidationError):
+            RationaleIn.model_validate({"target": _target(), **bad})
 
 
 def test_api_version_is_2() -> None:

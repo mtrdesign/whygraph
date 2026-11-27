@@ -25,6 +25,13 @@
         "text": "no network in the hot path"
       }
     ],
+    "context_stale": false,
+    "deeper": null,
+    "depth": {
+      "reason": "Auto chose Medium because no task was given.",
+      "requested": "auto",
+      "resolved": "medium"
+    },
     "describing": 2,
     "evidence_count": {
       "commits": 2,
@@ -43,6 +50,8 @@
       "name": "Api project",
       "plans_dir": "docs/plans",
       "project_role": "admin",
+      "rationale_depth": "auto",
+      "rationale_max_depth": "medium",
       "role": "owner",
       "slug": "api"
     },

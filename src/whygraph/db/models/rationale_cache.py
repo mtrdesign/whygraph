@@ -71,3 +71,17 @@ class RationaleCache(WhygraphTable, table=True):
     Empty means the card is final; a row written before this column existed is
     final, as it always was.
     """
+    depth: int | None = Field(default=None)
+    """The card's depth level, 0 ``low``, 1 ``medium`` (plan 62 section 13.5).
+
+    ``NULL`` marks a legacy row: its ``evidence_fingerprint`` hashes the whole
+    collected bundle, not Ring 0 only, and it counts as ``medium``.
+    """
+    context_shas: str = Field(
+        default="",
+        sa_type=Text,
+        sa_column_kwargs={"server_default": text("''")},
+    )
+    """Space-joined SHAs of the context (Ring 1) commits the card rendered."""
+    coverage: str | None = Field(default=None, sa_type=Text)
+    """The card's ``coverage`` object as JSON; ``NULL`` when not recorded."""

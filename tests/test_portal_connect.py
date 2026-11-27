@@ -1221,7 +1221,14 @@ def test_meta_is_public_on_every_host(cn: SimpleNamespace) -> None:
         assert response.json() == {
             "api_version": 2,
             "min_client": MIN_CLIENT_VERSION,
-            "capabilities": ["evidence", "rationale", "history", "resources", "plans"],
+            "capabilities": [
+                "evidence",
+                "rationale",
+                "history",
+                "resources",
+                "plans",
+                "rationale_depth",
+            ],
             "base_origin": PROD_BASE,  # the same on every host
         }
         MetaOut.model_validate(response.json())

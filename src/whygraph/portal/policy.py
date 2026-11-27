@@ -89,23 +89,32 @@ ORG_ONLY_KEYS: dict[str, tuple[str, ...]] = {
     "rationale": (
         "agent_generations_per_hour",
         "agent_generations_per_member_per_hour",
+        "org_max_depth",
     ),
 }
-"""The org limits on agent LLM spend (M2e plan section 0.1 #7): set by an
+"""The org limits on agent LLM spend (M2e plan section 0.1 #7) and the org's
+rationale depth ceiling (plan 62 R28): set by an
 owner on the org defaults only - never imported from a repo (a repo is
 untrusted input), never set per project. The platform reads them from the
 org layer row."""
 
 
-def _all_fields(cls: type, section: str | None = None) -> dict[str, bool]:
-    skip = ORG_ONLY_KEYS.get(section or "", ())
+_PUT_ONLY: tuple[str, ...] = ("depth", "max_depth")
+"""``[rationale]`` keys a project ``PUT`` may store but a repo may not import
+(plan 62 R28): they decide what a card costs, so a repo cannot raise them."""
+
+
+def _all_fields(
+    cls: type, section: str | None = None, repo_unsafe: tuple[str, ...] = ()
+) -> dict[str, bool]:
+    skip = (*ORG_ONLY_KEYS.get(section or "", ()), *repo_unsafe)
     return {f.name: True for f in fields(cls) if f.name not in skip}
 
 
 IMPORT_ALLOWLIST: Spec = {
     "llm": {"model": True, **{name: {"model": True} for name in PROVIDER_TABLES}},
     "analyze": _all_fields(AnalyzeConfig, "analyze"),
-    "rationale": _all_fields(RationaleConfig, "rationale"),
+    "rationale": _all_fields(RationaleConfig, "rationale", repo_unsafe=_PUT_ONLY),
     "chat": _all_fields(ChatConfig),
     "areas": True,
     "plans": {"dir": True},
@@ -121,6 +130,10 @@ IMPORT_ALLOWLIST: Spec = {
 
 PUT_ALLOWLIST: Spec = {
     **IMPORT_ALLOWLIST,
+    "rationale": {
+        **IMPORT_ALLOWLIST["rationale"],
+        **{key: True for key in _PUT_ONLY},
+    },
     "llm": {
         "model": True,
         **{

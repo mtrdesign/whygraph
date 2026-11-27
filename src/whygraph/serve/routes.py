@@ -28,12 +28,20 @@ from whygraph.core import get_config
 from whygraph.mcp.area_history import area_history_payload
 from whygraph.mcp.evidence import collect_evidence, evidence_payload
 from whygraph.mcp.rationale import (
+    _card_items,
     _format_response,
     _partial_fields,
     whygraph_rationale_brief,
 )
 from whygraph.mcp.plans import card_plan_shas, guarded_plans_for
 from whygraph.mcp.rationale_cache import lookup_cached
+from whygraph.mcp.rationale_depth import (
+    OfferedDepth,
+    DepthResolution,
+    deeper,
+    depth_block,
+    effective_ceiling,
+)
 from whygraph.mcp.resources import _commit_resource, _issue_resource, _pr_resource
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
@@ -197,7 +205,11 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     Returns ``{status: "cached", ...card}`` on a cache hit,
     ``{status: "no_evidence"}`` when the target has no historical evidence, or
     ``{status: "not_generated"}`` otherwise — the signal the UI uses to show a
-    "Generate" button.
+    "Generate" button. Any card of the target's lines is a hit, whatever its
+    depth (``min_depth="low"``, plan 62 section 13.5); its counts are over
+    the bundle at the card's own level. A hit also carries ``depth`` (the
+    row's level, no ``reason``: it is not stored) and ``deeper`` (what the
+    next level would add within the ceiling, ``None`` at it).
     """
     target = resolve_target(
         path=None, line_start=None, line_end=None, qualified_name=qualified_name
@@ -207,31 +219,45 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     if not evidence:
         return {"status": "no_evidence", "target": target_dict(target), **plans}
     provider, pinned_model = get_config().cache_identity("rationale")
-    cached = lookup_cached(target, evidence, provider, pinned_model)
+    cached = lookup_cached(target, evidence, provider, pinned_model, min_depth="low")
     if cached is None:
         return {"status": "not_generated", "target": target_dict(target), **plans}
+    rationale = get_config().rationale
+    # No resolver and no reason: the row's stored level, and what the next
+    # level would add for this evidence within the effective ceiling.
+    resolution = DepthResolution(rationale.depth, cached.level, "")
     return {
         "status": "cached",
         **_format_response(
             target,
             cached.rationale,
-            evidence,
+            _card_items(evidence, cached.level),
             cached.cached_at,
+            context_stale=cached.context_stale,
             **_partial_fields(cached),
         ),
+        "depth": depth_block(resolution, cached.level),
+        "deeper": deeper(cached.level, effective_ceiling(rationale), evidence),
         **plans,
     }
 
 
 @generate_router.post("/node/rationale")
-def rationale_generate(qualified_name: str = Query(...)) -> dict:
+def rationale_generate(
+    qualified_name: str = Query(...),
+    depth: OfferedDepth | None = Query(None),
+) -> dict:
     """Generate + cache a rationale card (the explicit "Generate" action).
 
     Runs :func:`whygraph_rationale_brief` verbatim — the same generate-and-cache
     flow the MCP tool performs — so the card can never drift from the MCP's. Slow
     (one LLM call); runs in the threadpool so the event loop is not blocked.
+
+    No intent (``medium`` under ``auto``, plan 62 section 14.3). ``depth``
+    is "Generate deeper" (R41): an offered level, capped at the effective
+    ceiling rather than refused, behind the same permission as Generate.
     """
-    card = whygraph_rationale_brief(qualified_name=qualified_name)
+    card = whygraph_rationale_brief(qualified_name=qualified_name, depth=depth)
     try:
         target = resolve_target(
             path=None, line_start=None, line_end=None, qualified_name=qualified_name

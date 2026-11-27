@@ -66,12 +66,26 @@ from test_portal_v1 import (  # noqa: F401 -- `v1`, `generator` are fixtures
     v1,
 )
 from whygraph.api_v1 import PLATFORM_BUDGET_MESSAGE, ErrorOut
+from whygraph.core.config import Config
+from whygraph.core.usage import (
+    UsageScope,
+    usage_blocked,
+    usage_pressure,
+    use_usage_sink,
+)
 from whygraph.portal import audit as audit_mod
 from whygraph.portal import db as portal_db
 from whygraph.portal.budgets import BudgetBook, BudgetLimit, OrgBudgets
 from whygraph.portal.models import AuditEvent, BudgetAlert, User
 from whygraph.portal.prices import Price
-from whygraph.portal.usage_store import SpendBook, UsageRow, current_month
+from whygraph.portal.usage import Attribution, PortalUsageSink
+from whygraph.portal.usage_store import (
+    PriceBook,
+    SpendBook,
+    UsageRow,
+    UsageWriter,
+    current_month,
+)
 from whygraph.serve import chat as serve_chat
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
@@ -198,6 +212,79 @@ def test_soft_budgets_only_alert() -> None:
     spend.add(_row(cost="3"))
     assert book.blocked_scope(1, 10, 100) is None
     assert _crossings(deferred) == [(1, None, 50), (1, None, 75), (1, None, 100)]
+
+
+def test_pressure_scope_at_75_percent_in_covering_order() -> None:
+    book, spend, _ = _book()
+    book.set_org(
+        1,
+        OrgBudgets(
+            org_slug="acme",
+            org=_limit(1, "org", "100", hard=False),
+            member_default=_limit(2, "member_default", "4"),
+            projects={10: _limit(4, "project", "10", hard=False, project_id=10)},
+        ),
+    )
+    assert book.pressure_scope(1, 10, 100) is None
+    spend.add(_row(user_id=100, cost="2.99"))  # member 74.75 %
+    assert book.pressure_scope(1, 10, 100) is None
+    spend.add(_row(user_id=100, cost="0.01"))  # member exactly 75 %
+    assert book.pressure_scope(1, 10, 100) == "member"
+    assert book.pressure_scope(1, 10, 101) is None  # another member: 30 % project
+    spend.add(_row(user_id=None, cost="5"))  # the project at 80 %, soft
+    assert book.pressure_scope(1, 10, 101) == "project"
+    assert book.pressure_scope(1, 10, 100) == "member"  # member first
+    assert book.pressure_scope(1, 11, None) is None  # org at 8 %
+    spend.add(_row(project_id=11, user_id=None, cost="70"))
+    assert book.pressure_scope(1, 11, None) == "org"
+    assert book.pressure_scope(2, 10, 100) is None  # another org
+
+
+def test_raising_a_budget_lifts_the_pressure_at_once() -> None:
+    """Unlike the fired-alert set, which never re-arms within a month."""
+    book, spend, deferred = _book()
+    book.set_org(1, OrgBudgets(org_slug="acme", org=_limit(1, "org", "10")))
+    spend.add(_row(cost="8"))
+    assert book.pressure_scope(1, 10, 100) == "org"
+    assert (1, None, 75) in _crossings(deferred)
+    book.set_org(1, OrgBudgets(org_slug="acme", org=_limit(1, "org", "20")))
+    assert book.pressure_scope(1, 10, 100) is None
+    assert book.fired(1, None, current_month(NOW)) == {50, 75}  # still fired
+
+
+def test_the_portal_sink_reads_the_pressure_from_the_book() -> None:
+    book, spend, _ = _book()
+    book.set_org(1, OrgBudgets(org_slug="acme", org=_limit(1, "org", "4")))
+    attribution = Attribution(
+        org_id=1,
+        org_slug="acme",
+        project_id=10,
+        project_slug="demo",
+        project_name="Demo",
+        actor_kind="member",
+        user_id=100,
+        actor_label="Tess",
+        config=Config(),
+    )
+    sink = PortalUsageSink(
+        UsageScope(source="mcp"),
+        attribution,
+        UsageWriter(),
+        spend,
+        PriceBook(),
+        budgets=book,
+    )
+    unbudgeted = PortalUsageSink(
+        UsageScope(source="mcp"), attribution, UsageWriter(), spend, PriceBook()
+    )
+    with use_usage_sink(sink):
+        assert usage_pressure() is None
+    spend.add(_row(cost="3"))
+    with use_usage_sink(sink):
+        assert usage_pressure() == "org"
+        assert usage_blocked() is None  # pressure is not a stop
+    with use_usage_sink(unbudgeted):
+        assert usage_pressure() is None
 
 
 def test_thresholds_fire_once_per_budget_and_per_member() -> None:

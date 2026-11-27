@@ -15,6 +15,8 @@
           {
             "author": "reporter",
             "body": "We need a sample.",
+            "comments": [],
+            "comments_total": 0,
             "html_url": "https://github.com/acme/api/issues/42",
             "labels": [
               "bug"
@@ -36,6 +38,10 @@
             ],
             "merged_at": "<time>",
             "number": 7,
+            "review_summaries": [],
+            "review_threads": [],
+            "review_threads_elsewhere": 0,
+            "review_threads_total": 0,
             "state": "merged",
             "title": "Add the sample module"
           }
@@ -67,6 +73,8 @@
       "name": "Api project",
       "plans_dir": "docs/plans",
       "project_role": "admin",
+      "rationale_depth": "auto",
+      "rationale_max_depth": "medium",
       "role": "owner",
       "slug": "api"
     },

@@ -135,7 +135,7 @@ Developer settings, GitHub Apps, New GitHub App.
 | Redirect on update | On, so configuring the installation returns to the portal too |
 | Webhook | Active, URL `<your base URL>/github/webhook`, with a secret of **at least 32 characters** (`openssl rand -hex 32`) |
 | Repository permissions | **Contents**, **Metadata**, **Pull requests** and **Issues**, all **read-only**. Nothing else, and no account permissions |
-| Subscribe to events | **Push**, **Repository**, **Pull request**, **Pull request review**, **Issues** and **Milestone**. GitHub always sends the installation events, which the portal uses too. The last four refresh pull request, issue and milestone data, and a tag push refreshes tags, with at most one run per project every five minutes |
+| Subscribe to events | **Push**, **Repository**, **Pull request**, **Pull request review**, **Issue comment**, **Pull request review comment**, **Issues** and **Milestone**. GitHub always sends the installation events, which the portal uses too. All but the first two refresh pull request, issue, review, comment and milestone data, and a tag push refreshes tags, with at most one run per project every five minutes |
 | Where can this GitHub App be installed? | **Any account**, so that people can install it on their own GitHub organizations |
 
 Then, on the app's page, **generate a client secret** and **generate a private key** (GitHub downloads
@@ -675,6 +675,13 @@ limit it was; a missing rationale key is `409 no_llm_key`. A [budget](../portal/
 that is used up with the hard stop on answers `403 budget_exceeded`, also with a `scope`. These four keys exist
 **only** as organization defaults: they are never set per project and never imported from a
 repository. See [Configuration](../reference/configuration.md#agent-limits-organization-only).
+
+**Depth ceiling.** An owner can also cap how deep any project's cards go with
+`[rationale].org_max_depth` (default `medium`), in the same **Settings** page. It is organization-only
+like the limits above: never per project, never imported from a repository. A project's own ceiling
+cannot exceed it (`422 depth_above_ceiling`), and lowering it later caps projects rather than
+rewriting them.
+See [Configuration](../reference/configuration.md#rationale-depth).
 
 Beyond the limits, each token is rate limited, at most two evidence or rationale requests run at
 once per organization (a third is answered `503 busy` rather than queued), and one request does a

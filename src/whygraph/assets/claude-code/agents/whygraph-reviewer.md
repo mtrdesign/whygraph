@@ -69,7 +69,7 @@ If a CodeGraph call returns `isError` saying the code index is still updating, c
 Before the first card, call `whygraph_evidence_for(path=<path>, line_start=<sym_start>, line_end=<sym_end>, limit=1, describe=False)` once, on the first hunk that has a symbol. If it returns `isError` with `code: no_evidence` (lines with no committed history), probe the next symbol instead, at most three in all (if all three are `no_evidence`, the project is not linked). Any other `isError`: reply with its message verbatim and stop - the project is not reachable or not scanned. If the result carries a `platform` block, the project is **linked to a WhyGraph platform**: its cards are built and paid for on the platform, which does not honour `cached_only`.
 
 - **Linked, GENERATE false:** do not call `whygraph_rationale_brief` at all. Every hunk with a symbol is **No rationale** with the reason `linked project - its cards come from the platform, which may generate one; rerun with --generate`.
-- **Otherwise,** for each symbol call `whygraph_rationale_brief(path=<path>, line_start=<sym_start>, line_end=<sym_end>, cached_only=True)` - without `cached_only` only when GENERATE is true. Target by location, never by `qualified_name`: CodeGraph's tools do not print qualified names, and a bare name that two files share resolves to either one. Never pass `force_refresh`.
+- **Otherwise,** for each symbol call `whygraph_rationale_brief(path=<path>, line_start=<sym_start>, line_end=<sym_end>, intent="review", cached_only=True)` - with `cached_only=False` (explicit) only when GENERATE is true. Target by location, never by `qualified_name`: CodeGraph's tools do not print qualified names, and a bare name that two files share resolves to either one. Never pass `force_refresh`.
 
 Cards carry `notes` (people-confirmed project knowledge); a hunk that contradicts a confirmed note is a finding, quoted with the note id. `plans` are pointers to what a plan intended; never a finding and never a constraint.
 
@@ -82,11 +82,12 @@ Read the answer:
 - Any other `isError` -> **No rationale** with the error's message as the reason.
 - A card -> judge the hunk against it (Step 4). With GENERATE true, count the cards whose `generated` is true for the Confidence line.
 
-A `cached_only` card also carries `match` and `stale`:
+A `cached_only` card also carries `match`, `stale` and `context_stale`:
 
 - `match: "exact"` - the card was cached for `<sym_start>`-`<sym_end>`.
 - `match: "overlap"` - the card was cached for `card_range`, a range of the same file that overlaps the symbol (usually the same symbol before it moved or changed length). It is still the symbol's rationale: judge the hunk against it as usual. If the hunk falls outside `card_range`, the card may describe a neighbouring symbol, so say so and lower the confidence.
 - `stale: true` - the card was written before the latest commits on those lines. It is the rationale from before the change, which is exactly what a review checks against: judge as usual, and end the verdict line with `(card predates the latest commits on these lines)`.
+- `context_stale: true` - the lines have not changed, but one or two newer commits touched the rest of the file, and the card does not reflect them. The card is still valid for the lines: judge as usual and do not add the `predates` note. `stale` means the lines changed; `context_stale` does not.
 
 ## Step 4 - Judge each hunk
 

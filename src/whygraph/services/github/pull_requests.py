@@ -15,12 +15,12 @@ and the ``totalCount`` count query.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Collection, Iterator, Sequence
 
 from whygraph.core import Shell, ShellError
 
 from .commands import (
-    PAGE_SIZES,
     GhApiGraphqlCmd,
     floor_for,
     forbidden_under,
@@ -30,8 +30,10 @@ from .commands import (
     tolerated_data,
 )
 from .exceptions import GitHubError
-from .pull_request import PullRequest
+from .pull_request import PullRequest, ReviewThread
 from .token import GH_TOKEN_ENV, token_env
+
+_log = logging.getLogger(__name__)
 
 _PR_FIELDS = """\
         number title body state isDraft url
@@ -55,7 +57,8 @@ _PR_FIELDS = """\
         }
         closingIssuesReferences(first: 50) { nodes { number } }
         comments(first: 100) {
-          nodes { author { login } body createdAt }
+          totalCount
+          nodes { author { __typename login } body createdAt isMinimized }
         }
         milestone { number }
         assignees(first: 10) { nodes { login } }
@@ -69,12 +72,20 @@ _PR_FIELDS = """\
         reviews(first: 5, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
           nodes { author { login } submittedAt }
         }
+        reviewSummaries: reviews(last: 30, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+          nodes { author { __typename login } state body submittedAt isMinimized }
+        }
+        reviewThreads { totalCount }
         files(first: 100) { nodes { path } }
         additions deletions changedFiles
 """
 
 
-def _list_query(size: int = PAGE_SIZES[0]) -> str:
+PR_PAGE_SIZES = (50, 25, 10, 5)
+"""Page sizes of the PR list query, tried in turn on a 502 / 504."""
+
+
+def _list_query(size: int = PR_PAGE_SIZES[0]) -> str:
     """Return the full PR listing query for a page of ``size`` PRs."""
     return (
         f"""
@@ -121,12 +132,12 @@ DETAILS_BATCH = 20
 """PRs per details request.
 
 20 x (250 commits + 100 comments + 100 files + 50 refs + 20 labels + up
-to 25 reviews and review requests) stays far under GitHub's 500k-node
+to 55 reviews and review requests) stays far under GitHub's 500k-node
 limit; a 502 / 504 halves it (see :data:`MIN_DETAILS_BATCH`).
 """
 
-MIN_DETAILS_BATCH = 5
-"""Smallest details batch a 502 / 504 halves down to (20, 10, 5)."""
+MIN_DETAILS_BATCH = 2
+"""Smallest details batch a 502 / 504 halves down to (20, 10, 5, 2)."""
 
 _COUNT_QUERY = """
 query($owner: String!, $name: String!) {
@@ -137,6 +148,206 @@ query($owner: String!, $name: String!) {
   }
 }
 """
+
+_THREAD_FIELDS = """\
+        number
+        reviewThreads(first: 20) {
+          totalCount
+          nodes { path originalLine isResolved isOutdated subjectType diffSide
+            comments(first: 10) { totalCount nodes { author { __typename login } body createdAt isMinimized diffHunk } } }
+        }
+"""
+"""Fields of the thread pass: the first 20 threads, 10 comments each.
+
+Only the first comment's ``diffHunk`` is used (the anchor,
+:meth:`ReviewThread.from_graphql_node`); the others are discarded at
+parse. No follow-up pagination: the list pass's ``reviewThreads {
+totalCount }`` reports the rest.
+"""
+
+THREAD_BATCH = 5
+"""PRs per thread-pass request; a 502 / 504 halves it down to 1 (5, 2, 1).
+
+5, not 10, because ``diffHunk`` adds bytes (measured on 5 heavy biome
+PRs: 1 point, about 711 KB, 2.5 s per batch).
+"""
+
+
+def _not_found(payload: dict) -> bool:
+    """Tolerate a batch whose only errors are unresolvable ``prN`` aliases.
+
+    A deleted PR makes ``gh`` exit non-zero with ``data`` holding a null
+    alias and a ``NOT_FOUND`` error whose ``path`` is exactly
+    ``["repository", "prN"]``. Any other error, or a mix, is not tolerated.
+    """
+    errors = payload.get("errors")
+    return (
+        isinstance(payload.get("data"), dict)
+        and isinstance(errors, list)
+        and bool(errors)
+        and all(
+            isinstance(e, dict)
+            and e.get("type") == "NOT_FOUND"
+            and isinstance(e.get("path"), list)
+            and len(e["path"]) == 2
+            and e["path"][0] == "repository"
+            and str(e["path"][1]).startswith("pr")
+            for e in errors
+        )
+    )
+
+
+ThreadResult = tuple[int, tuple[ReviewThread, ...] | None]
+"""One thread-pass result: a PR number and its threads (``None`` = not found)."""
+
+
+class ThreadPass(Iterator[ThreadResult]):
+    """One run of the review-thread pass, iterated batch by batch.
+
+    Returned by :meth:`PullRequests.review_threads`. Iterating sends
+    aliased ``pullRequest(number:)`` requests of :data:`THREAD_BATCH`
+    PRs and yields ``(number, threads)`` per PR, in the order asked, only
+    after that PR's whole batch returned. The outcome is read from the
+    attributes **after** iteration ends, normally or by a raised
+    :class:`GitHubError`.
+
+    Parameters
+    ----------
+    prs : PullRequests
+        The repository's collection (its shell, owner and name).
+    numbers : Sequence[int]
+        PR numbers to fetch.
+    point_floor : int
+        Rate-limit points to leave unspent (see Notes).
+
+    Attributes
+    ----------
+    stopped : bool
+        ``True`` when the pass stopped at the rate-limit floor; no error
+        is raised for it.
+    pending : tuple[int, ...]
+        PRs not fetched because of that stop (empty otherwise), in the
+        order asked.
+    skipped : tuple[int, ...]
+        PRs that still failed with a 502 / 504 alone; skipped for this
+        run (each logged), to be retried by the next one.
+    remaining : int or None
+        ``rateLimit.remaining`` of the last response that carried it.
+    reset_at : str or None
+        ``rateLimit.resetAt`` of that response.
+
+    Notes
+    -----
+    Before each request after the first, the pass stops when the last
+    response's ``remaining`` is below ``point_floor`` (no extra request:
+    every request also asks ``rateLimit { cost remaining resetAt }``).
+    A ``NOT_FOUND`` alias (a deleted PR) yields ``None`` for that PR; a
+    502 / 504 halves the batch down to 1 and then skips that PR; any
+    other failure raises :class:`GitHubError` after the batches already
+    yielded.
+    """
+
+    def __init__(
+        self, prs: PullRequests, numbers: Sequence[int], point_floor: int
+    ) -> None:
+        self.stopped = False
+        self.pending: tuple[int, ...] = ()
+        self.skipped: tuple[int, ...] = ()
+        self.remaining: int | None = None
+        self.reset_at: str | None = None
+        self._items = self._run(prs, [int(n) for n in numbers], point_floor)
+
+    def __next__(self) -> ThreadResult:
+        return next(self._items)
+
+    def _run(
+        self, prs: PullRequests, pending: list[int], point_floor: int
+    ) -> Iterator[ThreadResult]:
+        """Drive the batches; see the class docstring for the rules."""
+        size = THREAD_BATCH
+        skipped: list[int] = []
+        while pending:
+            if self.remaining is not None and self.remaining < point_floor:
+                self.stopped = True
+                self.pending = tuple(pending)
+                _log.info(
+                    "Thread pass stopped at the rate-limit floor "
+                    "(%d < %d points left, reset %s); %d PR(s) pending",
+                    self.remaining,
+                    point_floor,
+                    self.reset_at,
+                    len(pending),
+                )
+                return
+            batch, rest = pending[:size], pending[size:]
+            try:
+                data = prs._threads(batch)
+            except ShellError as exc:
+                data = tolerated_data(exc, _not_found)
+                if data is not None:
+                    pass
+                elif is_gateway_timeout(exc) and size > 1:
+                    size = max(size // 2, 1)
+                    continue
+                elif is_gateway_timeout(exc):
+                    _log.warning(
+                        "Review threads of PR #%d timed out alone; skipped for "
+                        "this run",
+                        batch[0],
+                    )
+                    skipped.append(batch[0])
+                    self.skipped = tuple(skipped)
+                    pending = rest
+                    continue
+                else:
+                    detail = exc.stderr.strip() or exc.stdout.strip()
+                    raise GitHubError(f"gh api graphql failed: {detail}") from exc
+            self._note_rate_limit(data)
+            results = _parse_thread_batch(data, batch)
+            pending = rest
+            yield from results
+
+    def _note_rate_limit(self, data: dict) -> None:
+        """Record ``rateLimit`` from a response, when it carries one."""
+        limit = data.get("rateLimit")
+        if not isinstance(limit, dict):
+            return
+        try:
+            self.remaining = int(limit["remaining"])
+        except (KeyError, TypeError, ValueError):
+            return
+        self.reset_at = limit.get("resetAt")
+
+
+def _parse_thread_batch(data: dict, batch: Sequence[int]) -> list[ThreadResult]:
+    """Parse one thread-pass response for ``batch``, all or nothing.
+
+    Raises
+    ------
+    GitHubError
+        If ``repository``, an alias or a found PR's ``reviewThreads`` is
+        missing or malformed; nothing of the batch is yielded then.
+    """
+    repo = data.get("repository")
+    if not isinstance(repo, dict):
+        raise GitHubError("GraphQL response missing repository")
+    results: list[ThreadResult] = []
+    for n in batch:
+        alias = f"pr{n}"
+        if alias not in repo:
+            raise GitHubError(f"GraphQL response missing repository.{alias}")
+        node = repo[alias]
+        if node is None:
+            results.append((n, None))
+            continue
+        conn = node.get("reviewThreads") if isinstance(node, dict) else None
+        if not isinstance(conn, dict):
+            raise GitHubError(f"GraphQL response missing {alias}.reviewThreads")
+        threads = tuple(
+            ReviewThread.from_graphql_node(t) for t in conn.get("nodes") or [] if t
+        )
+        results.append((n, threads))
+    return results
 
 
 class PullRequests(Collection[PullRequest]):
@@ -219,6 +430,7 @@ class PullRequests(Collection[PullRequest]):
             variables={"owner": self.owner, "name": self.name},
             query_for_size=_list_query,
             tolerate=_TOLERATE,
+            page_sizes=PR_PAGE_SIZES,
         ):
             yield PullRequest.from_graphql_node(node)
 
@@ -308,6 +520,57 @@ class PullRequests(Collection[PullRequest]):
         )
         query = (
             "query($owner: String!, $name: String!) {\n"
+            "  repository(owner: $owner, name: $name) {\n"
+            f"{aliases}  }}\n}}\n"
+        )
+        return self._shell.run(
+            GhApiGraphqlCmd(query, {"owner": self.owner, "name": self.name}),
+            env=token_env(GH_TOKEN_ENV),
+        )
+
+    def review_threads(self, numbers: Sequence[int], *, point_floor: int) -> ThreadPass:
+        """Fetch the first 20 review threads of each given PR (the thread pass).
+
+        Sends :data:`THREAD_BATCH` PRs per request as aliased
+        ``pullRequest(number:)`` fields, each request also asking
+        ``rateLimit``. An empty sequence sends nothing. Nothing is sent
+        until the result is iterated.
+
+        Parameters
+        ----------
+        numbers : Sequence[int]
+            PR numbers to fetch, in the order wanted.
+        point_floor : int
+            Stop, without error, before a request when the previous
+            response left fewer rate-limit points than this.
+
+        Returns
+        -------
+        ThreadPass
+            An iterator of ``(number, threads)`` per PR, ``threads`` being
+            ``None`` for a PR GitHub cannot resolve (deleted). After
+            iteration, :attr:`ThreadPass.stopped` / ``pending`` report a
+            floor stop and :attr:`ThreadPass.skipped` the PRs that timed
+            out alone.
+
+        Raises
+        ------
+        GitHubError
+            While iterating, on any failure other than a tolerated
+            ``NOT_FOUND`` alias or a 502 / 504, after the batches already
+            yielded.
+        """
+        return ThreadPass(self, numbers, point_floor)
+
+    def _threads(self, batch: Sequence[int]) -> dict:
+        """Run one aliased thread-pass request for ``batch``."""
+        aliases = "".join(
+            f"    pr{n}: pullRequest(number: {n}) {{\n{_THREAD_FIELDS}    }}\n"
+            for n in batch
+        )
+        query = (
+            "query($owner: String!, $name: String!) {\n"
+            "  rateLimit { cost remaining resetAt }\n"
             "  repository(owner: $owner, name: $name) {\n"
             f"{aliases}  }}\n}}\n"
         )

@@ -715,3 +715,181 @@ def test_chat_branching_backfills_parents_and_leaf(
         assert conn.execute("SELECT COUNT(*) FROM chat_session").fetchone()[0] == 3
     finally:
         conn.close()
+
+
+def test_forge_discussion_round_trip_keeps_rows(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """The plan 62 discussion columns land on a v1 DB and downgrade, keeping rows."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    script = ScriptDirectory.from_config(alembic_config())
+    assert len(script.get_heads()) == 1
+    assert script.get_revision("d2c8e4a7f1b3").down_revision == "b6f2a9c4d815"
+
+    pr_new = {
+        "review_summaries",
+        "review_threads",
+        "review_threads_total",
+        "review_threads_synced",
+        "comments_total",
+    }
+    issue_new = {"comments", "comments_total"}
+    command.upgrade(alembic_config(), "b6f2a9c4d815")
+    assert not pr_new & _column_names(db_path, "pull_request")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO pull_request (number, title, state, draft, created_at, "
+            "updated_at, head_sha, base_ref, html_url, labels, fetched_at, comments) "
+            "VALUES (7, 't', 'open', 0, 'x', 'x', 'h', 'main', 'u', '[]', 'x', "
+            '\'[{"author": "a"}]\')'
+        )
+        conn.execute(
+            "INSERT INTO issue (number, title, state, created_at, updated_at, "
+            "html_url, labels, fetched_at) "
+            "VALUES (8, 't', 'open', 'x', 'x', 'u', '[]', 'x')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert pr_new <= _column_names(db_path, "pull_request")
+    assert issue_new <= _column_names(db_path, "issue")
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT comments, review_summaries, review_threads, review_threads_total, "
+            "review_threads_synced, comments_total FROM pull_request WHERE number = 7"
+        ).fetchone()
+        assert row == ('[{"author": "a"}]', "[]", "[]", None, 0, None)
+        assert conn.execute(
+            "SELECT comments, comments_total FROM issue WHERE number = 8"
+        ).fetchone() == ("[]", None)
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "b6f2a9c4d815")
+    assert not pr_new & _column_names(db_path, "pull_request")
+    assert not issue_new & _column_names(db_path, "issue")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT comments FROM pull_request WHERE number = 7"
+        ).fetchone() == ('[{"author": "a"}]',)
+        assert conn.execute("SELECT COUNT(*) FROM issue").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_rationale_depth_columns_keep_legacy_rows(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """Plan 62 section 13.5: a row cached before ``depth`` survives as a legacy row."""
+    from alembic.script import ScriptDirectory
+
+    db_path = _isolate_config_and_engine
+    script = ScriptDirectory.from_config(alembic_config())
+    assert len(script.get_heads()) == 1
+    assert script.get_revision("9a4c6e1f3b57").down_revision == "d2c8e4a7f1b3"
+
+    new = {"depth", "context_shas", "coverage"}
+    command.upgrade(alembic_config(), "d2c8e4a7f1b3")
+    assert not new & _column_names(db_path, "rationale_cache")
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO rationale_cache (path, line_start, line_end, provider, "
+            "model, evidence_fingerprint, cached_at, purpose, why, constraints, "
+            "tradeoffs, risks, deferred_shas) VALUES ('a.py', 1, 3, 'fake', "
+            "'default', 'fp', 'x', 'p', 'w', '[]', '[]', '[]', 'abc1234')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.upgrade(alembic_config(), "head")
+    assert new <= _column_names(db_path, "rationale_cache")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT purpose, deferred_shas, depth, context_shas, coverage "
+            "FROM rationale_cache"
+        ).fetchone() == ("p", "abc1234", None, "", None)
+    finally:
+        conn.close()
+
+    db_engine._reset_engine()
+    command.downgrade(alembic_config(), "d2c8e4a7f1b3")
+    assert not new & _column_names(db_path, "rationale_cache")
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT purpose FROM rationale_cache").fetchone() == ("p",)
+    finally:
+        conn.close()
+
+
+def test_a_row_with_the_removed_checks_still_loads(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """Plan 62 R49: a row the dev eval stored with ``check`` / ``verification`` loads without them."""
+    import json
+
+    from whygraph.analyze import CardCoverage, Item, Rationale
+    from whygraph.mcp.rationale_cache import lookup_exact, store_cached
+    from whygraph.mcp.targets import Target
+
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+    columns = _column_names(db_path, "rationale_cache")
+    target = Target(path="a.py", line_start=1, line_end=3, qualified_name=None)
+    card = Rationale(
+        purpose="p",
+        why="w",
+        constraints=(Item("c", "inferred"),),
+        tradeoffs=(),
+        risks=(Item("r", "inferred"),),
+        model="m",
+        provider="fake",
+        coverage=CardCoverage(line_commits=1, source="included"),
+    )
+    store_cached(target, [], card, "fake", None, depth=2)
+    assert not {"check", "verification"} & columns
+
+    # What a card from before R49 holds in its JSON columns.
+    old = {"verdict": "holds", "reason": "line 2"}
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE rationale_cache SET constraints = ?, risks = ?, coverage = ?",
+            (
+                json.dumps(
+                    [{"text": "c", "basis": "inferred", "refs": [], "check": old}]
+                ),
+                json.dumps(
+                    [{"text": "r", "basis": "inferred", "refs": [], "check": old}]
+                ),
+                json.dumps(
+                    {
+                        "line_commits": 1,
+                        "source": "included",
+                        "verification": "verified",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    row = lookup_exact(target, "fake", None)
+    assert row.rationale.constraints == card.constraints
+    assert row.rationale.risks == card.risks
+    assert row.rationale.coverage == card.coverage
+    assert "verification" not in row.rationale.coverage.as_dict()
+    assert "check" not in row.rationale.constraints[0].as_dict()

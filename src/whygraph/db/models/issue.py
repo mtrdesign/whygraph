@@ -19,6 +19,12 @@ class Issue(WhygraphTable, table=True):
         JSON list of assignee logins.
     state_reason : str or None
         GitHub's ``stateReason`` (``COMPLETED``, ``NOT_PLANNED``, ...).
+    comments : str
+        JSON list of the first 100 comments, oldest first; human,
+        non-minimized comments only.
+    comments_total : int or None
+        GitHub's comment count (includes comments not stored); ``None``
+        until a crawl re-reads the row.
     """
 
     number: int = Field(primary_key=True, nullable=True)
@@ -37,3 +43,7 @@ class Issue(WhygraphTable, table=True):
         default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
     )
     state_reason: str | None = Field(default=None, sa_type=Text)
+    comments: str = Field(
+        default="[]", sa_type=Text, sa_column_kwargs={"server_default": text("'[]'")}
+    )
+    comments_total: int | None = Field(default=None)

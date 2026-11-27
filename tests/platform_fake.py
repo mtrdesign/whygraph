@@ -112,12 +112,14 @@ class FakePlatform:
         api_version: int = API_VERSION,
         min_client: str = "0.0.0",
         plans_supported: bool = True,
+        depth_supported: bool = True,
     ) -> None:
         self.platform_origin = platform_origin
         self.host = httpx.URL(platform_origin).netloc.decode()
         self.api_version = api_version
         self.min_client = min_client
         self.plans_supported = plans_supported
+        self.depth_supported = depth_supported
         self.requests: list[httpx.Request] = []
         self.responses: dict[str, tuple[int, Any]] = {}
         self.failure: str | None = None
@@ -227,6 +229,7 @@ class FakePlatform:
                     "history",
                     "resources",
                     *(["plans"] if self.plans_supported else []),
+                    *(["rationale_depth"] if self.depth_supported else []),
                 ],
                 "base_origin": self.platform_origin,
             },

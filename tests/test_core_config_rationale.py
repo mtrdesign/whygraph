@@ -114,6 +114,53 @@ def test_rationale_pr_render_cap_below_one_raises(
         Config.from_toml(config)
 
 
+def test_rationale_review_threads_max_chars_default() -> None:
+    assert RationaleConfig().review_threads_max_chars == 3000
+
+
+@pytest.mark.parametrize("value", [0, 3000])
+def test_rationale_review_threads_max_chars_accepted(
+    tmp_path: Path, value: int
+) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\nreview_threads_max_chars = {value}\n",
+    )
+    assert Config.from_toml(config).rationale.review_threads_max_chars == value
+
+
+def test_rationale_review_threads_max_chars_negative_raises(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[rationale]\nreview_threads_max_chars = -1\n",
+    )
+    with pytest.raises(ConfigError, match="review_threads_max_chars"):
+        Config.from_toml(config)
+
+
+def test_rationale_context_max_chars_default() -> None:
+    """Plan 62 R45: the B0-measured default."""
+    assert RationaleConfig().context_max_chars == 27000
+
+
+@pytest.mark.parametrize("value", [0, 27000, 50000])
+def test_rationale_context_max_chars_accepted(tmp_path: Path, value: int) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        f"[rationale]\ncontext_max_chars = {value}\n",
+    )
+    assert Config.from_toml(config).rationale.context_max_chars == value
+
+
+def test_rationale_context_max_chars_negative_raises(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "whygraph.toml",
+        "[rationale]\ncontext_max_chars = -1\n",
+    )
+    with pytest.raises(ConfigError, match="context_max_chars"):
+        Config.from_toml(config)
+
+
 def test_rationale_config_is_frozen() -> None:
     cfg = RationaleConfig()
     with pytest.raises(Exception):  # FrozenInstanceError
@@ -172,3 +219,42 @@ def test_rationale_member_limit_out_of_range_raises(tmp_path: Path, value: str) 
     )
     with pytest.raises(ConfigError, match="agent_generations_per_member_per_hour"):
         Config.from_toml(config)
+
+
+def test_rationale_depth_defaults() -> None:
+    cfg = RationaleConfig()
+    assert (cfg.depth, cfg.max_depth, cfg.org_max_depth) == ("auto", "medium", "medium")
+
+
+def test_rationale_depth_keys_flow_through_from_dict(tmp_path: Path) -> None:
+    cfg = Config.from_dict(
+        {"rationale": {"depth": "low", "max_depth": "medium", "org_max_depth": "low"}},
+        tmp_path,
+    )
+    assert cfg.rationale.depth == "low"
+    assert cfg.rationale.max_depth == "medium"
+    assert cfg.rationale.org_max_depth == "low"
+
+
+def test_rationale_depth_above_max_depth_is_accepted(tmp_path: Path) -> None:
+    """It is capped when resolved, never refused here."""
+    cfg = Config.from_dict(
+        {"rationale": {"depth": "medium", "max_depth": "low"}}, tmp_path
+    )
+    assert (cfg.rationale.depth, cfg.rationale.max_depth) == ("medium", "low")
+
+
+@pytest.mark.parametrize("key", ["depth", "max_depth", "org_max_depth"])
+@pytest.mark.parametrize("value", ["high", "xhigh", "deep", "", 3])
+def test_rationale_depth_refuses_unoffered_levels(
+    tmp_path: Path, key: str, value: object
+) -> None:
+    """``high`` and ``xhigh`` are not offered (R49)."""
+    with pytest.raises(ConfigError, match=f"rationale.{key}"):
+        Config.from_dict({"rationale": {key: value}}, tmp_path)
+
+
+@pytest.mark.parametrize("key", ["max_depth", "org_max_depth"])
+def test_rationale_ceilings_refuse_auto(tmp_path: Path, key: str) -> None:
+    with pytest.raises(ConfigError, match=f"rationale.{key}"):
+        Config.from_dict({"rationale": {key: "auto"}}, tmp_path)

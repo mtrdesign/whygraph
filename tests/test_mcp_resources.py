@@ -227,7 +227,13 @@ def test_pr_resource_caps_comments(whygraph_db_initialized: Path) -> None:
     pr = _pr_resource(43)["pull_request"]
     assert [c["body"] for c in pr["comments"][1:]] == [f"c{i}" for i in range(1, 50)]
     assert pr["comments"][0]["body"] == "x" * 4000 + "..."
-    assert pr["omitted"] == {"comments": 30, "comment_chars": 100}
+    assert pr["omitted"] == {
+        "comments": 30,
+        "comment_chars": 100,
+        "review_summaries": 0,
+        "review_comments": 0,
+        "review_comment_chars": 0,
+    }
 
 
 def test_pr_resource_no_omitted_when_small(whygraph_db_initialized: Path) -> None:
@@ -282,6 +288,120 @@ def test_issue_resource_closing_prs(whygraph_db_initialized: Path) -> None:
     # Nested PR views drop the heavy blobs.
     assert "commit_titles" not in result["closing_prs"][0]
     assert "comments" not in result["closing_prs"][0]
+
+
+def _review_thread(path: str, *bodies: str, bot_opener: bool = False) -> dict:
+    """A stored review thread (plan 62 section 5), anchor included."""
+    comments = [
+        {"author": "jane", "body": body, "created_at": "2026-01-02T00:00:00Z"}
+        for body in bodies
+    ]
+    if bot_opener and comments:
+        comments[0] = {
+            **comments[0],
+            "author": "copilot",
+            "bot": True,
+            "minimized": False,
+        }
+    return {
+        "path": path,
+        "original_line": 4,
+        "anchor": {"lines": ["return compute_the_value(x)"], "added": True},
+        "resolved": True,
+        "outdated": False,
+        "comments": comments,
+        "comments_total": len(comments),
+    }
+
+
+def test_pr_resource_review_discussion_before_comments(
+    whygraph_db_initialized: Path,
+) -> None:
+    """Summaries and every file's threads, no anchor, ahead of ``comments``."""
+    with get_session() as session:
+        pr = _db_pr(number=46, comments=json.dumps([{"author": "a", "body": "c"}]))
+        pr.review_summaries = json.dumps(
+            [{"author": "omar", "state": "APPROVED", "body": "ok", "submitted_at": "t"}]
+        )
+        pr.review_threads = json.dumps(
+            [
+                _review_thread("a.py", "q?", "because", bot_opener=True),
+                _review_thread("b.py", "other file"),
+            ]
+        )
+        session.add(pr)
+
+    payload = _pr_resource(46)["pull_request"]
+
+    keys = list(payload)
+    assert keys[-4:] == [
+        "commit_titles",
+        "review_summaries",
+        "review_threads",
+        "comments",
+    ]
+    assert payload["review_summaries"][0]["body"] == "ok"
+    threads = payload["review_threads"]
+    assert [t["path"] for t in threads] == ["a.py", "b.py"]
+    assert all("anchor" not in t and "current" not in t for t in threads)
+    opener = threads[0]["comments"][0]
+    assert opener["bot"] is True and opener["minimized"] is False
+    assert "bot" not in threads[0]["comments"][1]
+    assert "omitted" not in payload
+
+
+def test_pr_resource_caps_review_discussion(whygraph_db_initialized: Path) -> None:
+    from whygraph.mcp.resources import PR_COMMENTS_MAX
+
+    long = "r" * 1010
+    with get_session() as session:
+        pr = _db_pr(number=47)
+        pr.review_summaries = json.dumps(
+            [{"author": "o", "body": long}] + [{"author": "o", "body": "s"}] * 59
+        )
+        pr.review_threads = json.dumps(
+            [_review_thread("a.py", long, *["c"] * 9)]
+            + [_review_thread("a.py", *["c"] * 10) for _ in range(5)]
+        )
+        session.add(pr)
+
+    payload = _pr_resource(47)["pull_request"]
+
+    assert len(payload["review_summaries"]) == PR_COMMENTS_MAX
+    assert payload["review_summaries"][0]["body"] == "r" * 1000 + "..."
+    per_thread = [len(t["comments"]) for t in payload["review_threads"]]
+    assert per_thread == [10, 10, 10, 10, 10]
+    assert payload["review_threads"][0]["comments"][0]["body"] == "r" * 1000 + "..."
+    assert payload["omitted"] == {
+        "comments": 0,
+        "comment_chars": 0,
+        "review_summaries": 10,
+        "review_comments": 10,
+        "review_comment_chars": 20,
+    }
+
+
+def test_issue_resource_carries_comments_and_nested_stays_compact(
+    whygraph_db_initialized: Path,
+) -> None:
+    comments = [{"author": "a", "body": "x" * 1005}] + [
+        {"author": "b", "body": "y"}
+    ] * 59
+    with get_session() as session:
+        issue = _db_issue(number=56)
+        issue.comments = json.dumps(comments)
+        session.add(issue)
+        session.add(_db_pr(number=23))
+        session.add(PRIssueLink(pr_number=23, issue_number=56, link_kind="closes"))
+
+    direct = _issue_resource(56)["issue"]
+    nested = _pr_resource(23)["closing_issues"][0]
+
+    assert len(direct["comments"]) == 50
+    assert direct["comments"][0]["body"] == "x" * 1000 + "..."
+    assert direct["omitted"] == {"comments": 10, "comment_chars": 5}
+    assert nested["number"] == 56
+    assert "comments" not in nested and "omitted" not in nested
 
 
 def test_issue_resource_not_found(whygraph_db_initialized: Path) -> None:

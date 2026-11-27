@@ -4,7 +4,7 @@ This repository uses WhyGraph (via the `whygraph` MCP server) to ground code-cha
 
 ## Before editing existing code
 
-When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module — anything beyond a typo or formatter pass — call the `whygraph_rationale_brief` MCP tool first. Identify the symbol by `qualified_name` (preferred when CodeGraph resolves it) or by `path` + `line_start` + `line_end` (fallback).
+When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module — anything beyond a typo or formatter pass — call the `whygraph_rationale_brief` MCP tool first. Identify the symbol by `qualified_name` (preferred when CodeGraph resolves it) or by `path` + `line_start` + `line_end` (fallback). Pass `intent`: `edit` for a change to a body; `refactor` for a rename, move or signature change; `delete` for a deletion or "can I delete this?"; `explain` for "why does this exist?".
 
 The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `evidence_count`, and `cached_at`. Use it to inform the change:
 
@@ -13,6 +13,7 @@ The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `e
 - **Risks** are flagged *before* the change, not after.
 - **Empty `evidence_count`**: the chunk has no meaningful history yet; proceed with judgement.
 - `plans` are pointers to what a plan intended; never a finding and never a constraint.
+- **`deeper`**: If the card carries `deeper` and the task needs what it `adds`, you may call once more with `depth: <deeper.level>`; never loop.
 
 If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 
@@ -22,7 +23,7 @@ Don't dump the full brief verbatim to the user unless asked. Use it to shape the
 
 ## When the user asks "why does X exist?"
 
-For intent questions about an existing symbol — "what is this for?", "is this still needed?", "can I delete this?" — call `whygraph_rationale_brief` and present the response **verbatim**. The grounded answer is the value; don't paraphrase or pre-answer from the code.
+For intent questions about an existing symbol — "what is this for?", "is this still needed?", "can I delete this?" — call `whygraph_rationale_brief` with `intent: "explain"` (`delete` for "can I delete this?") and present the response **verbatim**. The grounded answer is the value; don't paraphrase or pre-answer from the code.
 
 If the user suspects the cached rationale is stale, re-call with `force_refresh: true`. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 

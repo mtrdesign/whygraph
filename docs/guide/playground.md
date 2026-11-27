@@ -119,6 +119,21 @@ default model, with the provider key from Settings - the same provider and model
 If that provider has no key yet, add one under Settings first. See
 [Configuration](../reference/configuration.md).
 
+### Rationale depth { #rationale-depth }
+
+A card shows a badge with the depth it was built at; click it for a panel that compares the levels
+(what each answers, what it reads, how many model calls) and the estimated price of a card at each.
+When the next level would add something for that code, the card says what and offers **Generate
+deeper**, with its estimated price. It uses the same permission and budget as **Generate rationale**
+and is hidden at the project's ceiling, so only a `Low` card offers it, for `Medium`. A card also notes
+when newer commits are not reflected, and when commits are missing descriptions.
+
+Choose the default in the project's **Settings**, under **Rationale depth**: **Depth** (`Auto`, `Low`
+or `Medium`) and **Ceiling** (the deepest level this project may use). In production a ceiling
+above your organization's is disabled. A depth above the ceiling is capped. See
+[Configuration](../reference/configuration.md#rationale-depth). A [linked](../portal/platform-projects.md)
+project shows both read-only, from the platform.
+
 ### Notes { #notes }
 
 The **Notes** tab lists the [project notes](notes.md) that apply to the selected symbol: notes anchored

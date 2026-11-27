@@ -100,23 +100,46 @@ keyed by number (as a string), however many commits link the same pull request:
   "describing": 0,
   "pull_requests": {
     "847": {
-      "text": { "body": "...", "comments": [{ "author": "jane", "body": "...", "created_at": "..." }] },
+      "text": {
+        "body": "...",
+        "comments": [{ "author": "jane", "body": "...", "created_at": "..." }],
+        "review_summaries": [{ "author": "sam", "state": "APPROVED", "body": "...", "submitted_at": "..." }],
+        "review_threads": [{
+          "path": "src/auth.py", "original_line": 42, "resolved": true, "outdated": false, "current": true,
+          "comments": [{ "author": "sam", "body": "...", "created_at": "..." }]
+        }]
+      },
       "commit_titles": [{ "oid": "4f1c...", "headline": "fix: retry refresh", "author_name": "Jane Doe" }],
+      "review_threads_elsewhere": 2,
+      "review_threads_total": 3,
       "omitted": { "comments": 3, "commit_titles": 0, "body_chars": 0 }
     }
   },
   "issues": {
-    "812": { "text": { "body": "..." } }
+    "812": { "text": { "body": "...", "comments": [{ "author": "ana", "body": "...", "created_at": "..." }] } }
   }
 }
 ```
 
-A pull request entry holds `text.body`, `text.comments` (the first
-`[rationale].pr_discussion_max_comments`, each cut to `pr_comment_max_chars`) and `commit_titles`
-(the first `pr_roster_max_commits`); an issue entry holds `text.body`. Pull request and issue bodies
-are cut at **4000** characters (marked with `...`); commit bodies are not cut. An entry that lost
-anything carries `omitted`: on a pull request `{ "comments": n, "commit_titles": m, "body_chars": k }`,
-on an issue `{ "body_chars": k }`.
+A pull request entry holds `text.body`, `text.comments` (the conversation), `text.review_summaries`
+(the review bodies and their state), `text.review_threads` and `commit_titles` (the first
+`pr_roster_max_commits`); an issue entry holds `text.body` and `text.comments`. Comments and
+review summaries are the oldest first, at most `[rationale].pr_discussion_max_comments` of each, and
+every comment is cut to `pr_comment_max_chars`. Pull request and issue bodies are cut at **4000**
+characters (marked with `...`); commit bodies are not cut. Bot and hidden (minimized) comments are
+not stored, so they never appear, except a bot's or hidden opening comment of a thread a human
+answered (cut short).
+
+`review_threads` holds only the threads on **the target's file** (renames followed), at most
+`pr_discussion_max_comments` comments in all. Each thread carries `current`: `true` when the code it
+was written about still exists in today's file, `false` when it is gone or cannot be placed. The
+threads on other files are not inlined: `review_threads_elsewhere` counts them and
+`whygraph://pr/{n}` carries every file's. `review_threads_total` is GitHub's own count of threads on
+the pull request, which can exceed what was stored (the first 20 threads are kept).
+
+An entry that lost anything carries `omitted`: on a pull request `{ "comments": n, "commit_titles": m,
+"body_chars": k, "review_summaries": a, "review_comments": b, "review_threads_elsewhere": c }`, on an
+issue `{ "body_chars": k, "comments": n }`.
 
 `source` says how the commit was found: `blame`, `pr-origin`, `blame-walked`, `predecessor-blame` or
 `area`. A [linked project](#linked-projects) may add `push_status`.
@@ -187,7 +210,9 @@ switching `[rationale].provider` or `model` regenerates rather than returning th
 | `line_end` | int | Last line of the chunk. |
 | `qualified_name` | str | Fully-qualified symbol name, instead of `path`/lines. |
 | `force_refresh` | bool (default `false`) | Skip the cache and generate a new card (still stored; the same permission and budget checks apply). |
-| `cached_only` | bool (default `false`) | Never generate: no generation, no description backfill, no LLM spend. Use it to read what is already known. It is looser than a normal lookup: it also returns a card whose lines changed since it was written, or the card of an overlapping range, and `{ "status": "not_cached", "target": {...} }` only when there is none (see [Cached-only lookups](#cached-only-lookups)). Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
+| `intent` | `explain`, `edit`, `refactor`, `delete`, `review` or `plan` (optional) | The task the card is for. Under the project's `auto` depth it picks the level (see [Depth and intent](#depth-and-intent)). |
+| `depth` | `low` or `medium` (optional) | A level instead of `auto`. Capped at the project's ceiling, never refused. Omit it unless the card's `deeper` says the next level adds what the task needs. |
+| `cached_only` | bool (default by `intent`) | Never generate: no generation, no description backfill, no LLM spend. It defaults to `true` for `intent="review"` and `false` otherwise. Use it to read what is already known. It is looser than a normal lookup: it also returns a card whose lines changed since it was written, or the card of an overlapping range, and `{ "status": "not_cached", "target": {...} }` only when there is none (see [Cached-only lookups](#cached-only-lookups)). Has no effect with `force_refresh`, nor on a [linked](#linked-projects) project, whose card the platform serves. |
 
 Returns the card:
 
@@ -247,6 +272,38 @@ supports it (the model's reading of the diffs, not a recorded statement), and `u
 cached before sources existed. A ref is `{kind, id, url?}`: `kind` is `commit`, `pr` or `issue`, and
 `id` is the full commit SHA or the PR or issue number. `tradeoffs` stays a list of strings.
 
+#### Card freshness and coverage { #card-coverage }
+
+A card also carries `context_stale` (see the table below) and, when it was generated by a current
+build, `coverage`: what the prompt left out. It holds `full_prs_demoted` (pull requests shown as one
+line because of the size limits), `threads_lost` (review threads that did not fit), `trimmed` (what
+was cut to fit), `descriptions_missing` (commits without a description), `line_commits` and
+`context_commits` (how many commits were used) and `context_omitted` (file-history commits that did
+not fit). A card cached before this version has no `coverage`.
+
+#### Depth and intent { #depth-and-intent }
+
+A card is built at one of two levels (see [Concepts](../guide/concepts.md#depth-levels)); the card's
+`depth` says which: `{requested, resolved, reason}`, where `requested` is what was asked (`auto` or a
+level), `resolved` is the level used and `reason` is a short sentence saying why. Under `auto`:
+
+| `intent` | Level |
+|---|---|
+| `explain`, `review` | `low`. `review` also accepts a cached card of any depth. |
+| `plan`, `edit`, `refactor`, `delete`, none | `medium` |
+
+One level up when the symbol has five or more distinct callers (matched by name), one level down when
+a budget that covers the caller is at 75 % or more of its limit, and never above `medium` or the
+ceiling. The `reason` names only what moved the level. An
+explicit `depth` skips all of that except the ceiling. A cached card of the resolved level is served;
+a shallower one is regenerated at the resolved level, a deeper one is served as it is.
+
+`deeper`, when present, is `{level, adds}`: what the next level would add for this target, so only a
+`low` card can carry it (`null` at `medium` or at the ceiling). Ask for it at most once, with `depth`,
+and only when the task needs what it adds. `coverage` gains `source` (`included`, `omitted` for a
+target over 8,000 characters, or `unavailable`). A card cached before depth levels has none of these
+fields.
+
 #### Cached-only lookups { #cached-only-lookups }
 
 A `cached_only` call is meant for reading what is already known, such as a review of a branch whose
@@ -261,12 +318,13 @@ symbols have moved or gained commits, so it accepts cards a generating call woul
    with its current evidence.
 4. Otherwise `{ "status": "not_cached", "target": {...} }`.
 
-Every card a `cached_only` call returns carries two more keys, and an overlap a third:
+Every card a `cached_only` call returns carries three more keys, and an overlap a fourth:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `match` | `"exact"` or `"overlap"` | Whether the card was cached for the requested range or for an overlapping one. |
 | `stale` | bool | `true` when the card's lines got new commits since it was written: it is the rationale from before that change. |
+| `context_stale` | bool | `true` when one or two newer commits touched the file but not the card's lines. The card is still valid for the lines; those commits are not in it. Three or more newer file commits make a miss instead. Apart from `stale`, which means the lines changed. |
 | `card_range` | `{ "line_start", "line_end" }` | With `match: "overlap"` only: the range the card was written for. `target` stays the requested range. |
 
 `generated` is always `false`. For an overlap card, `evidence_count` and `evidence` describe the
@@ -296,8 +354,8 @@ Read-only, JSON, addressed by URI.
 | URI | Name | Description |
 |---|---|---|
 | `whygraph://commit/{sha}` | `whygraph_commit` | A scanned commit and the pull requests that contain it (closing issues not inlined). |
-| `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles`, and the first 50 `comments` (the oldest, each body cut to 4,000 characters); when anything was cut, an `omitted` key says how many comments (`comments`) and characters (`comment_chars`). |
-| `whygraph://issue/{number}` | `whygraph_issue` | An issue and the pull requests that close it. |
+| `whygraph://pr/{number}` | `whygraph_pull_request` | A pull request and the issues it closes. Includes full `commit_titles`, and the first 50 `comments` (the oldest, each body cut to 4,000 characters); when anything was cut, an `omitted` key says how many comments (`comments`) and characters (`comment_chars`). Also carries `review_summaries` and the review threads on **every** file (each with its `path`; no `current`, because a resource has no target), plus `review_threads_total`. |
+| `whygraph://issue/{number}` | `whygraph_issue` | An issue and the pull requests that close it. Includes the issue's `comments` (the first 100 stored, oldest first, human only, each cut like a pull request comment). |
 | `whygraph://repo/overview` | `whygraph_repo_overview` | Repo-level summary: row counts, commit date range, scan freshness, LLM-description coverage, top contributors, and a `freshness` block. |
 | `whygraph://plan/{stem}` | `whygraph_plan` | A committed [plan](#plans)'s decision digest, its links and a contents list. Intent, not history. |
 | `whygraph://plan/{stem}/section/{n}` | `whygraph_plan_section` | One section of a plan, at most 8,000 characters. |

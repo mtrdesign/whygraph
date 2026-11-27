@@ -500,6 +500,129 @@ def test_mcp_linked_rationale_shows_the_platforms_budget_refusal(
     assert payload["platform"]["status"] == "ok"
 
 
+DEPTH_FIELDS = ("intent", "depth", "cached_only")
+"""The ``RationaleIn`` fields a platform with depth levels takes (plan 62 section 14.4)."""
+
+
+def test_mcp_linked_rationale_sends_depth_only_to_a_platform_that_has_it(
+    repo: SimpleNamespace,
+) -> None:
+    """An older platform's ``meta``: none of the new fields, and its old card validates."""
+    fake = FakePlatform(depth_supported=False)
+    ctx = linked_over(repo, fake)
+    with use_project(ctx):
+        card = whygraph_rationale_brief(
+            qualified_name="pkg.mixed",
+            intent="review",
+            depth="medium",
+            cached_only=True,
+        )
+    body = bodies(fake, "rationale")[0]
+    assert not set(DEPTH_FIELDS) & set(body)
+    assert card["purpose"] == "p"
+    for key in ("depth", "coverage", "deeper", "status", "match", "stale"):
+        assert key not in card
+    assert all("check" not in item for item in card["constraints"])
+    # The capability was read once, and serves the plans branch too.
+    assert len(meta_requests(fake)) == 1
+
+
+def test_mcp_linked_rationale_without_depth_inputs_reads_no_meta(
+    linked: ProjectContext, fake: FakePlatform
+) -> None:
+    with use_project(linked):
+        whygraph_rationale_brief(qualified_name="pkg.mixed")
+    assert not set(DEPTH_FIELDS) & set(bodies(fake, "rationale")[0])
+    # `meta` is read by the plans branch only, after the card.
+    paths = [r.url.path for r in fake.requests]
+    assert paths.index("/api/v1/meta") > paths.index(
+        f"/api/v1/projects/{SLUG}/rationale"
+    )
+
+
+def test_mcp_linked_rationale_on_a_platform_with_depth_levels(
+    linked: ProjectContext, fake: FakePlatform
+) -> None:
+    """The set fields go; the card's depth, coverage and deeper come back.
+
+    A ``check`` or ``coverage.verification`` from a platform built before
+    R49 is dropped, never relayed.
+    """
+    checked = {
+        **RATIONALE_ITEMS[0],
+        "check": {"verdict": "holds", "reason": "line 2 still does it"},
+    }
+    depth = {
+        "requested": "medium",
+        "resolved": "medium",
+        "reason": "Medium was asked for.",
+    }
+    coverage = {
+        "full_prs_demoted": 0,
+        "threads_lost": 0,
+        "trimmed": [],
+        "descriptions_missing": 0,
+        "line_commits": 2,
+        "context_commits": 0,
+        "context_omitted": 0,
+        "verification": "verified",
+        "source": "included",
+    }
+    fake.responses["rationale"] = (
+        200,
+        {
+            "target": {"path": "a.py", "line_start": 1, "line_end": 2},
+            "purpose": "p",
+            "why": "w",
+            "constraints": [checked],
+            "tradeoffs": [],
+            "risks": [],
+            "model": "m",
+            "provider": "x",
+            "cached_at": "2026-10-05T10:00:00Z",
+            "evidence_count": {"commits": 2, "prs": 0, "issues": 0},
+            "depth": depth,
+            "coverage": coverage,
+            "deeper": None,
+            "project": fake.projects[SLUG],
+        },
+    )
+    with use_project(linked):
+        card = whygraph_rationale_brief(
+            qualified_name="pkg.mixed", intent="edit", depth="medium"
+        )
+    body = bodies(fake, "rationale")[0]
+    assert (body["intent"], body["depth"]) == ("edit", "medium")
+    assert "cached_only" not in body  # None is left out
+    assert card["depth"] == depth
+    assert card["coverage"] == {
+        k: v for k, v in coverage.items() if k != "verification"
+    }
+    assert "deeper" not in card  # None at the ceiling is left out
+    assert card["constraints"] == [RATIONALE_ITEMS[0]]
+
+
+def test_mcp_linked_rationale_cached_only_miss_is_the_not_cached_shape(
+    linked: ProjectContext, fake: FakePlatform
+) -> None:
+    fake.responses["rationale"] = (
+        200,
+        {
+            "status": "not_cached",
+            "target": {"path": "a.py", "line_start": 3, "line_end": 5},
+            "project": fake.projects[SLUG],
+        },
+    )
+    with use_project(linked):
+        card = whygraph_rationale_brief(qualified_name="pkg.mixed", intent="review")
+    assert bodies(fake, "rationale")[0]["intent"] == "review"
+    assert card["status"] == "not_cached"
+    assert (card["target"]["line_start"], card["target"]["line_end"]) == (3, 5)
+    assert "purpose" not in card and "constraints" not in card
+    # As the local tool: no plans beside a cached_only miss.
+    assert "plans" not in card and plan_requests(fake) == []
+
+
 # ---------------------------------------------------------------------------
 # Ordering
 # ---------------------------------------------------------------------------
@@ -763,7 +886,7 @@ def test_mcp_linked_never_creates_whygraph_db(
     monkeypatch.setattr(
         "whygraph.mcp.evidence.backfill_evidence_descriptions", forbidden
     )
-    monkeypatch.setattr("whygraph.mcp.rationale.lookup_cached", forbidden)
+    monkeypatch.setattr("whygraph.mcp.rationale.lookup_card", forbidden)
     monkeypatch.setattr("whygraph.mcp.rationale.store_cached", forbidden)
     monkeypatch.setattr("whygraph.mcp.rationale.collect_evidence", forbidden)
     monkeypatch.setattr("whygraph.mcp.path_history.area_history_commits", forbidden)

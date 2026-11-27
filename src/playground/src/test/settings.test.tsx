@@ -229,6 +229,7 @@ describe("SettingsLayout", () => {
     expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
       "General",
       "Models and keys",
+      "Rationale depth",
       "GitHub",
       "Git hooks",
       "Scanning",
@@ -328,6 +329,26 @@ describe("SectionForm", () => {
     await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
     expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({ config: { plans: { dir: "" } } });
     expect(configSections("project", { production: true, source: "github" }).map((s) => s.id)).toContain("plans");
+  });
+
+  it("Rationale depth: Save writes depth and max_depth alone; the org's refusal is a field error", async () => {
+    const user = userEvent.setup();
+    mount("/p/alpha/settings");
+    await screen.findByTestId("config-form");
+    const section = region("Rationale depth");
+    await user.selectOptions(within(section).getByLabelText("Depth"), "medium");
+    await user.selectOptions(within(section).getByLabelText("Ceiling"), "medium");
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(calls("PUT", "/api/projects/alpha/config")).toHaveLength(1));
+    expect(calls("PUT", "/api/projects/alpha/config")[0].body).toEqual({
+      config: { rationale: { depth: "medium", max_depth: "medium" } },
+    });
+
+    handlers["PUT /api/projects/alpha/config"] = () =>
+      json({ error: "above", code: "depth_above_ceiling", ceiling: "low" }, 422);
+    await user.selectOptions(within(section).getByLabelText("Ceiling"), "low");
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    expect(await within(section).findByRole("alert")).toHaveTextContent("Above your organization's ceiling (Low).");
   });
 
   it("Areas: an untouched table round-trips exactly, another section never rewrites it", async () => {

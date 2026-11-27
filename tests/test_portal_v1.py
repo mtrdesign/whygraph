@@ -276,13 +276,28 @@ class _Generator:
     """Stub :class:`~whygraph.analyze.RationaleGenerator`; counts generations."""
 
     calls = 0
+    threads: list[dict] = []
+    """The review-thread arguments of each generation (plan 62 section 4.9)."""
 
     @classmethod
     def from_config(cls, config: object) -> _Generator:
         return cls()
 
-    def generate(self, evidence, *, symbol_context=None, subject=None) -> Rationale:  # noqa: ANN001
+    def generate(  # noqa: ANN001
+        self,
+        evidence,
+        *,
+        symbol_context=None,
+        subject=None,
+        paths=None,
+        file_lines=None,
+        target_range=None,
+        **_,
+    ) -> Rationale:
         type(self).calls += 1
+        type(self).threads.append(
+            {"paths": paths, "file_lines": file_lines, "target_range": target_range}
+        )
         return Rationale(
             purpose="Holds the sample lines.",
             why="Two commits built it up.",
@@ -298,6 +313,7 @@ class _Generator:
 def generator(monkeypatch: pytest.MonkeyPatch) -> type[_Generator]:
     """``RationaleGenerator`` stubbed; ``generator.calls`` counts generations."""
     _Generator.calls = 0
+    _Generator.threads = []
     monkeypatch.setattr(rationale_mod, "RationaleGenerator", _Generator)
     # A configured, reachable provider: the key pre-check is its own test.
     monkeypatch.setattr(v1_routes, "_missing_key", lambda *a, **k: None)
@@ -563,6 +579,53 @@ def test_rationale_cache_shared_across_working_trees(
     assert second.json()["risks"] == first.json()["risks"]
 
 
+def test_rationale_depth_inputs_resolve_with_the_platform_projects_settings(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """Plan 62 section 14.4: `intent`, `depth` and `cached_only` reach the card."""
+    target = target_body(name="sample.fn")
+    miss = call(v1, "POST", "/rationale", json={"target": target, "intent": "review"})
+    assert miss.status_code == 200, miss.text
+    assert RationaleOut.model_validate(miss.json()).status == "not_cached"
+    assert set(miss.json()) == {"status", "target", "project"}
+    assert generator.calls == 0
+
+    low = call(v1, "POST", "/rationale", json={"target": target, "depth": "low"})
+    assert low.status_code == 200, low.text
+    card = RationaleOut.model_validate(low.json())
+    assert card.depth is not None
+    assert (card.depth.requested, card.depth.resolved) == ("low", "low")
+    assert generator.calls == 1
+
+    # A review accepts any cached depth; an explicit cached_only=false too.
+    again = call(
+        v1,
+        "POST",
+        "/rationale",
+        json={"target": target, "intent": "review", "cached_only": False},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["depth"]["resolved"] == "low"
+    assert generator.calls == 1
+
+    # Not offered (R49), and strict: refused, never coerced.
+    for bad in (
+        {"depth": "high"},
+        {"depth": "xhigh"},
+        {"cached_only": "true"},
+        {"intent": "guess"},
+    ):
+        refused = call(v1, "POST", "/rationale", json={"target": target, **bad})
+        assert refused.status_code == 422, refused.text
+
+    status = call(v1, "GET", "")
+    assert status.status_code == 200, status.text
+    assert (
+        status.json()["rationale_depth"],
+        status.json()["rationale_max_depth"],
+    ) == ("auto", "medium")
+
+
 def test_rationale_without_a_symbol_uses_the_requested_range(
     v1: V1World, generator: type[_Generator]
 ) -> None:
@@ -580,6 +643,39 @@ def test_rationale_without_a_symbol_uses_the_requested_range(
     card = RationaleOut.model_validate(response.json())
     assert (card.target.line_start, card.target.line_end) == (1, 3)
     assert generator.calls == 1
+
+
+def test_rationale_for_an_indexed_symbol_checks_threads_on_the_clone(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """The platform's own range and blame: review threads are scoped to its clone."""
+    response = call(
+        v1,
+        "POST",
+        "/rationale",
+        json={"target": target_body(start=100, end=120, name="sample.fn"), "hunks": []},
+    )
+    assert response.status_code == 200, response.text
+    (inputs,) = generator.threads
+    assert "sample.py" in inputs["paths"]
+    assert inputs["file_lines"] is not None and len(inputs["file_lines"]) >= 3
+    assert inputs["target_range"] == (1, 3)
+
+
+def test_rationale_for_an_explicit_range_renders_no_threads(
+    v1: V1World, generator: type[_Generator]
+) -> None:
+    """The requester's working-tree numbers: no scope, so no threads (fail closed)."""
+    response = call(
+        v1,
+        "POST",
+        "/rationale",
+        json={"target": target_body(name="nosuch.symbol"), "hunks": hunks_of(v1)},
+    )
+    assert response.status_code == 200, response.text
+    assert generator.threads == [
+        {"paths": None, "file_lines": None, "target_range": None}
+    ]
 
 
 def test_rationale_without_evidence_is_404(
@@ -1359,3 +1455,72 @@ def test_member_limits_are_org_only_keys() -> None:
         assert key in policy.ORG_ONLY_KEYS[section]
         assert policy.DEFAULTS_ALLOWLIST[section][key] is True
         assert key not in policy.PUT_ALLOWLIST[section]
+
+
+@pytest.mark.parametrize("key", ["depth", "max_depth", "org_max_depth"])
+def test_depth_keys_not_importable_from_repo(tmp_path: Path, key: str) -> None:
+    """A repo's ``whygraph.toml`` cannot set any depth key (plan 62 R28)."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "whygraph.toml").write_text(f'[rationale]\n{key} = "low"\n')
+    preview = policy.preview_import(root)
+    assert key not in preview.layer.get("rationale", {})
+    assert f"rationale.{key}" in {entry["key"] for entry in preview.dropped}
+    assert key not in policy.IMPORT_ALLOWLIST["rationale"]
+
+
+def test_depth_allowlists() -> None:
+    """``depth`` / ``max_depth`` are writable by PUT; ``org_max_depth`` only on defaults."""
+    for name in ("PUT_ALLOWLIST", "PRODUCTION_PUT_ALLOWLIST", "DEFAULTS_ALLOWLIST"):
+        rationale = getattr(policy, name)["rationale"]
+        assert rationale["depth"] is True, name
+        assert rationale["max_depth"] is True, name
+    assert "org_max_depth" in policy.ORG_ONLY_KEYS["rationale"]
+    assert policy.DEFAULTS_ALLOWLIST["rationale"]["org_max_depth"] is True
+    for name in ("IMPORT_ALLOWLIST", "PUT_ALLOWLIST", "PRODUCTION_PUT_ALLOWLIST"):
+        assert "org_max_depth" not in getattr(policy, name)["rationale"], name
+
+
+def test_org_max_depth_set_on_defaults_not_per_project(v1: V1World) -> None:
+    assert (
+        set_defaults(v1, {"rationale": {"org_max_depth": "medium"}}).status_code == 200
+    )
+    for level in ("high", "xhigh"):
+        assert (
+            set_defaults(v1, {"rationale": {"org_max_depth": level}}).status_code == 422
+        )
+    assert (
+        set_defaults(v1, {"rationale": {"org_max_depth": "low"}}, who="cy").status_code
+        == 403
+    )
+    signed_in(v1.client, v1.ids["ben"])
+    response = v1.client.put(
+        f"{at(ORG)}/api/projects/{SLUG}/config",
+        json={"config": {"rationale": {"org_max_depth": "low"}}},
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_project_put_depth_and_ceiling(v1: V1World) -> None:
+    """A depth / max_depth PUT works up to the org ceiling, then 422 ``depth_above_ceiling``."""
+    url = f"{at(ORG)}/api/projects/{SLUG}/config"
+    assert set_defaults(v1, {"rationale": {"org_max_depth": "low"}}).status_code == 200
+    signed_in(v1.client, v1.ids["ben"])
+    ok = v1.client.put(
+        url, json={"config": {"rationale": {"depth": "medium", "max_depth": "low"}}}
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["config"]["rationale"] == {"depth": "medium", "max_depth": "low"}
+
+    refused = v1.client.put(
+        url, json={"config": {"rationale": {"max_depth": "medium"}}}
+    )
+    assert refused.status_code == 422, refused.text
+    body = refused.json()
+    assert body["code"] == "depth_above_ceiling"
+    assert body["ceiling"] == "low"
+    # A level that is not offered (R49) is refused as a value.
+    not_offered = v1.client.put(url, json={"config": {"rationale": {"depth": "high"}}})
+    assert not_offered.status_code == 422, not_offered.text
+    stored = v1.client.get(url).json()["config"]["rationale"]
+    assert stored["max_depth"] == "low"

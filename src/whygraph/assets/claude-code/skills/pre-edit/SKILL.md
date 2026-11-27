@@ -30,6 +30,8 @@ Identify the chunk one of two ways (pass one, not both):
 - **By name** (preferred when CodeGraph resolves it): `qualified_name` (e.g. `auth.session.refresh_token`).
 - **By location** (fallback): `path` + `line_start` + `line_end`.
 
+Pass `intent`: `edit` for a change to a body; `refactor` for a rename, move or signature change; `delete` for a deletion or "can I delete this?"; `explain` for "why does this exist?".
+
 Leave other args at their defaults unless you have a specific reason (`force_refresh=True`
 only when the code has clearly changed since the last card).
 
@@ -43,6 +45,7 @@ only when the code has clearly changed since the last card).
 - **`evidence_count`**: if it's empty or low, the card has little git history behind it -
   treat it as a weak signal and verify against the code yourself.
 - **`plans`** are pointers to what a plan intended; never a finding and never a constraint.
+- **`deeper`**: If the card carries `deeper` and the task needs what it `adds`, you may call once more with `depth: <deeper.level>`; never loop.
 
 If the `whygraph_*` tools are missing from this session, flag that the WhyGraph portal is not connected (start it with `whygraph up`) and proceed with the edit using your own judgment.
 

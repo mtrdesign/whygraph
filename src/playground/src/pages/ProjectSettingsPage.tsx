@@ -26,6 +26,7 @@ import { SectionForm } from "../components/settings/SectionForm";
 import { TransferSection } from "../components/settings/TransferSection";
 import { SettingsLayout, SettingsSection, type SettingsNavItem } from "../components/settings/SettingsLayout";
 import { PageSkeleton } from "../components/state/Skeletons";
+import { depthOptionName } from "../lib/rationaleDepth";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 
@@ -156,6 +157,37 @@ function General({
   );
 }
 
+/** A linked project's depth and ceiling: the platform's, read-only (its cards are built there). */
+function LinkedDepth({ project: p }: { project: ProjectDetails }) {
+  const link = p.link;
+  const word = (value: string | null | undefined) => (value ? depthOptionName(value) : "Not known yet");
+  return (
+    <SettingsSection id="depth" title="Rationale depth">
+      <dl className="flex flex-col gap-2 text-sm" data-testid="linked-depth">
+        <Row label="Depth">
+          <span className="row-wrap gap-3">
+            {word(link?.rationale_depth)}
+            {link?.manage_url && (
+              <a
+                href={link.manage_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-primary-text underline-offset-4 hover:underline"
+              >
+                Managed on the platform
+              </a>
+            )}
+          </span>
+        </Row>
+        <Row label="Ceiling">{word(link?.rationale_max_depth)}</Row>
+      </dl>
+      <p className="text-xs text-muted-foreground">
+        Cards for this project are generated on the platform with its settings. Change them there.
+      </p>
+    </SettingsSection>
+  );
+}
+
 /** Agents: the picker in settings mode (a section form), or why it cannot be changed here. */
 function Agents({ project: p, canSetup }: { project: ProjectDetails; canSetup: boolean }) {
   const queryClient = useQueryClient();
@@ -232,6 +264,7 @@ export function ProjectSettingsPage() {
   const sections: SettingsNavItem[] = linked
     ? [
         { id: "general", label: "General" },
+        { id: "depth", label: "Rationale depth" },
         { id: "agents", label: "Agents" },
         { id: "hooks", label: "Git hooks" },
         { id: "scanning", label: "Scanning" },
@@ -270,6 +303,7 @@ export function ProjectSettingsPage() {
 
       {linked ? (
         <>
+          <LinkedDepth project={p} />
           <Agents project={p} canSetup={canSetup} />
           <SettingsSection
             id="hooks"

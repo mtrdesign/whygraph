@@ -40,7 +40,7 @@ The `PROFILE:` block is optional. The planner passes it only to the `ui-surface`
 
 ## Tools
 
-- **WhyGraph MCP** - `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. The planner already warmed the rationale cache for the working set, so calls on those nodes are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). You may also fetch cards for symbols *outside* the working set if your lens requires it (e.g. a caller you discover via CodeGraph).
+- **WhyGraph MCP** - `whygraph_rationale_brief`, `whygraph_evidence_for`, `whygraph_area_history`. The planner already warmed the rationale cache for the working set, so calls on those nodes are served from the cache (a few hundred ms: blame runs again to check the evidence is unchanged). Pass `intent="plan"` on every `whygraph_rationale_brief` call. You may also fetch cards for symbols *outside* the working set if your lens requires it (e.g. a caller you discover via CodeGraph).
 - **CodeGraph MCP** (served by the WhyGraph portal) - `codegraph_search` (find a symbol), `codegraph_node` (one symbol's source + Called by / Calls trail), `codegraph_impact` (transitive dependents, `depth` 1-3), `codegraph_explore` (source + call paths for an area). Source of *what is structurally affected*. `codegraph_callers` / `codegraph_callees` are not available here. Use to verify structural claims and walk neighbours.
 - **File tools** - Read, Grep, Glob. Use to ground your findings against actual source.
 - **Budget** - if a rationale call errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and note it under Limitations.

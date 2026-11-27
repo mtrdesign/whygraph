@@ -62,10 +62,14 @@ _log = logging.getLogger(__name__)
 MAX_MONTHLY_USD = Decimal("1000000")
 """The largest monthly budget (``ck_budgets_amount``)."""
 
+PRESSURE_PERCENT = 75
+"""Spend, in percent of a budget, at which ``auto`` rationale depth steps down."""
+
 _CENTS = Decimal("0.01")
 
 __all__ = [
     "MAX_MONTHLY_USD",
+    "PRESSURE_PERCENT",
     "BudgetBook",
     "BudgetLimit",
     "BudgetState",
@@ -424,6 +428,35 @@ class BudgetBook:
             ``"member"``, ``"project"``, ``"org"`` or ``None``.
         """
         return self.budget_state(org_id, project_id, user_id).blocked_scope
+
+    def pressure_scope(
+        self, org_id: int, project_id: int | None, user_id: int | None
+    ) -> str | None:
+        """The first covering budget at :data:`PRESSURE_PERCENT` or more (O(1)).
+
+        Measured on the spend now, hard stop or not, so a raised budget
+        lifts the pressure at once (unlike the fired-alert set, which
+        never re-arms within a month). Plan 62 section 14.3, step 4.
+
+        Parameters
+        ----------
+        org_id, project_id, user_id
+            As for :meth:`covering`.
+
+        Returns
+        -------
+        str or None
+            ``"member"``, ``"project"`` or ``"org"`` (in that order), or
+            ``None`` when no covering budget is that far spent.
+        """
+        return next(
+            (
+                c.scope
+                for c in self.covering(org_id, project_id, user_id)
+                if c.spent * 100 >= c.budget.monthly_usd * PRESSURE_PERCENT
+            ),
+            None,
+        )
 
     # -- alerts ----------------------------------------------------------
 

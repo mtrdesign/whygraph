@@ -98,8 +98,13 @@ max_workers = 4               # parallel LLM calls in the diff-analyzer crawler;
 # provider = "anthropic"      # which [llm.*] adapter writes the rationale card
 # model = "claude-haiku-4-5"  # override the model for rationale only
 # pr_roster_max_commits = 30      # squashed-commit headlines shown per PR in the prompt
-# pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt
-# pr_comment_max_chars = 500      # each PR comment clipped to this length
+# pr_discussion_max_comments = 20 # PR comments shown per PR in the prompt, and PR / issue discussion in full evidence
+# pr_comment_max_chars = 500      # each comment clipped to this length, in the prompt and in full evidence
+# review_threads_max_chars = 3000 # review-thread text in one card prompt; 0 keeps threads out
+# context_max_chars = 27000       # short-form history of the file's other commits in one card prompt; 0 keeps it out
+# depth = "auto"                  # auto | low | medium: how deep a card is built
+# max_depth = "medium"            # the project's ceiling; a depth above it is capped
+# org_max_depth = "medium"        # org setting only (production), see "Rationale depth" below
 # agent_generations_per_hour = 120  # org setting only, see "Agent limits" below
 # agent_generations_per_member_per_hour = 30  # org setting only, one member's share
 
@@ -161,7 +166,7 @@ timeout_sec = 120
 | `[plans]` | `dir`, the folder of [committed plans](#plans) the scan indexes (default `docs/plans`; empty turns indexing off). |
 | `[llm]` | `model` - the default `"provider/model"` for every role. See [Choosing models](#choosing-models). |
 | `[analyze]` | The per-commit LLM diff descriptions written during a scan - provider, model, parallelism (`max_workers`), the truncation / per-file thresholds, and an [org-only agent limit](#agent-limits-organization-only). |
-| `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, and an [org-only agent limit](#agent-limits-organization-only). |
+| `[rationale]` | The `whygraph_rationale_brief` card - provider, model, how much of a squash-merged PR is rendered into the prompt, the [depth](#rationale-depth), and an [org-only agent limit](#agent-limits-organization-only). |
 | `[chat]` | The [chat assistant](../guide/chat.md) - default provider and model for new sessions, plus the per-turn tool, generation, and context budgets, the output limit, continuations, the default [effort](../guide/chat.md#effort), and (per project) the default [mode](../guide/chat.md#modes). |
 | `[areas.<name>]` | Named [product areas](#areas): a set of paths and issue / PR labels the chat assistant can filter history by. Empty by default. |
 | `[llm.*]` | Per-provider **connection** settings - key, timeout, and `base_url` / `host` where relevant. Five adapters; only four can drive chat. See [LLM providers](llm-providers.md). |
@@ -248,6 +253,25 @@ Paths are only compared with the file paths recorded in history; nothing opens t
 !!! note "Ownership, not performance"
     `get_area_owners` describes who knows the code under an area. It is not a ranking of people, and
     the assistant is told not to present it as one.
+
+## Rationale depth { #rationale-depth }
+
+`[rationale].depth` is how much a card reads: `low`, `medium`, or `auto` (the default), which picks
+one per request. `[rationale].max_depth` (default `medium`) is the project's ceiling. The levels are
+described in [Concepts](../guide/concepts.md#depth-levels).
+
+- **A depth above the ceiling is capped, not refused.** `depth = "medium"` with `max_depth = "low"`
+  builds `low` cards. `auto` never goes above the ceiling either.
+- **Organization ceiling.** In production, `[rationale].org_max_depth` (default `medium`) caps every
+  project of the organization; the effective ceiling is the lower of the two. It is set only in the
+  organization's defaults, by an owner, and is ignored in local mode. A project that sets
+  `max_depth` above it is refused (`422 depth_above_ceiling`); lowering the org ceiling later does not
+  rewrite projects, it caps them.
+- **Not importable.** A repository's `whygraph.toml` cannot set `depth`, `max_depth` or
+  `org_max_depth`: they are dropped and reported on import, because they decide spend. Set them in
+  Settings.
+- **Linked projects** take the platform's values; see [Linked projects](../portal/platform-projects.md#what-your-agent-sees).
+- **Values.** Only `low` and `medium` are levels (`depth` also takes `auto`); any other value is refused.
 
 ## Agent limits (organization only)
 

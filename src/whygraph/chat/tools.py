@@ -69,11 +69,14 @@ from whygraph.mcp.notes import (
 )
 from whygraph.mcp.path_history import path_commit_counts
 from whygraph.mcp.rationale import (
+    _card_items,
     _format_response,
     _partial_fields,
+    _with_depth,
     whygraph_rationale_brief,
 )
 from whygraph.mcp.rationale_cache import lookup_cached
+from whygraph.mcp.rationale_depth import resolve_for_target
 from whygraph.mcp.resources import (
     _area_owners_resource,
     _commit_resource,
@@ -363,8 +366,9 @@ _SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="get_issue",
         description=(
-            "Get one issue by number — title, body, labels, and the PRs that "
-            "closed it. Issues carry the original problem statement."
+            "Get one issue by number — title, body, labels, its discussion, "
+            "and the PRs that closed it. Issues carry the original problem "
+            "statement."
         ),
         parameters={
             "type": "object",
@@ -425,10 +429,10 @@ _SPECS: tuple[ToolSpec, ...] = (
             "THE one tool for 'what is in flight / in review / stuck / blocked'. "
             "Not for history: list_recent_activity says what happened lately and "
             "find_changes what changed in the code; never list open PRs with "
-            "run_project_stats. A PR's last activity is its newest comment, else "
-            "its last update; a PR with 100+ comments uses the update time, and "
-            "bot comments may count unless the login ends in [bot]. Drafts are "
-            "never stale. Each PR carries its review decision, requested "
+            "run_project_stats. A PR's last activity is its newest human comment "
+            "(bot and hidden comments are not stored), else its last update; a "
+            "PR with more than 100 comments on GitHub uses the update time. "
+            "Drafts are never stale. Each PR carries its review decision, requested "
             "reviewers, first review time, assignees, milestone and diff size; "
             "each issue its assignees and milestone. `area` keeps items placed "
             "in a configured area: a PR by its labels, else its changed files "
@@ -1013,12 +1017,31 @@ def _get_area_outline(path: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _prose_last(result: dict) -> dict:
+    """``result`` with ``issues`` and then ``pull_requests`` moved to the end.
+
+    :data:`MAX_RESULT_CHARS` cuts the JSON at the end, so PR prose (review
+    discussion included) goes before the issues map does. Chat only: the
+    MCP tools keep their order.
+    """
+    tail = ("issues", "pull_requests")
+    out = {key: value for key, value in result.items() if key not in tail}
+    for key in tail:
+        if key in result:
+            out[key] = result[key]
+    return out
+
+
 def _get_evidence(qualified_name: str, limit: int = 10) -> dict:
     """Handler for ``get_evidence``."""
     if not qualified_name:
         return {"error": "qualified_name is required"}
-    return whygraph_evidence_for(
-        qualified_name=qualified_name, limit=max(1, limit), detail="full"
+    return _prose_last(
+        dict(
+            whygraph_evidence_for(
+                qualified_name=qualified_name, limit=max(1, limit), detail="full"
+            )
+        )
     )
 
 
@@ -1034,7 +1057,7 @@ def _get_area_history(path: str, limit: int = 10, include_renames: bool = True) 
     )
     # Chat stays plan-free until its prompt frames plans (plan 61, R22).
     result.pop("plans", None)
-    return result
+    return _prose_last(result)
 
 
 def _find_changes(
@@ -1098,6 +1121,10 @@ def _get_repo_overview() -> dict:
             },
         }
     return overview
+
+
+CHAT_RATIONALE_INTENT = "explain"
+"""The ``intent`` of every ``get_rationale`` card (plan 62 section 14.3)."""
 
 
 def _is_linked() -> bool:
@@ -1473,6 +1500,10 @@ class ToolRegistry:
         not the chat session's: the cache key includes provider and model,
         so generating under the chat provider would write a row the
         Explorer and MCP would still see as missing.
+
+        The card's task is :data:`CHAT_RATIONALE_INTENT` (plan 62 section
+        14.3): under ``auto`` the cheapest level, ``low``. The cache read
+        asks for the level it resolves to, as the brief does.
         """
         if not qualified_name:
             return {"error": "qualified_name is required"}
@@ -1489,22 +1520,37 @@ class ToolRegistry:
                 "notes": notes,
             }
 
+        resolution = resolve_for_target(target, evidence, intent=CHAT_RATIONALE_INTENT)
         provider, pinned_model = get_config().cache_identity("rationale")
-        cached = lookup_cached(target, evidence, provider, pinned_model)
+        cached = lookup_cached(
+            target, evidence, provider, pinned_model, min_depth=resolution.resolved
+        )
         if cached is not None:
             fields = _partial_fields(cached)
             if fields["partial"] and self.generations_used < self._generation_budget:
                 # The brief serves the cached card at once and may start a
                 # background completion; only a started one spends budget.
-                card = whygraph_rationale_brief(qualified_name=qualified_name)
+                card = whygraph_rationale_brief(
+                    qualified_name=qualified_name, intent=CHAT_RATIONALE_INTENT
+                )
                 if card.get("completing"):
                     self.generations_used += 1
                 return {"status": "cached", "generated": False, **card, "notes": notes}
             return {
                 "status": "cached",
                 "generated": False,
-                **_format_response(
-                    target, cached.rationale, evidence, cached.cached_at, **fields
+                **_with_depth(
+                    _format_response(
+                        target,
+                        cached.rationale,
+                        _card_items(evidence, cached.level),
+                        cached.cached_at,
+                        context_stale=cached.context_stale,
+                        **fields,
+                    ),
+                    resolution,
+                    cached.level,
+                    evidence,
                 ),
                 "notes": notes,
             }
@@ -1524,7 +1570,9 @@ class ToolRegistry:
             self.generations_used,
             self._generation_budget,
         )
-        card = whygraph_rationale_brief(qualified_name=qualified_name)
+        card = whygraph_rationale_brief(
+            qualified_name=qualified_name, intent=CHAT_RATIONALE_INTENT
+        )
         return {"status": "cached", "generated": True, **card, "notes": notes}
 
     def _propose_note(

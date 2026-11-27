@@ -1584,6 +1584,7 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_P}/node/rationale", "GET"): _READ,
     # An explicit LLM generation: viewers are refused (M2f-1 section 4.6).
     (f"{_P}/node/rationale", "POST"): _CHAT,
+    (f"{_P}/rationale/depth-profile", "GET"): _READ,
     (f"{_P}/node/evidence", "GET"): _READ,
     (f"{_P}/history", "GET"): _READ,
     (f"{_P}/commit/{{sha}}", "GET"): _READ,

@@ -13,9 +13,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from whygraph.db.models import Commit, Issue, PullRequest
+
+if TYPE_CHECKING:
+    from .card_bundle import CardCoverage
 
 ITEM_BASES = ("quoted", "cited", "inferred", "unknown")
 """The values of :attr:`Item.basis`, strongest first."""
@@ -187,6 +190,10 @@ class Rationale:
         Prompt-token count when the provider reports it.
     output_tokens : int or None
         Completion-token count when the provider reports it.
+    coverage : CardCoverage or None
+        What the card's prompt left out (plan 62 section 13.4), set by
+        :meth:`~whygraph.analyze.RationaleGenerator.generate` and stored with
+        the cached card; ``None`` for a legacy cache row, which has none.
     """
 
     purpose: str
@@ -198,3 +205,4 @@ class Rationale:
     provider: str
     input_tokens: int | None = None
     output_tokens: int | None = None
+    coverage: CardCoverage | None = None

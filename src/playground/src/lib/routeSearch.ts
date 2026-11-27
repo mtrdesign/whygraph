@@ -166,6 +166,7 @@ export function validatePlansSearch(search: Record<string, unknown>): PlansSearc
 export const PROJECT_SETTINGS_SECTIONS = [
   "general",
   "models",
+  "depth",
   "github",
   "hooks",
   "scanning",
@@ -179,7 +180,7 @@ export const PROJECT_SETTINGS_SECTIONS = [
   "danger",
 ] as const;
 export type ProjectSettingsSection = (typeof PROJECT_SETTINGS_SECTIONS)[number];
-export const ORG_SETTINGS_SECTIONS = ["general", "models", "github", "limits", "budgets", "danger"] as const;
+export const ORG_SETTINGS_SECTIONS = ["general", "models", "github", "limits", "depth", "budgets", "danger"] as const;
 export type OrgSettingsSection = (typeof ORG_SETTINGS_SECTIONS)[number];
 
 /** `/p/$slug/settings?section=`: the section to scroll to. */

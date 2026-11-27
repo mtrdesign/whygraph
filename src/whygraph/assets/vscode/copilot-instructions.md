@@ -4,7 +4,7 @@ This repository uses WhyGraph (via the `whygraph` MCP server) to ground code-cha
 
 ## Before editing existing code
 
-When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module (anything beyond a typo or formatter pass), call the `whygraph_rationale_brief` MCP tool first, identifying the symbol by `qualified_name` when CodeGraph resolves it, otherwise by `path` + `line_start` + `line_end`. Treat `constraints[]` as non-negotiable and surface `risks[]` before the change. For "why does X exist?" questions, call it and present the answer verbatim. The details of calling it and reading errors are in `instructions/pre-edit.instructions.md`.
+When the request is to **edit, refactor, rename, move, or delete** an existing function, class, or module (anything beyond a typo or formatter pass), call the `whygraph_rationale_brief` MCP tool first, identifying the symbol by `qualified_name` when CodeGraph resolves it, otherwise by `path` + `line_start` + `line_end`, and pass `intent` (`edit`, `refactor`, `delete` or `explain`). Treat `constraints[]` as non-negotiable and surface `risks[]` before the change. For "why does X exist?" questions, call it and present the answer verbatim. The details of calling it and reading errors are in `instructions/pre-edit.instructions.md`.
 
 The server also offers prompts: `whygraph_pre_edit_brief`, `whygraph_why_was_this_written`, `whygraph_triage_commit`.
 

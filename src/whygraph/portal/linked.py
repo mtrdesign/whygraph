@@ -57,6 +57,8 @@ from whygraph.api_v1 import (
     MAX_PATH,
     MAX_PLAN_PATHS,
     MAX_PLAN_SECTION,
+    NOT_CACHED,
+    RATIONALE_DEPTH_CAPABILITY,
     EvidenceIn,
     HunkIn,
     OriginIn,
@@ -357,7 +359,7 @@ class LinkedProject:
         self.status = status
         self.reason = reason
         self.project_id = project_id
-        self._plans: bool | None = None  # the ``plans`` capability, once read
+        self._capabilities: frozenset[str] | None = None  # ``meta``, once read
 
     @property
     def url(self) -> str:
@@ -490,8 +492,30 @@ class LinkedProject:
             list(reply.unknown_shas),
         )
 
-    def rationale(self, target: Target, hunks: Sequence[BlameHunk]) -> dict:
+    def rationale(
+        self,
+        target: Target,
+        hunks: Sequence[BlameHunk],
+        *,
+        intent: str | None = None,
+        depth: str | None = None,
+        cached_only: bool | None = None,
+    ) -> dict:
         """``POST /rationale``: a card from the platform's shared cache.
+
+        ``intent``, ``depth`` and ``cached_only`` (plan 62 section 14.4) are
+        sent only when the platform's ``meta`` lists
+        :data:`~whygraph.api_v1.RATIONALE_DEPTH_CAPABILITY` (read once,
+        shared with the plans capability, and only when one of them is
+        set): an older platform refuses an unknown field, so it gets the
+        request it always got and answers its default card.
+
+        Returns
+        -------
+        dict
+            The card without the fields the platform did not send, or
+            ``{"status": "not_cached", "target"}`` for a ``cached_only``
+            miss.
 
         Raises
         ------
@@ -500,13 +524,30 @@ class LinkedProject:
             limit and a missing key arrive this way too, with the
             platform's own message).
         """
+        wanted = {
+            key: value
+            for key, value in (
+                ("intent", intent),
+                ("depth", depth),
+                ("cached_only", cached_only),
+            )
+            if value is not None
+        }
+        if wanted and RATIONALE_DEPTH_CAPABILITY not in self._capability_set():
+            wanted = {}
         body = self._body(
-            lambda: RationaleIn(target=_target_in(target), hunks=_hunks_in(hunks))
+            lambda: RationaleIn(
+                target=_target_in(target), hunks=_hunks_in(hunks), **wanted
+            )
         )
         card = self._guard(lambda: self._client.rationale(self.slug, body))
         out = card.model_dump(mode="json")
+        if card.status == NOT_CACHED:
+            return {"status": NOT_CACHED, "target": out["target"]}
         # An older platform sends none of these: leave them out rather than
-        # report ``partial: false`` for a card it built under the old bound.
+        # report ``partial: false`` for a card it built under the old bound
+        # (the model's dump already leaves out a missing ``depth``,
+        # ``coverage`` and ``deeper``).
         for key in ("partial", "describing", "completing"):
             if out.get(key) is None:
                 out.pop(key, None)
@@ -553,16 +594,14 @@ class LinkedProject:
 
     # -- plans (plan 61 section 4.8) ----------------------------------------
 
-    def _plans_capable(self) -> bool:
-        """Whether the platform's ``meta`` lists ``plans`` (read once, if it succeeds).
+    def _capability_set(self) -> frozenset[str]:
+        """The platform's ``meta`` capabilities (read once, if it succeeds).
 
-        An older platform has no plans routes, and its catch-all answers
-        them with ``401 login_required``, so the capability is read first.
         Only a successful read is kept: a failed one raises
         :class:`RemoteError` (``status`` ``ok``, nothing recorded about the
         link) and the next call reads it again.
         """
-        if self._plans is None:
+        if self._capabilities is None:
             try:
                 meta = self._client.meta()
             except PlatformError as exc:
@@ -570,8 +609,16 @@ class LinkedProject:
                 raise RemoteError(
                     str(self._error(exc, status, reason)), status=status, reason=reason
                 ) from exc
-            self._plans = PLANS_CAPABILITY in meta.capabilities
-        return self._plans
+            self._capabilities = frozenset(meta.capabilities)
+        return self._capabilities
+
+    def _plans_capable(self) -> bool:
+        """Whether the platform's ``meta`` lists ``plans`` (:meth:`_capability_set`).
+
+        An older platform has no plans routes, and its catch-all answers
+        them with ``401 login_required``, so the capability is read first.
+        """
+        return PLANS_CAPABILITY in self._capability_set()
 
     def plans_for(
         self,
@@ -735,6 +782,15 @@ def status_of(outcome: Any) -> tuple[str, str | None]:
 # ---------------------------------------------------------------------------
 
 
+_platform_depth: dict[int, tuple[str | None, str | None]] = {}
+"""``projects.id`` -> the platform's ``(rationale_depth, rationale_max_depth)`` last seen.
+
+In memory only (the settings page shows them read-only; a restart shows
+"not known yet" until the next status answer): nothing about a platform's
+cards is stored here beyond what the link row holds.
+"""
+
+
 def link_block(row: PlatformLink) -> dict[str, Any]:
     """The ``link`` block of a linked project's summary (plan section 4.11).
 
@@ -750,12 +806,16 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         ``platform_origin``, ``org``, ``remote_slug``, ``status``,
         ``status_reason``, ``last_platform_head``, ``project_role`` (the
         caller's role on the platform project as last reported, or
-        ``None``; a ``viewer`` has no chat there) and the three deep links
+        ``None``; a ``viewer`` has no chat there), ``rationale_depth`` and
+        ``rationale_max_depth`` (the platform's ``[rationale]`` depth and
+        effective ceiling as its last status answer said, ``None`` until
+        one did or from an older platform) and the three deep links
         into the platform's SPA: ``manage_url`` (the project's home),
         ``explorer_url`` and ``chat_url``. All three live on the org host,
         because that is where the project is.
     """
     home = f"{row.api_origin}/p/{row.remote_slug}"
+    depth, max_depth = _platform_depth.get(row.project_id, (None, None))
     return {
         "platform_origin": row.platform_origin,
         "org": row.org_slug,
@@ -764,6 +824,8 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         "status_reason": row.status_reason,
         "last_platform_head": row.last_platform_head,
         "project_role": row.remote_project_role,
+        "rationale_depth": depth,
+        "rationale_max_depth": max_depth,
         "explorer_url": f"{home}/explorer",
         "chat_url": f"{home}/chat",
         "manage_url": home,
@@ -835,6 +897,10 @@ def save_status(
             row.status_at = _now()
             changed = True
         if project is not None:
+            _platform_depth[project_id] = (
+                project.rationale_depth,
+                project.rationale_max_depth,
+            )
             if project.name and row.remote_name != project.name:
                 row.remote_name = project.name
                 local = session.get(Project, project_id)

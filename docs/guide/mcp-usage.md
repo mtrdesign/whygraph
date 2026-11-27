@@ -29,8 +29,8 @@ number; see [Evidence items](../reference/mcp.md#evidence-items).
   none, it returns `{"status": "not_cached"}`. See
   [Cached-only lookups](../reference/mcp.md#cached-only-lookups).
   Pass `intent` (`explain`, `edit`, `refactor`, `delete`, `review` or `plan`) so the project's `auto`
-  depth builds a card fitting the task: a cheap one to explain code, a verified one before a refactor
-  or a deletion. If the card's `deeper` says the next level adds what the task needs, ask once more
+  depth builds a card fitting the task: a cheap one to explain code, one with the file's recent
+  history before an edit, a refactor or a deletion. If the card's `deeper` says the next level adds what the task needs, ask once more
   with `depth`; do not loop. See [Depth and intent](../reference/mcp.md#depth-and-intent).
 
 Each item of a card's `constraints` and `risks` is an object that names its source:

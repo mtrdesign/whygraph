@@ -74,8 +74,10 @@ describe("UI copy", () => {
   });
 
   it("keeps the depth level copy in one constant the panel and the hints share (R31)", () => {
-    // The offered levels only: `xhigh` is not offered until Part D.
-    expect(DEPTH_LEVELS).toEqual(["low", "medium", "high"]);
+    // The offered levels only: `high` and `xhigh` are not offered (R49).
+    expect(DEPTH_LEVELS).toEqual(["low", "medium"]);
+    expect(Object.keys(DEPTH_COPY.levels)).toEqual(["low", "medium"]);
+    expect(JSON.stringify(DEPTH_COPY)).not.toMatch(/[Vv]erif|High/);
     expect(DEPTH_COPY.footer).toBe("Every level reads the LLM description of each commit it includes.");
     for (const level of DEPTH_LEVELS) {
       const row = DEPTH_COPY.levels[level];

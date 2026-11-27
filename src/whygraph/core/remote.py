@@ -143,8 +143,8 @@ class RemoteProject(Protocol):
         Returns
         -------
         dict
-            The card (``depth``, ``coverage``, ``deeper`` and each item's
-            ``check`` when the platform sends them), or
+            The card (``depth``, ``coverage`` and ``deeper`` when the
+            platform sends them), or
             ``{"status": "not_cached", "target"}`` for a ``cached_only``
             miss.
         """

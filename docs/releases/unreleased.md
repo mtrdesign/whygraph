@@ -43,26 +43,23 @@ code that still exists.
 - **Review threads need a unique anchor.** A thread appears on a card only when the code it was
   written about occurs once in the file.
 - **Depth levels and `auto`.** A rationale card is now built at a depth: `low` (the lines' own
-  commits and their pull requests), `medium` (adds the file's recent history in short form) or `high`
-  (adds the feature-branch commits of squash PRs and a verification pass). The new
-  `[rationale].depth` defaults to `auto`, which picks a level per request from the task, how many
+  commits and their pull requests) or `medium` (adds the file's recent history in short form). The
+  new `[rationale].depth` defaults to `auto`, which picks a level per request from the task, how many
   places call the symbol, and how close a budget is to its limit; `[rationale].max_depth` (default
-  `high`) is the ceiling. `whygraph_rationale_brief` gains `intent` and `depth`, and `cached_only`
+  `medium`) is the ceiling. `whygraph_rationale_brief` gains `intent` and `depth`, and `cached_only`
   now defaults to true for `intent="review"`. The card gains `depth` (requested, resolved, reason)
-  and `deeper` (what the next level would add). Existing projects get `auto` with a `high` ceiling.
+  and `deeper` (what the next level would add). Existing projects get `auto` with a `medium` ceiling.
   See [MCP reference](../reference/mcp.md#depth-and-intent) and
   [Concepts](../guide/concepts.md#depth-levels).
-- **Verification pass and grounding.** From `high`, a second model call checks each constraint and
-  risk against the target's current code; each item carries a `check` (`holds`, `contradicted` or
-  `cannot_tell`) and `coverage.verification` says how it went. At every level the draft prompt now
-  includes the target's current source (up to 8,000 characters, `coverage.source`), says that caller
-  and callee lists are matched by name, and labels draft commits of squash PRs. The source goes to
-  the project's rationale provider, as diffs already do. Existing cards are not regenerated.
+- **Grounding.** At every level the draft prompt now includes the target's current source (up to
+  8,000 characters, `coverage.source`), says that caller and callee lists are matched by name, and
+  labels draft commits of squash PRs. The source goes to the project's rationale provider, as diffs
+  already do. Existing cards are not regenerated.
 - **Settings and the estimate.** Project Settings gain a **Rationale depth** section (Depth and
   Ceiling) with an info panel comparing the levels and an estimate of a card's price per level,
   computed with no model call. An organization owner sets an org-wide ceiling,
   `[rationale].org_max_depth`, in production. Cards show their depth, and the Explorer offers
-  **Generate deeper**. A deeper level above `high` is planned and is not offered yet. See
+  **Generate deeper**. A deeper level above `medium` is planned and is not offered yet. See
   [Configuration](../reference/configuration.md#rationale-depth),
   [the Explorer](../guide/playground.md#rationale-depth) and
   [Usage & cost](../portal/usage.md#depth-estimate).

@@ -76,13 +76,11 @@ This keeps a card small and cheap; the card's `coverage` field says what did not
 
 ### Depth levels { #depth-levels }
 
-A card is built at one of three depths. **Low** answers "who wrote these lines, and why?": the
+A card is built at one of two depths. **Low** answers "who wrote these lines, and why?": the
 commits that own them and the one that created them, their pull requests in full, and the author's
 review replies. **Medium** adds what has been happening around them: more pull requests and the
-file's recent history in short form. **High** asks "is each claim still true of today's code?": it
-adds the feature-branch commits of squash PRs and a second model call that checks every constraint
-and risk against the target's current code, marking each `holds`, `contradicted` or `cannot_tell`
-(nothing is removed). Every level reads the description of each commit it includes. The project's
+file's recent history in short form. A deeper level is planned. Every level reads the description of
+each commit it includes and makes one model call. The project's
 default is `auto`, which picks a level per request; see
 [Depth and intent](../reference/mcp.md#depth-and-intent) and
 [Configuration](../reference/configuration.md#rationale-depth).

@@ -34,7 +34,6 @@ const ready = (over: Record<string, unknown> = {}) => ({
   levels: {
     low: level({ low: 0.019, high: 0.025 }),
     medium: level({ low: 0.05, high: 0.09 }),
-    high: level({ low: 0.03, high: 0.04 }),
   },
   descriptions: { undescribed_share: 0.4, per_commit_usd: 0.015 },
   cheaper_descriptions: { provider: "anthropic", model: "claude-haiku-4-5", per_commit_usd: 0.004, current_per_commit_usd: 0.015 },
@@ -79,10 +78,10 @@ describe("the depth info panel", () => {
     expect(within(panel).getByText(DEPTH_COPY.title)).toBeInTheDocument();
     // The popup is named by its heading (aria-labelledby).
     expect(screen.getByRole("dialog", { name: DEPTH_COPY.title })).toBeInTheDocument();
-    for (const name of ["Auto", "Low - Lines", "Medium - Context", "High - Verified"])
+    for (const name of ["Auto", "Low - Lines", "Medium - Context"])
       expect(within(panel).getAllByText(name).length).toBeGreaterThan(0);
-    // `xhigh` is not offered until Part D.
-    expect(within(panel).queryByText(/Extra high/)).toBeNull();
+    // `high` and `xhigh` are not offered (R49).
+    expect(within(panel).queryByText(/High|Extra high|Verified/)).toBeNull();
     expect(panel).toHaveTextContent(DEPTH_COPY.footer);
     await waitFor(() => expect(panel).toHaveTextContent("about $0.05-0.09 (estimate)"));
     expect(panel).toHaveTextContent("A commit without a description yet costs about $0.015, once.");
@@ -176,7 +175,7 @@ function Harness({ values, orgCeiling }: { values: Partial<ConfigFormValues>; or
   const form = useForm<ConfigFormValues>({ defaultValues: { ...layerToValues({}), ...values } });
   return (
     <ProjectProvider slug="alpha">
-      <RationaleDepthFields form={form} readOnly={false} inheritedDepth="auto" inheritedMax="high" orgCeiling={orgCeiling} />
+      <RationaleDepthFields form={form} readOnly={false} inheritedDepth="auto" inheritedMax="medium" orgCeiling={orgCeiling} />
     </ProjectProvider>
   );
 }
@@ -192,31 +191,33 @@ function mountFields(values: Partial<ConfigFormValues>, orgCeiling: string | nul
 
 describe("the Rationale depth fields", () => {
   it("disables the depth options above the ceiling and labels them", () => {
-    mountFields({ maxDepth: "medium" }, null);
+    mountFields({ maxDepth: "low" }, null);
     const depth = screen.getByLabelText("Depth") as HTMLSelectElement;
     const options = Array.from(depth.options).map((o) => [o.textContent, o.disabled]);
     expect(options).toEqual([
       ["Auto", false],
       ["Low - Lines", false],
-      ["Medium - Context", false],
-      ["High - Verified (above ceiling)", true],
+      ["Medium - Context (above ceiling)", true],
     ]);
+    // Only the offered levels are choices for the ceiling.
+    const ceiling = screen.getByLabelText("Ceiling") as HTMLSelectElement;
+    expect(Array.from(ceiling.options).map((o) => o.value)).toEqual(["low", "medium"]);
   });
 
   it("follows the selection with its hint and shows the org's ceiling", async () => {
-    mountFields({ maxDepth: "medium" }, "medium");
+    mountFields({ maxDepth: "low" }, "low");
     const depth = screen.getByLabelText("Depth");
     expect(screen.getByText(DEPTH_COPY.auto.description)).toBeInTheDocument();
     await userEvent.setup().selectOptions(depth, "low");
     expect(screen.getByText(levelDescription("low"))).toBeInTheDocument();
-    // The org allows up to Medium: High is not a choice for the project's ceiling.
-    expect(screen.getByText(/Your organization allows up to Medium\./)).toBeInTheDocument();
+    // The org allows up to Low: Medium is not a choice for the project's ceiling.
+    expect(screen.getByText(/Your organization allows up to Low\./)).toBeInTheDocument();
     const ceiling = screen.getByLabelText("Ceiling") as HTMLSelectElement;
-    expect(Array.from(ceiling.options).find((o) => o.value === "high")?.disabled).toBe(true);
+    expect(Array.from(ceiling.options).find((o) => o.value === "medium")?.disabled).toBe(true);
   });
 
   it("says a stored ceiling above the org's is capped", () => {
-    mountFields({ maxDepth: "high" }, "low");
+    mountFields({ maxDepth: "medium" }, "low");
     expect(screen.getByText(/Capped by your organization at Low\./)).toBeInTheDocument();
   });
 
@@ -226,7 +227,7 @@ describe("the Rationale depth fields", () => {
       return <OrgCeilingField form={form} readOnly={false} />;
     }
     render(<Org />);
-    expect(screen.getByLabelText("Organization ceiling")).toHaveValue("high");
+    expect(screen.getByLabelText("Organization ceiling")).toHaveValue("medium");
     expect(screen.getByText(/never a higher one/)).toBeInTheDocument();
   });
 });
@@ -234,13 +235,13 @@ describe("the Rationale depth fields", () => {
 describe("the depth layer", () => {
   it("reads and writes depth, max_depth and org_max_depth beside the other [rationale] keys", () => {
     const base = { rationale: { model: "m", agent_generations_per_hour: 5 } };
-    const values = { ...layerToValues(base), depth: "medium", maxDepth: "high", orgMaxDepth: "medium" };
+    const values = { ...layerToValues(base), depth: "low", maxDepth: "medium", orgMaxDepth: "medium" };
     // Only the section that owns a key writes it.
     expect(valuesToLayer(base, values, { scan: true }).rationale).toEqual(base.rationale);
     expect(valuesToLayer(base, values, { scan: true, depth: true }).rationale).toEqual({
       ...base.rationale,
-      depth: "medium",
-      max_depth: "high",
+      depth: "low",
+      max_depth: "medium",
     });
     expect(valuesToLayer(base, values, { scan: false, ceiling: true }).rationale).toEqual({
       ...base.rationale,
@@ -254,7 +255,7 @@ describe("the depth layer", () => {
   });
 
   it("words depth_above_ceiling with the ceiling the server names", () => {
-    const err = new ApiError(422, "above", "depth_above_ceiling", { ceiling: "high" });
-    expect(errorMessage(err)).toBe("Above your organization's ceiling (High).");
+    const err = new ApiError(422, "above", "depth_above_ceiling", { ceiling: "medium" });
+    expect(errorMessage(err)).toBe("Above your organization's ceiling (Medium).");
   });
 });

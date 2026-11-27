@@ -255,10 +255,8 @@ with **no model call**, so it costs nothing and is cached per project and `HEAD`
 commit without a description yet costs to describe, once. Without a pinned rationale model it uses
 the one recent cards were served by, and says "Price unknown" when there is none.
 
-A `high` card makes two model calls (the draft and the verification pass), and each is recorded as
-its own usage row against the project's [budget](#budgets-and-the-hard-stop). On a connected
-machine's agents, the card counts twice (once per model call) against the organization's
-[hourly card limit](../deploy/production.md#agent-limits).
+A card at either level is one model call, recorded as one usage row against the project's
+[budget](#budgets-and-the-hard-stop).
 
 ## Agent calls that count as failed
 

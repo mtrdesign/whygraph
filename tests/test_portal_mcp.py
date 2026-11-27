@@ -514,15 +514,9 @@ def test_tools_declare_an_output_schema() -> None:
         assert props[key]["items"] == {"$ref": "#/$defs/RationaleItem"}
     item = defs["RationaleItem"]
     assert set(item["required"]) == {"text", "basis", "refs"}
-    assert set(item["properties"]) == {"text", "basis", "refs", "quote", "check"}
-    # A high card's verification verdict (plan 62 section 14.4).
-    check = defs["RationaleItemCheck"]
-    assert set(check["required"]) == {"verdict", "reason"}
-    assert check["properties"]["verdict"]["enum"] == [
-        "holds",
-        "contradicted",
-        "cannot_tell",
-    ]
+    assert set(item["properties"]) == {"text", "basis", "refs", "quote"}
+    # The verification pass is gone (R49): no verdict type is left.
+    assert "RationaleItemCheck" not in defs
     assert item["properties"]["basis"]["enum"] == [
         "quoted",
         "cited",
@@ -548,8 +542,8 @@ def test_tools_declare_an_output_schema() -> None:
     brief_inputs = tools["whygraph_rationale_brief"].inputSchema["properties"]
     assert "cached_only" in brief_inputs
     assert {"type": "null"} in brief_inputs["cached_only"]["anyOf"]
-    # intent and depth carry their guidance in the input schema; xhigh is
-    # not offered until Part D, so validation refuses it.
+    # intent and depth carry their guidance in the input schema; high and
+    # xhigh are not offered (R49), so validation refuses them.
     assert brief_inputs["intent"]["anyOf"][0]["enum"] == [
         "explain",
         "edit",
@@ -558,7 +552,7 @@ def test_tools_declare_an_output_schema() -> None:
         "review",
         "plan",
     ]
-    assert brief_inputs["depth"]["anyOf"][0]["enum"] == ["low", "medium", "high"]
+    assert brief_inputs["depth"]["anyOf"][0]["enum"] == ["low", "medium"]
     for name in ("intent", "depth"):
         assert brief_inputs[name]["description"]
         assert name not in tools["whygraph_rationale_brief"].inputSchema.get(

@@ -37,7 +37,11 @@ from whygraph.db.models import PullRequest
 from .rationale import CommitEvidence
 
 LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
-"""The depth levels, shallowest first (plan 62 R24)."""
+"""The depth levels, shallowest first (plan 62 R24).
+
+``high`` and ``xhigh`` stay defined for Part D but are not offered (R49):
+:data:`~whygraph.core.config.OFFERED_DEPTH_LEVELS` is what a caller may ask for.
+"""
 
 DEFAULT_LEVEL = "medium"
 """The level a card is built at when its caller passes none (plan 62 Part C)."""
@@ -82,35 +86,6 @@ CONTEXT_COMMITS: Mapping[str, int] = {
 FEATURE_COMMITS_FROM = "high"
 """The shallowest level whose squash units show their feature-branch commits."""
 
-VERIFY_FROM = "high"
-"""The shallowest level whose card runs the verification pass (section 14.2)."""
-
-UNVERIFIED_LEVEL = "medium"
-"""The level a card stores at when its verification pass failed or was skipped.
-
-The deepest level such a draft fully satisfies, so a later request at
-:data:`VERIFY_FROM` or deeper regenerates it (plan 62 section 14.2).
-"""
-
-VERIFICATIONS = (
-    "verified",
-    "pending",
-    "failed",
-    "skipped",
-    "source_too_long",
-    "no_source",
-)
-"""The values of :attr:`CardCoverage.verification`.
-
-``verified``: the pass ran (or the draft had nothing to check);
-``pending``: a partial card, verified by its completion; ``failed`` (the
-call or its answer failed) and ``skipped`` (refused by the card budget or
-an exhausted usage budget): stored at :data:`UNVERIFIED_LEVEL`;
-``source_too_long`` and ``no_source``: the target's source is over the
-verifier's limit or could not be read, so the card keeps its level
-unchecked (regenerating could not change that).
-"""
-
 SOURCES = ("included", "omitted", "unavailable")
 """The values of :attr:`CardCoverage.source` (plan 62 section 14.2a).
 
@@ -118,29 +93,6 @@ SOURCES = ("included", "omitted", "unavailable")
 source is longer than the draft's limit, so the prompt held none;
 ``unavailable``: the target's lines could not be read.
 """
-
-
-def verifies(level: str) -> bool:
-    """Whether a card at ``level`` runs the verification pass (``high`` and deeper).
-
-    Parameters
-    ----------
-    level : str
-        One of :data:`LEVELS`.
-
-    Returns
-    -------
-    bool
-        ``True`` from :data:`VERIFY_FROM`.
-
-    Raises
-    ------
-    ValueError
-        If ``level`` is not one of :data:`LEVELS`.
-    """
-    if level not in LEVELS:
-        raise ValueError(f"unknown depth level {level!r}; expected one of {LEVELS}")
-    return LEVELS.index(level) >= LEVELS.index(VERIFY_FROM)
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,9 +481,6 @@ class CardCoverage:
     omitted_shas : frozenset[str]
         The bundle's Ring 1 SHAs the prompt did not render; never served,
         used to keep them out of a card's deferred SHAs.
-    verification : str or None
-        The verification pass's outcome (:data:`VERIFICATIONS`), set on a
-        card built at :data:`VERIFY_FROM` or deeper; ``None`` below that.
     source : str or None
         Whether the draft prompt held the target's source (:data:`SOURCES`);
         ``None`` when the generator was built without it.
@@ -545,13 +494,12 @@ class CardCoverage:
     trimmed: tuple[str, ...] = ()
     descriptions_missing: int = 0
     omitted_shas: frozenset[str] = frozenset()
-    verification: str | None = None
     source: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         """The card's ``coverage`` object (every field but ``omitted_shas``).
 
-        ``verification`` and ``source`` are present only when set.
+        ``source`` is present only when set.
         """
         out: dict[str, object] = {
             "full_prs_demoted": self.full_prs_demoted,
@@ -562,8 +510,6 @@ class CardCoverage:
             "context_commits": self.context_commits,
             "context_omitted": self.context_omitted,
         }
-        if self.verification is not None:
-            out["verification"] = self.verification
         if self.source is not None:
             out["source"] = self.source
         return out

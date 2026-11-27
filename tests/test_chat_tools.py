@@ -855,7 +855,8 @@ def test_rationale_cache_read_asks_for_the_explain_level(
     assert result["depth"]["requested"] == "auto"
     assert result["depth"]["resolved"] == "medium"
     assert result["depth"]["reason"].endswith("A cached Medium card was served.")
-    assert result["deeper"]["level"] == "high"
+    # Medium is the highest offered level (R49): nothing deeper.
+    assert result["deeper"] is None
 
 
 def _partial_hit(monkeypatch: pytest.MonkeyPatch, spy) -> None:

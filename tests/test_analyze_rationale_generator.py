@@ -8,7 +8,6 @@ JSON parsing, and error wrapping.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -2127,7 +2126,8 @@ def test_low_renders_its_rows() -> None:
     assert "Source: area-history" not in prompt
     assert "(8 file commits that touched the file but not these lines" in prompt
     _assert_every_commit_is_described_raw(prompt)
-    assert card.coverage.trimmed == () and card.coverage.verification is None
+    assert card.coverage.trimmed == ()
+    assert "verification" not in card.coverage.as_dict()
 
 
 def test_medium_renders_its_rows() -> None:
@@ -2211,181 +2211,43 @@ def test_generate_selects_its_bundle_at_the_level_it_is_given() -> None:
         RationaleGenerator(_StubClient()).generate(_level_evidence(), level="huge")
 
 
-# ---- plan 62 Part C: the verification pass (section 14.2) -------------------
+# ---- plan 62 Part C: the target's source lines -----------------------------
 
 
-def _draft() -> Rationale:
-    """A draft with two constraints, one risk and a tradeoff."""
-    return Rationale(
-        purpose="Fetches with retries.",
-        why="Three attempts.",
-        constraints=(
-            Item("MAX_ATTEMPTS stays 3", "quoted", (_PR_REF,), "stays at 3"),
-            Item("the timeout is passed on every call", "inferred"),
-        ),
-        tradeoffs=("retries over failing fast",),
-        risks=(Item("raising the limit locks the client out", "cited", (_PR_REF,)),),
-        model="stub-1",
-        provider="stub",
-        coverage=card_bundle_module.CardCoverage(line_commits=1),
+def test_target_source_lines_are_the_targets_lines_within_the_limit() -> None:
+    from whygraph.analyze.rationale_generator import (
+        TARGET_SOURCE_MAX_CHARS,
+        target_source_lines,
     )
 
-
-def _verdicts(*entries: dict) -> str:
-    return json.dumps({"verdicts": list(entries)})
-
-
-def test_verify_sends_the_source_and_the_numbered_claims() -> None:
-    client = _StubClient(text=_verdicts())
-
-    RationaleGenerator(client).verify(_draft(), _FILE[:6], first_line=1, subject="f")
-
-    (request,) = client.requests
-    system, task = request.messages[0].content, request.messages[1].content
-    assert '"verdicts"' in system and "cannot_tell" in system
-    assert "SOURCE (lines 1-6):" in task
-    assert "3      while attempts < MAX_ATTEMPTS:" in task
-    assert "C1: MAX_ATTEMPTS stays 3" in task
-    assert "C2: the timeout is passed on every call" in task
-    assert "R1: raising the limit locks the client out" in task
-    assert "retries over failing fast" not in task  # tradeoffs are not checked
-    assert "stays at 3" not in task  # only the claim, not its quote
+    assert target_source_lines(_FILE, (3, 4)) == (_FILE[2:4], None)
+    assert target_source_lines(None, (1, 2)) == (None, "no_source")
+    assert target_source_lines(_FILE, None) == (None, "no_source")
+    assert target_source_lines((), (1, 2)) == (None, "no_source")
+    assert target_source_lines(_FILE, (40, 50)) == (None, "no_source")
+    # The default limit is the draft's (R48): 8,000 characters.
+    long = ("x" * TARGET_SOURCE_MAX_CHARS, "y")
+    assert target_source_lines(long, (1, 2)) == (None, "source_too_long")
+    assert target_source_lines(long, (1, 1)) == ((long[0],), None)
 
 
-def test_verify_marks_every_item_and_changes_nothing_else() -> None:
-    reply = _verdicts(
-        {"id": "C1", "verdict": "holds", "reason": "line 3 compares to MAX_ATTEMPTS"},
-        {"id": "R1", "verdict": "contradicted", "reason": "  no   limit\nhere "},
-        {"id": "C9", "verdict": "holds", "reason": "unknown id"},
-        {"id": "C1", "verdict": "contradicted", "reason": "a second verdict"},
-    )
-    draft = _draft()
+def test_the_verification_pass_is_gone() -> None:
+    """R49: no verify call, prompt pair or verdicts are left to reach."""
+    import importlib.resources
+    import typing
 
-    card = RationaleGenerator(_StubClient(text=reply)).verify(draft, _FILE[:6])
-
-    assert [i.check.as_dict() for i in (*card.constraints, *card.risks)] == [
-        {"verdict": "holds", "reason": "line 3 compares to MAX_ATTEMPTS"},
-        {"verdict": "cannot_tell", "reason": "no verdict given"},
-        {"verdict": "contradicted", "reason": "no limit here"},
-    ]
-    # Kept and marked: never added, removed or rewritten.
-    strip = [
-        dataclasses.replace(i, check=None) for i in (*card.constraints, *card.risks)
-    ]
-    assert strip == [*draft.constraints, *draft.risks]
-    assert (card.purpose, card.why, card.tradeoffs) == (
-        draft.purpose,
-        draft.why,
-        draft.tradeoffs,
-    )
-    assert card.coverage.verification == "verified"
-    assert card.coverage.line_commits == 1
-    assert card.constraints[0].as_dict()["check"]["verdict"] == "holds"
-
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        {"id": "C1", "verdict": "maybe"},
-        {"id": 1, "verdict": "holds"},
-        "C1 holds",
-        {"verdict": "holds"},
-    ],
-)
-def test_verify_ignores_a_malformed_entry(entry: object) -> None:
-    card = RationaleGenerator(
-        _StubClient(text=json.dumps({"verdicts": [entry]}))
-    ).verify(_draft(), _FILE[:6])
-
-    assert card.constraints[0].check.verdict == "cannot_tell"
-
-
-def test_verify_keeps_a_reason_that_is_not_a_string_out_and_clips_long_ones() -> None:
-    reply = _verdicts(
-        {"id": "C1", "verdict": "holds", "reason": 5},
-        {"id": "C2", "verdict": "holds", "reason": "x" * 1000},
-    )
-
-    card = RationaleGenerator(_StubClient(text=reply)).verify(_draft(), _FILE[:6])
-
-    assert card.constraints[0].check.reason == ""
-    assert len(card.constraints[1].check.reason) == 300
-
-
-@pytest.mark.parametrize(
-    "reply", ["not json", "[]", '{"verdicts": "C1 holds"}', '{"checks": []}']
-)
-def test_verify_raises_on_a_malformed_answer(reply: str) -> None:
-    with pytest.raises(RationaleError):
-        RationaleGenerator(_StubClient(text=reply)).verify(_draft(), _FILE[:6])
-
-
-def test_verify_strips_a_code_fence() -> None:
-    reply = "```json\n" + _verdicts({"id": "R1", "verdict": "holds"}) + "\n```"
-
-    card = RationaleGenerator(_StubClient(text=reply)).verify(_draft(), _FILE[:6])
-
-    assert card.risks[0].check.verdict == "holds"
-
-
-def test_verify_wraps_an_llm_error() -> None:
-    client = _StubClient(raise_with=LlmError("provider down"))
-
-    with pytest.raises(AnalyzeError, match="provider down"):
-        RationaleGenerator(client).verify(_draft(), _FILE[:6])
-
-
-def test_verify_a_draft_with_nothing_to_check_makes_no_call() -> None:
-    client = _StubClient()
-    draft = dataclasses.replace(_draft(), constraints=(), risks=())
-
-    card = RationaleGenerator(client).verify(draft, _FILE[:6])
-
-    assert client.requests == []
-    assert card.coverage.verification == "verified"
-
-
-def test_verify_records_its_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    import whygraph.analyze as analyze
+    from whygraph.analyze import prompt as prompt_module
     from whygraph.analyze import rationale_generator
 
-    recorded: list[tuple[str, str | None]] = []
-    monkeypatch.setattr(
-        rationale_generator,
-        "record_usage",
-        lambda task, response, **kw: recorded.append((task, kw["subject"])),
-    )
-
-    RationaleGenerator(_StubClient(text=_verdicts())).verify(
-        _draft(), _FILE[:6], subject="mod.fetch"
-    )
-
-    assert recorded == [("rationale", "mod.fetch")]
-
-
-def test_verification_source_is_the_targets_lines_within_the_limit() -> None:
-    from whygraph.analyze.rationale_generator import (
-        VERIFY_SOURCE_MAX_CHARS,
-        verification_source,
-    )
-
-    assert verification_source(_FILE, (3, 4)) == (_FILE[2:4], None)
-    assert verification_source(None, (1, 2)) == (None, "no_source")
-    assert verification_source(_FILE, None) == (None, "no_source")
-    assert verification_source((), (1, 2)) == (None, "no_source")
-    assert verification_source(_FILE, (40, 50)) == (None, "no_source")
-    long = ("x" * VERIFY_SOURCE_MAX_CHARS, "y")
-    assert verification_source(long, (1, 2)) == (None, "source_too_long")
-    assert verification_source(long, (1, 1)) == ((long[0],), None)
-
-
-def test_the_packaged_verify_prompt_resolves_with_its_placeholder() -> None:
-    from whygraph.analyze.prompt import VERIFY_PLACEHOLDER, resolve
-
-    prompt = resolve("rationale_verify", "verify", "anthropic", "any-model")
-
-    assert VERIFY_PLACEHOLDER in prompt.task
-    assert "holds" in prompt.system and "contradicted" in prompt.system
-    assert VERIFY_PLACEHOLDER not in prompt.system
+    assert not hasattr(RationaleGenerator, "verify")
+    for name in ("VERIFY_SOURCE_MAX_CHARS", "verification_source", "with_verification"):
+        assert not hasattr(rationale_generator, name)
+    assert not hasattr(prompt_module, "VERIFY_PLACEHOLDER")
+    assert not hasattr(analyze, "ItemCheck")
+    assert "verify" not in typing.get_args(prompt_module.PromptOperation)
+    prompts = importlib.resources.files("whygraph") / "analyze" / "prompts"
+    assert not (prompts / "rationale_verify").is_dir()
 
 
 # ---- plan 62 Part C: grounding the draft (section 14.2a, R48) --------------
@@ -2493,21 +2355,6 @@ def test_the_switch_leaves_the_source_out() -> None:
     assert "TARGET SOURCE" not in client.requests[0].messages[1].content
     assert card.coverage.source is None
     assert "source" not in card.coverage.as_dict()
-
-
-def test_the_verification_pass_keeps_its_own_larger_source_limit() -> None:
-    from whygraph.analyze.rationale_generator import (
-        TARGET_SOURCE_MAX_CHARS,
-        verification_source,
-    )
-
-    lines = ("x" * TARGET_SOURCE_MAX_CHARS, "y")
-
-    assert verification_source(lines, (1, 2)) == (lines, None)
-    assert verification_source(lines, (1, 2), max_chars=TARGET_SOURCE_MAX_CHARS) == (
-        None,
-        "source_too_long",
-    )
 
 
 def test_the_system_prompt_states_the_grounding_rules() -> None:

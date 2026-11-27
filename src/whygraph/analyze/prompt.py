@@ -14,8 +14,8 @@ Layout — ``prompts/<component>/<key>/<file>``:
 * Each LLM call needs two files: a ``system`` message (standing
   instructions) and a ``task`` message (the payload). A component may
   prompt for one or more *operations*, and the operation is a filename
-  prefix mapped by :data:`_OPERATION_INFIX`: ``describe``, ``rationale``
-  and ``verify`` use ``system.md`` / ``task.md``, ``synthesis`` uses
+  prefix mapped by :data:`_OPERATION_INFIX`: ``describe`` and
+  ``rationale`` use ``system.md`` / ``task.md``, ``synthesis`` uses
   ``synthesis.system.md`` / ``synthesis.task.md``.
 
 Resolution is layered and *per file*: for a given ``(provider, model)``
@@ -53,10 +53,7 @@ task prompt."""
 RATIONALE_PLACEHOLDER = "{{EVIDENCE}}"
 """Placeholder token for the evidence bundle in a ``rationale`` task prompt."""
 
-VERIFY_PLACEHOLDER = "{{CLAIMS}}"
-"""Placeholder token for the source and numbered claims in a ``verify`` task prompt."""
-
-PromptOperation = Literal["describe", "synthesis", "rationale", "verify"]
+PromptOperation = Literal["describe", "synthesis", "rationale"]
 """The operations an analyze module prompts for — see the module docstring."""
 
 PromptRole = Literal["system", "task"]
@@ -66,7 +63,6 @@ _OPERATION_INFIX: dict[PromptOperation, str] = {
     "describe": "",
     "synthesis": "synthesis.",
     "rationale": "",
-    "verify": "",
 }
 
 _DEFAULT_KEY = "default"

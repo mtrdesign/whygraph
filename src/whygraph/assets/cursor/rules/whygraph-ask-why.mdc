@@ -22,7 +22,7 @@ The user is asking about the *intent* behind existing code. WhyGraph has a struc
 
 3. Present the response **verbatim**, especially `purpose`, `why`, `constraints[]`, `tradeoffs[]`, and `risks[]`. The value here is the grounded answer; don't paraphrase or layer your own interpretation on top.
 
-4. If the card carries `deeper` and the answer needs a verified card, you may ask once more with `depth: <deeper.level>`; never loop.
+4. If the card carries `deeper` and the answer needs what it `adds`, you may ask once more with `depth: <deeper.level>`; never loop.
 
 5. If the user suspects the cached rationale is stale, re-call with `force_refresh=True`.
 

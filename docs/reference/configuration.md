@@ -102,9 +102,9 @@ max_workers = 4               # parallel LLM calls in the diff-analyzer crawler;
 # pr_comment_max_chars = 500      # each comment clipped to this length, in the prompt and in full evidence
 # review_threads_max_chars = 3000 # review-thread text in one card prompt; 0 keeps threads out
 # context_max_chars = 27000       # short-form history of the file's other commits in one card prompt; 0 keeps it out
-# depth = "auto"                  # auto | low | medium | high: how deep a card is built
-# max_depth = "high"              # the project's ceiling; a depth above it is capped
-# org_max_depth = "high"          # org setting only (production), see "Rationale depth" below
+# depth = "auto"                  # auto | low | medium: how deep a card is built
+# max_depth = "medium"            # the project's ceiling; a depth above it is capped
+# org_max_depth = "medium"        # org setting only (production), see "Rationale depth" below
 # agent_generations_per_hour = 120  # org setting only, see "Agent limits" below
 # agent_generations_per_member_per_hour = 30  # org setting only, one member's share
 
@@ -256,13 +256,13 @@ Paths are only compared with the file paths recorded in history; nothing opens t
 
 ## Rationale depth { #rationale-depth }
 
-`[rationale].depth` is how much a card reads and checks: `low`, `medium`, `high`, or `auto` (the
-default), which picks one per request. `[rationale].max_depth` (default `high`) is the project's
-ceiling. The levels are described in [Concepts](../guide/concepts.md#depth-levels).
+`[rationale].depth` is how much a card reads: `low`, `medium`, or `auto` (the default), which picks
+one per request. `[rationale].max_depth` (default `medium`) is the project's ceiling. The levels are
+described in [Concepts](../guide/concepts.md#depth-levels).
 
-- **A depth above the ceiling is capped, not refused.** `depth = "high"` with `max_depth = "medium"`
-  builds `medium` cards. `auto` never goes above the ceiling either.
-- **Organization ceiling.** In production, `[rationale].org_max_depth` (default `high`) caps every
+- **A depth above the ceiling is capped, not refused.** `depth = "medium"` with `max_depth = "low"`
+  builds `low` cards. `auto` never goes above the ceiling either.
+- **Organization ceiling.** In production, `[rationale].org_max_depth` (default `medium`) caps every
   project of the organization; the effective ceiling is the lower of the two. It is set only in the
   organization's defaults, by an owner, and is ignored in local mode. A project that sets
   `max_depth` above it is refused (`422 depth_above_ceiling`); lowering the org ceiling later does not
@@ -271,7 +271,7 @@ ceiling. The levels are described in [Concepts](../guide/concepts.md#depth-level
   `org_max_depth`: they are dropped and reported on import, because they decide spend. Set them in
   Settings.
 - **Linked projects** take the platform's values; see [Linked projects](../portal/platform-projects.md#what-your-agent-sees).
-- **Not offered yet:** a level above `high` (`xhigh`) is planned and is refused as a value for now.
+- **Not offered:** `high` and `xhigh` are refused as values.
 
 ## Agent limits (organization only)
 

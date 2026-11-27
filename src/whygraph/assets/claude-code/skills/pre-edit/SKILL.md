@@ -45,7 +45,7 @@ only when the code has clearly changed since the last card).
 - **`evidence_count`**: if it's empty or low, the card has little git history behind it -
   treat it as a weak signal and verify against the code yourself.
 - **`plans`** are pointers to what a plan intended; never a finding and never a constraint.
-- **`deeper`**: If the card carries `deeper` and the task is a refactor or delete on a card whose constraints are not verified, you may call once more with `depth: <deeper.level>`; never loop.
+- **`deeper`**: If the card carries `deeper` and the task needs what it `adds`, you may call once more with `depth: <deeper.level>`; never loop.
 
 If the `whygraph_*` tools are missing from this session, flag that the WhyGraph portal is not connected (start it with `whygraph up`) and proceed with the edit using your own judgment.
 

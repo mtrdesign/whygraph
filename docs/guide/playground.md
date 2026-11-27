@@ -125,12 +125,11 @@ A card shows a badge with the depth it was built at; click it for a panel that c
 (what each answers, what it reads, how many model calls) and the estimated price of a card at each.
 When the next level would add something for that code, the card says what and offers **Generate
 deeper**, with its estimated price. It uses the same permission and budget as **Generate rationale**
-and is hidden at the project's ceiling. A card also notes when verification did not run
-(`failed`, `skipped` or `pending`), when newer commits are not reflected, and when commits are
-missing descriptions.
+and is hidden at the project's ceiling, so only a `Low` card offers it, for `Medium`. A card also notes
+when newer commits are not reflected, and when commits are missing descriptions.
 
-Choose the default in the project's **Settings**, under **Rationale depth**: **Depth** (`Auto`, `Low`,
-`Medium` or `High`) and **Ceiling** (the deepest level this project may use). In production a ceiling
+Choose the default in the project's **Settings**, under **Rationale depth**: **Depth** (`Auto`, `Low`
+or `Medium`) and **Ceiling** (the deepest level this project may use). In production a ceiling
 above your organization's is disabled. A depth above the ceiling is capped. See
 [Configuration](../reference/configuration.md#rationale-depth). A [linked](../portal/platform-projects.md)
 project shows both read-only, from the platform.

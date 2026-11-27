@@ -103,8 +103,6 @@ export interface RationaleItem {
   basis: "quoted" | "cited" | "inferred" | "unknown";
   refs: RationaleItemRef[];
   quote?: string;
-  /** The verification pass's verdict (a `high` card). */
-  check?: { verdict: "holds" | "contradicted" | "cannot_tell"; reason: string };
 }
 
 /** What a card was built from (`RationaleCard.coverage`); every field is absent on an older card. */
@@ -115,7 +113,6 @@ export interface RationaleCoverage {
   descriptions_missing?: number;
   full_prs_demoted?: number;
   threads_lost?: number;
-  verification?: "verified" | "failed" | "skipped" | "pending";
   source?: "included" | "omitted" | "unavailable";
 }
 
@@ -148,7 +145,7 @@ export type DepthProfile =
       prices_as_of: string | null;
       output_source: "ledger" | "default";
       cost_hidden: boolean;
-      levels: Record<"low" | "medium" | "high", DepthProfileLevel>;
+      levels: Record<"low" | "medium", DepthProfileLevel>;
       descriptions: { undescribed_share: number; per_commit_usd: number | null };
       cheaper_descriptions: {
         provider: string;

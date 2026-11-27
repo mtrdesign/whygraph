@@ -11,7 +11,7 @@ import {
   type RationaleItemRef,
 } from "../api";
 import { providerLabel } from "../lib/labels";
-import { depthShortName, formatCostRange } from "../lib/rationaleDepth";
+import { depthShortName, formatCostRange, isLevel } from "../lib/rationaleDepth";
 import { formatDateTime } from "../lib/format";
 import { plural } from "../lib/plural";
 import { useSlug } from "../lib/project";
@@ -69,19 +69,6 @@ function ItemRow({ item }: { item: RationaleItem }) {
           title={item.basis === "quoted" && item.quote ? item.quote : undefined}
         >
           {item.basis}
-        </span>
-      )}
-      {item.check && item.check.verdict !== "holds" && (
-        <span
-          className={
-            item.check.verdict === "contradicted"
-              ? "ml-2 text-xs text-destructive"
-              : "ml-2 text-xs text-muted-foreground"
-          }
-          data-testid="rationale-check"
-          title={item.check.reason || undefined}
-        >
-          {item.check.verdict === "contradicted" ? "Contradicted by today's code" : "Could not be checked"}
         </span>
       )}
       {refs.length > 0 && (
@@ -166,13 +153,7 @@ function PartialNote({
   );
 }
 
-const VERIFICATION_NOTE = {
-  failed: "The verification pass failed, so the claims are not checked against today's code.",
-  skipped: "The verification pass was skipped, so the claims are not checked against today's code.",
-  pending: "The claims will be checked against today's code once the missing descriptions are in.",
-} as const;
-
-/** What this card was built from: the level and why, what it read, and what it could not check. */
+/** What this card was built from: the level and why, what it read, and what it left out. */
 function BuiltNotes({ card, deeper }: { card: RationaleCard; deeper?: ReactNode }) {
   const level = card.depth?.resolved;
   const c = card.coverage;
@@ -185,8 +166,6 @@ function BuiltNotes({ card, deeper }: { card: RationaleCard; deeper?: ReactNode 
         context > 0 ? `, ${c.context_commits ?? 0} of ${context} other commits to the file` : ""
       }.`,
     );
-  if (c?.verification && c.verification in VERIFICATION_NOTE)
-    lines.push(VERIFICATION_NOTE[c.verification as keyof typeof VERIFICATION_NOTE]);
   if (card.context_stale) lines.push("Newer commits to this file are not reflected.");
   if ((c?.descriptions_missing ?? 0) > 0 && card.partial !== true)
     lines.push(`${plural(c!.descriptions_missing!, "commit")} had no description when this card was built.`);
@@ -331,8 +310,10 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
     onSuccess: (card) => queryClient.setQueryData(queryKey, card),
   });
 
-  // "Generate deeper" (R41): the next level through the same POST, gated like Generate, never above the ceiling.
-  const deeperLevel = data?.status === "cached" ? (data.deeper?.level ?? null) : null;
+  // "Generate deeper" (R41): the next level through the same POST, gated like Generate, never above the ceiling
+  // and never a level that is not offered.
+  const offeredDeeper = data?.status === "cached" ? data.deeper?.level : undefined;
+  const deeperLevel = isLevel(offeredDeeper) ? offeredDeeper : null;
   const canDeepen = deeperLevel !== null && canGenerate && !budgetBlocked && !missingKey;
   const deepen = useMutation({
     mutationFn: (level: string) => api.rationaleGenerate(qualifiedName, level),
@@ -345,7 +326,7 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
   });
   const deeperPrice =
     deeperLevel && profile.data?.status === "ready" && !profile.data.cost_hidden
-      ? formatCostRange(profile.data.levels[deeperLevel as "medium" | "high"]?.cost)
+      ? formatCostRange(profile.data.levels[deeperLevel]?.cost)
       : null;
 
   if (isLoading) return <div className="p-4"><Loading label="Checking cache…" /></div>;

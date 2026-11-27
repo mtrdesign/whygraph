@@ -512,7 +512,10 @@ def test_mcp_linked_rationale_sends_depth_only_to_a_platform_that_has_it(
     ctx = linked_over(repo, fake)
     with use_project(ctx):
         card = whygraph_rationale_brief(
-            qualified_name="pkg.mixed", intent="review", depth="high", cached_only=True
+            qualified_name="pkg.mixed",
+            intent="review",
+            depth="medium",
+            cached_only=True,
         )
     body = bodies(fake, "rationale")[0]
     assert not set(DEPTH_FIELDS) & set(body)
@@ -540,12 +543,20 @@ def test_mcp_linked_rationale_without_depth_inputs_reads_no_meta(
 def test_mcp_linked_rationale_on_a_platform_with_depth_levels(
     linked: ProjectContext, fake: FakePlatform
 ) -> None:
-    """The set fields go; the card's depth, coverage, deeper and checks come back."""
+    """The set fields go; the card's depth, coverage and deeper come back.
+
+    A ``check`` or ``coverage.verification`` from a platform built before
+    R49 is dropped, never relayed.
+    """
     checked = {
         **RATIONALE_ITEMS[0],
         "check": {"verdict": "holds", "reason": "line 2 still does it"},
     }
-    depth = {"requested": "high", "resolved": "high", "reason": "High was asked for."}
+    depth = {
+        "requested": "medium",
+        "resolved": "medium",
+        "reason": "Medium was asked for.",
+    }
     coverage = {
         "full_prs_demoted": 0,
         "threads_lost": 0,
@@ -578,15 +589,17 @@ def test_mcp_linked_rationale_on_a_platform_with_depth_levels(
     )
     with use_project(linked):
         card = whygraph_rationale_brief(
-            qualified_name="pkg.mixed", intent="edit", depth="high"
+            qualified_name="pkg.mixed", intent="edit", depth="medium"
         )
     body = bodies(fake, "rationale")[0]
-    assert (body["intent"], body["depth"]) == ("edit", "high")
+    assert (body["intent"], body["depth"]) == ("edit", "medium")
     assert "cached_only" not in body  # None is left out
     assert card["depth"] == depth
-    assert card["coverage"] == coverage
+    assert card["coverage"] == {
+        k: v for k, v in coverage.items() if k != "verification"
+    }
     assert "deeper" not in card  # None at the ceiling is left out
-    assert card["constraints"] == [checked]
+    assert card["constraints"] == [RATIONALE_ITEMS[0]]
 
 
 def test_mcp_linked_rationale_cached_only_miss_is_the_not_cached_shape(

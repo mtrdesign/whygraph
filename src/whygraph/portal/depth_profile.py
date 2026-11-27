@@ -39,13 +39,10 @@ from typing import Any
 from sqlalchemy import func
 from sqlmodel import col, select
 
-from whygraph.analyze.card_bundle import verifies
 from whygraph.analyze.rationale_generator import (
-    VERIFY_SOURCE_MAX_CHARS,
     RationaleGenerator,
     _PrRenderCaps,
     card_bundle_for,
-    verification_source,
 )
 from whygraph.core.config import OFFERED_DEPTH_LEVELS, Config, ConfigError
 from whygraph.db import get_session as project_session
@@ -79,12 +76,6 @@ CHARS_PER_TOKEN = 4.0
 
 DEFAULT_DRAFT_OUTPUT_TOKENS = 1500
 """A draft's output tokens when the project has no rationale usage yet."""
-
-VERIFY_OUTPUT_TOKENS = 300
-"""A verification pass's output tokens."""
-
-VERIFY_OVERHEAD_CHARS = 2500
-"""The verification prompt beyond the target's source (system, task, numbered claims)."""
 
 DEFAULT_DESCRIPTION_CHARS = 600
 """A commit's description length when the project has none to measure."""
@@ -230,8 +221,7 @@ def sample_profile(
         history to build a prompt from, else
         ``{"status": "ready", "targets": [...], "sampled", "computed_at"}``
         where each target maps every offered level to
-        ``{"input_tokens", "undescribed", "commits"}``, and
-        ``"verify_input_tokens"`` for the levels that verify.
+        ``{"input_tokens", "undescribed", "commits"}``.
 
     """
     deadline = time.monotonic() + wall_sec
@@ -307,14 +297,6 @@ def _measure(
         scope = review_scope(session, repo.root, target.path)
     inputs = _thread_inputs(scope, (target.line_start, target.line_end))
     context = graph.context(target.qualified_name) if target.qualified_name else None
-    source, _ = verification_source(
-        scope.current_lines,
-        (target.line_start, target.line_end),
-        max_chars=VERIFY_SOURCE_MAX_CHARS,
-    )
-    verify_chars = (
-        VERIFY_OVERHEAD_CHARS + len("\n".join(source)) if source is not None else None
-    )
     levels: dict[str, dict] = {}
     for level in OFFERED_DEPTH_LEVELS:
         bundle = card_bundle_for(evidence, config.rationale, level)
@@ -328,14 +310,11 @@ def _measure(
         )
         undescribed = sum(1 for item in bundle.items if not item.commit.llm_description)
         chars += undescribed * median_description_chars
-        entry: dict[str, Any] = {
+        levels[level] = {
             "input_tokens": round(chars / CHARS_PER_TOKEN),
             "undescribed": undescribed,
             "commits": len(bundle.items),
         }
-        if verifies(level) and verify_chars is not None:
-            entry["verify_input_tokens"] = round(verify_chars / CHARS_PER_TOKEN)
-        levels[level] = entry
     return levels
 
 
@@ -442,14 +421,10 @@ def render_profile(
     levels: dict[str, dict] = {}
     for level in OFFERED_DEPTH_LEVELS:
         rows = [t[level] for t in targets if level in t]
-        verify = verifies(level)
-        # A level that verifies reads the target's source once more.
-        inputs = [r["input_tokens"] + (r.get("verify_input_tokens") or 0) for r in rows]
-        out = (draft_out or DEFAULT_DRAFT_OUTPUT_TOKENS) + (
-            VERIFY_OUTPUT_TOKENS if verify else 0
-        )
+        inputs = [r["input_tokens"] for r in rows]
+        out = draft_out or DEFAULT_DRAFT_OUTPUT_TOKENS
         body: dict[str, Any] = {
-            "calls": 2 if verify else 1,
+            "calls": 1,
             "input_tokens": None,
             "output_tokens": None,
             "cost": None,

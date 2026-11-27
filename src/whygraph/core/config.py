@@ -431,9 +431,11 @@ class AnalyzeConfig:
 DEPTH_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 """Every rationale depth level, lowest first (plan 62 section 14.1)."""
 
-OFFERED_DEPTH_LEVELS: tuple[str, ...] = ("low", "medium", "high")
-"""The levels ``[rationale]`` accepts today. ``xhigh`` is not offered until
-Part D ships: add it here (use :data:`DEPTH_LEVELS`) and nothing else moves."""
+OFFERED_DEPTH_LEVELS: tuple[str, ...] = ("low", "medium")
+"""The levels ``[rationale]`` accepts today (R49). ``high`` and ``xhigh`` stay
+defined for Part D but are not offered: add a level here (use
+:data:`DEPTH_LEVELS`) and the validation, the tool, ``/api/v1`` and the UI
+follow."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,12 +502,12 @@ class RationaleConfig:
         and capped when it is resolved, not refused here.
     max_depth : str
         The project's ceiling: one of :data:`OFFERED_DEPTH_LEVELS`.
-        Default ``"high"``. Not importable from a repo's ``whygraph.toml``.
+        Default ``"medium"``. Not importable from a repo's ``whygraph.toml``.
     org_max_depth : str
         Production only, **org setting** (owners): the org's ceiling, one
         of :data:`OFFERED_DEPTH_LEVELS`. Read from the org layer, never
         from a project's. The effective ceiling is the lower of this and
-        :attr:`max_depth`. Default ``"high"``.
+        :attr:`max_depth`. Default ``"medium"``.
     """
 
     provider: str | None = None
@@ -519,8 +521,8 @@ class RationaleConfig:
     agent_generations_per_hour: int = 120
     agent_generations_per_member_per_hour: int = 30
     depth: str = "auto"
-    max_depth: str = "high"
-    org_max_depth: str = "high"
+    max_depth: str = "medium"
+    org_max_depth: str = "medium"
 
 
 AREA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")

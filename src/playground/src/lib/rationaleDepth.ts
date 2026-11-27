@@ -1,10 +1,10 @@
 // Rationale depth (plan 62 section 14): the levels, the one copy constant the info
 // panel and the settings hints both read, and the formatting of the estimate.
-// `xhigh` is not offered until Part D ships, so the UI lists Auto, Low, Medium, High.
+// `high` and `xhigh` are not offered (plan 62 R49), so the UI lists Auto, Low and Medium.
 
 import { formatUsd } from "./format";
 
-export const DEPTH_LEVELS = ["low", "medium", "high"] as const;
+export const DEPTH_LEVELS = ["low", "medium"] as const;
 export type DepthLevel = (typeof DEPTH_LEVELS)[number];
 /** What a project's `[rationale].depth` may hold (the ceiling never `auto`). */
 export type DepthSetting = "auto" | DepthLevel;
@@ -15,13 +15,13 @@ const RANK = ["low", "medium", "high", "xhigh"] as const;
 export const rankOf = (level: string): number => RANK.indexOf(level as (typeof RANK)[number]);
 
 export const DEFAULT_DEPTH: DepthSetting = "auto";
-/** `[rationale].max_depth` and the org ceiling default until Part D ships. */
-export const DEFAULT_CEILING: DepthLevel = "high";
+/** `[rationale].max_depth` and the org ceiling default. */
+export const DEFAULT_CEILING: DepthLevel = "medium";
 
 export const isLevel = (value: unknown): value is DepthLevel =>
   typeof value === "string" && (DEPTH_LEVELS as readonly string[]).includes(value);
 
-/** The short name: "High". A level the UI does not offer reads as itself. */
+/** The short name: "Medium". A level the UI does not offer reads as itself. */
 export function depthShortName(level: string): string {
   if (level === "auto") return "Auto";
   if (level === "xhigh") return "Extra high";
@@ -63,12 +63,6 @@ export const DEPTH_COPY = {
       question: "What has been happening around them?",
       reads: "Adds more PRs in full and the file's recent history in short form.",
       calls: 1,
-    },
-    high: {
-      name: "High - Verified",
-      question: "Is each claim still true of today's code?",
-      reads: "Adds the feature-branch commits of squash PRs and a check of every claim against today's code.",
-      calls: 2,
     },
   } satisfies Record<DepthLevel, DepthRow>,
   footer: "Every level reads the LLM description of each commit it includes.",

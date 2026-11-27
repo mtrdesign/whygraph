@@ -97,12 +97,9 @@ Intent = Literal["explain", "edit", "refactor", "delete", "review", "plan"]
 """The task a card is for (``mcp.rationale_depth.INTENTS``, plan 62 section 14.3)."""
 
 DepthLevel = Literal[OFFERED_DEPTH_LEVELS]  # type: ignore[valid-type]
-"""A depth a request may ask for: the offered levels only (``xhigh`` refused
-until Part D ships). Answers carry a level as a plain string, so a client
+"""A depth a request may ask for: the offered levels only (``high`` and
+``xhigh`` refused, R49). Answers carry a level as a plain string, so a client
 never refuses a card of a level it does not know yet."""
-
-Verdict = Literal["holds", "contradicted", "cannot_tell"]
-"""A verification verdict on a constraint or risk (plan 62 section 14.2)."""
 
 RATIONALE_DEPTH_CAPABILITY = "rationale_depth"
 """The ``meta`` capability of a platform whose ``/rationale`` takes ``intent``,
@@ -537,13 +534,6 @@ class RationaleItemRefOut(_Out):
         return data
 
 
-class RationaleItemCheckOut(_Out):
-    """The verification pass's verdict on one item (``mcp.rationale.RationaleItemCheck``)."""
-
-    verdict: Verdict
-    reason: str = ""
-
-
 class RationaleItemOut(_Out):
     """One constraint or risk of a card, with its source (``analyze.Item.as_dict``).
 
@@ -557,16 +547,12 @@ class RationaleItemOut(_Out):
         The named sources found in the evidence.
     quote : str
         The checked quote; omitted when empty.
-    check : RationaleItemCheckOut or None
-        The verification verdict of a ``high`` card; omitted when ``None``
-        (a shallower card, or a platform that predates it).
     """
 
     text: str
     basis: Basis
     refs: list[RationaleItemRefOut] = Field(default_factory=list)
     quote: str = ""
-    check: RationaleItemCheckOut | None = None
 
     @model_serializer(mode="wrap")
     def _drop_empty_quote(
@@ -575,8 +561,6 @@ class RationaleItemOut(_Out):
         data = handler(self)
         if not data.get("quote"):
             data.pop("quote", None)
-        if data.get("check") is None:
-            data.pop("check", None)
         return data
 
 
@@ -602,8 +586,8 @@ class RationaleDeeperOut(_Out):
 class RationaleCoverageOut(_Out):
     """A card's ``coverage``: what its prompt left out (``analyze.CardCoverage.as_dict``).
 
-    ``verification`` and ``source`` are omitted when ``None``; a key a
-    newer platform adds is ignored.
+    ``source`` is omitted when ``None``; a key a newer platform adds is
+    ignored.
     """
 
     full_prs_demoted: int = 0
@@ -613,15 +597,13 @@ class RationaleCoverageOut(_Out):
     line_commits: int = 0
     context_commits: int = 0
     context_omitted: int = 0
-    verification: str | None = None
     source: str | None = None
 
     @model_serializer(mode="wrap")
     def _drop_unset(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         data = handler(self)
-        for key in ("verification", "source"):
-            if data.get(key) is None:
-                data.pop(key, None)
+        if data.get("source") is None:
+            data.pop("source", None)
         return data
 
 
@@ -1089,7 +1071,6 @@ __all__ = [
     "RationaleDeeperOut",
     "RationaleDepthOut",
     "RationaleIn",
-    "RationaleItemCheckOut",
     "RationaleItemOut",
     "RationaleItemRefOut",
     "RationaleOut",
@@ -1102,7 +1083,6 @@ __all__ = [
     "TargetIn",
     "TargetOut",
     "TokenReply",
-    "Verdict",
     "blame_hunks_from_in",
     "hunk_in_from_blame",
 ]

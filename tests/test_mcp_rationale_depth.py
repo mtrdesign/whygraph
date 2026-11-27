@@ -32,31 +32,39 @@ _BASE: dict[str, Any] = {
     "depth": None,
     "project_depth": "auto",
     "intent": None,
-    "ceiling": "high",
+    "ceiling": "medium",
     "callers": 0,
     "pressure": None,
 }
 
-NOT_OFFERED = "Capped at High: Extra high is not offered yet."
 UNKNOWN = "The caller count is unknown, so importance did not count."
+CEILING_LOW = "Capped at Low by the depth ceiling."
 
 # (id, overrides, resolved, requested, reason)
 ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
     # Step 1: fixed (explicit depth or a project depth), only step 5 applies.
-    ("explicit", {"depth": "high"}, "high", "high", "High was asked for."),
+    ("explicit", {"depth": "medium"}, "medium", "medium", "Medium was asked for."),
     (
         "explicit-above-ceiling-capped",
-        {"depth": "high", "ceiling": "medium"},
+        {"depth": "medium", "ceiling": "low"},
+        "low",
+        "medium",
+        f"Medium was asked for. {CEILING_LOW}",
+    ),
+    # The tool and /api/v1 refuse these (R49); a direct call maps them to Medium.
+    (
+        "explicit-high-not-offered",
+        {"depth": "high"},
         "medium",
         "high",
-        "High was asked for. Capped at Medium by the depth ceiling.",
+        "High was asked for. Capped at Medium: High is not offered.",
     ),
     (
-        "explicit-xhigh-maps-to-high",
+        "explicit-xhigh-not-offered",
         {"depth": "xhigh"},
-        "high",
+        "medium",
         "xhigh",
-        f"Extra high was asked for. {NOT_OFFERED}",
+        "Extra high was asked for. Capped at Medium: Extra high is not offered.",
     ),
     (
         "explicit-ignores-pressure",
@@ -74,7 +82,7 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
     ),
     (
         "explicit-beats-project-depth",
-        {"depth": "low", "project_depth": "high"},
+        {"depth": "low", "project_depth": "medium"},
         "low",
         "low",
         "Low was asked for.",
@@ -88,10 +96,10 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
     ),
     (
         "project-depth-capped",
-        {"project_depth": "high", "ceiling": "low"},
+        {"project_depth": "medium", "ceiling": "low"},
         "low",
-        "high",
-        "High is the project depth. Capped at Low by the depth ceiling.",
+        "medium",
+        f"Medium is the project depth. {CEILING_LOW}",
     ),
     # Step 2: the task base.
     (
@@ -122,35 +130,56 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
         "auto",
         "Auto chose Medium because no task was given.",
     ),
+    # Refactor and delete reach the top offered level from the task alone:
+    # the callers and the clamp are not mentioned (R49).
     (
-        "refactor-with-callers-xhigh-maps-to-high",
+        "refactor-with-callers",
         {"intent": "refactor", "callers": 2},
-        "high",
+        "medium",
         "auto",
-        'Auto chose High because the task was "refactor" and the symbol has'
-        f" callers. {NOT_OFFERED}",
+        'Auto chose Medium because the task was "refactor".',
     ),
     (
         "delete-without-callers",
         {"intent": "delete", "callers": 0},
-        "high",
+        "medium",
         "auto",
-        'Auto chose High because the task was "delete" and the symbol has no callers.',
+        'Auto chose Medium because the task was "delete".',
     ),
     (
         "refactor-unknown-callers",
         {"intent": "refactor", "callers": None},
-        "high",
+        "medium",
         "auto",
-        f'Auto chose High because the task was "refactor". {UNKNOWN}',
+        'Auto chose Medium because the task was "refactor".',
+    ),
+    (
+        "delete-many-callers",
+        {"intent": "delete", "callers": 40},
+        "medium",
+        "auto",
+        'Auto chose Medium because the task was "delete".',
+    ),
+    (
+        "refactor-under-a-stale-high-ceiling",
+        {"intent": "refactor", "callers": 9, "ceiling": "high"},
+        "medium",
+        "auto",
+        'Auto chose Medium because the task was "refactor".',
+    ),
+    (
+        "refactor-capped-by-ceiling",
+        {"intent": "refactor", "callers": 3, "ceiling": "low"},
+        "low",
+        "auto",
+        f'Auto chose Low because the task was "refactor". {CEILING_LOW}',
     ),
     (
         "base-capped-by-ceiling",
         {"intent": "edit", "ceiling": "low"},
         "low",
         "auto",
-        'Auto chose Low because the task was "edit". Capped at Low by the'
-        " depth ceiling.",
+        f'Auto chose Low because the task was "edit". {CEILING_LOW}',
     ),
     # Step 3: importance.
     (
@@ -169,29 +198,35 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
         'Auto chose Low because the task was "explain".',
     ),
     (
-        "important-edit-to-high",
+        "important-edit-stays-at-the-top",
         {"intent": "edit", "callers": 7},
-        "high",
+        "medium",
         "auto",
-        'Auto chose High because the task was "edit" and the symbol has 7'
-        " distinct callers.",
+        'Auto chose Medium because the task was "edit".',
     ),
     (
         "important-capped-by-ceiling",
-        {"intent": "edit", "callers": 7, "ceiling": "medium"},
-        "medium",
+        {"intent": "explain", "callers": 7, "ceiling": "low"},
+        "low",
         "auto",
-        'Auto chose Medium because the task was "edit" and the symbol has 7'
-        " distinct callers. Capped at Medium by the depth ceiling.",
+        'Auto chose Low because the task was "explain" and the symbol has 7'
+        f" distinct callers. {CEILING_LOW}",
     ),
     (
-        "unknown-callers-no-change",
+        "unknown-callers-below-the-top",
+        {"intent": "explain", "callers": None},
+        "low",
+        "auto",
+        f'Auto chose Low because the task was "explain". {UNKNOWN}',
+    ),
+    (
+        "unknown-callers-at-the-top-not-mentioned",
         {"intent": "edit", "callers": None},
         "medium",
         "auto",
-        f'Auto chose Medium because the task was "edit". {UNKNOWN}',
+        'Auto chose Medium because the task was "edit".',
     ),
-    # Step 4: budget pressure.
+    # Step 4: budget pressure, named when it lowers the level.
     (
         "pressure-lowers",
         {"intent": "edit", "pressure": "org"},
@@ -201,43 +236,43 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
         " 75 % or more.",
     ),
     (
-        "pressure-floor-is-low",
+        "pressure-at-the-floor-not-mentioned",
         {"intent": "explain", "pressure": "member"},
         "low",
         "auto",
-        'Auto chose Low because the task was "explain" and the member budget is'
-        " at 75 % or more.",
+        'Auto chose Low because the task was "explain".',
     ),
     (
         "importance-and-pressure-cancel",
-        {"intent": "edit", "callers": 9, "pressure": "project"},
-        "medium",
+        {"intent": "explain", "callers": 9, "pressure": "project"},
+        "low",
         "auto",
-        'Auto chose Medium because the task was "edit", the symbol has 9'
+        'Auto chose Low because the task was "explain", the symbol has 9'
         " distinct callers and the project budget is at 75 % or more.",
     ),
     # Step 5: clamped after each step, not once at the end.
     (
         "clamp-after-each-step",
-        {
-            "intent": "refactor",
-            "callers": 9,
-            "pressure": "project",
-            "ceiling": "medium",
-        },
+        {"intent": "refactor", "callers": 9, "pressure": "project"},
         "low",
         "auto",
-        'Auto chose Low because the task was "refactor", the symbol has 9'
-        " distinct callers and the project budget is at 75 % or more. Capped at"
-        " Medium by the depth ceiling.",
+        'Auto chose Low because the task was "refactor" and the project budget'
+        " is at 75 % or more.",
     ),
     (
-        "clamp-after-each-step-at-top",
-        {"intent": "refactor", "callers": 9, "pressure": "org"},
-        "medium",
+        "clamp-after-each-step-edit",
+        {"intent": "edit", "callers": 9, "pressure": "project"},
+        "low",
         "auto",
-        'Auto chose Medium because the task was "refactor", the symbol has 9'
-        f" distinct callers and the org budget is at 75 % or more. {NOT_OFFERED}",
+        'Auto chose Low because the task was "edit" and the project budget is at'
+        " 75 % or more.",
+    ),
+    (
+        "clamp-after-each-step-by-ceiling",
+        {"intent": "refactor", "callers": 9, "pressure": "org", "ceiling": "low"},
+        "low",
+        "auto",
+        f'Auto chose Low because the task was "refactor". {CEILING_LOW}',
     ),
     # Review: low, any cached depth, steps 3-4 skipped.
     (
@@ -307,7 +342,7 @@ REVIEW_ROWS: list[tuple[str, dict[str, Any], bool, bool]] = [
     ),
     (
         "review-explicit-depth-keeps-its-depth",
-        {"intent": "review", "depth": "high"},
+        {"intent": "review", "depth": "medium"},
         False,
         True,
     ),
@@ -335,11 +370,11 @@ def test_review_semantics(
 
 
 def test_review_with_explicit_depth_is_fixed() -> None:
-    result = resolve_depth(**{**_BASE, "intent": "review", "depth": "high"})
+    result = resolve_depth(**{**_BASE, "intent": "review", "depth": "medium"})
     assert result == DepthResolution(
-        requested="high",
-        resolved="high",
-        reason="High was asked for.",
+        requested="medium",
+        resolved="medium",
+        reason="Medium was asked for.",
         any_cached_depth=False,
         cached_only=True,
     )
@@ -362,10 +397,10 @@ def test_unknown_values_raise(overrides: dict[str, Any]) -> None:
 @pytest.mark.parametrize(
     ("max_depth", "org_max_depth", "expected"),
     [
-        ("high", "high", "high"),
-        ("high", "medium", "medium"),
-        ("low", "high", "low"),
+        ("medium", "medium", "medium"),
         ("medium", "low", "low"),
+        ("low", "medium", "low"),
+        ("low", "low", "low"),
     ],
 )
 def test_effective_ceiling_is_the_lower(
@@ -469,9 +504,12 @@ def _target() -> Target:
 def test_resolve_for_target_reads_the_bound_config_and_callers(bound: None) -> None:
     """Under auto, the index's distinct callers and the project's ceiling count."""
     resolution = resolve_for_target(_target(), [_item("blame")], intent="refactor")
-    # Box.put has callers: xhigh, mapped to high (not offered yet).
-    assert resolution.resolved == "high"
-    assert "History is thin" in resolution.reason
+    # Box.put has callers, but a refactor is Medium, the top offered level (R49).
+    assert resolution.resolved == "medium"
+    assert resolution.reason == (
+        'Auto chose Medium because the task was "refactor". History is thin (one'
+        " commit, no PR)."
+    )
     review = resolve_for_target(_target(), [_item("blame", prs=1)], intent="review")
     assert (review.resolved, review.cached_only, review.any_cached_depth) == (
         "low",
@@ -490,9 +528,9 @@ def test_resolve_for_target_without_own_lines_counts_no_callers(
 
     monkeypatch.setattr(rationale_depth, "distinct_callers", _never)
     resolution = resolve_for_target(
-        _target(), [_item("blame", prs=1)], intent="edit", count_callers=False
+        _target(), [_item("blame", prs=1)], intent="explain", count_callers=False
     )
-    assert resolution.resolved == "medium"
+    assert resolution.resolved == "low"
     assert UNKNOWN in resolution.reason
     # Fixed depths read no signal at all.
     fixed = resolve_for_target(_target(), [_item("blame")], depth="low")
@@ -501,13 +539,13 @@ def test_resolve_for_target_without_own_lines_counts_no_callers(
 
 def test_resolve_for_target_caps_at_the_effective_ceiling(tmp_path: Path) -> None:
     config = Config(
-        rationale=RationaleConfig(max_depth="high", org_max_depth="medium"),
+        rationale=RationaleConfig(max_depth="medium", org_max_depth="low"),
         codegraph_db=tmp_path / "absent.db",
     )
     with use_project(ProjectContext(slug="demo", root=tmp_path, config=config)):
-        resolution = resolve_for_target(_target(), [_item("blame")], depth="high")
-    assert resolution.resolved == "medium"
-    assert "Capped at Medium by the depth ceiling." in resolution.reason
+        resolution = resolve_for_target(_target(), [_item("blame")], depth="medium")
+    assert resolution.resolved == "low"
+    assert "Capped at Low by the depth ceiling." in resolution.reason
 
 
 @pytest.mark.parametrize(
@@ -516,7 +554,7 @@ def test_resolve_for_target_caps_at_the_effective_ceiling(tmp_path: Path) -> Non
         ("medium", "cached", "medium", None),
         ("high", "cached", "high", "A cached High card was served."),
         ("high", "kept", "high", "Built at High to keep the deeper card"),
-        ("low", "unverified", "low", "Stored at Low: the verification pass"),
+        ("low", "cached", "low", "A cached Low card was served."),
     ],
 )
 def test_depth_block_reports_the_card_served(
@@ -539,28 +577,22 @@ def test_deeper_names_what_the_next_level_adds() -> None:
         _item("pr-origin"),
         *[_item("area") for _ in range(9)],
     ]
-    low = deeper("low", "high", evidence)
+    low = deeper("low", "medium", evidence)
     assert low == {
         "level": "medium",
         "adds": "Reads the PRs of the earlier commits that shaped these lines "
         "and reads 4 of the 9 other commits to this file.",
     }
-    medium = deeper("medium", "high", evidence)
-    assert medium == {
-        "level": "high",
-        "adds": "Checks each constraint and risk against today's code, reads 6 "
-        "instead of 4 of the 9 other commits to this file and shows the draft "
-        "commits of squash-merged PRs.",
-    }
 
 
 def test_deeper_is_none_at_the_ceiling_or_with_nothing_to_add() -> None:
     lines_only = [_item("blame", prs=1)]
-    assert deeper("high", "high", lines_only) is None  # xhigh is not offered
-    assert deeper("medium", "medium", lines_only) is None  # the ceiling
-    assert deeper("low", "high", lines_only) is None  # medium adds nothing here
-    # The verification pass always adds something.
-    assert deeper("medium", "high", lines_only) == {
-        "level": "high",
-        "adds": "Checks each constraint and risk against today's code.",
-    }
+    rich = [_item("blame", prs=1), _item("pr-origin"), *[_item("area")] * 9]
+    # Medium is the highest offered level (R49): nothing deeper, whatever the
+    # ceiling or the evidence (High would add context and draft commits).
+    for ceiling in ("medium", "high", "xhigh"):
+        assert deeper("medium", ceiling, rich) is None
+        assert deeper("medium", ceiling, lines_only) is None
+    assert deeper("high", "xhigh", rich) is None  # a stale row: not offered either
+    assert deeper("low", "low", rich) is None  # the ceiling
+    assert deeper("low", "medium", lines_only) is None  # medium adds nothing here

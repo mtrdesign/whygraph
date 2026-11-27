@@ -260,16 +260,16 @@ const level = (cost: { low: number; high: number } | null) => ({
   first_card: null,
 });
 
-const readyProfile = (high: { low: number; high: number } | null) => ({
+const readyProfile = (medium: { low: number; high: number } | null) => ({
   status: "ready",
   head: "abc",
   computed_at: "2026-11-27T10:00:00+00:00",
   sampled: 20,
-  model: { provider: "anthropic", model: "claude-sonnet-5-5", source: "pinned", price_known: high !== null },
+  model: { provider: "anthropic", model: "claude-sonnet-5-5", source: "pinned", price_known: medium !== null },
   prices_as_of: "2026-11-11",
   output_source: "default",
   cost_hidden: false,
-  levels: { low: level(null), medium: level(null), high: level(high) },
+  levels: { low: level(null), medium: level(medium) },
   descriptions: { undescribed_share: 0, per_commit_usd: null },
   cheaper_descriptions: null,
 });
@@ -277,8 +277,8 @@ const readyProfile = (high: { low: number; high: number } | null) => ({
 describe("RationaleTab depth", () => {
   const built = (over: Partial<RationaleCard> = {}) =>
     card({
-      depth: { requested: "auto", resolved: "medium", reason: 'Auto chose Medium because the task was "edit".' },
-      deeper: { level: "high", adds: "Checks each constraint and risk against today's code." },
+      depth: { requested: "auto", resolved: "low", reason: 'Auto chose Low because the task was "explain".' },
+      deeper: { level: "medium", adds: "Reads 4 of the 9 other commits to this file." },
       coverage: { line_commits: 2, context_commits: 4, context_omitted: 5 },
       ...over,
     });
@@ -286,38 +286,40 @@ describe("RationaleTab depth", () => {
   it("shows the level badge, the reason and what the card read", async () => {
     read = built();
     await mount();
-    expect(screen.getByTestId("depth-badge")).toHaveTextContent("Medium - Context");
+    expect(screen.getByTestId("depth-badge")).toHaveTextContent("Low - Lines");
     const notes = screen.getByTestId("rationale-built");
-    expect(notes).toHaveTextContent('Auto chose Medium because the task was "edit".');
+    expect(notes).toHaveTextContent('Auto chose Low because the task was "explain".');
     expect(notes).toHaveTextContent("Read 2 commits that wrote these lines, 4 of 9 other commits to the file.");
-    expect(notes).toHaveTextContent("A High card checks each constraint and risk against today's code.");
+    expect(notes).toHaveTextContent("A Medium card reads 4 of the 9 other commits to this file.");
   });
 
-  it("says what the verification pass did not do, and that newer commits are not reflected", async () => {
+  it("says what the card left out, and that newer commits are not reflected", async () => {
     read = built({
-      depth: { requested: "high", resolved: "medium", reason: "" },
-      coverage: { line_commits: 1, verification: "failed", descriptions_missing: 2 },
+      depth: { requested: "medium", resolved: "medium", reason: "" },
+      deeper: null,
+      // A card stored before the verification pass was removed (R49): its key is ignored.
+      coverage: { line_commits: 1, verification: "failed", descriptions_missing: 2 } as RationaleCard["coverage"],
       context_stale: true,
     });
     await mount();
     const notes = screen.getByTestId("rationale-built");
     expect(notes).toHaveTextContent("Built at Medium.");
-    expect(notes).toHaveTextContent("The verification pass failed");
+    expect(notes).not.toHaveTextContent(/verification/i);
     expect(notes).toHaveTextContent("Newer commits to this file are not reflected.");
     expect(notes).toHaveTextContent("2 commits had no description when this card was built.");
   });
 
   it("Generate deeper posts the next level and shows the price when it is known", async () => {
     read = built();
-    posted = built({ depth: { requested: "high", resolved: "high", reason: "" }, deeper: null });
+    posted = built({ depth: { requested: "medium", resolved: "medium", reason: "" }, deeper: null });
     profile = readyProfile({ low: 0.03, high: 0.05 });
     await mount();
-    const button = await screen.findByRole("button", { name: "Generate deeper - High · about $0.03-0.05" });
+    const button = await screen.findByRole("button", { name: "Generate deeper - Medium · about $0.03-0.05" });
     await userEvent.setup().click(button);
     await waitFor(() => expect(posts).toBe(1));
-    expect(postUrls[0]).toContain("depth=high");
-    // The answer replaces the card: now at High, with nothing deeper to offer.
-    await waitFor(() => expect(screen.getByTestId("depth-badge")).toHaveTextContent("High - Verified"));
+    expect(postUrls[0]).toContain("depth=medium");
+    // The answer replaces the card: now at Medium, the highest offered level, with nothing deeper to offer.
+    await waitFor(() => expect(screen.getByTestId("depth-badge")).toHaveTextContent("Medium - Context"));
     expect(screen.queryByTestId("generate-deeper")).toBeNull();
   });
 
@@ -325,7 +327,17 @@ describe("RationaleTab depth", () => {
     read = built();
     profile = readyProfile(null);
     await mount();
-    expect(await screen.findByRole("button", { name: "Generate deeper - High" })).toBeEnabled();
+    expect(await screen.findByRole("button", { name: "Generate deeper - Medium" })).toBeEnabled();
+  });
+
+  it("never offers a level that is not offered, whatever the card says", async () => {
+    read = built({
+      depth: { requested: "medium", resolved: "medium", reason: "" },
+      deeper: { level: "high", adds: "Reads more." },
+    });
+    await mount();
+    expect(screen.getByTestId("depth-badge")).toHaveTextContent("Medium - Context");
+    expect(screen.queryByTestId("generate-deeper")).toBeNull();
   });
 
   it("offers no Generate deeper at the ceiling", async () => {

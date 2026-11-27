@@ -36,7 +36,6 @@ def _raw(n: int = 3) -> dict:
     target = {
         "low": dict(LEVEL_ROW, input_tokens=10_000),
         "medium": dict(LEVEL_ROW, input_tokens=12_000),
-        "high": dict(LEVEL_ROW, input_tokens=14_000, verify_input_tokens=2_000),
     }
     return {
         "status": "ready",
@@ -95,13 +94,13 @@ def test_computing_then_ready_without_a_model_call(
         assert body["status"] == "ready" and body["sampled"] == 3
         assert body["cost_hidden"] is False
         levels = body["levels"]
-        assert levels["low"]["calls"] == 1 and levels["high"]["calls"] == 2
+        # The offered levels only (R49), one model call each.
+        assert set(levels) == {"low", "medium"}
+        assert levels["low"]["calls"] == 1 and levels["medium"]["calls"] == 1
         assert levels["low"]["input_tokens"] == {"p50": 10_000, "p90": 10_000}
-        # High reads the target's source once more for its verification pass.
-        assert levels["high"]["input_tokens"]["p50"] == 16_000
-        assert levels["high"]["output_tokens"] == (
+        assert levels["medium"]["input_tokens"]["p50"] == 12_000
+        assert levels["medium"]["output_tokens"] == (
             depth_profile.DEFAULT_DRAFT_OUTPUT_TOKENS
-            + depth_profile.VERIFY_OUTPUT_TOKENS
         )
         assert body["output_source"] == "default"
         assert body["descriptions"]["undescribed_share"] == pytest.approx(
@@ -280,8 +279,7 @@ def test_sample_profile_measures_each_level_over_the_most_referenced_files(
     # The largest definable symbol of the referenced file is the class A (3-30).
     assert seen == [("src/pkg/a.py", 3, 30)]
     (target,) = raw["targets"]
-    assert set(target) == {"low", "medium", "high"}
+    assert set(target) == {"low", "medium"}
     assert target["low"]["undescribed"] == 1 and target["low"]["input_tokens"] > 0
-    assert "verify_input_tokens" in target["high"]
-    assert "verify_input_tokens" not in target["low"]
+    assert set(target["medium"]) == {"input_tokens", "undescribed", "commits"}
     assert no_llm.n == 0

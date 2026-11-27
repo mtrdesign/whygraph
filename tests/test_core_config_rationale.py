@@ -223,7 +223,7 @@ def test_rationale_member_limit_out_of_range_raises(tmp_path: Path, value: str) 
 
 def test_rationale_depth_defaults() -> None:
     cfg = RationaleConfig()
-    assert (cfg.depth, cfg.max_depth, cfg.org_max_depth) == ("auto", "high", "high")
+    assert (cfg.depth, cfg.max_depth, cfg.org_max_depth) == ("auto", "medium", "medium")
 
 
 def test_rationale_depth_keys_flow_through_from_dict(tmp_path: Path) -> None:
@@ -239,17 +239,17 @@ def test_rationale_depth_keys_flow_through_from_dict(tmp_path: Path) -> None:
 def test_rationale_depth_above_max_depth_is_accepted(tmp_path: Path) -> None:
     """It is capped when resolved, never refused here."""
     cfg = Config.from_dict(
-        {"rationale": {"depth": "high", "max_depth": "low"}}, tmp_path
+        {"rationale": {"depth": "medium", "max_depth": "low"}}, tmp_path
     )
-    assert (cfg.rationale.depth, cfg.rationale.max_depth) == ("high", "low")
+    assert (cfg.rationale.depth, cfg.rationale.max_depth) == ("medium", "low")
 
 
 @pytest.mark.parametrize("key", ["depth", "max_depth", "org_max_depth"])
-@pytest.mark.parametrize("value", ["xhigh", "deep", "", 3])
+@pytest.mark.parametrize("value", ["high", "xhigh", "deep", "", 3])
 def test_rationale_depth_refuses_unoffered_levels(
     tmp_path: Path, key: str, value: object
 ) -> None:
-    """``xhigh`` is not offered until Part D ships."""
+    """``high`` and ``xhigh`` are not offered (R49)."""
     with pytest.raises(ConfigError, match=f"rationale.{key}"):
         Config.from_dict({"rationale": {key: value}}, tmp_path)
 

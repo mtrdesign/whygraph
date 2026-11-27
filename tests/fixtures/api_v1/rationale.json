@@ -26,10 +26,7 @@
       }
     ],
     "context_stale": false,
-    "deeper": {
-      "adds": "Checks each constraint and risk against today's code.",
-      "level": "high"
-    },
+    "deeper": null,
     "depth": {
       "reason": "Auto chose Medium because no task was given.",
       "requested": "auto",
@@ -54,7 +51,7 @@
       "plans_dir": "docs/plans",
       "project_role": "admin",
       "rationale_depth": "auto",
-      "rationale_max_depth": "high",
+      "rationale_max_depth": "medium",
       "role": "owner",
       "slug": "api"
     },

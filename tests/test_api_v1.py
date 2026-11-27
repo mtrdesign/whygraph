@@ -481,24 +481,20 @@ def test_rationale_item_out_refuses_an_unknown_basis_or_ref_kind() -> None:
         RationaleOut.model_validate({**card, "constraints": ["a plain string"]})
 
 
-def test_rationale_out_mirrors_a_card_with_depth_coverage_deeper_and_checks() -> None:
+def test_rationale_out_mirrors_a_card_with_depth_coverage_and_deeper() -> None:
     """Plan 62 section 14.4: the additive card fields round-trip unchanged."""
-    from dataclasses import replace
-
     from whygraph.analyze.card_bundle import CardCoverage
-    from whygraph.analyze.rationale import ItemCheck
 
-    checked = replace(ITEMS[0], check=ItemCheck("holds", "line 2 still does it"))
     rationale = Rationale(
         purpose="p",
         why="w",
-        constraints=(checked, ITEMS[2]),
+        constraints=(ITEMS[0], ITEMS[2]),
         tradeoffs=(),
         risks=(ITEMS[1],),
         model="m",
         provider="stub",
         coverage=CardCoverage(
-            line_commits=1, trimmed=("full_pr_budget",), verification="verified"
+            line_commits=1, trimmed=("full_pr_budget",), source="included"
         ),
     )
     payload = {
@@ -508,19 +504,27 @@ def test_rationale_out_mirrors_a_card_with_depth_coverage_deeper_and_checks() ->
             [_evidence()],
             "2026-01-01T00:00:00+00:00",
         ),
-        "depth": {"requested": "auto", "resolved": "high", "reason": "r"},
-        "deeper": {"level": "xhigh", "adds": "More."},
+        "depth": {"requested": "auto", "resolved": "low", "reason": "r"},
+        "deeper": {"level": "medium", "adds": "More."},
     }
-    assert payload["constraints"][0]["check"]["verdict"] == "holds"
     model = RationaleOut.model_validate(payload)
     assert model.model_dump(mode="json") == payload
     # None is left out, as an older platform's card never had them.
     bare = RationaleOut.model_validate({**payload, "deeper": None, "coverage": None})
     assert {"deeper", "coverage"}.isdisjoint(bare.model_dump(mode="json"))
-    with pytest.raises(ValidationError):
-        RationaleItemOut.model_validate(
-            {"text": "x", "basis": "inferred", "check": {"verdict": "maybe"}}
-        )
+    # A card from before R49 still parses; its check and verification are dropped.
+    old = {
+        **payload,
+        "constraints": [{**payload["constraints"][0], "check": {"verdict": "holds"}}],
+        "coverage": {**payload["coverage"], "verification": "verified"},
+    }
+    dumped = RationaleOut.model_validate(old).model_dump(mode="json")
+    assert "check" not in dumped["constraints"][0]
+    assert "verification" not in dumped["coverage"]
+    item = RationaleItemOut.model_validate(
+        {"text": "x", "basis": "inferred", "check": {"verdict": "maybe"}}
+    )
+    assert "check" not in item.model_dump(mode="json")
 
 
 def test_rationale_out_is_a_card_or_a_not_cached_miss() -> None:
@@ -548,7 +552,8 @@ def test_rationale_in_depth_fields() -> None:
     )
     assert full.model_dump(mode="json")["cached_only"] is False
     for bad in (
-        {"depth": "xhigh"},  # not offered until Part D: refused
+        {"depth": "high"},  # not offered (R49): refused
+        {"depth": "xhigh"},
         {"intent": "guess"},
         {"cached_only": "true"},
         {"cached_only": 1},

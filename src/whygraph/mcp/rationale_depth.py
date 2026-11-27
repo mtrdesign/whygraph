@@ -10,18 +10,23 @@ Step                   Rule
                        ``auto``, is used as is; only step 5 applies.
 2 Task base (auto)     ``explain`` / ``review`` -> ``low``; ``plan`` / ``edit``
                        -> ``medium``; ``refactor`` / ``delete`` -> ``xhigh``
-                       when the symbol has callers (``high`` until Part D
-                       ships), ``high`` when it has none or the count is
-                       unknown; no intent -> ``medium``. ``review`` accepts any
-                       cached depth and skips steps 3-4.
+                       when the symbol has callers, ``high`` when it has none
+                       or the count is unknown (neither is offered, so both
+                       are ``medium`` today, R49); no intent -> ``medium``.
+                       ``review`` accepts any cached depth and skips steps 3-4.
 3 Importance (auto)    +1 at :data:`IMPORTANT_CALLERS` distinct callers or
                        more; an unknown count changes nothing.
 4 Budget (auto)        -1 when a covering budget is at 75 % or more
                        (:func:`whygraph.core.usage.usage_pressure`).
 5 Ceiling              Clamp to ``low`` .. the effective ceiling after each
-                       step; a level that is not offered yet maps to the
+                       step; a level that is not offered maps to the
                        highest offered one.
 =====================  =========================================================
+
+An auto reason names only what moved the level: a signal clamped away (the
+callers of a ``refactor`` target, importance at the top level, budget
+pressure at ``low``) is left out, and so is the clamp to the highest offered
+level. A cap by the ceiling has its own sentence.
 
 The signal it needs from the index, :func:`distinct_callers`, is not pure:
 it reads the bound project's CodeGraph index and never raises.
@@ -37,7 +42,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, get_args
 
-from whygraph.analyze.card_bundle import LINE_LEVEL_SOURCES, level_caps, verifies
+from whygraph.analyze.card_bundle import LINE_LEVEL_SOURCES, level_caps
 from whygraph.core import get_config
 from whygraph.core.config import DEPTH_LEVELS, OFFERED_DEPTH_LEVELS, RationaleConfig
 from whygraph.core.usage import usage_pressure
@@ -65,8 +70,8 @@ OfferedDepth = Literal[OFFERED_DEPTH_LEVELS]  # type: ignore[valid-type]
 """The ``depth`` input a caller may pass: the offered levels only.
 
 Built from :data:`~whygraph.core.config.OFFERED_DEPTH_LEVELS`, so input
-validation refuses ``xhigh`` until Part D ships (plan 62 section 14.1) and
-follows that tuple when it does.
+validation refuses ``high`` and ``xhigh`` (R49) and follows that tuple when
+Part D offers a third level.
 """
 
 IMPORTANT_CALLERS = 5
@@ -166,22 +171,28 @@ def _join(parts: list[str]) -> str:
 class _Clamp:
     """Step 5: clamp a level index to ``low`` .. the effective ceiling.
 
-    A level above the highest offered one (``xhigh`` until Part D ships)
-    maps to it; :attr:`note` says what capped a level, if anything did.
+    A level above the highest offered one maps to it; :attr:`note` says
+    what capped a level, if anything did. The highest offered level is
+    named only when ``announce`` is set (an explicit or project level that
+    is not offered): under ``auto`` that clamp is silent.
     """
 
-    def __init__(self, ceiling: str) -> None:
-        offered_top = DEPTH_LEVELS.index(OFFERED_DEPTH_LEVELS[-1])
+    def __init__(self, ceiling: str, *, announce: str | None = None) -> None:
+        self.offered_top = DEPTH_LEVELS.index(OFFERED_DEPTH_LEVELS[-1])
         ceiling_index = DEPTH_LEVELS.index(ceiling)
-        self.top = min(ceiling_index, offered_top)
-        self._by_ceiling = ceiling_index < offered_top
+        self.top = min(ceiling_index, self.offered_top)
+        self._by_ceiling = ceiling_index < self.offered_top
+        self._announce = announce
         self.capped = False
+
+    def offered(self, index: int) -> int:
+        """``index`` clamped to the offered levels only (the ceiling ignored)."""
+        return min(max(index, 0), self.offered_top)
 
     def __call__(self, index: int) -> int:
         if index > self.top:
             self.capped = True
-            return self.top
-        return max(index, 0)
+        return min(max(index, 0), self.top)
 
     @property
     def note(self) -> str | None:
@@ -190,7 +201,9 @@ class _Clamp:
         label = _LABELS[DEPTH_LEVELS[self.top]]
         if self._by_ceiling:
             return f"Capped at {label} by the depth ceiling."
-        return f"Capped at {label}: {_LABELS['xhigh']} is not offered yet."
+        if self._announce is not None:
+            return f"Capped at {label}: {_LABELS[self._announce]} is not offered."
+        return None
 
 
 def resolve_depth(
@@ -252,11 +265,11 @@ def resolve_depth(
         raise ValueError(f"unknown intent {intent!r}; expected one of {INTENTS}")
     review = intent == "review"
     only = review if cached_only is None else cached_only
-    clamp = _Clamp(ceiling)
     thin = ["History is thin (one commit, no PR)."] if thin_history else []
 
     fixed = depth if depth is not None else project_depth
     if fixed != AUTO:  # step 1, then step 5
+        clamp = _Clamp(ceiling, announce=fixed)
         level = clamp(DEPTH_LEVELS.index(fixed))
         who = "was asked for" if depth is not None else "is the project depth"
         sentences = [f"{_LABELS[fixed]} {who}.", clamp.note, *thin]
@@ -267,11 +280,16 @@ def resolve_depth(
             cached_only=only,
         )
 
-    # Step 2: the task base.
+    # Step 2: the task base. A signal is named only when it moves the level
+    # within the offered ones (the ceiling's cap has its own sentence).
+    clamp = _Clamp(ceiling)
     parts = ["no task was given" if intent is None else f'the task was "{intent}"']
     if intent in ("refactor", "delete"):
         base = "xhigh" if callers else "high"
-        if callers is not None and callers < IMPORTANT_CALLERS:  # else step 3 says
+        split = clamp.offered(DEPTH_LEVELS.index("xhigh")) != clamp.offered(
+            DEPTH_LEVELS.index("high")
+        )
+        if split and callers is not None and callers < IMPORTANT_CALLERS:
             parts.append(
                 "the symbol has callers" if callers else "the symbol has no callers"
             )
@@ -280,16 +298,22 @@ def resolve_depth(
     level = clamp(DEPTH_LEVELS.index(base))
     unknown = None
     if not review:
-        # Step 3: importance.
+        # Step 3: importance. Named when it would raise the level within the
+        # offered ones, even if the ceiling then caps it.
         if callers is None:
-            unknown = "The caller count is unknown, so importance did not count."
+            if level < clamp.top:
+                unknown = "The caller count is unknown, so importance did not count."
         elif callers >= IMPORTANT_CALLERS:
-            parts.append(f"the symbol has {callers} distinct callers")
+            free = clamp.offered(DEPTH_LEVELS.index(base))
+            if clamp.offered(free + 1) != free:
+                parts.append(f"the symbol has {callers} distinct callers")
             level = clamp(level + 1)
         # Step 4: budget pressure.
         if pressure is not None:
-            parts.append(f"the {pressure} budget is at 75 % or more")
-            level = clamp(level - 1)
+            lowered = clamp(level - 1)
+            if lowered != level:
+                parts.append(f"the {pressure} budget is at 75 % or more")
+            level = lowered
     resolved = DEPTH_LEVELS[level]
     sentences = [
         f"Auto chose {_LABELS[resolved]} because {_join(parts)}.",
@@ -417,9 +441,6 @@ SERVED_CACHED = "cached"
 SERVED_KEPT = "kept"
 """The card was rebuilt at a deeper row's level, never replacing it shallower."""
 
-SERVED_UNVERIFIED = "unverified"
-"""The verification pass did not complete, so the card was stored lower."""
-
 
 def depth_block(
     resolution: DepthResolution, level: str, served: str = SERVED_CACHED
@@ -428,9 +449,9 @@ def depth_block(
 
     ``resolved`` is the level of the card actually returned. When that is
     not the resolver's level - a deeper cached card satisfied the request,
-    ``review`` accepted a shallower one, a deeper row was rebuilt at its
-    own level, or a ``high`` draft was stored lower - ``resolved`` is the
-    card's level and ``reason`` gains a sentence saying why.
+    ``review`` accepted a shallower one, or a deeper row was rebuilt at its
+    own level - ``resolved`` is the card's level and ``reason`` gains a
+    sentence saying why.
 
     Parameters
     ----------
@@ -439,8 +460,8 @@ def depth_block(
     level : str
         The level of the card returned.
     served : str, optional
-        Why the levels differ: :data:`SERVED_CACHED` (default),
-        :data:`SERVED_KEPT` or :data:`SERVED_UNVERIFIED`.
+        Why the levels differ: :data:`SERVED_CACHED` (default) or
+        :data:`SERVED_KEPT`.
 
     Returns
     -------
@@ -454,9 +475,6 @@ def depth_block(
     sentence = {
         SERVED_CACHED: f"A cached {label} card was served.",
         SERVED_KEPT: f"Built at {label} to keep the deeper card of these lines.",
-        SERVED_UNVERIFIED: (
-            f"Stored at {label}: the verification pass did not complete."
-        ),
     }[served]
     block["resolved"] = level
     block["reason"] = f"{block['reason']} {sentence}"
@@ -469,9 +487,10 @@ def deeper(
     """What a card one level deeper would add for this target, or ``None``.
 
     The next level's differences from ``level`` (plan 62 section 14.1),
-    kept to the ones this target's evidence would show: the verification
-    pass, more of the file's other commits, the PRs of earlier commits of
-    the lines, the draft commits of a squash-merged PR.
+    kept to the ones this target's evidence would show: more of the file's
+    other commits, the PRs of earlier commits of the lines, the draft
+    commits of a squash-merged PR. Never a level that is not offered: at
+    ``medium`` (the highest offered level, R49) it is ``None``.
 
     Parameters
     ----------
@@ -496,8 +515,6 @@ def deeper(
     nxt = DEPTH_LEVELS[index + 1]
     here, there = level_caps(level), level_caps(nxt)
     parts: list[str] = []
-    if verifies(nxt) and not verifies(level):
-        parts.append("checks each constraint and risk against today's code")
     if nxt == "medium" and any(
         item.source in LINE_LEVEL_SOURCES
         and item.source not in ("blame", "pr-origin")

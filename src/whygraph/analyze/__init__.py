@@ -20,9 +20,8 @@ Public API
   :class:`CardCoverage` — what one card includes (plan 62 Part B): the
   evidence rings and the full-PR selection, chosen before the description
   backfill, and what the card's prompt left out.
-* :class:`Item`, :class:`ItemRef`, :class:`ItemCheck` — one constraint or
-  risk of a :class:`Rationale`, with the evidence it names, its basis and
-  (from ``high``) the verification pass's verdict.
+* :class:`Item`, :class:`ItemRef` — one constraint or risk of a
+  :class:`Rationale`, with the evidence it names and its basis.
 * :class:`Prompt`, :func:`resolve_prompt`, :func:`render_prompt`,
   :data:`PLACEHOLDER`, :data:`SYNTHESIS_PLACEHOLDER`,
   :data:`RATIONALE_PLACEHOLDER` — the resolved ``system`` + ``task``
@@ -83,7 +82,7 @@ from .prompt import (
     render as render_prompt,
     resolve as resolve_prompt,
 )
-from .rationale import CommitEvidence, Item, ItemCheck, ItemRef, Rationale
+from .rationale import CommitEvidence, Item, ItemRef, Rationale
 from .rationale_generator import RationaleGenerator, card_bundle_for
 
 __all__ = [
@@ -96,7 +95,6 @@ __all__ = [
     "CommitEvidence",
     "Description",
     "Item",
-    "ItemCheck",
     "ItemRef",
     "LlmDescriptor",
     "Prompt",

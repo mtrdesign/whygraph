@@ -608,8 +608,13 @@ def test_rationale_depth_inputs_resolve_with_the_platform_projects_settings(
     assert again.json()["depth"]["resolved"] == "low"
     assert generator.calls == 1
 
-    # Not offered until Part D, and strict: refused, never coerced.
-    for bad in ({"depth": "xhigh"}, {"cached_only": "true"}, {"intent": "guess"}):
+    # Not offered (R49), and strict: refused, never coerced.
+    for bad in (
+        {"depth": "high"},
+        {"depth": "xhigh"},
+        {"cached_only": "true"},
+        {"intent": "guess"},
+    ):
         refused = call(v1, "POST", "/rationale", json={"target": target, **bad})
         assert refused.status_code == 422, refused.text
 
@@ -618,7 +623,7 @@ def test_rationale_depth_inputs_resolve_with_the_platform_projects_settings(
     assert (
         status.json()["rationale_depth"],
         status.json()["rationale_max_depth"],
-    ) == ("auto", "high")
+    ) == ("auto", "medium")
 
 
 def test_rationale_without_a_symbol_uses_the_requested_range(
@@ -1480,9 +1485,10 @@ def test_org_max_depth_set_on_defaults_not_per_project(v1: V1World) -> None:
     assert (
         set_defaults(v1, {"rationale": {"org_max_depth": "medium"}}).status_code == 200
     )
-    assert (
-        set_defaults(v1, {"rationale": {"org_max_depth": "xhigh"}}).status_code == 422
-    )
+    for level in ("high", "xhigh"):
+        assert (
+            set_defaults(v1, {"rationale": {"org_max_depth": level}}).status_code == 422
+        )
     assert (
         set_defaults(v1, {"rationale": {"org_max_depth": "low"}}, who="cy").status_code
         == 403
@@ -1498,20 +1504,23 @@ def test_org_max_depth_set_on_defaults_not_per_project(v1: V1World) -> None:
 def test_project_put_depth_and_ceiling(v1: V1World) -> None:
     """A depth / max_depth PUT works up to the org ceiling, then 422 ``depth_above_ceiling``."""
     url = f"{at(ORG)}/api/projects/{SLUG}/config"
-    assert (
-        set_defaults(v1, {"rationale": {"org_max_depth": "medium"}}).status_code == 200
-    )
+    assert set_defaults(v1, {"rationale": {"org_max_depth": "low"}}).status_code == 200
     signed_in(v1.client, v1.ids["ben"])
     ok = v1.client.put(
-        url, json={"config": {"rationale": {"depth": "high", "max_depth": "medium"}}}
+        url, json={"config": {"rationale": {"depth": "medium", "max_depth": "low"}}}
     )
     assert ok.status_code == 200, ok.text
-    assert ok.json()["config"]["rationale"] == {"depth": "high", "max_depth": "medium"}
+    assert ok.json()["config"]["rationale"] == {"depth": "medium", "max_depth": "low"}
 
-    refused = v1.client.put(url, json={"config": {"rationale": {"max_depth": "high"}}})
+    refused = v1.client.put(
+        url, json={"config": {"rationale": {"max_depth": "medium"}}}
+    )
     assert refused.status_code == 422, refused.text
     body = refused.json()
     assert body["code"] == "depth_above_ceiling"
-    assert body["ceiling"] == "medium"
+    assert body["ceiling"] == "low"
+    # A level that is not offered (R49) is refused as a value.
+    not_offered = v1.client.put(url, json={"config": {"rationale": {"depth": "high"}}})
+    assert not_offered.status_code == 422, not_offered.text
     stored = v1.client.get(url).json()["config"]["rationale"]
-    assert stored["max_depth"] == "medium"
+    assert stored["max_depth"] == "low"

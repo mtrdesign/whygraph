@@ -13,7 +13,7 @@ The tool returns `purpose`, `why`, `constraints[]`, `tradeoffs[]`, `risks[]`, `e
 - **Risks** are flagged *before* the change, not after.
 - **Empty `evidence_count`**: the chunk has no meaningful history yet; proceed with judgement.
 - `plans` are pointers to what a plan intended; never a finding and never a constraint.
-- **`deeper`**: If the card carries `deeper` and the task is a refactor or delete on a card whose constraints are not verified, you may call once more with `depth: <deeper.level>`; never loop.
+- **`deeper`**: If the card carries `deeper` and the task needs what it `adds`, you may call once more with `depth: <deeper.level>`; never loop.
 
 If the tool returns `isError: true`, surface the error verbatim and proceed with your own judgment after flagging the cause to the user. If it errors with `code: budget_exceeded` or `generation_not_permitted`, do not retry; call `whygraph_evidence_for` instead (no LLM, always allowed) and tell the user generation is paused for this project.
 

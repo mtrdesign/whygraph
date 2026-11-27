@@ -834,13 +834,13 @@ def test_rationale_depth_columns_keep_legacy_rows(
         conn.close()
 
 
-def test_rationale_checks_ride_in_the_existing_json_columns(
+def test_a_row_with_the_removed_checks_still_loads(
     _isolate_config_and_engine: Path,
 ) -> None:
-    """Plan 62 step C3: ``check`` and ``coverage.verification`` need no migration."""
+    """Plan 62 R49: a row the dev eval stored with ``check`` / ``verification`` loads without them."""
     import json
 
-    from whygraph.analyze import CardCoverage, Item, ItemCheck, Rationale
+    from whygraph.analyze import CardCoverage, Item, Rationale
     from whygraph.mcp.rationale_cache import lookup_exact, store_cached
     from whygraph.mcp.targets import Target
 
@@ -851,30 +851,45 @@ def test_rationale_checks_ride_in_the_existing_json_columns(
     card = Rationale(
         purpose="p",
         why="w",
-        constraints=(Item("c", "inferred", check=ItemCheck("holds", "line 2")),),
+        constraints=(Item("c", "inferred"),),
         tradeoffs=(),
-        risks=(Item("r", "inferred", check=ItemCheck("contradicted", "gone")),),
+        risks=(Item("r", "inferred"),),
         model="m",
         provider="fake",
-        coverage=CardCoverage(verification="verified"),
+        coverage=CardCoverage(line_commits=1, source="included"),
     )
-
     store_cached(target, [], card, "fake", None, depth=2)
-
     assert not {"check", "verification"} & columns
+
+    # What a card from before R49 holds in its JSON columns.
+    old = {"verdict": "holds", "reason": "line 2"}
     conn = sqlite3.connect(db_path)
     try:
-        constraints, risks, coverage, depth = conn.execute(
-            "SELECT constraints, risks, coverage, depth FROM rationale_cache"
-        ).fetchone()
+        conn.execute(
+            "UPDATE rationale_cache SET constraints = ?, risks = ?, coverage = ?",
+            (
+                json.dumps(
+                    [{"text": "c", "basis": "inferred", "refs": [], "check": old}]
+                ),
+                json.dumps(
+                    [{"text": "r", "basis": "inferred", "refs": [], "check": old}]
+                ),
+                json.dumps(
+                    {
+                        "line_commits": 1,
+                        "source": "included",
+                        "verification": "verified",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
     finally:
         conn.close()
-    assert json.loads(constraints)[0]["check"] == {
-        "verdict": "holds",
-        "reason": "line 2",
-    }
-    assert json.loads(risks)[0]["check"]["verdict"] == "contradicted"
-    assert (json.loads(coverage)["verification"], depth) == ("verified", 2)
+
     row = lookup_exact(target, "fake", None)
     assert row.rationale.constraints == card.constraints
-    assert row.rationale.coverage.verification == "verified"
+    assert row.rationale.risks == card.risks
+    assert row.rationale.coverage == card.coverage
+    assert "verification" not in row.rationale.coverage.as_dict()
+    assert "check" not in row.rationale.constraints[0].as_dict()

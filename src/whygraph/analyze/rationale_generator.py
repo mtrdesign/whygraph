@@ -8,9 +8,7 @@ It owns only the prompt + LLM round-trip:
 
 * No git or database access — the evidence is an input.
 * No persistence — the :class:`~whygraph.analyze.Rationale` is an output.
-* No chunking — one bundle in, one card out, in a single LLM call; a
-  ``high`` card's verification pass is a second call, :meth:`verify`,
-  which the caller runs on a non-partial draft.
+* No chunking — one bundle in, one card out, in a single LLM call.
 
 Gathering the evidence (git blame, database lookups, grouping pull requests
 and issues onto commits) is intentionally out of scope so this class stays
@@ -21,7 +19,6 @@ trivially testable: feed a stub :class:`LlmClient` and a list of
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import re
 import time
@@ -45,30 +42,20 @@ from .card_bundle import DEFAULT_LEVEL, CardBundle, CardCoverage, card_bundle
 from .exceptions import AnalyzeError, RationaleError
 from .prompt import (
     RATIONALE_PLACEHOLDER,
-    VERIFY_PLACEHOLDER,
     Prompt,
     render,
     resolve,
 )
-from .rationale import VERDICTS, CommitEvidence, Item, ItemCheck, ItemRef, Rationale
+from .rationale import CommitEvidence, Item, ItemRef, Rationale
 
 # Prompt component tag — the subtree under ``analyze/prompts/`` that holds
 # this class's ``system`` / ``task`` markdown files.
 _PROMPT_COMPONENT = "rationale_generator"
-# The verification pass's prompt pair (plan 62 section 14.2).
-_VERIFY_COMPONENT = "rationale_verify"
-
-VERIFY_SOURCE_MAX_CHARS = 20_000
-"""The longest target source the verification pass checks against (section 14.2)."""
-
 TARGET_SOURCE_MAX_CHARS = 8_000
 """The longest target source the draft prompt holds (section 14.2a, R48).
 
 A longer target gets no source block at all, never a truncated one.
 """
-
-_VERIFY_REASON_MAX_CHARS = 300
-_NO_VERDICT = "no verdict given"
 
 # The rationale JSON schema, split by the validation each key needs.
 _REQUIRED_STR_FIELDS = ("purpose", "why")
@@ -1253,17 +1240,16 @@ def card_bundle_for(
     return card_bundle(evidence, level, pr_chars=_full_pr_chars(caps))
 
 
-def verification_source(
+def target_source_lines(
     file_lines: Sequence[str] | None,
     target_range: tuple[int, int] | None,
     *,
-    max_chars: int = VERIFY_SOURCE_MAX_CHARS,
+    max_chars: int = TARGET_SOURCE_MAX_CHARS,
 ) -> tuple[tuple[str, ...] | None, str | None]:
     """The target's current source lines, or why there are none.
 
-    The one reader of the target's source for both LLM calls: the
-    verification pass (the default cap) and the draft prompt
-    (:data:`TARGET_SOURCE_MAX_CHARS`, section 14.2a).
+    The one reader of the target's source for the draft prompt's
+    ``TARGET SOURCE`` block (section 14.2a).
 
     Parameters
     ----------
@@ -1273,7 +1259,7 @@ def verification_source(
     target_range : tuple[int, int] or None
         The target's inclusive 1-based line range in ``file_lines``.
     max_chars : int, optional
-        The longest source returned; default :data:`VERIFY_SOURCE_MAX_CHARS`.
+        The longest source returned; default :data:`TARGET_SOURCE_MAX_CHARS`.
 
     Returns
     -------
@@ -1306,9 +1292,7 @@ def _target_source(
     path: str | None,
 ) -> tuple[str | None, str]:
     """The draft prompt's ``TARGET SOURCE`` block and ``coverage.source`` (section 14.2a)."""
-    source, reason = verification_source(
-        file_lines, target_range, max_chars=TARGET_SOURCE_MAX_CHARS
-    )
+    source, reason = target_source_lines(file_lines, target_range)
     if source is None or target_range is None:
         return None, "omitted" if reason == "source_too_long" else "unavailable"
     first = max(target_range[0], 1)
@@ -1316,98 +1300,6 @@ def _target_source(
     where = f"{path}:{span}" if path else f"lines {span}"
     header = f"TARGET SOURCE ({where}, as of the card's build)"
     return "\n".join([header, "", *_numbered(source, first)]), "included"
-
-
-def with_verification(rationale: Rationale, verification: str) -> Rationale:
-    """``rationale`` with its ``coverage.verification`` set to ``verification``.
-
-    Parameters
-    ----------
-    rationale : Rationale
-        A draft card; one without a coverage gets an empty one.
-    verification : str
-        One of :data:`~whygraph.analyze.card_bundle.VERIFICATIONS`.
-
-    Returns
-    -------
-    Rationale
-        A copy; the items are unchanged.
-    """
-    coverage = rationale.coverage if rationale.coverage is not None else CardCoverage()
-    return dataclasses.replace(
-        rationale, coverage=dataclasses.replace(coverage, verification=verification)
-    )
-
-
-def _claim_ids(rationale: Rationale) -> tuple[list[str], list[str]]:
-    """The verifier's ids of a card's constraints (``C1..``) and risks (``R1..``)."""
-    return (
-        [f"C{n}" for n in range(1, len(rationale.constraints) + 1)],
-        [f"R{n}" for n in range(1, len(rationale.risks) + 1)],
-    )
-
-
-def _format_claims(rationale: Rationale, source: Sequence[str], first_line: int) -> str:
-    """The verify task's payload: the numbered source lines, then the numbered claims.
-
-    Tradeoffs are not claims the pass checks (plan 62 section 14.2).
-    """
-    lines = [f"SOURCE (lines {first_line}-{first_line + len(source) - 1}):"]
-    lines.extend(_numbered(source, first_line))
-    constraint_ids, risk_ids = _claim_ids(rationale)
-    lines.extend(["", "CONSTRAINTS:"])
-    lines.extend(
-        f"{cid}: {_collapse_whitespace(item.text)}"
-        for cid, item in zip(constraint_ids, rationale.constraints)
-    )
-    if not constraint_ids:
-        lines.append("(none)")
-    lines.extend(["", "RISKS:"])
-    lines.extend(
-        f"{rid}: {_collapse_whitespace(item.text)}"
-        for rid, item in zip(risk_ids, rationale.risks)
-    )
-    if not risk_ids:
-        lines.append("(none)")
-    return "\n".join(lines)
-
-
-def _parse_verify_json(text: str, ids: Sequence[str]) -> dict[str, ItemCheck]:
-    """Parse the verifier's answer into one check per id in ``ids``.
-
-    Strips an optional code fence. The answer must be a JSON object whose
-    ``verdicts`` is a list; anything else raises. Each entry is an object
-    with a known ``id`` and a ``verdict`` in :data:`VERDICTS` (its first
-    entry wins); other entries are ignored, a non-string ``reason`` reads as
-    ``""`` and a reason is clipped. An id without a usable entry is
-    ``cannot_tell``.
-
-    Raises
-    ------
-    RationaleError
-        If the answer is not JSON, not an object, or has no ``verdicts`` list.
-    """
-    payload = _strip_code_fence(text)
-    try:
-        parsed = json.loads(payload)
-    except json.JSONDecodeError as exc:
-        raise RationaleError(
-            f"verification output is not valid JSON: {exc}; got {payload[:120]!r}"
-        ) from exc
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("verdicts"), list):
-        raise RationaleError("verification output must be an object with 'verdicts'")
-    wanted = set(ids)
-    checks: dict[str, ItemCheck] = {}
-    for entry in parsed["verdicts"]:
-        if not isinstance(entry, dict):
-            continue
-        item_id, verdict = entry.get("id"), entry.get("verdict")
-        if item_id not in wanted or item_id in checks or verdict not in VERDICTS:
-            continue
-        reason = entry.get("reason")
-        reason = _collapse_whitespace(reason) if isinstance(reason, str) else ""
-        checks[item_id] = ItemCheck(verdict, reason[:_VERIFY_REASON_MAX_CHARS])
-    return {i: checks.get(i, ItemCheck("cannot_tell", _NO_VERDICT)) for i in ids}
 
 
 class RationaleGenerator:
@@ -1439,18 +1331,12 @@ class RationaleGenerator:
         discussion into the prompt. ``None`` (default) uses the
         :class:`~whygraph.core.config.RationaleConfig` defaults;
         :meth:`from_config` projects them from the loaded config.
-    verify_prompt : Prompt, optional
-        Override the verification pass's prompt pair (:meth:`verify`);
-        ``None`` (default) resolves ``analyze/prompts/rationale_verify/``
-        by the client's provider and model. Its ``task`` should contain
-        :data:`~whygraph.analyze.prompt.VERIFY_PLACEHOLDER`.
     target_source : bool, optional
         When ``True`` (default), the draft prompt holds the target's current
         source (a ``TARGET SOURCE`` block, plan 62 section 14.2a) whenever
         :meth:`generate` is given its lines and they fit
         :data:`TARGET_SOURCE_MAX_CHARS`; ``False`` leaves it out and
-        ``coverage.source`` unset (an eval arm without it). The
-        verification pass is not affected.
+        ``coverage.source`` unset (an eval arm without it).
 
     Examples
     --------
@@ -1466,7 +1352,6 @@ class RationaleGenerator:
         timeout_sec: int | None = None,
         rationale_prompt: Prompt | None = None,
         caps: _PrRenderCaps | None = None,
-        verify_prompt: Prompt | None = None,
         target_source: bool = True,
     ) -> None:
         self._client = client
@@ -1477,11 +1362,6 @@ class RationaleGenerator:
             rationale_prompt
             if rationale_prompt is not None
             else resolve(_PROMPT_COMPONENT, "rationale", client.provider, client.model)
-        )
-        self._verify_prompt = (
-            verify_prompt
-            if verify_prompt is not None
-            else resolve(_VERIFY_COMPONENT, "verify", client.provider, client.model)
         )
 
     def __repr__(self) -> str:
@@ -1728,9 +1608,7 @@ class RationaleGenerator:
         level : str, optional
             The depth level the bundle is selected at when ``bundle`` is
             ``None``; default
-            :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`. The draft
-            is never verified here: the caller runs :meth:`verify` on a
-            non-partial ``high`` draft (plan 62 section 14.2).
+            :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`.
         target_path : str, optional
             The target's file path, named in the ``TARGET SOURCE`` header;
             ``None`` (default) uses ``symbol_context``'s, else the header
@@ -1811,88 +1689,3 @@ class RationaleGenerator:
             output_tokens=response.output_tokens,
             coverage=coverage,
         )
-
-    def verify(
-        self,
-        rationale: Rationale,
-        source: Sequence[str],
-        *,
-        first_line: int = 1,
-        subject: str | None = None,
-    ) -> Rationale:
-        """Check a draft's constraints and risks against the target's source (plan 62 section 14.2).
-
-        One LLM call over the source lines and the draft's constraints and
-        risks, numbered ``C1..`` and ``R1..`` (tradeoffs are not checked).
-        Each item gets its :class:`~whygraph.analyze.rationale.ItemCheck`;
-        no item is added, removed or rewritten, and a ``contradicted`` item
-        is kept and marked. A draft with neither constraints nor risks is
-        returned ``verified`` without a call.
-
-        Parameters
-        ----------
-        rationale : Rationale
-            The draft (:meth:`generate`).
-        source : Sequence[str]
-            The target's current source lines
-            (:func:`verification_source`).
-        first_line : int, optional
-            The line number of ``source[0]``; default 1.
-        subject : str, optional
-            What the card is about, reported with the call's usage.
-
-        Returns
-        -------
-        Rationale
-            The draft with ``check`` on every constraint and risk and
-            ``coverage.verification`` ``"verified"``.
-
-        Raises
-        ------
-        AnalyzeError
-            If the underlying :meth:`LlmClient.complete` raises
-            :class:`LlmError`.
-        RationaleError
-            If the answer is not a JSON object with a ``verdicts`` list.
-        """
-        constraint_ids, risk_ids = _claim_ids(rationale)
-        if not constraint_ids and not risk_ids:
-            return with_verification(rationale, "verified")
-        task = render(
-            self._verify_prompt.task,
-            _format_claims(rationale, source, first_line),
-            placeholder=VERIFY_PLACEHOLDER,
-        )
-        request = CompletionRequest.of(
-            task,
-            system=self._verify_prompt.system,
-            timeout_sec=self._timeout_sec,
-        )
-        started = time.monotonic()
-        try:
-            response = self._client.complete(request)
-        except LlmError as exc:
-            raise AnalyzeError(f"LLM call failed: {exc}") from exc
-        # Before parsing: a malformed answer was still billed.
-        record_usage(
-            "rationale",
-            response,
-            provider=self._client.provider,
-            model_requested=self._client.model,
-            subject=subject,
-            started=started,
-        )
-
-        checks = _parse_verify_json(response.text, [*constraint_ids, *risk_ids])
-        checked = dataclasses.replace(
-            rationale,
-            constraints=tuple(
-                dataclasses.replace(item, check=checks[cid])
-                for cid, item in zip(constraint_ids, rationale.constraints)
-            ),
-            risks=tuple(
-                dataclasses.replace(item, check=checks[rid])
-                for rid, item in zip(risk_ids, rationale.risks)
-            ),
-        )
-        return with_verification(checked, "verified")

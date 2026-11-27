@@ -45,8 +45,22 @@ from pathlib import Path
 
 IMPACT_CALL_SITES = 5
 MIN_NAME = 4
+MAX_DESCRIBED_POOL = 50
+# Names that say nothing about what is called (or that only tests use): a target or a
+# caller with one of these bare names is skipped and counted.
+GENERIC_NAMES = frozenset(
+    "test tests it describe main new get set run init default clone from into fmt eq len "
+    "next drop hash parse build create update add push pop map call apply handle then "
+    "done close open read write send start stop reset setup teardown before after each "
+    "all any value values keys key size name type id data item items list find has is "
+    "to_string as_str unwrap expect iter".split()
+)
+TEST_NAME = re.compile(
+    r"^(test|tests|it|describe|spec|mock|fixture|bench)([_A-Z0-9]|$)|([_a-z])(test|tests|spec)$"
+)
 TEST_PATH = re.compile(
     r"(^|/)(tests?|__tests__|__mocks__|spec|specs|e2e)(/|$)|(^|/)test_|[._]test\.|[._]spec\."
+    r"|(^|/)testing\.|test_?utils|_tests?\.|/testdata/"
 )
 BODY_CHARS = 700
 DESC_CHARS = 1200
@@ -97,6 +111,8 @@ class Target:
     edges_total: int = 0
     unresolved_rows: int = 0
     unresolved_callers: int = 0
+    skipped_generic_callers: int = 0
+    skipped_undescribed: int = 0
 
 
 @dataclass
@@ -114,6 +130,9 @@ class Repo:
     commits: int = 0
     described: int = 0
     candidates: int = 0
+    skipped_generic_targets: int = 0
+    mode: str = "plain"
+    plain_undescribed: tuple[int, int] = (0, 0)
     _files: dict[str, list[str] | None] = field(default_factory=dict)
     _dates: dict[str, str | None] = field(default_factory=dict)
 
@@ -211,6 +230,12 @@ def render(
     return "\n".join(parts)
 
 
+def generic_name(name: str) -> bool:
+    """Return True for a generic or test-only bare name."""
+    bare = name.split("::")[-1].split(".")[-1]
+    return bare.lower() in GENERIC_NAMES or bool(TEST_NAME.search(bare))
+
+
 def candidates(repo: Repo) -> list[sqlite3.Row]:
     """Return every target that qualifies (rows ordered by node id)."""
     rows = repo.cdb.execute(
@@ -227,7 +252,10 @@ def candidates(repo: Repo) -> list[sqlite3.Row]:
         """,
         (MIN_NAME,),
     ).fetchall()
-    return [r for r in rows if not TEST_PATH.search(r["file_path"])]
+    rows = [r for r in rows if not TEST_PATH.search(r["file_path"])]
+    kept = [r for r in rows if not generic_name(r["name"])]
+    repo.skipped_generic_targets = len(rows) - len(kept)
+    return kept
 
 
 def unresolved_for(repo: Repo, name: str) -> tuple[int, int]:
@@ -241,7 +269,7 @@ def unresolved_for(repo: Repo, name: str) -> tuple[int, int]:
     return row[0], row[1]
 
 
-def examine(repo: Repo, row: sqlite3.Row) -> Target:
+def examine(repo: Repo, row: sqlite3.Row, described_only: bool = False) -> Target:
     """Build the ring for one target: rank callers, blame call lines, render."""
     tgt = Target(
         node_id=row["id"],
@@ -265,6 +293,16 @@ def examine(repo: Repo, row: sqlite3.Row) -> Target:
     by_caller: dict[str, sqlite3.Row] = {}
     for e in edges:
         by_caller.setdefault(e["source"], e)  # dedupe by caller node, first line
+    usable = {
+        k: e
+        for k, e in by_caller.items()
+        if not generic_name(e["qualified_name"])
+        and not TEST_PATH.search(e["file_path"])
+    }
+    tgt.skipped_generic_callers = len(by_caller) - len(usable)
+    by_caller = usable
+    if sum(1 for e in by_caller.values() if e["file_path"] != tgt.path) < 2:
+        return tgt  # fewer than two usable callers in other files: no ring
     # newest file activity first (no date last), then other files before the target's own
     ranked = sorted(by_caller.values(), key=lambda e: e["source"])
     ranked.sort(key=lambda e: newest_date(repo, e["file_path"]) or "", reverse=True)
@@ -304,6 +342,9 @@ def examine(repo: Repo, row: sqlite3.Row) -> Target:
             if commit
             else ("(commit not in the WhyGraph DB)", "", "", None)
         )
+        if described_only and not desc:
+            tgt.skipped_undescribed += 1
+            continue
         number, title = pr_for(repo, sha)
         ln = e["line"]
         tgt.sites.append(
@@ -342,18 +383,33 @@ def examine(repo: Repo, row: sqlite3.Row) -> Target:
     return tgt
 
 
-def sample(repo: Repo, seed: int, per_repo: int, per_target: int) -> None:
-    """Fill ``repo.targets`` with a seeded sample worth ``per_repo`` sites."""
+def sample(
+    repo: Repo,
+    seed: int,
+    per_repo: int,
+    per_target: int,
+    described_only: bool = False,
+    pool: int = MAX_DESCRIBED_POOL,
+) -> None:
+    """Fill ``repo.targets`` with a seeded sample worth ``per_repo`` sites.
+
+    With ``described_only`` only call sites whose commit has a stored description are
+    rendered, and only the first ``MAX_DESCRIBED_POOL`` seeded candidates are tried.
+    """
+    repo.targets = []
     cands = candidates(repo)
     repo.candidates = len(cands)
     random.Random(seed).shuffle(cands)
+    if described_only:
+        cands = cands[:pool]
+        repo.mode = f"described-only (first {pool} seeded candidates)"
     judged = 0
     for row in cands:
         if judged >= per_repo:
             break
         if file_lines(repo, row["file_path"]) is None:
             continue
-        tgt = examine(repo, row)
+        tgt = examine(repo, row, described_only)
         if not tgt.sites:
             continue
         repo.targets.append(tgt)
@@ -427,6 +483,13 @@ def measures(repos: list[Repo]) -> dict:
             "skipped_null_line": sum(t.skipped_null_line for t in targets),
             "skipped_text": sum(t.skipped_text for t in targets),
             "skipped_other": sum(t.skipped_other for t in targets),
+            "skipped_generic_targets": sum(r.skipped_generic_targets for r in group),
+            "skipped_generic_callers": sum(t.skipped_generic_callers for t in targets),
+            "skipped_undescribed": sum(t.skipped_undescribed for t in targets),
+            "mode": "; ".join(r.mode for r in group),
+            "plain_undescribed": " / ".join(
+                f"{r.plain_undescribed[0]} of {r.plain_undescribed[1]}" for r in group
+            ),
             "unresolved_rows": sum(t.unresolved_rows for t in targets),
             "unresolved_callers": sum(t.unresolved_callers for t in targets),
             "callers_resolved_total": sum(t.callers_total for t in targets),
@@ -440,14 +503,28 @@ def measures(repos: list[Repo]) -> dict:
     return out
 
 
-def measures_md(m: dict, repos: list[Repo]) -> str:
+def measures_md(
+    m: dict, repos: list[Repo], extra: tuple[str, dict] | None = None
+) -> str:
     """Render the measures table."""
-    cols = [r.label for r in repos] + ["total"]
+    cols = [r.label for r in repos]
+    if extra:
+        m = {**m, extra[0]: extra[1]}
+        cols.append(extra[0])
     rows = [
         ("HEAD", lambda x: x["head"]),
         (
             "Candidate targets (function / method, >= 2 callers in other files)",
             lambda x: x["candidate_targets"],
+        ),
+        (
+            "Candidates dropped first as generic or test-only names (targets)",
+            lambda x: x["skipped_generic_targets"],
+        ),
+        ("Sampling mode", lambda x: x["mode"]),
+        (
+            "Call-site commits without a stored description in the plain seeded sample",
+            lambda x: x["plain_undescribed"],
         ),
         ("Targets sampled", lambda x: x["targets"]),
         ("Call sites judged", lambda x: x["judged_sites"]),
@@ -488,6 +565,14 @@ def measures_md(m: dict, repos: list[Repo]) -> str:
             ),
         ),
         (
+            "Callers dropped as generic / test-only names or test paths (sampled targets)",
+            lambda x: x["skipped_generic_callers"],
+        ),
+        (
+            "Call sites skipped for an undescribed commit (described-only mode)",
+            lambda x: x["skipped_undescribed"],
+        ),
+        (
             "Skipped for a null `line` / a line missing from the file",
             lambda x: f"{x['skipped_null_line']} / {x['skipped_other']}",
         ),
@@ -508,7 +593,13 @@ def measures_md(m: dict, repos: list[Repo]) -> str:
     ]
     lines = ["| Measure | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
     for label, fn in rows:
-        lines.append(f"| {label} | " + " | ".join(str(fn(m[c])) for c in cols) + " |")
+        cells = []
+        for c in cols:
+            try:
+                cells.append(str(fn(m[c])))
+            except KeyError:
+                cells.append("n/a")
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
@@ -523,9 +614,10 @@ def fence(text: str) -> str:
     return "```text\n" + text.replace("```", "'''") + "\n```"
 
 
-def sheet(repos: list[Repo], m: dict, seed: int) -> str:
+def sheet(
+    repos: list[Repo], m: dict, seed: int, extra: tuple[str, dict] | None = None
+) -> str:
     """Render the judging sheet."""
-    total = m["total"]
     out = [
         "# Plan 62 spike D0: call-site judging sheet",
         "",
@@ -539,11 +631,11 @@ def sheet(repos: list[Repo], m: dict, seed: int) -> str:
         "value, ordering, or an error case. Otherwise **n** (the commit only touched the line "
         "incidentally, or says nothing about the target). Judge the commit text as shown, not the code.",
         "",
-        f"**Pass bar (section 15):** useful in at least 15 of {total['judged_sites']}.",
+        "**Pass bar (section 15):** useful in at least 15 of 30.",
         "",
         "## Measures",
         "",
-        measures_md(m, repos),
+        measures_md(m, repos, extra),
         "",
         "Notes: tokens are rendered header + stored raw description + PR title only (the commit body "
         "shown below is for the judge, a card would not carry it). A skipped call site is dropped, not "
@@ -553,7 +645,13 @@ def sheet(repos: list[Repo], m: dict, seed: int) -> str:
     ]
     n = 0
     for repo in repos:
-        out += [f"## {repo.label} (HEAD {repo.head})", ""]
+        out += [
+            f"## {repo.label}",
+            "",
+            f"Checkout: `{repo.root}` at HEAD `{repo.head}` (blame and the lines shown are at this HEAD). "
+            f"Sampling: {repo.mode}.",
+            "",
+        ]
         for tgt in repo.targets:
             judged = tgt.judged
             if not judged:
@@ -605,12 +703,53 @@ def main() -> None:
     ap.add_argument("--sites-per-target", type=int, default=3)
     ap.add_argument("--out", required=True)
     ap.add_argument("--json")
+    ap.add_argument(
+        "--widen-pool",
+        type=int,
+        default=0,
+        help="when described-only finds fewer than --per-repo sites in "
+        f"{MAX_DESCRIBED_POOL} candidates, retry with this many (0: do not widen)",
+    )
+    ap.add_argument(
+        "--extra-json", help="measures JSON of an earlier run to show as a column"
+    )
+    ap.add_argument("--extra-key", default="whygraph")
+    ap.add_argument("--extra-label", default="")
     args = ap.parse_args()
     repos = [open_repo(spec) for spec in args.repo]
     for repo in repos:
         sample(repo, args.seed, args.per_repo, args.sites_per_target)
+        sites = [s for t in repo.targets for s in t.judged]
+        repo.plain_undescribed = (sum(s.description is None for s in sites), len(sites))
+        if repo.plain_undescribed[0] * 2 > repo.plain_undescribed[1]:
+            # more than half lack a stored description: prefer described call-site commits
+            sample(
+                repo,
+                args.seed,
+                args.per_repo,
+                args.sites_per_target,
+                described_only=True,
+            )
+            first = sum(len(t.judged) for t in repo.targets)
+            if first < args.per_repo and args.widen_pool > MAX_DESCRIBED_POOL:
+                sample(
+                    repo,
+                    args.seed,
+                    args.per_repo,
+                    args.sites_per_target,
+                    described_only=True,
+                    pool=args.widen_pool,
+                )
+                repo.mode += (
+                    f"; the {MAX_DESCRIBED_POOL}-candidate pool gave only {first} site(s), "
+                    "so the pool was widened (deviation from the 50-candidate rule)"
+                )
     m = measures(repos)
-    Path(args.out).write_text(sheet(repos, m, args.seed), encoding="utf-8")
+    extra = None
+    if args.extra_json:
+        old = json.loads(Path(args.extra_json).read_text(encoding="utf-8"))
+        extra = (args.extra_label or args.extra_key, old[args.extra_key])
+    Path(args.out).write_text(sheet(repos, m, args.seed, extra), encoding="utf-8")
     if args.json:
         Path(args.json).write_text(json.dumps(m, indent=2), encoding="utf-8")
     print(json.dumps(m, indent=2))

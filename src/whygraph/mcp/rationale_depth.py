@@ -8,25 +8,21 @@ Step                   Rule
 =====================  =========================================================
 1 Fixed                An explicit ``depth``, or a project depth other than
                        ``auto``, is used as is; only step 5 applies.
-2 Task base (auto)     ``explain`` / ``review`` -> ``low``; ``plan`` / ``edit``
-                       -> ``medium``; ``refactor`` / ``delete`` -> ``xhigh``
-                       when the symbol has callers, ``high`` when it has none
-                       or the count is unknown (neither is offered, so both
-                       are ``medium`` today, R49); no intent -> ``medium``.
+2 Task base (auto)     ``explain`` / ``review`` -> ``low``; every other task
+                       (``plan``, ``edit``, ``refactor``, ``delete``) and no
+                       intent -> ``medium`` (R49, R51).
                        ``review`` accepts any cached depth and skips steps 3-4.
 3 Importance (auto)    +1 at :data:`IMPORTANT_CALLERS` distinct callers or
                        more; an unknown count changes nothing.
 4 Budget (auto)        -1 when a covering budget is at 75 % or more
                        (:func:`whygraph.core.usage.usage_pressure`).
 5 Ceiling              Clamp to ``low`` .. the effective ceiling after each
-                       step; a level that is not offered maps to the
-                       highest offered one.
+                       step.
 =====================  =========================================================
 
 An auto reason names only what moved the level: a signal clamped away (the
-callers of a ``refactor`` target, importance at the top level, budget
-pressure at ``low``) is left out, and so is the clamp to the highest offered
-level. A cap by the ceiling has its own sentence.
+importance at the top level, budget pressure at ``low``) is left out. A cap
+by the ceiling has its own sentence.
 
 The signal it needs from the index, :func:`distinct_callers`, is not pure:
 it reads the bound project's CodeGraph index and never raises.
@@ -44,7 +40,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 
 from whygraph.analyze.card_bundle import LINE_LEVEL_SOURCES, level_caps
 from whygraph.core import get_config
-from whygraph.core.config import DEPTH_LEVELS, OFFERED_DEPTH_LEVELS, RationaleConfig
+from whygraph.core.config import DEPTH_LEVELS, RationaleConfig
 from whygraph.core.usage import usage_pressure
 
 from .plans import _innermost
@@ -66,12 +62,11 @@ Intent = Literal["explain", "edit", "refactor", "delete", "review", "plan"]
 INTENTS: tuple[str, ...] = get_args(Intent)
 """The tasks a caller may name (``intent``)."""
 
-OfferedDepth = Literal[OFFERED_DEPTH_LEVELS]  # type: ignore[valid-type]
-"""The ``depth`` input a caller may pass: the offered levels only.
+OfferedDepth = Literal[DEPTH_LEVELS]  # type: ignore[valid-type]
+"""The ``depth`` input a caller may pass: ``low`` or ``medium``.
 
-Built from :data:`~whygraph.core.config.OFFERED_DEPTH_LEVELS`, so input
-validation refuses ``high`` and ``xhigh`` (R49) and follows that tuple when
-Part D offers a third level.
+Built from :data:`~whygraph.core.config.DEPTH_LEVELS`, so input validation
+refuses any other level.
 """
 
 IMPORTANT_CALLERS = 5
@@ -82,15 +77,15 @@ _TASK_BASE: dict[str | None, str] = {
     "review": "low",
     "plan": "medium",
     "edit": "medium",
+    "refactor": "medium",
+    "delete": "medium",
     None: "medium",
 }
-"""Step 2's base level per intent (``refactor`` / ``delete`` depend on callers)."""
+"""Step 2's base level per intent."""
 
 _LABELS: dict[str, str] = {
     "low": "Low",
     "medium": "Medium",
-    "high": "High",
-    "xhigh": "Extra high",
 }
 
 
@@ -105,8 +100,8 @@ class DepthResolution:
         the project's ``[rationale].depth`` (``"auto"`` or a level).
     resolved : str
         The level to build (one of
-        :data:`~whygraph.core.config.OFFERED_DEPTH_LEVELS`), never above
-        the effective ceiling.
+        :data:`~whygraph.core.config.DEPTH_LEVELS`), never above the
+        effective ceiling.
     reason : str
         A short sentence for the card ("Auto chose Medium because the task
         was \\"edit\\".").
@@ -171,23 +166,15 @@ def _join(parts: list[str]) -> str:
 class _Clamp:
     """Step 5: clamp a level index to ``low`` .. the effective ceiling.
 
-    A level above the highest offered one maps to it; :attr:`note` says
-    what capped a level, if anything did. The highest offered level is
-    named only when ``announce`` is set (an explicit or project level that
-    is not offered): under ``auto`` that clamp is silent.
+    :attr:`note` says what capped a level, if anything did: only a ceiling
+    below the deepest level can, so asking for more than ``medium`` of a
+    ``medium`` ceiling says nothing.
     """
 
-    def __init__(self, ceiling: str, *, announce: str | None = None) -> None:
-        self.offered_top = DEPTH_LEVELS.index(OFFERED_DEPTH_LEVELS[-1])
-        ceiling_index = DEPTH_LEVELS.index(ceiling)
-        self.top = min(ceiling_index, self.offered_top)
-        self._by_ceiling = ceiling_index < self.offered_top
-        self._announce = announce
+    def __init__(self, ceiling: str) -> None:
+        self.top = DEPTH_LEVELS.index(ceiling)
+        self._by_ceiling = self.top < len(DEPTH_LEVELS) - 1
         self.capped = False
-
-    def offered(self, index: int) -> int:
-        """``index`` clamped to the offered levels only (the ceiling ignored)."""
-        return min(max(index, 0), self.offered_top)
 
     def __call__(self, index: int) -> int:
         if index > self.top:
@@ -196,14 +183,9 @@ class _Clamp:
 
     @property
     def note(self) -> str | None:
-        if not self.capped:
+        if not (self.capped and self._by_ceiling):
             return None
-        label = _LABELS[DEPTH_LEVELS[self.top]]
-        if self._by_ceiling:
-            return f"Capped at {label} by the depth ceiling."
-        if self._announce is not None:
-            return f"Capped at {label}: {_LABELS[self._announce]} is not offered."
-        return None
+        return f"Capped at {_LABELS[DEPTH_LEVELS[self.top]]} by the depth ceiling."
 
 
 def resolve_depth(
@@ -269,7 +251,7 @@ def resolve_depth(
 
     fixed = depth if depth is not None else project_depth
     if fixed != AUTO:  # step 1, then step 5
-        clamp = _Clamp(ceiling, announce=fixed)
+        clamp = _Clamp(ceiling)
         level = clamp(DEPTH_LEVELS.index(fixed))
         who = "was asked for" if depth is not None else "is the project depth"
         sentences = [f"{_LABELS[fixed]} {who}.", clamp.note, *thin]
@@ -281,31 +263,20 @@ def resolve_depth(
         )
 
     # Step 2: the task base. A signal is named only when it moves the level
-    # within the offered ones (the ceiling's cap has its own sentence).
+    # (the ceiling's cap has its own sentence).
     clamp = _Clamp(ceiling)
     parts = ["no task was given" if intent is None else f'the task was "{intent}"']
-    if intent in ("refactor", "delete"):
-        base = "xhigh" if callers else "high"
-        split = clamp.offered(DEPTH_LEVELS.index("xhigh")) != clamp.offered(
-            DEPTH_LEVELS.index("high")
-        )
-        if split and callers is not None and callers < IMPORTANT_CALLERS:
-            parts.append(
-                "the symbol has callers" if callers else "the symbol has no callers"
-            )
-    else:
-        base = _TASK_BASE[intent]
-    level = clamp(DEPTH_LEVELS.index(base))
+    base = DEPTH_LEVELS.index(_TASK_BASE[intent])
+    level = clamp(base)
     unknown = None
     if not review:
-        # Step 3: importance. Named when it would raise the level within the
-        # offered ones, even if the ceiling then caps it.
+        # Step 3: importance. Named when it would raise the level, even if
+        # the ceiling then caps it.
         if callers is None:
             if level < clamp.top:
                 unknown = "The caller count is unknown, so importance did not count."
         elif callers >= IMPORTANT_CALLERS:
-            free = clamp.offered(DEPTH_LEVELS.index(base))
-            if clamp.offered(free + 1) != free:
+            if base < len(DEPTH_LEVELS) - 1:
                 parts.append(f"the symbol has {callers} distinct callers")
             level = clamp(level + 1)
         # Step 4: budget pressure.
@@ -488,9 +459,8 @@ def deeper(
 
     The next level's differences from ``level`` (plan 62 section 14.1),
     kept to the ones this target's evidence would show: more of the file's
-    other commits, the PRs of earlier commits of the lines, the draft
-    commits of a squash-merged PR. Never a level that is not offered: at
-    ``medium`` (the highest offered level, R49) it is ``None``.
+    other commits and the PRs of earlier commits of the lines. At ``medium``
+    (the deepest level, R49 and R51) it is ``None``.
 
     Parameters
     ----------
@@ -505,10 +475,10 @@ def deeper(
     -------
     dict[str, str] or None
         ``{"level", "adds"}`` (``adds`` one sentence); ``None`` at the
-        ceiling (or the highest offered level), or when the next level
+        ceiling (or the deepest level), or when the next level
         would add nothing for this target.
     """
-    top = min(DEPTH_LEVELS.index(ceiling), DEPTH_LEVELS.index(OFFERED_DEPTH_LEVELS[-1]))
+    top = DEPTH_LEVELS.index(ceiling)
     index = DEPTH_LEVELS.index(level)
     if index >= top:
         return None
@@ -534,12 +504,6 @@ def deeper(
             if not shown
             else f"reads {more} instead of {shown} {of}"
         )
-    if (
-        there.feature_commits
-        and not here.feature_commits
-        and any(item.source == "pr-origin" for item in evidence)
-    ):
-        parts.append("shows the draft commits of squash-merged PRs")
     if not parts:
         return None
     text = _join(parts)

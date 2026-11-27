@@ -59,7 +59,7 @@ code that still exists.
   Ceiling) with an info panel comparing the levels and an estimate of a card's price per level,
   computed with no model call. An organization owner sets an org-wide ceiling,
   `[rationale].org_max_depth`, in production. Cards show their depth, and the Explorer offers
-  **Generate deeper**. A deeper level above `medium` is planned and is not offered yet. See
+  **Generate deeper**. See
   [Configuration](../reference/configuration.md#rationale-depth),
   [the Explorer](../guide/playground.md#rationale-depth) and
   [Usage & cost](../portal/usage.md#depth-estimate).

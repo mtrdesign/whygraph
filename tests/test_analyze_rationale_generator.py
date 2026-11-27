@@ -1766,11 +1766,10 @@ def _titles(prompt: str) -> set[str]:
 def test_each_level_is_a_superset_of_the_one_below_with_threads() -> None:
     """R24 while stopper 2 does not bind: full PRs, threads and context only grow."""
     prompts = {
-        level: _bundle_prompt(_rich_evidence(), level)[0]
-        for level in ("low", "medium", "high", "xhigh")
+        level: _bundle_prompt(_rich_evidence(), level)[0] for level in ("low", "medium")
     }
 
-    for shallow, deep in (("low", "medium"), ("medium", "high"), ("high", "xhigh")):
+    for shallow, deep in (("low", "medium"),):
         assert _titles(prompts[shallow]) <= _titles(prompts[deep])
         shallow_lines = {
             ln for ln in prompts[shallow].splitlines() if "PR author]" in ln
@@ -1784,7 +1783,6 @@ def test_each_level_is_a_superset_of_the_one_below_with_threads() -> None:
     assert "Title: Walked PR" in prompts["medium"]
     assert prompts["low"].count("  Source: area-history") == 0
     assert prompts["medium"].count("  Source: area-history") == 4
-    assert prompts["high"].count("  Source: area-history") == 6
 
 
 def test_a_long_description_is_rendered_whole() -> None:
@@ -1875,7 +1873,7 @@ def test_a_squash_commit_body_never_renders_when_its_pr_is_a_title_line() -> Non
     prompt, card = _bundle_prompt(evidence, reply=reply)
 
     assert "squash body words" not in prompt
-    assert "  (squash of 3 commits; shown from high)" in prompt
+    assert "  (squash of 3 commits)" in prompt
     assert "  PR #7 (title only)" in prompt
     # The squash body stays a quote source; a demoted PR's body does not.
     assert [item.basis for item in card.constraints] == ["quoted", "cited"]
@@ -2090,7 +2088,6 @@ def _level_evidence() -> list[CommitEvidence]:
 
 
 _RING0 = ("a1b2c3d4", "55555555")
-_FEATURE = ("77777777", "88888888")
 
 
 def _context(count: int) -> set[str]:
@@ -2122,7 +2119,7 @@ def test_low_renders_its_rows() -> None:
     assert _commits_in(prompt) == set(_RING0)
     assert "    Title: Blame PR" in prompt  # own PR of a commit that owns the lines
     assert "  PR #7 (title only)" in prompt  # own PR of a walked commit
-    assert "  (squash of 2 commits; shown from high)" in prompt
+    assert "  (squash of 2 commits)" in prompt
     assert "Source: area-history" not in prompt
     assert "(8 file commits that touched the file but not these lines" in prompt
     _assert_every_commit_is_described_raw(prompt)
@@ -2143,56 +2140,26 @@ def test_medium_renders_its_rows() -> None:
     assert card.coverage.trimmed == ()
 
 
-def test_high_renders_its_rows() -> None:
-    prompt, card = _bundle_prompt(_level_evidence(), "high")
-
-    assert _commits_in(prompt) == {*_RING0, *_FEATURE, *_context(6)}
-    assert (
-        "Source: draft commit inside a squash-merged PR (intermediate states "
-        "never reached the default branch)" in prompt
-    )
-    assert prompt.count("  PR #7 (shown above)") == 2  # the feature-branch commits
-    assert "(2 more file commits not shown)" in prompt
-    _assert_every_commit_is_described_raw(prompt)
-    assert (card.coverage.line_commits, card.coverage.context_commits) == (4, 6)
-    assert card.coverage.trimmed == ()
-
-
-def test_xhigh_renders_its_rows() -> None:
-    prompt, card = _bundle_prompt(_level_evidence(), "xhigh")
-
-    assert _commits_in(prompt) == {*_RING0, *_FEATURE, *_context(8)}
-    assert "more file commits not shown" not in prompt
-    _assert_every_commit_is_described_raw(prompt)
-    assert card.coverage.context_commits == 8
-
-
 def test_the_level_stoppers_are_the_r45_numbers() -> None:
     from whygraph.analyze.card_bundle import level_caps
 
-    caps = {level: level_caps(level) for level in ("low", "medium", "high", "xhigh")}
+    caps = {level: level_caps(level) for level in ("low", "medium")}
     assert {lv: c.full_pr_max_count for lv, c in caps.items()} == dict.fromkeys(
         caps, 16
     )
-    assert [c.full_pr_max_chars for c in caps.values()] == [35_000, *[40_000] * 3]
-    assert [c.total_max_chars for c in caps.values()] == [
-        158_000,
-        163_000,
-        183_000,
-        183_000,
-    ]
-    assert [c.context_commits for c in caps.values()] == [0, 4, 6, 8]
-    assert [c.feature_commits for c in caps.values()] == [False, False, True, True]
+    assert [c.full_pr_max_chars for c in caps.values()] == [35_000, 40_000]
+    assert [c.total_max_chars for c in caps.values()] == [158_000, 163_000]
+    assert [c.context_commits for c in caps.values()] == [0, 4]
 
 
 def test_a_deeper_prompt_includes_every_commit_of_a_shallower_one() -> None:
     """R24 commit-wise: each level's commits, with their descriptions, only grow."""
     prompts = {
         level: _bundle_prompt(_level_evidence(), level)[0]
-        for level in ("low", "medium", "high", "xhigh")
+        for level in ("low", "medium")
     }
 
-    for shallow, deep in (("low", "medium"), ("medium", "high"), ("high", "xhigh")):
+    for shallow, deep in (("low", "medium"),):
         assert _commits_in(prompts[shallow]) < _commits_in(prompts[deep])
         summaries = {
             line for line in prompts[shallow].splitlines() if "  Summary: " in line
@@ -2204,9 +2171,9 @@ def test_a_deeper_prompt_includes_every_commit_of_a_shallower_one() -> None:
 def test_generate_selects_its_bundle_at_the_level_it_is_given() -> None:
     client = _StubClient()
 
-    RationaleGenerator(client).generate(_level_evidence(), level="high")
+    RationaleGenerator(client).generate(_level_evidence(), level="medium")
 
-    assert "COMMIT 77777777" in client.requests[0].messages[1].content
+    assert "c4c4c4c4" in client.requests[0].messages[1].content
     with pytest.raises(ValueError, match="unknown depth level"):
         RationaleGenerator(_StubClient()).generate(_level_evidence(), level="huge")
 
@@ -2255,7 +2222,7 @@ def test_the_verification_pass_is_gone() -> None:
 _SOURCE_HEADER = "TARGET SOURCE (lines 1-6, as of the card's build)"
 
 
-@pytest.mark.parametrize("level", ["low", "medium", "high"])
+@pytest.mark.parametrize("level", ["low", "medium"])
 def test_the_draft_holds_the_targets_numbered_source_at_every_level(
     level: str,
 ) -> None:

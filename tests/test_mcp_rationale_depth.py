@@ -51,21 +51,6 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
         "medium",
         f"Medium was asked for. {CEILING_LOW}",
     ),
-    # The tool and /api/v1 refuse these (R49); a direct call maps them to Medium.
-    (
-        "explicit-high-not-offered",
-        {"depth": "high"},
-        "medium",
-        "high",
-        "High was asked for. Capped at Medium: High is not offered.",
-    ),
-    (
-        "explicit-xhigh-not-offered",
-        {"depth": "xhigh"},
-        "medium",
-        "xhigh",
-        "Extra high was asked for. Capped at Medium: Extra high is not offered.",
-    ),
     (
         "explicit-ignores-pressure",
         {"depth": "medium", "pressure": "project"},
@@ -159,13 +144,6 @@ ROWS: list[tuple[str, dict[str, Any], str, str, str]] = [
         "medium",
         "auto",
         'Auto chose Medium because the task was "delete".',
-    ),
-    (
-        "refactor-under-a-stale-high-ceiling",
-        {"intent": "refactor", "callers": 9, "ceiling": "high"},
-        "medium",
-        "auto",
-        'Auto chose Medium because the task was "refactor".',
     ),
     (
         "refactor-capped-by-ceiling",
@@ -548,12 +526,23 @@ def test_resolve_for_target_caps_at_the_effective_ceiling(tmp_path: Path) -> Non
     assert "Capped at Low by the depth ceiling." in resolution.reason
 
 
+def test_depth_block_says_a_deeper_card_was_kept() -> None:
+    resolution = DepthResolution("auto", "low", "Auto chose Low.")
+
+    kept = depth_block(resolution, "medium", "kept")
+    cached = depth_block(resolution, "medium", "cached")
+
+    assert kept["resolved"] == cached["resolved"] == "medium"
+    assert kept["reason"] == (
+        "Auto chose Low. Built at Medium to keep the deeper card of these lines."
+    )
+    assert cached["reason"] == "Auto chose Low. A cached Medium card was served."
+
+
 @pytest.mark.parametrize(
     ("level", "served", "resolved", "sentence"),
     [
         ("medium", "cached", "medium", None),
-        ("high", "cached", "high", "A cached High card was served."),
-        ("high", "kept", "high", "Built at High to keep the deeper card"),
         ("low", "cached", "low", "A cached Low card was served."),
     ],
 )
@@ -588,11 +577,8 @@ def test_deeper_names_what_the_next_level_adds() -> None:
 def test_deeper_is_none_at_the_ceiling_or_with_nothing_to_add() -> None:
     lines_only = [_item("blame", prs=1)]
     rich = [_item("blame", prs=1), _item("pr-origin"), *[_item("area")] * 9]
-    # Medium is the highest offered level (R49): nothing deeper, whatever the
-    # ceiling or the evidence (High would add context and draft commits).
-    for ceiling in ("medium", "high", "xhigh"):
-        assert deeper("medium", ceiling, rich) is None
-        assert deeper("medium", ceiling, lines_only) is None
-    assert deeper("high", "xhigh", rich) is None  # a stale row: not offered either
+    # Medium is the deepest level (R49, R51): nothing deeper, whatever the evidence.
+    assert deeper("medium", "medium", rich) is None
+    assert deeper("medium", "medium", lines_only) is None
     assert deeper("low", "low", rich) is None  # the ceiling
     assert deeper("low", "medium", lines_only) is None  # medium adds nothing here

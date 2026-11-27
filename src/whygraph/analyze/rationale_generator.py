@@ -716,9 +716,7 @@ def _body_note(item: CommitEvidence, layout: _Layout) -> str | None:
     if pr.number in layout.full:
         return f"(body: the PR's squashed commits, see PR #{pr.number})"
     count = len(_json_list(pr.commit_titles))
-    if layout.bundle.caps.feature_commits:
-        return f"(squash of {count} commits)"
-    return f"(squash of {count} commits; shown from high)"
+    return f"(squash of {count} commits)"
 
 
 def _render(

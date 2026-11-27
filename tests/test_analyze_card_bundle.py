@@ -89,12 +89,11 @@ def _numbers(prs) -> list[int]:
 
 
 def test_level_constants_are_the_b0_numbers() -> None:
-    assert dict(FULL_PR_MAX_COUNT) == {"low": 16, "medium": 16, "high": 16, "xhigh": 16}
-    assert FULL_PR_MAX_CHARS["low"] == 35_000
-    assert FULL_PR_MAX_CHARS["medium"] == FULL_PR_MAX_CHARS["high"] == 40_000
-    assert (TOTAL_MAX_CHARS["low"], TOTAL_MAX_CHARS["medium"]) == (158_000, 163_000)
-    assert TOTAL_MAX_CHARS["high"] == 183_000
-    assert dict(CONTEXT_COMMITS) == {"low": 0, "medium": 4, "high": 6, "xhigh": 8}
+    assert LEVELS == ("low", "medium")
+    assert dict(FULL_PR_MAX_COUNT) == {"low": 16, "medium": 16}
+    assert dict(FULL_PR_MAX_CHARS) == {"low": 35_000, "medium": 40_000}
+    assert dict(TOTAL_MAX_CHARS) == {"low": 158_000, "medium": 163_000}
+    assert dict(CONTEXT_COMMITS) == {"low": 0, "medium": 4}
 
 
 def test_level_values_never_decrease_with_depth() -> None:
@@ -107,9 +106,9 @@ def test_level_values_never_decrease_with_depth() -> None:
 
 
 def test_level_caps_raise_a_lowered_deeper_value(monkeypatch) -> None:
-    monkeypatch.setitem(FULL_PR_MAX_CHARS, "high", 1_000)
+    monkeypatch.setitem(FULL_PR_MAX_CHARS, "medium", 1_000)
 
-    assert level_caps("high").full_pr_max_chars == 40_000
+    assert level_caps("medium").full_pr_max_chars == 35_000
 
 
 def test_unknown_level_raises() -> None:
@@ -146,8 +145,7 @@ def test_ring1_takes_the_newest_context_commits_up_to_the_level() -> None:
 
     assert [i.commit.sha for i in bundle.ring1] == [f"{i:08x}" for i in range(4)]
     assert bundle.context_total == 10
-    assert len(card_bundle(evidence, "high").ring1) == 6
-    assert len(card_bundle(evidence, "xhigh").ring1) == 8
+    assert len(card_bundle(evidence, "low").ring1) == 0
 
 
 def _squash_evidence() -> tuple[list[CommitEvidence], PullRequest]:
@@ -159,7 +157,7 @@ def _squash_evidence() -> tuple[list[CommitEvidence], PullRequest]:
     return [newer, s, f2, f1], squash
 
 
-def test_a_squash_unit_renders_as_its_squash_commit_below_high() -> None:
+def test_a_squash_unit_renders_as_its_squash_commit() -> None:
     evidence, squash = _squash_evidence()
 
     for level in ("low", "medium"):
@@ -170,19 +168,17 @@ def test_a_squash_unit_renders_as_its_squash_commit_below_high() -> None:
         assert 7 in _numbers(bundle.full_prs)
 
 
-def test_a_squash_unit_shows_its_feature_commits_from_high() -> None:
-    evidence, _ = _squash_evidence()
+def test_a_pr_origin_commit_without_its_squash_commit_is_its_own_unit() -> None:
+    """C3a: the squash commit is not in the evidence, so the draft commit stands alone."""
+    squash = _pr(7, head="f2f2f2f2", merge="5555aaaa")
+    f2 = _item("f2f2f2f2", 4, "pr-origin", squash)
+    evidence = [_item("9999bbbb", 20, "blame", _pr(8)), f2]
 
-    bundle = card_bundle(evidence, "high")
+    for level in LEVELS:
+        bundle = card_bundle(evidence, level)
 
-    assert [i.commit.sha for i in bundle.ring0] == [
-        "9999bbbb",
-        "5555aaaa",
-        "f2f2f2f2",
-        "f1f1f1f1",
-    ]
-    # The unit's PR counts as its feature commits' own.
-    assert 7 in bundle.own["f1f1f1f1"]
+        assert [i.commit.sha for i in bundle.ring0] == ["9999bbbb", "f2f2f2f2"]
+        assert [u.head.commit.sha for u in bundle.units] == ["9999bbbb", "f2f2f2f2"]
 
 
 def test_a_squash_unit_is_dated_by_its_squash_commit() -> None:
@@ -258,7 +254,7 @@ def test_roster_only_prs_are_never_full() -> None:
         item.commit, (*item.pull_requests, release), source="blame", lines=((1, 2),)
     )
 
-    bundle = card_bundle([item], "xhigh")
+    bundle = card_bundle([item], "medium")
 
     assert _numbers(bundle.full_prs) == [2]
     assert 40 not in _numbers(bundle.title_prs)

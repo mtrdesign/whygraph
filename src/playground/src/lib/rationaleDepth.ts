@@ -1,6 +1,6 @@
 // Rationale depth (plan 62 section 14): the levels, the one copy constant the info
 // panel and the settings hints both read, and the formatting of the estimate.
-// `high` and `xhigh` are not offered (plan 62 R49), so the UI lists Auto, Low and Medium.
+// The levels are Low and Medium (plan 62 R49, R51); the UI lists Auto, Low and Medium.
 
 import { formatUsd } from "./format";
 
@@ -9,10 +9,7 @@ export type DepthLevel = (typeof DEPTH_LEVELS)[number];
 /** What a project's `[rationale].depth` may hold (the ceiling never `auto`). */
 export type DepthSetting = "auto" | DepthLevel;
 
-/** Every level the backend knows, for ranking a value the UI does not offer yet. */
-const RANK = ["low", "medium", "high", "xhigh"] as const;
-
-export const rankOf = (level: string): number => RANK.indexOf(level as (typeof RANK)[number]);
+export const rankOf = (level: string): number => (DEPTH_LEVELS as readonly string[]).indexOf(level);
 
 export const DEFAULT_DEPTH: DepthSetting = "auto";
 /** `[rationale].max_depth` and the org ceiling default. */
@@ -21,10 +18,9 @@ export const DEFAULT_CEILING: DepthLevel = "medium";
 export const isLevel = (value: unknown): value is DepthLevel =>
   typeof value === "string" && (DEPTH_LEVELS as readonly string[]).includes(value);
 
-/** The short name: "Medium". A level the UI does not offer reads as itself. */
+/** The short name: "Medium". */
 export function depthShortName(level: string): string {
   if (level === "auto") return "Auto";
-  if (level === "xhigh") return "Extra high";
   return level.charAt(0).toUpperCase() + level.slice(1);
 }
 

@@ -6,9 +6,10 @@ newest first) that decides, for a depth level,
 
 * **Ring 0** - every line-level item, grouped into **units**: a squash
   commit together with the ``pr-origin`` commits recovered from its PR is
-  one unit, dated and ordered by the squash commit. Below ``high`` the unit
-  renders as its squash commit; from ``high`` its feature-branch commits
-  render inside it.
+  one unit, dated and ordered by the squash commit. The unit renders as its
+  squash commit; its feature-branch commits are never rendered. A
+  ``pr-origin`` commit whose squash commit is not in the evidence is a unit
+  of its own, at every level.
 * **Ring 1** - ``area`` items (commits that touched the file but not these
   lines), newest first, up to the level's count of context commits.
 * **Full PRs** - the PRs rendered with body, roster, discussion and review
@@ -36,12 +37,8 @@ from whygraph.db.models import PullRequest
 
 from .rationale import CommitEvidence
 
-LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
-"""The depth levels, shallowest first (plan 62 R24).
-
-``high`` and ``xhigh`` stay defined for Part D but are not offered (R49):
-:data:`~whygraph.core.config.OFFERED_DEPTH_LEVELS` is what a caller may ask for.
-"""
+LEVELS: tuple[str, ...] = ("low", "medium")
+"""The depth levels, shallowest first (plan 62 R24; R49 and R51 removed the rest)."""
 
 DEFAULT_LEVEL = "medium"
 """The level a card is built at when its caller passes none (plan 62 Part C)."""
@@ -54,37 +51,26 @@ LINE_LEVEL_SOURCES = frozenset(
 FULL_PR_MAX_COUNT: Mapping[str, int] = {
     "low": 16,
     "medium": 16,
-    "high": 16,
-    "xhigh": 16,
 }
 """Stopper 1's count ceiling: full PR blocks in one card (R45)."""
 
 FULL_PR_MAX_CHARS: Mapping[str, int] = {
     "low": 35_000,
     "medium": 40_000,
-    "high": 40_000,
-    "xhigh": 40_000,
 }
 """Stopper 1's character budget: full PR block text in one card (R45)."""
 
 TOTAL_MAX_CHARS: Mapping[str, int] = {
     "low": 158_000,
     "medium": 163_000,
-    "high": 183_000,
-    "xhigh": 183_000,
 }
-"""Stopper 2's total prompt cap in characters (R45; ``xhigh`` as ``high``)."""
+"""Stopper 2's total prompt cap in characters (R45)."""
 
 CONTEXT_COMMITS: Mapping[str, int] = {
     "low": 0,
     "medium": 4,
-    "high": 6,
-    "xhigh": 8,
 }
 """Ring 1 commits (compact context) a card may show (R45)."""
-
-FEATURE_COMMITS_FROM = "high"
-"""The shallowest level whose squash units show their feature-branch commits."""
 
 SOURCES = ("included", "omitted", "unavailable")
 """The values of :attr:`CardCoverage.source` (plan 62 section 14.2a).
@@ -109,15 +95,12 @@ class LevelCaps:
         Stopper 2's total prompt cap, in characters.
     context_commits : int
         Ring 1 commits the level may show.
-    feature_commits : bool
-        Whether squash units show their feature-branch commits.
     """
 
     full_pr_max_count: int
     full_pr_max_chars: int
     total_max_chars: int
     context_commits: int
-    feature_commits: bool
 
 
 def _running_max(table: Mapping[str, int], level: str) -> int:
@@ -155,7 +138,6 @@ def level_caps(level: str) -> LevelCaps:
         full_pr_max_chars=_running_max(FULL_PR_MAX_CHARS, level),
         total_max_chars=_running_max(TOTAL_MAX_CHARS, level),
         context_commits=_running_max(CONTEXT_COMMITS, level),
-        feature_commits=LEVELS.index(level) >= LEVELS.index(FEATURE_COMMITS_FROM),
     )
 
 
@@ -196,8 +178,7 @@ class CardBundle:
         The depth level the bundle was selected for.
     ring0 : tuple[CommitEvidence, ...]
         The Ring 0 commits the card renders, in rendering order (the
-        evidence's order, a squash unit's feature-branch commits after its
-        squash commit).
+        evidence's order, one commit per unit).
     ring1 : tuple[CommitEvidence, ...]
         The context candidates, newest first, at most the level's count;
         the generator's context budget may render fewer.
@@ -216,7 +197,7 @@ class CardBundle:
         The Ring 0 units, in priority order.
     own : Mapping[str, frozenset[int]]
         Per rendered commit SHA, the numbers of the PRs that are its own
-        (a squash unit's PR counts as its feature-branch commits' own).
+        (a unit's own PRs).
     context_total : int
         ``area`` items collected (the context the card could have shown).
     caps : LevelCaps
@@ -337,8 +318,8 @@ def card_bundle(
     """Select what one card at ``level`` includes (plan 62 section 13.2).
 
     Every line-level unit is in Ring 0 at every level. A level differs only
-    in whose PRs are shown in full, whether squash units show their
-    feature-branch commits, and how many context commits it may show.
+    in whose PRs are shown in full and how many context commits it may
+    show.
     Stopper 1 runs here, on PR text only: full PR blocks are added in Ring 0
     order until the count ceiling or the character budget binds, and adding
     stops at the first block that does not fit. Stopper 2 (the total prompt
@@ -415,12 +396,6 @@ def card_bundle(
         unit_prs = frozenset(pr.number for pr in unit.own_prs)
         ring0.append(unit.head)
         own[unit.head.commit.sha] = unit_prs
-        if caps.feature_commits:
-            for member in unit.members:
-                ring0.append(member)
-                own[member.commit.sha] = unit_prs | {
-                    pr.number for pr in _own_prs(member)
-                }
     return CardBundle(
         level=level,
         ring0=tuple(ring0),

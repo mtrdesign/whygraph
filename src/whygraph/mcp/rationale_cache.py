@@ -13,7 +13,8 @@ context commits committed after the card was built (its ``cached_at``)
 decides between fresh, ``context_stale`` (1 or 2) and a miss
 (:data:`CONTEXT_REFRESH_COMMITS` or more).
 
-Each row records its depth level (``depth``, 0 ``low`` .. 3 ``xhigh``). A
+Each row records its depth level (``depth``, 0 ``low``, 1 ``medium``; a row
+stored above that by a dev eval still loads and is served as ``medium``). A
 deeper card satisfies a shallower request and is never overwritten by a
 shallower one (:func:`store_cached`). A row with ``depth`` ``NULL`` is a
 **legacy** row, written before depth levels: its fingerprint is the old
@@ -102,7 +103,7 @@ _DEFAULT_DEPTH = LEVELS.index(DEFAULT_LEVEL)
 
 
 def depth_of(level: str) -> int:
-    """The stored ``depth`` of a level name (0 ``low`` .. 3 ``xhigh``).
+    """The stored ``depth`` of a level name (0 ``low``, 1 ``medium``).
 
     Parameters
     ----------
@@ -127,6 +128,9 @@ def depth_of(level: str) -> int:
 def level_of(depth: int | None) -> str:
     """The level name of a stored ``depth``; ``NULL`` (legacy) is :data:`LEGACY_LEVEL`.
 
+    A ``depth`` above the deepest level (a row a dev eval stored before the
+    deeper levels were removed) is that deepest level.
+
     Parameters
     ----------
     depth : int or None
@@ -137,9 +141,9 @@ def level_of(depth: int | None) -> str:
     str
         The level name.
     """
-    if depth is None or not 0 <= depth < len(LEVELS):
+    if depth is None or depth < 0:
         return LEGACY_LEVEL
-    return LEVELS[depth]
+    return LEVELS[min(depth, len(LEVELS) - 1)]
 
 
 def _fingerprint(evidence: Sequence[CommitEvidence]) -> str:
@@ -358,7 +362,7 @@ class CachedCard:
         Space-joined SHAs the card was written without a description for;
         empty means the card is final.
     depth : int or None
-        The card's depth level (0 ``low`` .. 3 ``xhigh``); ``None`` for a
+        The card's depth level (0 ``low``, 1 ``medium``); ``None`` for a
         legacy row.
     context_shas : str
         Space-joined SHAs of the context commits the card rendered.
@@ -841,7 +845,7 @@ def store_cached(
         The row this request's lookup rejected (:attr:`CacheLookup.seen`);
         ``None`` when there was none.
     depth : int, optional
-        The card's depth level, 0 ``low`` .. 3 ``xhigh``; default the
+        The card's depth level, 0 ``low``, 1 ``medium``; default the
         depth of :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`.
     context_shas : str, optional
         Space-joined SHAs of the context commits the card rendered.
@@ -1300,17 +1304,15 @@ def _import_deferred(value: Any, name: str = "deferred_shas") -> str:
 
 
 def _import_depth(value: Any) -> int | None:
-    """A record's ``depth``: absent is ``None`` (a legacy row); else 0 .. 3."""
+    """A record's ``depth``: absent is ``None`` (a legacy row); else 0 .. 3.
+
+    The range is the one builds stored before ``high`` and ``xhigh`` were
+    removed: a 2 or 3 is kept and served as ``medium`` (:func:`level_of`).
+    """
     if value is None:
         return None
-    if (
-        not isinstance(value, int)
-        or isinstance(value, bool)
-        or not 0 <= value < len(LEVELS)
-    ):
-        raise ImportFormatError(
-            "depth", f"must be an integer from 0 to {len(LEVELS) - 1}"
-        )
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 3:
+        raise ImportFormatError("depth", "must be an integer from 0 to 3")
     return value
 
 

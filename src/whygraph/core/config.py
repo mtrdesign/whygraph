@@ -428,14 +428,10 @@ class AnalyzeConfig:
     agent_descriptions_per_member_per_hour: int = 150
 
 
-DEPTH_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
-"""Every rationale depth level, lowest first (plan 62 section 14.1)."""
-
-OFFERED_DEPTH_LEVELS: tuple[str, ...] = ("low", "medium")
-"""The levels ``[rationale]`` accepts today (R49). ``high`` and ``xhigh`` stay
-defined for Part D but are not offered: add a level here (use
-:data:`DEPTH_LEVELS`) and the validation, the tool, ``/api/v1`` and the UI
-follow."""
+DEPTH_LEVELS: tuple[str, ...] = ("low", "medium")
+"""Every rationale depth level, lowest first (plan 62 section 14.1; R49 and R51
+removed ``high`` and ``xhigh``). A level added here is followed by the
+validation, the tool, ``/api/v1`` and the UI."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,15 +493,15 @@ class RationaleConfig:
         one, so the lower of the two binds). Org setting; ``0`` to
         ``10000``. Default ``30``.
     depth : str
-        How deep a card reads: one of :data:`OFFERED_DEPTH_LEVELS` or
+        How deep a card reads: one of :data:`DEPTH_LEVELS` or
         ``"auto"`` (default). A depth above :attr:`max_depth` is accepted
         and capped when it is resolved, not refused here.
     max_depth : str
-        The project's ceiling: one of :data:`OFFERED_DEPTH_LEVELS`.
+        The project's ceiling: one of :data:`DEPTH_LEVELS`.
         Default ``"medium"``. Not importable from a repo's ``whygraph.toml``.
     org_max_depth : str
         Production only, **org setting** (owners): the org's ceiling, one
-        of :data:`OFFERED_DEPTH_LEVELS`. Read from the org layer, never
+        of :data:`DEPTH_LEVELS`. Read from the org layer, never
         from a project's. The effective ceiling is the lower of this and
         :attr:`max_depth`. Default ``"medium"``.
     """
@@ -1561,16 +1557,16 @@ class Config:
                 f"got {self.rationale.context_max_chars}"
             )
         for name, value, allowed in (
-            ("rationale.depth", self.rationale.depth, (*OFFERED_DEPTH_LEVELS, "auto")),
+            ("rationale.depth", self.rationale.depth, (*DEPTH_LEVELS, "auto")),
             (
                 "rationale.max_depth",
                 self.rationale.max_depth,
-                OFFERED_DEPTH_LEVELS,
+                DEPTH_LEVELS,
             ),
             (
                 "rationale.org_max_depth",
                 self.rationale.org_max_depth,
-                OFFERED_DEPTH_LEVELS,
+                DEPTH_LEVELS,
             ),
         ):
             if value not in allowed:

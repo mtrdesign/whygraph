@@ -34,7 +34,7 @@ from pydantic import (
     model_validator,
 )
 
-from whygraph.core.config import OFFERED_DEPTH_LEVELS, PLANS_DIR_RE
+from whygraph.core.config import DEPTH_LEVELS, PLANS_DIR_RE
 from whygraph.services.git import BlameHunk, BlameOrigin
 
 API_VERSION = 2
@@ -96,9 +96,8 @@ RefKind = Literal["commit", "pr", "issue"]
 Intent = Literal["explain", "edit", "refactor", "delete", "review", "plan"]
 """The task a card is for (``mcp.rationale_depth.INTENTS``, plan 62 section 14.3)."""
 
-DepthLevel = Literal[OFFERED_DEPTH_LEVELS]  # type: ignore[valid-type]
-"""A depth a request may ask for: the offered levels only (``high`` and
-``xhigh`` refused, R49). Answers carry a level as a plain string, so a client
+DepthLevel = Literal[DEPTH_LEVELS]  # type: ignore[valid-type]
+"""A depth a request may ask for: ``low`` or ``medium`` (R49, R51). Answers carry a level as a plain string, so a client
 never refuses a card of a level it does not know yet."""
 
 RATIONALE_DEPTH_CAPABILITY = "rationale_depth"

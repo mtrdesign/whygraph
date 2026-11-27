@@ -72,7 +72,7 @@ class RationaleCache(WhygraphTable, table=True):
     final, as it always was.
     """
     depth: int | None = Field(default=None)
-    """The card's depth level, 0 ``low`` .. 3 ``xhigh`` (plan 62 section 13.5).
+    """The card's depth level, 0 ``low``, 1 ``medium`` (plan 62 section 13.5).
 
     ``NULL`` marks a legacy row: its ``evidence_fingerprint`` hashes the whole
     collected bundle, not Ring 0 only, and it counts as ``medium``.

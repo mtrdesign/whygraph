@@ -1372,7 +1372,7 @@ IntentInput = Annotated[Intent | None, Field(description=INTENT_HELP)]
 """The tool's optional ``intent`` (plan 62 section 14.4)."""
 
 DepthInput = Annotated[OfferedDepth | None, Field(description=DEPTH_HELP)]
-"""The tool's optional ``depth``: an offered level, so ``high`` and ``xhigh`` are refused."""
+"""The tool's optional ``depth``: ``low`` or ``medium``; any other value is refused."""
 
 
 def whygraph_rationale_brief(
@@ -1407,8 +1407,8 @@ def whygraph_rationale_brief(
     :func:`~whygraph.mcp.rationale_depth.resolve_for_target`, before the
     cache lookup (plan 62 section 14.3); the card reports it as ``depth``
     and what the next level would add as ``deeper``. A ``depth`` above the
-    project's ceiling is capped; one that is not offered (``high``,
-    ``xhigh``) is refused by the input schema.
+    project's ceiling is capped; one that is not a level is refused by the
+    input schema.
 
     The card carries the top
     :data:`CARD_EVIDENCE_REFS` commits as ``evidence`` and ``generated``

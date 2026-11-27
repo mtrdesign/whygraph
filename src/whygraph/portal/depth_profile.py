@@ -44,7 +44,7 @@ from whygraph.analyze.rationale_generator import (
     _PrRenderCaps,
     card_bundle_for,
 )
-from whygraph.core.config import OFFERED_DEPTH_LEVELS, Config, ConfigError
+from whygraph.core.config import DEPTH_LEVELS, Config, ConfigError
 from whygraph.db import get_session as project_session
 from whygraph.db.models import Commit
 from whygraph.mcp.evidence import evidence_from_hunks, review_scope
@@ -298,7 +298,7 @@ def _measure(
     inputs = _thread_inputs(scope, (target.line_start, target.line_end))
     context = graph.context(target.qualified_name) if target.qualified_name else None
     levels: dict[str, dict] = {}
-    for level in OFFERED_DEPTH_LEVELS:
+    for level in DEPTH_LEVELS:
         bundle = card_bundle_for(evidence, config.rationale, level)
         chars = generator.prompt_chars(
             evidence,
@@ -419,7 +419,7 @@ def render_profile(
 
     targets = raw["targets"]
     levels: dict[str, dict] = {}
-    for level in OFFERED_DEPTH_LEVELS:
+    for level in DEPTH_LEVELS:
         rows = [t[level] for t in targets if level in t]
         inputs = [r["input_tokens"] for r in rows]
         out = draft_out or DEFAULT_DRAFT_OUTPUT_TOKENS

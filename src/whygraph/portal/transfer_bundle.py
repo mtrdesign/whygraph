@@ -568,7 +568,7 @@ class RationaleRecord(BaseModel):
     ``quote``) or, in a bundle written before items carried sources, a plain
     string (read as basis ``unknown``). Both stay format version 1.
 
-    ``depth`` (0 ``low`` .. 3 ``xhigh``), ``context_shas`` and ``coverage``
+    ``depth`` (0 ``low``, 1 ``medium``), ``context_shas`` and ``coverage``
     (plan 62 section 13.5) are absent from older bundles: such a record is a
     legacy row (``depth`` ``None``), still format version 1.
     """

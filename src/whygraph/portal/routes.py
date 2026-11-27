@@ -63,7 +63,6 @@ from whygraph.agents import (
 )
 from whygraph.core.config import (
     DEPTH_LEVELS,
-    OFFERED_DEPTH_LEVELS,
     Config,
     ConfigError,
     RationaleConfig,
@@ -3109,7 +3108,7 @@ def _check_depth_ceiling(
     if state.mode == "production":
         org_table = load_layer(session, None, org_id=project.org_id).get("rationale")
         stored = org_table.get("org_max_depth") if isinstance(org_table, dict) else None
-        if stored in OFFERED_DEPTH_LEVELS:
+        if stored in DEPTH_LEVELS:
             ceiling = stored
     if DEPTH_LEVELS.index(value) > DEPTH_LEVELS.index(ceiling):
         raise ApiError(

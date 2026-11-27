@@ -80,7 +80,7 @@ describe("the depth info panel", () => {
     expect(screen.getByRole("dialog", { name: DEPTH_COPY.title })).toBeInTheDocument();
     for (const name of ["Auto", "Low - Lines", "Medium - Context"])
       expect(within(panel).getAllByText(name).length).toBeGreaterThan(0);
-    // `high` and `xhigh` are not offered (R49).
+    // No level above `medium` exists (R49, R51).
     expect(within(panel).queryByText(/High|Extra high|Verified/)).toBeNull();
     expect(panel).toHaveTextContent(DEPTH_COPY.footer);
     await waitFor(() => expect(panel).toHaveTextContent("about $0.05-0.09 (estimate)"));

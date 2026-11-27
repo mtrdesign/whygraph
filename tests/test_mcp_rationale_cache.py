@@ -648,8 +648,6 @@ def test_a_deeper_card_satisfies_a_shallower_request(
     _store(_T, _LINES, depth=1)
     assert _lookup(_T, _LINES, "low").card is not None
     assert _lookup(_T, _LINES, "medium").card is not None
-    too_shallow = _lookup(_T, _LINES, "high")
-    assert too_shallow.card is None and too_shallow.seen.depth == 1
 
     other = replace(_T, line_start=30, line_end=40, qualified_name=None)
     _store(other, _LINES, depth=0)
@@ -661,22 +659,35 @@ def test_a_deeper_card_satisfies_a_shallower_request(
 def test_a_shallower_store_never_overwrites_a_deeper_card(
     whygraph_db_initialized: Path,
 ) -> None:
-    """Concurrent misses: the high card stands whichever request stores last."""
-    assert _store(_T, _LINES, depth=2, purpose="high") is not None
+    """Concurrent misses: the medium card stands whichever request stores last."""
+    assert _store(_T, _LINES, depth=1, purpose="medium") is not None
     assert _store(_T, _LINES, depth=0, purpose="low") is None
     row = lookup_exact(_T, "fake", None)
-    assert (row.rationale.purpose, row.depth) == ("high", 2)
-    # Low first, then high: high replaces it.
+    assert (row.rationale.purpose, row.depth) == ("medium", 1)
+    # Low first, then medium: medium replaces it.
     other = replace(_T, line_start=30, line_end=40)
     assert _store(other, _LINES, depth=0, purpose="low") is not None
-    assert _store(other, _LINES, depth=2, purpose="high") is not None
-    assert lookup_exact(other, "fake", None).depth == 2
+    assert _store(other, _LINES, depth=1, purpose="medium") is not None
+    assert lookup_exact(other, "fake", None).depth == 1
+
+
+def test_a_row_stored_above_medium_loads_and_is_served_as_medium(
+    whygraph_db_initialized: Path,
+) -> None:
+    """R51: a ``depth`` of 2 or 3 (a dev eval, before the levels were removed) never raises."""
+    for depth in (2, 3):
+        other = replace(_T, line_start=100 * depth, line_end=100 * depth + 5)
+        _store(other, _LINES, depth=depth, purpose="deep")
+        for request in ("low", "medium"):
+            hit = _lookup(other, _LINES, request)
+            assert hit.card is not None
+            assert (hit.card.depth, hit.card.level) == (depth, "medium")
 
 
 def test_a_shallower_store_replaces_the_row_it_saw_or_a_dead_one(
     whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _store(_T, _LINES, depth=2, purpose="high")
+    _store(_T, _LINES, depth=1, purpose="medium")
     seen = lookup_exact(_T, "fake", None)
     monkeypatch.setattr(
         "whygraph.mcp.rationale_cache._now_iso", lambda: "2027-01-01T00:00:00+00:00"
@@ -717,7 +728,7 @@ def test_a_legacy_row_is_checked_the_old_way_and_replaced_by_any_card(
     hit = _lookup(_T, evidence)
     assert hit.card is not None and hit.card.depth is None
     assert hit.card.level == "medium" and hit.card.context_stale is False
-    assert _lookup(_T, evidence, "high").card is None
+    assert _lookup(_T, evidence, "low").card is not None
     # Any change to the bundle (an area commit too) is a miss, as before.
     assert _lookup(_T, [_area(1, 1), *evidence]).card is None
     # A legacy row never follows its symbol.
@@ -809,11 +820,11 @@ def test_store_cached_round_trips_depth_context_and_coverage(
         replace(_RATIONALE, coverage=coverage),
         "fake",
         None,
-        depth=2,
+        depth=1,
         context_shas="abc1234",
     )
     row = lookup_exact(_T, "fake", None)
-    assert (row.depth, row.context_shas, row.level) == (2, "abc1234", "high")
+    assert (row.depth, row.context_shas, row.level) == (1, "abc1234", "medium")
     assert row.rationale.coverage == coverage
     assert row.evidence_fingerprint == ring0_fingerprint(_LINES)
 

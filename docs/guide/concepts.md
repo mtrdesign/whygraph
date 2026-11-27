@@ -79,7 +79,7 @@ This keeps a card small and cheap; the card's `coverage` field says what did not
 A card is built at one of two depths. **Low** answers "who wrote these lines, and why?": the
 commits that own them and the one that created them, their pull requests in full, and the author's
 review replies. **Medium** adds what has been happening around them: more pull requests and the
-file's recent history in short form. A deeper level is planned. Every level reads the description of
+file's recent history in short form. Every level reads the description of
 each commit it includes and makes one model call. The project's
 default is `auto`, which picks a level per request; see
 [Depth and intent](../reference/mcp.md#depth-and-intent) and

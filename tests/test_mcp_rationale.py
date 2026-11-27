@@ -1973,19 +1973,19 @@ def test_a_medium_request_with_only_a_low_card_regenerates_once(
 def test_a_context_stale_deeper_row_regenerates_once_at_its_depth(
     whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance 3: a high row with 3 newer file commits, a medium request."""
+    """Acceptance 3: a medium row with 3 newer file commits, a low request."""
     levels = _levels_generator(monkeypatch)
-    _store_row(_ring_evidence(), depth=2, purpose="high card")
+    _store_row(_ring_evidence(), depth=1, purpose="medium card")
     evidence = _ring_evidence([3, 2, 1])
 
-    first = _rc(evidence)
-    again = _rc(evidence)
+    first = _rc(evidence, level="low")
+    again = _rc(evidence, level="low")
 
-    assert levels == ["high"]
+    assert levels == ["medium"]
     assert first["generated"] is True and first["context_stale"] is False
     assert again["generated"] is False
     row = _row()
-    assert row.depth == 2
+    assert row.depth == 1
     assert row.context_shas.split() == [f"{d:02d}" * 20 for d in (3, 2, 1)]
 
 
@@ -2009,12 +2009,12 @@ def test_force_refresh_never_stores_a_shallower_card(
 ) -> None:
     levels = _levels_generator(monkeypatch)
     evidence = _ring_evidence()
-    _store_row(evidence, depth=2, purpose="high card")
+    _store_row(evidence, depth=1, purpose="medium card")
 
-    card = _rc(evidence, force_refresh=True)
+    card = _rc(evidence, force_refresh=True, level="low")
 
-    assert levels == ["high"] and card["generated"] is True
-    assert (_row().depth, _row().rationale.purpose) == (2, "Holds two sample lines.")
+    assert levels == ["medium"] and card["generated"] is True
+    assert (_row().depth, _row().rationale.purpose) == (1, "Holds two sample lines.")
 
 
 def test_a_deeper_card_stored_meanwhile_wins_and_nothing_completes(
@@ -2026,7 +2026,7 @@ def test_a_deeper_card_stored_meanwhile_wins_and_nothing_completes(
 
     class _Racing(_FakeGenerator):
         def generate(self, evidence, **kwargs):  # noqa: ANN001, ANN003, ANN201
-            _store_row(evidence, depth=2, purpose="deeper, meanwhile")
+            _store_row(evidence, depth=1, purpose="deeper, meanwhile")
             return super().generate(evidence)
 
     monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Racing)
@@ -2035,11 +2035,11 @@ def test_a_deeper_card_stored_meanwhile_wins_and_nothing_completes(
         lambda *a, **k: started.append(a) or True,
     )
 
-    card = _rc(evidence)
+    card = _rc(evidence, level="low")
 
     assert card["generated"] is True and card["completing"] is False
     assert card["purpose"] == "Holds two sample lines."
-    assert (_row().depth, _row().rationale.purpose) == (2, "deeper, meanwhile")
+    assert (_row().depth, _row().rationale.purpose) == (1, "deeper, meanwhile")
     assert started == []
 
 
@@ -2056,16 +2056,16 @@ def test_a_partial_deeper_row_is_completed_at_its_own_depth(
     levels = _levels_generator(monkeypatch)
     monkeypatch.setattr("whygraph.mcp.rationale.CARD_RETRY_COOLDOWN_SEC", 600)
     shas = _seed_undescribed(2)
-    _store_row(_evidence(shas), depth=2, deferred_shas=" ".join(shas))
+    _store_row(_evidence(shas), depth=1, deferred_shas=" ".join(shas))
 
-    hit = _card(shas)  # a medium request: the high row satisfies it
+    hit = _card(shas, level="low")  # a low request: the medium row satisfies it
 
     assert (hit["partial"], hit["completing"], hit["generated"]) == (True, True, False)
     assert drain_describes(timeout=30)
-    assert levels == ["high"]
+    assert levels == ["medium"]
     row = _row()
-    assert (row.depth, row.deferred_shas) == (2, "")
-    assert {key[-1] for key in rationale._completion_attempts} == {2}
+    assert (row.depth, row.deferred_shas) == (1, "")
+    assert {key[-1] for key in rationale._completion_attempts} == {1}
 
 
 def test_a_completion_rebuilds_context_commits_that_left_the_evidence(
@@ -2242,18 +2242,33 @@ def test_a_medium_card_is_one_call_and_satisfies_a_low_request(
     assert len(log) == 1
 
 
-def test_a_medium_request_never_overwrites_a_deeper_row(
+def test_a_low_request_never_overwrites_a_deeper_row(
     whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A ``high`` row (stored before R49, or by Part D) stays; one call per rebuild."""
+    """A ``medium`` row stays when a low request refreshes; one call per rebuild."""
     log = _level_generator(monkeypatch)
     evidence = _ring_evidence()
-    _rc(evidence, level="high", **_scope())
+    _rc(evidence, level="medium", **_scope())
 
-    _rc(evidence, level="medium", force_refresh=True, **_scope())
+    _rc(evidence, level="low", force_refresh=True, **_scope())
 
-    assert log == [("generate", "high")] * 2
-    assert _row().depth == 2
+    assert log == [("generate", "medium")] * 2
+    assert _row().depth == 1
+
+
+def test_a_row_stored_above_medium_is_served_as_medium(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R51: a dev eval's ``high`` / ``xhigh`` row still loads and never raises."""
+    levels = _levels_generator(monkeypatch)
+    evidence = _ring_evidence()
+    for depth in (2, 3):
+        _store_row(evidence, depth=depth, purpose="deeper card")
+
+        card = _rc(evidence, level="medium", **_scope())
+
+        assert (card["purpose"], card["generated"]) == ("deeper card", False)
+    assert levels == []
 
 
 # ---- plan 62 Part C: grounding the draft (C3a, section 14.2a) -------------

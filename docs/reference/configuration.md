@@ -271,7 +271,7 @@ described in [Concepts](../guide/concepts.md#depth-levels).
   `org_max_depth`: they are dropped and reported on import, because they decide spend. Set them in
   Settings.
 - **Linked projects** take the platform's values; see [Linked projects](../portal/platform-projects.md#what-your-agent-sees).
-- **Not offered:** `high` and `xhigh` are refused as values.
+- **Values.** Only `low` and `medium` are levels (`depth` also takes `auto`); any other value is refused.
 
 ## Agent limits (organization only)
 

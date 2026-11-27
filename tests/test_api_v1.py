@@ -540,11 +540,11 @@ def test_rationale_in_depth_fields() -> None:
     from typing import get_args
 
     from whygraph.api_v1 import DepthLevel, Intent
-    from whygraph.core.config import OFFERED_DEPTH_LEVELS
+    from whygraph.core.config import DEPTH_LEVELS
     from whygraph.mcp.rationale_depth import INTENTS
 
     assert get_args(Intent) == INTENTS
-    assert get_args(DepthLevel) == OFFERED_DEPTH_LEVELS
+    assert get_args(DepthLevel) == DEPTH_LEVELS
     bare = RationaleIn(target=_target())
     assert set(bare.model_dump(mode="json")) == {"target", "hunks"}
     full = RationaleIn(

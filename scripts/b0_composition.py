@@ -50,7 +50,10 @@ HEADER_CHARS = 200
 LINE_SOURCES = frozenset({"blame", "pr-origin", "blame-walked", "predecessor-blame"})
 SOURCE_LABELS = {
     "blame": "line-blame",
-    "pr-origin": "original commit recovered from a squash-merged PR",
+    "pr-origin": (
+        "draft commit inside a squash-merged PR "
+        "(intermediate states never reached the default branch)"
+    ),
     "blame-walked": "line-blame (skipped a refactor commit)",
     "predecessor-blame": "line-blame on a pre-rename predecessor file",
     "area": "area-history (touched the file but not these lines)",

@@ -35,6 +35,19 @@ The sub-commands run in order; each writes what the next one reads::
 
 ``generate`` without ``--yes`` prints the corpus and the estimate only.
 
+Part C's grounding arms (plan 62 section 14.8, R48; step C7) reuse the same
+copies and the 15 thread targets, at ``medium`` with today's bundle::
+
+    uv run --no-sync python scripts/rationale_thread_eval.py \\
+        --model claude-sonnet-5-5 grounding            # prompts + estimate only
+    ... grounding --yes                                # G0 x2, G1, G2 (60 cards)
+    ... grounding-verify --yes                         # the high pass on G2
+    ... grounding-sheets                               # blind sheets + keys
+    ... grounding-summary                              # sizes, spend, verdicts
+
+G0 is today's generator with the pre-C3a ``system.md`` and labels injected
+here (from ``1ae370e^``), never in ``src/``.
+
 Notes
 -----
 * The defaults point at ``make dev-local`` (Postgres on ``127.0.0.1:55432``,
@@ -82,6 +95,8 @@ PROVIDER = "anthropic"
 CAP_USD = 10.0
 RESERVE_USD = 0.25
 """Stop a paid call when the ledger is this close to the cap."""
+STEP = "plan62-part-a"
+"""The ``step`` of every ledger line this run writes."""
 
 ARMS = ("baseline1", "baseline2", "treated")
 PRE_PLAN_REV = "b466670"
@@ -120,11 +135,14 @@ class Ledger:
         ``cost``.
     cap : float
         The cumulative cap in USD across every line of the file.
+    reserve : float, optional
+        Kept free below the cap; default :data:`RESERVE_USD`.
     """
 
-    def __init__(self, path: Path, cap: float) -> None:
+    def __init__(self, path: Path, cap: float, reserve: float = RESERVE_USD) -> None:
         self.path = path
         self.cap = cap
+        self.reserve = reserve
         self._lock = threading.Lock()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
@@ -155,14 +173,13 @@ class Ledger:
         Raises
         ------
         BudgetStop
-            When the total plus ``upcoming`` plus :data:`RESERVE_USD`
-            exceeds the cap.
+            When the total plus ``upcoming`` plus the reserve exceeds the cap.
         """
         spent = self.total()
-        if spent + upcoming + RESERVE_USD > self.cap:
+        if spent + upcoming + self.reserve > self.cap:
             raise BudgetStop(
                 f"ledger at ${spent:.4f}; next call ~${upcoming:.4f} would cross "
-                f"${self.cap:.2f} (reserve ${RESERVE_USD:.2f})"
+                f"${self.cap:.2f} (reserve ${self.reserve:.2f})"
             )
 
     def append(self, entry: dict) -> None:
@@ -333,7 +350,7 @@ class EvalSink:
         self._ledger.append(
             {
                 "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "step": "plan62-part-a",
+                "step": STEP,
                 "cost": float(priced.cost_usd),
                 "provider": rec.provider,
                 "model": rec.model_served or rec.model_requested,
@@ -395,6 +412,8 @@ class GuardedClient:
         USD per million tokens, for the pre-call estimate.
     max_out_tokens : int
         Output tokens assumed by the estimate.
+    chars_per_token : float
+        Prompt characters per input token assumed by the estimate.
     """
 
     def __init__(
@@ -404,12 +423,14 @@ class GuardedClient:
         price_in: float,
         price_out: float,
         max_out_tokens: int = 4000,
+        chars_per_token: float = 3.0,
     ) -> None:
         self._inner = inner
         self._ledger = ledger
         self._price_in = price_in
         self._price_out = price_out
         self._max_out = max_out_tokens
+        self._cpt = chars_per_token
         self.provider = inner.provider
         self.model = inner.model
         self.last_prompt: dict | None = None
@@ -433,7 +454,7 @@ class GuardedClient:
         """
         chars = sum(len(m.content) for m in request.messages)
         estimate = (
-            chars / 3.0 * self._price_in + self._max_out * self._price_out
+            chars / self._cpt * self._price_in + self._max_out * self._price_out
         ) / 1e6
         self._ledger.check(estimate)
         self.last_prompt = {m.role: m.content for m in request.messages}
@@ -2698,6 +2719,926 @@ def _code_checks_arms(record: dict, base: str, treated: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Part C grounding arms (plan 62 section 14.8, R48, step C7)
+# ---------------------------------------------------------------------------
+
+C_CARDS = EVAL_DIR / "part-c-cards"
+C_WORK = EVAL_DIR / "part-c-work"
+
+
+def _cards_dir(level: str) -> Path:
+    """Where one level's Part C cards live (``medium``: the grounding arms' dir)."""
+    return C_CARDS if level == "medium" else EVAL_DIR / f"part-c-cards-{level}"
+
+
+GROUNDING_ARMS = ("g0a", "g0b", "g1", "g2")
+"""G0 plain twice (the noise control), G1 = G0 + R48 (b)-(d), G2 = G1 + (a)."""
+GROUNDING_LEVEL = "medium"
+GROUNDING_CAP_USD = 10.0
+"""The grounding arms are funded from Part A's unspent budget (R48)."""
+PRE_R48_REV = "1ae370e^"
+"""The commit before step C3a: the plain (G0) system prompt and labels."""
+CHARS_PER_TOKEN = 2.4
+"""Conservative prompt characters per token (measured 2.43-2.46 on biome)."""
+EST_OUT_TOKENS = 1500
+GUARD_OUT_TOKENS = 2500
+"""Output tokens the pre-call cap check assumes (the Sonnet cards' max ~1,700)."""
+CLAIM_SHEETS = 3
+
+_RG_PROMPTS = "src/whygraph/analyze/prompts/rationale_generator/default"
+_OLD_CALLERS = "Called by ({n} caller(s) — blast radius of a change):"
+_OLD_CALLEES = "Calls ({n} callee(s) — what this depends on):"
+_OLD_PR_ORIGIN = "original commit recovered from a squash-merged PR"
+_NEW_CALLERS_RE = re.compile(
+    r"^Possible callers \((\d+), matched by name; "
+    r"may include other functions with the same name\):$",
+    re.M,
+)
+_NEW_CALLEES_RE = re.compile(r"^Possible callees \((\d+), matched by name\):$", re.M)
+_SOURCE_BLOCK_RE = re.compile(
+    r"TARGET SOURCE \([^\n]*, as of the card's build\)\n\n(?:[ \d]+  [^\n]*(?:\n|$))*\n?"
+)
+
+
+def _git_show(rev: str, path: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{rev}:{path}"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def _pre_r48_prompt() -> Any:
+    """The G0 prompt pair: the pre-C3a ``system.md`` and today's (unchanged) ``task.md``."""
+    from whygraph.analyze.prompt import Prompt
+
+    task = (REPO / _RG_PROMPTS / "task.md").read_text(encoding="utf-8")
+    if _git_show(PRE_R48_REV, f"{_RG_PROMPTS}/task.md") != task:
+        raise SystemExit("task.md changed since the pre-R48 commit; G0 is not plain")
+    old_module = _git_show(PRE_R48_REV, "src/whygraph/analyze/rationale_generator.py")
+    for literal in (
+        "Called by ({len(context.callers)} caller(s) — blast radius of a change):",
+        "Calls ({len(context.callees)} callee(s) — what this depends on):",
+        f'"pr-origin": "{_OLD_PR_ORIGIN}"',
+    ):
+        if literal not in old_module:
+            raise SystemExit(f"pre-R48 label not found in {PRE_R48_REV}: {literal}")
+    return Prompt(system=_git_show(PRE_R48_REV, f"{_RG_PROMPTS}/system.md"), task=task)
+
+
+def _to_old_labels(text: str) -> str:
+    """``text`` with the R48 (c) / (d) labels put back to the pre-C3a ones."""
+    from whygraph.analyze.rationale_generator import _SOURCE_LABELS
+
+    text = _NEW_CALLERS_RE.sub(lambda m: _OLD_CALLERS.format(n=m[1]), text)
+    text = _NEW_CALLEES_RE.sub(lambda m: _OLD_CALLEES.format(n=m[1]), text)
+    return text.replace(_SOURCE_LABELS["pr-origin"], _OLD_PR_ORIGIN)
+
+
+class _Pre48Labels:
+    """Patch the generator module's graph headers and draft label to the G0 ones."""
+
+    def __enter__(self) -> None:
+        from whygraph.analyze import rationale_generator as rg
+
+        self._fmt = rg._format_symbol_context
+        self._label = rg._SOURCE_LABELS["pr-origin"]
+        new_fmt = self._fmt
+        rg._format_symbol_context = lambda context: _to_old_labels(new_fmt(context))
+        rg._SOURCE_LABELS["pr-origin"] = _OLD_PR_ORIGIN
+
+    def __exit__(self, *exc: object) -> None:
+        from whygraph.analyze import rationale_generator as rg
+
+        rg._format_symbol_context = self._fmt
+        rg._SOURCE_LABELS["pr-origin"] = self._label
+
+
+class _NoPatch:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+def _arm_generator(arm: str, client: Any, config: Any, old_prompt: Any) -> Any:
+    """The arm's generator: G0 the pre-R48 prompt, G1 today's without the source, G2 today's."""
+    from whygraph.analyze import RationaleGenerator
+    from whygraph.analyze.rationale_generator import _PrRenderCaps
+
+    return RationaleGenerator(
+        client,
+        timeout_sec=config.timeout_for("rationale"),
+        caps=_PrRenderCaps.from_config(config.rationale),
+        rationale_prompt=old_prompt if arm.startswith("g0") else None,
+        target_source=arm == "g2",
+    )
+
+
+def _arm_patch(arm: str) -> Any:
+    return _Pre48Labels() if arm.startswith("g0") else _NoPatch()
+
+
+def _coverage_dict(coverage: Any) -> dict | None:
+    import dataclasses
+
+    if coverage is None:
+        return None
+    out = dataclasses.asdict(coverage)
+    out["omitted_shas"] = sorted(out.get("omitted_shas") or ())
+    out["trimmed"] = list(out.get("trimmed") or ())
+    return out
+
+
+def _c_item_dict(item: Any) -> dict:
+    out = _item_dict(item)
+    out["check"] = item.check.as_dict() if item.check is not None else None
+    return out
+
+
+def _c_card_dict(r: Any) -> dict:
+    card = _card_dict(r)
+    card["constraints"] = [_c_item_dict(i) for i in r.constraints]
+    card["risks"] = [_c_item_dict(i) for i in r.risks]
+    card["coverage"] = _coverage_dict(r.coverage)
+    return card
+
+
+def _grounding_checks(record: dict) -> list[str]:
+    """Failed prompt checks: each arm differs from the one below it by its part only."""
+    p = record["prompts"]
+    fails: list[str] = []
+    if p["g0a"] != p["g0b"]:
+        fails.append("g0a and g0b prompts differ")
+    if p["g0a"]["system"] == p["g1"]["system"]:
+        fails.append("g0 and g1 system prompts are the same")
+    if p["g1"]["system"] != p["g2"]["system"]:
+        fails.append("g1 and g2 system prompts differ")
+    if _to_old_labels(p["g1"]["user"]) != p["g0a"]["user"]:
+        fails.append("g1 user prompt differs from g0 by more than the labels")
+    source = (record["coverage"]["g2"] or {}).get("source")
+    g2_user = p["g2"]["user"]
+    if source == "included":
+        stripped, n = _SOURCE_BLOCK_RE.subn("", g2_user, count=1)
+        if n != 1 or stripped != p["g1"]["user"]:
+            fails.append("g2 user prompt differs from g1 by more than the source block")
+    elif g2_user != p["g1"]["user"]:
+        fails.append(f"g2 ({source}) user prompt differs from g1")
+    return fails
+
+
+def _target_inputs(row: dict, config: Any, level: str) -> tuple[Any, dict, dict]:
+    """One target's evidence, ``generate`` keywords and record fields, as the card path builds them.
+
+    Mirrors :func:`whygraph.mcp.rationale.rationale_card` at ``level``: the
+    bundle, the description backfill (which describes nothing new here: the
+    corpus was described in Part A), the review scope and the symbol context.
+    Runs under the bound project.
+    """
+    from whygraph.analyze import card_bundle_for
+    from whygraph.db import get_session
+    from whygraph.mcp.evidence import (
+        backfill_evidence_descriptions,
+        collect_evidence,
+        review_scope,
+    )
+    from whygraph.mcp.rationale import _missing_reasons, _symbol_context
+    from whygraph.mcp.targets import repo_root
+
+    target = _target_of(Node(**{k: row[k] for k in Node.__annotations__}))
+    evidence = collect_evidence(target, limit=20)
+    bundle = card_bundle_for(evidence, config.rationale, level)
+    items = list(bundle.items)
+    outcome = backfill_evidence_descriptions(
+        items,
+        target_path=target.path,
+        allow=lambda: False,  # the corpus is described; no new describe
+        max_commits=len(items),
+    )
+    with get_session() as session:
+        scope = review_scope(session, repo_root(), target.path)
+    rng = (target.line_start, target.line_end)
+    lines = scope.current_lines or ()
+    code = "\n".join(lines[rng[0] - 1 : rng[1]])
+    kwargs: dict[str, Any] = {
+        "symbol_context": _symbol_context(target),
+        "subject": target.qualified_name,
+        "bundle": bundle,
+        "missing_descriptions": _missing_reasons(outcome),
+        "target_path": target.path,
+        "paths": scope.paths,
+        "file_lines": scope.current_lines,
+        "target_range": rng,
+    }
+    fields = {
+        "tid": row["tid"],
+        "target": {k: row[k] for k in ("qualified_name", "path", "start", "end")},
+        "level": level,
+        "evidence_commits": len(evidence),
+        "bundle_commits": len(items),
+        "descriptions_waiting": sorted(outcome.waiting),
+        "code": code,
+        "code_chars": len(code),
+    }
+    return evidence, kwargs, fields
+
+
+def cmd_level_prompts(env: Env, args: argparse.Namespace) -> None:
+    """Level-arm prompt sizes and cost estimate: 15 targets x low / medium / high (no LLM).
+
+    Builds each level's draft prompt with the surviving grounding arm's
+    generator (``--arm g1`` or ``g2``) and estimates the ``high`` verification
+    call from the stored ``medium`` card's claims (the draft at ``high`` is not
+    known before it is made).
+    """
+    from whygraph.analyze.rationale_generator import (
+        _format_claims,
+        verification_source,
+    )
+    from whygraph.analyze.prompt import resolve
+    from whygraph.core import get_config
+    from whygraph.core.context import use_project
+
+    corpus = [
+        r
+        for r in json.loads((EVAL_DIR / "part-a-corpus.json").read_text())
+        if r["corpus_class"] == "thread"
+    ]
+    price_in, price_out = _price_per_m()
+    v2, cg = WORK / "v2" / "whygraph.db", WORK / "cg" / "codegraph.db"
+    ctx = eval_context(env, v2, cg)
+    old_prompt = _pre_r48_prompt()
+    verify_system = resolve("rationale_verify", "verify", PROVIDER, MODEL).system
+    sizes: dict[str, dict] = {}
+    cost: Counter = Counter()
+    with use_project(ctx):
+        config = get_config()
+        for row in corpus:
+            entry = sizes.setdefault(row["tid"], {})
+            for level in ("low", "medium", "high"):
+                evidence, kwargs, _ = _target_inputs(row, config, level)
+                client = PromptOnlyClient()
+                with _arm_patch(args.arm):
+                    _arm_generator(args.arm, client, config, old_prompt).generate(
+                        evidence, **kwargs
+                    )
+                assert client.last_prompt is not None
+                chars = sum(len(v) for v in client.last_prompt.values())
+                entry[level] = chars
+                cost[level] += (
+                    chars / CHARS_PER_TOKEN * price_in + EST_OUT_TOKENS * price_out
+                ) / 1e6
+            rec_path = C_CARDS / f"{row['tid']}.json"
+            card = (
+                json.loads(rec_path.read_text()).get("cards", {}).get(args.arm)
+                if rec_path.exists()
+                else None
+            )
+            src, _ = verification_source(kwargs["file_lines"], kwargs["target_range"])
+            if card is not None and src is not None:
+                payload = _format_claims(
+                    _rationale_from(card), src, max(kwargs["target_range"][0], 1)
+                )
+                vchars = len(verify_system) + len(payload)
+                entry["verify"] = vchars
+                cost["verify"] += (
+                    vchars / CHARS_PER_TOKEN * price_in + 600 * price_out
+                ) / 1e6
+            print(f"{row['tid']} {entry}")
+    C_WORK.mkdir(parents=True, exist_ok=True)
+    out = {
+        "arm": args.arm,
+        "model": f"{PROVIDER}/{MODEL}",
+        "sizes": sizes,
+        "estimate_usd": {k: round(v, 4) for k, v in cost.items()},
+        "assumptions": {
+            "chars_per_token": CHARS_PER_TOKEN,
+            "draft_output_tokens": EST_OUT_TOKENS,
+            "verify_output_tokens": 600,
+        },
+    }
+    (C_WORK / "level-prompts.json").write_text(json.dumps(out, indent=1))
+    print(json.dumps(out["estimate_usd"]))
+
+
+def cmd_grounding(env: Env, args: argparse.Namespace) -> None:
+    """Build the arms' prompts (no LLM); with ``--yes``, generate the cards.
+
+    At ``--level medium`` (the default) these are the grounding arms; at
+    another level, the level arms of section 14.8 (one arm, the surviving
+    prompt), stored in their own directory.
+    """
+    global STEP
+    level = args.level
+    STEP = "plan62-part-c-grounding" if level == "medium" else "plan62-part-c-levels"
+    cards_dir = _cards_dir(level)
+    from whygraph.analyze import RationaleGenerator
+    from whygraph.core import get_config
+    from whygraph.core.context import use_project
+    from whygraph.core.usage import use_usage_sink
+
+    corpus = [
+        r
+        for r in json.loads((EVAL_DIR / "part-a-corpus.json").read_text())
+        if r["corpus_class"] == "thread"
+    ]
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    unknown = set(arms) - set(GROUNDING_ARMS)
+    if unknown:
+        raise SystemExit(f"unknown arms {sorted(unknown)}")
+    ledger = Ledger(LEDGER, args.cap, reserve=0.0)
+    price_in, price_out = _price_per_m()
+    print(f"corpus {len(corpus)} targets, arms {arms}, level {level}")
+    print(f"ledger ${ledger.total():.4f}; cap ${args.cap:.2f}")
+    v2, cg = WORK / "v2" / "whygraph.db", WORK / "cg" / "codegraph.db"
+    ctx = eval_context(env, v2, cg)
+    old_prompt = _pre_r48_prompt()
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    portal_sink, writer = (None, None)
+    if args.yes and not args.no_portal_ledger:
+        portal_sink, writer = _portal_sink(env, ctx.config, ctx.key_scopes)
+    sink = EvalSink(ledger, ctx.config, portal_sink)
+    estimate = 0.0
+    pending = 0
+    try:
+        with use_project(ctx):
+            config = get_config()
+            real = RationaleGenerator.from_config(config)._client if args.yes else None
+            for row in corpus:
+                tid = row["tid"]
+                out = cards_dir / f"{tid}.json"
+                record = json.loads(out.read_text()) if out.exists() else {}
+                evidence, kwargs, fields = _target_inputs(row, config, level)
+                record.update(fields)
+                prompts: dict[str, dict] = {}
+                coverage: dict[str, dict | None] = {}
+                for arm in arms:
+                    client = PromptOnlyClient()
+                    with _arm_patch(arm):
+                        draft = _arm_generator(
+                            arm, client, config, old_prompt
+                        ).generate(evidence, **kwargs)
+                    assert client.last_prompt is not None
+                    prompts[arm] = client.last_prompt
+                    coverage[arm] = _coverage_dict(draft.coverage)
+                record.setdefault("prompts", {}).update(prompts)
+                record["prompt_chars"] = {
+                    a: len(p["system"]) + len(p["user"])
+                    for a, p in record["prompts"].items()
+                }
+                record.setdefault("coverage", {}).update(coverage)
+                record.setdefault("cards", {})
+                if set(GROUNDING_ARMS) <= set(record["prompts"]):
+                    record["checks_failed"] = _grounding_checks(record)
+                todo = [a for a in arms if a not in record["cards"]]
+                for arm in todo:
+                    est = (
+                        record["prompt_chars"][arm] / CHARS_PER_TOKEN * price_in
+                        + EST_OUT_TOKENS * price_out
+                    ) / 1e6
+                    estimate += est
+                    pending += 1
+                pc = record["prompt_chars"]
+                print(
+                    f"{tid} chars "
+                    + " ".join(f"{a}={pc[a]}" for a in arms)
+                    + f" source={(coverage.get('g2') or {}).get('source')}"
+                    + f" checks_failed={record.get('checks_failed')}"
+                    + f" todo={todo}"
+                )
+                out.write_text(json.dumps(record, indent=1))
+                if not args.yes:
+                    continue
+                for arm in todo:
+                    guarded = GuardedClient(
+                        real,
+                        ledger,
+                        price_in,
+                        price_out,
+                        max_out_tokens=GUARD_OUT_TOKENS,
+                        chars_per_token=CHARS_PER_TOKEN,
+                    )
+                    _CURRENT_CALL.set((tid, arm))
+                    card = None
+                    for attempt in range(2):
+                        try:
+                            with _arm_patch(arm), use_usage_sink(sink):
+                                card = _arm_generator(
+                                    arm, guarded, config, old_prompt
+                                ).generate(evidence, **kwargs)
+                            break
+                        except BudgetStop:
+                            raise
+                        except Exception as exc:  # noqa: BLE001 -- retried once, then recorded
+                            print(f"  {arm} attempt {attempt + 1} failed: {exc}")
+                            record.setdefault("errors", []).append(
+                                {"arm": arm, "error": str(exc)}
+                            )
+                    if guarded.last_prompt != prompts[arm]:
+                        record.setdefault("errors", []).append(
+                            {
+                                "arm": arm,
+                                "error": "sent prompt differs from the dry one",
+                            }
+                        )
+                    if card is not None:
+                        record["cards"][arm] = _c_card_dict(card)
+                        print(
+                            f"  {arm}: {card.input_tokens} in / {card.output_tokens} "
+                            f"out; ledger ${ledger.total():.4f}"
+                        )
+                    out.write_text(json.dumps(record, indent=1))
+    except BudgetStop as exc:
+        print(f"STOPPED before the cap: {exc}")
+    finally:
+        if writer is not None:
+            writer.stop()
+    print(
+        f"estimate for the {pending} card calls this run planned: ${estimate:.4f} "
+        f"({CHARS_PER_TOKEN} chars/token, {EST_OUT_TOKENS} output tokens each)"
+    )
+    print(f"ledger total ${ledger.total():.4f} of ${args.cap:.2f}")
+
+
+def _rationale_from(card: dict) -> Any:
+    """A :class:`Rationale` back from a stored card (for the verification pass)."""
+    from whygraph.analyze.rationale import Item, ItemRef, Rationale
+
+    def item(d: dict) -> Any:
+        refs = tuple(ItemRef(r["kind"], r["id"], r.get("url")) for r in d["refs"])
+        return Item(d["text"], d["basis"], refs, d.get("quote") or "")
+
+    return Rationale(
+        purpose=card["purpose"],
+        why=card["why"],
+        constraints=tuple(item(d) for d in card["constraints"]),
+        tradeoffs=tuple(card["tradeoffs"]),
+        risks=tuple(item(d) for d in card["risks"]),
+        model=card["model"],
+        provider=card["provider"],
+    )
+
+
+def cmd_grounding_verify(env: Env, args: argparse.Namespace) -> None:
+    """Run the ``high`` verification pass on stored Part C cards (one call each)."""
+    global STEP
+    STEP = "plan62-part-c-verify" if args.level == "medium" else "plan62-part-c-levels"
+    from whygraph.analyze import RationaleGenerator
+    from whygraph.analyze.rationale_generator import (
+        _claim_ids,
+        _format_claims,
+        verification_source,
+    )
+    from whygraph.core import get_config
+    from whygraph.core.context import use_project
+    from whygraph.core.usage import use_usage_sink
+    from whygraph.db import get_session
+    from whygraph.mcp.evidence import review_scope
+    from whygraph.mcp.targets import repo_root
+
+    arms = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+    ledger = Ledger(LEDGER, args.cap, reserve=0.0)
+    price_in, price_out = _price_per_m()
+    v2, cg = WORK / "v2" / "whygraph.db", WORK / "cg" / "codegraph.db"
+    ctx = eval_context(env, v2, cg)
+    portal_sink, writer = (None, None)
+    if args.yes and not args.no_portal_ledger:
+        portal_sink, writer = _portal_sink(env, ctx.config, ctx.key_scopes)
+    sink = EvalSink(ledger, ctx.config, portal_sink)
+    estimate = 0.0
+    print(f"ledger ${ledger.total():.4f}; cap ${args.cap:.2f}; arms {arms}")
+    try:
+        with use_project(ctx):
+            config = get_config()
+            generator = RationaleGenerator.from_config(config) if args.yes else None
+            verify_system = None
+            for path in sorted(_cards_dir(args.level).glob("T*.json")):
+                record = json.loads(path.read_text())
+                tid = record["tid"]
+                tgt = record["target"]
+                with get_session() as session:
+                    scope = review_scope(session, repo_root(), tgt["path"])
+                rng = (tgt["start"], tgt["end"])
+                source, unavailable = verification_source(scope.current_lines, rng)
+                record.setdefault("verify", {})
+                for arm in arms:
+                    card = record.get("cards", {}).get(arm)
+                    if card is None or arm in record["verify"]:
+                        continue
+                    if source is None:
+                        record["verify"][arm] = {"skipped": unavailable}
+                        continue
+                    draft = _rationale_from(card)
+                    c_ids, r_ids = _claim_ids(draft)
+                    if not c_ids and not r_ids:
+                        record["verify"][arm] = {"verdicts": {}}
+                        continue
+                    if verify_system is None:
+                        from whygraph.analyze.prompt import resolve
+
+                        verify_system = resolve(
+                            "rationale_verify", "verify", PROVIDER, MODEL
+                        ).system
+                    chars = len(verify_system) + len(
+                        _format_claims(draft, source, max(rng[0], 1))
+                    )
+                    estimate += (
+                        chars / CHARS_PER_TOKEN * price_in + 600 * price_out
+                    ) / 1e6
+                    if generator is None:
+                        continue
+                    guarded = GuardedClient(
+                        generator._client,
+                        ledger,
+                        price_in,
+                        price_out,
+                        max_out_tokens=1500,
+                        chars_per_token=CHARS_PER_TOKEN,
+                    )
+                    verifier = RationaleGenerator(
+                        guarded,
+                        timeout_sec=config.timeout_for("rationale"),
+                        caps=generator._caps,
+                    )
+                    _CURRENT_CALL.set((tid, f"{arm}-verify"))
+                    try:
+                        with use_usage_sink(sink):
+                            checked = verifier.verify(
+                                draft,
+                                source,
+                                first_line=max(rng[0], 1),
+                                subject=tgt["qualified_name"],
+                            )
+                    except BudgetStop:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 -- recorded, the run goes on
+                        record["verify"][arm] = {"failed": str(exc)}
+                        path.write_text(json.dumps(record, indent=1))
+                        continue
+                    verdicts = {
+                        cid: item.check.as_dict()
+                        for cid, item in zip(c_ids, checked.constraints)
+                    }
+                    verdicts.update(
+                        {
+                            rid: item.check.as_dict()
+                            for rid, item in zip(r_ids, checked.risks)
+                        }
+                    )
+                    record["verify"][arm] = {
+                        "verdicts": verdicts,
+                        "prompt": guarded.last_prompt,
+                    }
+                    counts = Counter(v["verdict"] for v in verdicts.values())
+                    print(f"{tid} {arm}: {dict(counts)}; ledger ${ledger.total():.4f}")
+                    path.write_text(json.dumps(record, indent=1))
+    except BudgetStop as exc:
+        print(f"STOPPED before the cap: {exc}")
+    finally:
+        if writer is not None:
+            writer.stop()
+    print(f"verification estimate (calls this run planned): ${estimate:.4f}")
+    print(f"ledger total ${ledger.total():.4f} of ${args.cap:.2f}")
+
+
+_CLAIMS_RULES = """\
+Fill one row per unit, in a separate file (below), with `y` / `n` / `?` in each verdict column and a short reason that names the evidence you used (a file and line of today's code, a commit, a PR).
+
+- **T** - true of today's code and history: the claim holds for the target code shown and the repository at the stated HEAD; a history claim is true when the repo history and the evidence file agree with it. A claim that attributes content to a commit / PR / issue that you cannot find in the evidence file or the repo is `?`.
+- **O** - about the target: `y` when the unit is about the target symbol itself (its behaviour, its constraints, its callers' dependence on it, its own history); `n` when it is about another function, a caller's own logic, a sibling, a test elsewhere, or the module / PR at large, even when true.
+- **N** - narration: `y` when the unit only restates what the code does, with no reason from the evidence (no commit, PR, issue or review comment behind the *why*); `n` when it carries a reason from the history.
+- **R** - rejected / open / retracted: `y` when the unit presents a rejected suggestion, an open review question, an uncertain answer or a statement the author took back as fact; this should be `n`.
+
+Units of one target come from several cards of that target, shuffled; nothing on the sheet tells you which card a unit came from, and you must not try to find out (do not open any `*-key*.json` file, `part-c-cards/`, or `part-c-work/` other than the evidence files named below).
+"""
+
+
+def _claims_target_block(
+    rec: dict, units: list[tuple[str, dict]], evidence: str = "evidence"
+) -> list[str]:
+    tgt = rec["target"]
+    out = [f"## {rec['tid']} - `{tgt['qualified_name']}`", ""]
+    out += _code_block(rec)
+    out += [
+        "Evidence the cards were written from: "
+        f"`plans/62-eval/part-c-work/{evidence}/{rec['tid']}.txt`",
+        "",
+        "| Unit | Kind | Text | Refs |",
+        "|---|---|---|---|",
+    ]
+    for uid, u in units:
+        refs = ", ".join(f"{r['kind']} {r['id'][:10]}" for r in u.get("refs", []))
+        text = u["text"].replace("|", "\\|").replace("\n", " ")
+        out.append(f"| {uid} | {u['kind']} | {text} | {refs or '-'} |")
+    out.append("")
+    return out
+
+
+def _balanced(sizes: dict[str, int], n: int) -> list[list[str]]:
+    """Split keys into ``n`` groups of similar total size (largest first, greedy)."""
+    groups: list[list[str]] = [[] for _ in range(n)]
+    totals = [0] * n
+    for key in sorted(sizes, key=lambda k: -sizes[k]):
+        i = totals.index(min(totals))
+        groups[i].append(key)
+        totals[i] += sizes[key]
+    return [sorted(g) for g in groups]
+
+
+def _write_claims_sheets(
+    entries: list[tuple[dict, dict[str, tuple[dict, dict]]]],
+    *,
+    prefix: str,
+    title: str,
+    rng: random.Random,
+    head: str,
+    evidence: str = "evidence",
+) -> list[tuple[Path, int]]:
+    """Blind claims sheets: every unit of every card, shuffled within its target.
+
+    ``entries`` holds, per target record, its cards by a hidden label (an arm
+    or a level) with their verification verdicts by claim id. Targets are
+    split into :data:`CLAIM_SHEETS` sheets of similar size, each with its own
+    key file (label, kind, index and any verdict per unit id).
+    """
+    per_target: dict[str, list[tuple[dict, dict]]] = {}
+    records = [rec for rec, _ in entries]
+    for rec, cards in entries:
+        units: list[tuple[dict, dict]] = []
+        for arm, (card, checks) in cards.items():
+            counters: Counter = Counter()
+            for u in _units(card):
+                idx = counters[u["kind"]]
+                counters[u["kind"]] += 1
+                meta = {"tid": rec["tid"], "arm": arm, "kind": u["kind"], "index": idx}
+                if u["kind"] in ("constraint", "risk"):
+                    cid = ("C" if u["kind"] == "constraint" else "R") + str(idx + 1)
+                    if cid in checks:
+                        meta["check"] = checks[cid]
+                units.append((u, meta))
+        rng.shuffle(units)
+        per_target[rec["tid"]] = units
+    groups = _balanced({t: len(u) for t, u in per_target.items()}, CLAIM_SHEETS)
+    by_tid = {r["tid"]: r for r in records}
+    sheet_paths = []
+    for n, group in enumerate(groups, start=1):
+        key: dict[str, dict] = {}
+        body: list[str] = []
+        count = 0
+        for tid in group:
+            numbered = []
+            for u, meta in per_target[tid]:
+                count += 1
+                uid = f"C{n}-{count:03d}"
+                key[uid] = {**meta, "text": u["text"]}
+                numbered.append((uid, u))
+            body += _claims_target_block(by_tid[tid], numbered, evidence)
+        sheet = EVAL_DIR / f"{prefix}-sheet-{n}.md"
+        judge = EVAL_DIR / f"{prefix}-judge-{n}.md"
+        header = [
+            f"# Plan 62 Part C - {title} sheet {n} of {len(groups)} (judge)",
+            "",
+            f"Units to judge: **{count}** on {len(group)} targets "
+            f"({', '.join(group)}). Repository: biome at "
+            f"`~/.local/state/whygraph-dev/repos/biome`, HEAD `{head}` "
+            "(read-only: `git log`, `git show`, `git blame`, grep, file reads; "
+            "never write to it).",
+            "",
+            _CLAIMS_RULES,
+            f"Write your verdicts to `{judge.relative_to(REPO)}` as one markdown "
+            "table, `| Unit | T | O | N | R | Reason |`, one row per unit, every "
+            "unit of this sheet, in sheet order.",
+            "",
+        ]
+        sheet.write_text("\n".join(header + body))
+        (EVAL_DIR / f"{prefix}-key-{n}.json").write_text(json.dumps(key, indent=1))
+        sheet_paths.append((sheet, count))
+    return sheet_paths
+
+
+def cmd_grounding_sheets(env: Env, args: argparse.Namespace) -> None:
+    """Blind claims and pairs sheets for separate judges, keys apart (no LLM)."""
+    rng = random.Random(args.seed)
+    records = [json.loads(p.read_text()) for p in sorted(C_CARDS.glob("T*.json"))]
+    records = [r for r in records if set(GROUNDING_ARMS) <= set(r.get("cards", {}))]
+    if not records:
+        raise SystemExit("no target has all four grounding cards")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_biome_root(env),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    evidence_dir = C_WORK / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    for rec in records:
+        # The history every arm saw; G1's prompt has no source block and today's labels.
+        (evidence_dir / f"{rec['tid']}.txt").write_text(rec["prompts"]["g1"]["user"])
+
+    # (a) claims: every unit of every card, shuffled within the target.
+    entries = [
+        (
+            rec,
+            {
+                arm: (rec["cards"][arm], record_checks(rec, arm))
+                for arm in GROUNDING_ARMS
+            },
+        )
+        for rec in records
+    ]
+    sheet_paths = _write_claims_sheets(
+        entries, prefix="part-c-claims", title="grounding claims", rng=rng, head=head
+    )
+
+    # (b) pairs: G0a vs G0b, G0a vs G1, G1 vs G2 per target; shuffled, sides random.
+    pairs: list[tuple[dict, str, str, str]] = []
+    for rec in records:
+        for kind, x, y in (
+            ("g0-g0", "g0a", "g0b"),
+            ("g0-g1", "g0a", "g1"),
+            ("g1-g2", "g1", "g2"),
+        ):
+            a, b = (x, y) if rng.random() < 0.5 else (y, x)
+            pairs.append((rec, kind, a, b))
+    rng.shuffle(pairs)
+    pkey: dict[str, dict] = {}
+    body = [
+        "# Plan 62 Part C - grounding pairs sheet (judge)",
+        "",
+        f"For each of the **{len(pairs)}** pairs: two cards of the same code. "
+        "Question: **which card better explains why this code is the way it is, "
+        "with fewer wrong or irrelevant statements?** Write `A`, `B` or `=` and a "
+        "short reason. Pairs are shuffled; some pairs compare two cards made the "
+        "same way. Check claims against today's code (shown) and the evidence file "
+        f"named under each pair; repository: biome at "
+        f"`~/.local/state/whygraph-dev/repos/biome`, HEAD `{head}` (read-only).",
+        "",
+        "Do not open `part-c-pairs-key.json`, any `*-key*.json`, `part-c-cards/` "
+        "or `part-c-work/` other than the evidence files. Write your verdicts to "
+        "`plans/62-eval/part-c-pairs-judge.md` as one markdown table, "
+        "`| Pair | Verdict | Reason |`, every pair, in sheet order.",
+        "",
+    ]
+    for n, (rec, kind, a, b) in enumerate(pairs, start=1):
+        pid = f"P{n:02d}"
+        pkey[pid] = {"tid": rec["tid"], "pair": kind, "A": a, "B": b}
+        tgt = rec["target"]
+        body += [f"## {pid} - `{tgt['qualified_name']}`", ""]
+        body += _code_block(rec)
+        body += [
+            f"Evidence: `plans/62-eval/part-c-work/evidence/{rec['tid']}.txt`",
+            "",
+            "### Card A",
+            "",
+        ]
+        body += _render_card(rec["cards"][a])
+        body += ["### Card B", ""]
+        body += _render_card(rec["cards"][b])
+        body += ["**Verdict:** ", "", "---", ""]
+    (EVAL_DIR / "part-c-pairs-sheet.md").write_text("\n".join(body))
+    (EVAL_DIR / "part-c-pairs-key.json").write_text(json.dumps(pkey, indent=1))
+    for sheet, count in sheet_paths:
+        print(f"wrote {sheet.relative_to(REPO)} ({count} units)")
+    print(f"wrote plans/62-eval/part-c-pairs-sheet.md ({len(pairs)} pairs)")
+
+
+def cmd_level_sheets(env: Env, args: argparse.Namespace) -> None:
+    """Blind claims sheets over the level arms: low / medium / high of one arm (no LLM).
+
+    ``medium`` is the grounding run's card of ``--arm``; ``low`` and ``high``
+    come from ``grounding --level low|high``. The level is the hidden label;
+    the ``high`` verdicts go in the keys only. The evidence file is the
+    ``high`` prompt's history (the widest bundle) without the source block.
+    """
+    rng = random.Random(args.seed + 1)
+    entries = []
+    for path in sorted(C_CARDS.glob("T*.json")):
+        medium = json.loads(path.read_text())
+        recs = {"medium": medium}
+        for level in ("low", "high"):
+            other = _cards_dir(level) / path.name
+            if other.exists():
+                recs[level] = json.loads(other.read_text())
+        if not all(args.arm in r.get("cards", {}) for r in recs.values()):
+            continue
+        if len(recs) < 3:
+            continue
+        entries.append(
+            (
+                medium,
+                {
+                    lvl: (
+                        recs[lvl]["cards"][args.arm],
+                        record_checks(recs[lvl], args.arm),
+                    )
+                    for lvl in ("low", "medium", "high")
+                },
+            )
+        )
+        evidence_dir = C_WORK / "evidence-levels"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        user = recs["high"]["prompts"][args.arm]["user"]
+        (evidence_dir / path.name.replace(".json", ".txt")).write_text(
+            _SOURCE_BLOCK_RE.sub("", user, count=1)
+        )
+    if not entries:
+        raise SystemExit("no target has a card at all three levels")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=_biome_root(env),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    for sheet, count in _write_claims_sheets(
+        entries,
+        prefix="part-c-levels-claims",
+        title="level claims",
+        rng=rng,
+        head=head,
+        evidence="evidence-levels",
+    ):
+        print(f"wrote {sheet.relative_to(REPO)} ({count} units)")
+
+
+def record_checks(rec: dict, arm: str) -> dict:
+    """The verification verdicts of one arm's card, by claim id (``C1``, ``R1``)."""
+    return (rec.get("verify", {}).get(arm) or {}).get("verdicts") or {}
+
+
+def _biome_root(env: Env) -> Path:
+    if env.root is None:
+        _project_merged(env)
+    assert env.root is not None
+    return env.root
+
+
+def cmd_grounding_summary(env: Env, args: argparse.Namespace) -> None:
+    """Spend per arm, prompt sizes, ``coverage.source`` and verdict counts (no LLM)."""
+    records = [json.loads(p.read_text()) for p in sorted(C_CARDS.glob("T*.json"))]
+    spend: Counter = Counter()
+    for line in LEDGER.read_text().splitlines():
+        if line.strip():
+            e = json.loads(line)
+            if str(e.get("step", "")).startswith("plan62-part-c"):
+                spend[e.get("arm", "-")] += float(e.get("cost") or 0.0)
+    total = Ledger(LEDGER, GROUNDING_CAP_USD).total()
+    out: dict[str, Any] = {
+        "ledger_total": round(total, 4),
+        "spend_by_arm": {k: round(v, 4) for k, v in sorted(spend.items())},
+        "targets": {},
+    }
+    sources: Counter = Counter()
+    verdicts: Counter = Counter()
+    deltas = []
+    for rec in records:
+        pc = rec.get("prompt_chars", {})
+        src = (rec.get("coverage", {}).get("g2") or {}).get("source")
+        sources[src] += 1
+        delta = pc.get("g2", 0) - pc.get("g1", 0)
+        deltas.append(delta)
+        checks = record_checks(rec, "g2")
+        verdicts.update(v["verdict"] for v in checks.values())
+        out["targets"][rec["tid"]] = {
+            "code_chars": rec.get("code_chars"),
+            "prompt_chars": pc,
+            "g1_minus_g0": pc.get("g1", 0) - pc.get("g0a", 0),
+            "g2_minus_g1": delta,
+            "source": src,
+            "bundle_commits": rec.get("bundle_commits"),
+            "descriptions_waiting": len(rec.get("descriptions_waiting", [])),
+            "checks_failed": rec.get("checks_failed"),
+            "cards": sorted(rec.get("cards", {})),
+            "items": {
+                a: _n_items(c) + len(_sentences(c["why"]))
+                for a, c in rec.get("cards", {}).items()
+            },
+            "tokens": {
+                a: [c.get("input_tokens"), c.get("output_tokens")]
+                for a, c in rec.get("cards", {}).items()
+            },
+            "verify_g2": dict(Counter(v["verdict"] for v in checks.values())),
+            "errors": rec.get("errors", []),
+        }
+    out["source_counts"] = dict(sources)
+    out["g2_minus_g1"] = {
+        "median": statistics.median(deltas) if deltas else None,
+        "max": max(deltas) if deltas else None,
+        "sum": sum(deltas),
+    }
+    out["verify_g2_counts"] = dict(verdicts)
+    C_WORK.mkdir(parents=True, exist_ok=True)
+    path = C_WORK / "grounding-summary.json"
+    path.write_text(json.dumps(out, indent=1))
+    print(json.dumps({k: v for k, v in out.items() if k != "targets"}, indent=1))
+    print(f"wrote {path.relative_to(REPO)}")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and run one sub-command.
 
@@ -2760,6 +3701,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--prefix", default="sonnet-", help="arm-name prefix of the run")
     p.add_argument("--suffix", default="sonnet", help="suffix of the sheet files")
     p.add_argument("--title", default="Sonnet re-run", help="report section heading")
+    for name, default_arms in (
+        ("grounding", ",".join(GROUNDING_ARMS)),
+        ("grounding-verify", "g2"),
+    ):
+        p = sub.add_parser(name)
+        p.add_argument("--yes", action="store_true", help="spend (default: estimate)")
+        p.add_argument("--arms", default=default_arms)
+        p.add_argument("--cap", type=float, default=GROUNDING_CAP_USD)
+        p.add_argument("--no-portal-ledger", action="store_true")
+        p.add_argument(
+            "--level",
+            default=GROUNDING_LEVEL,
+            choices=("low", "medium", "high"),
+            help="medium: the grounding arms; low / high: the level arms",
+        )
+    sub.add_parser("grounding-sheets")
+    p = sub.add_parser("level-sheets")
+    p.add_argument("--arm", default="g2", choices=("g1", "g2"))
+    sub.add_parser("grounding-summary")
+    p = sub.add_parser("level-prompts")
+    p.add_argument("--arm", default="g2", choices=("g1", "g2"))
     args = parser.parse_args(argv)
     MODEL = args.model
     env = Env(slug=args.slug, data=args.data.expanduser(), db_url=args.db_url)
@@ -2774,6 +3736,12 @@ def main(argv: list[str] | None = None) -> int:
         "measure": cmd_measure,
         "repeats": cmd_repeats,
         "rerun": cmd_rerun,
+        "grounding": cmd_grounding,
+        "grounding-verify": cmd_grounding_verify,
+        "grounding-sheets": cmd_grounding_sheets,
+        "grounding-summary": cmd_grounding_summary,
+        "level-prompts": cmd_level_prompts,
+        "level-sheets": cmd_level_sheets,
     }
     commands[args.cmd](env, args)
     return 0

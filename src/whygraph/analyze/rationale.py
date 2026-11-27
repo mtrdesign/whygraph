@@ -8,6 +8,7 @@
   card returned by :meth:`whygraph.analyze.RationaleGenerator.generate`.
 * :class:`Item` and :class:`ItemRef` — one constraint or risk of a card,
   with the evidence it names and how well that evidence supports it.
+* :class:`ItemCheck` - the verification pass's verdict on one item.
 """
 
 from __future__ import annotations
@@ -25,6 +26,9 @@ ITEM_BASES = ("quoted", "cited", "inferred", "unknown")
 
 REF_KINDS = ("commit", "pr", "issue")
 """The values of :attr:`ItemRef.kind`."""
+
+VERDICTS = ("holds", "contradicted", "cannot_tell")
+"""The values of :attr:`ItemCheck.verdict` (plan 62 section 14.2)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +116,33 @@ class ItemRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemCheck:
+    """The verification pass's verdict on one constraint or risk (plan 62 section 14.2).
+
+    A verdict is as of the target's source when the card was built: a
+    committed edit of the lines changes the card's evidence and regenerates
+    it, an uncommitted one does not.
+
+    Attributes
+    ----------
+    verdict : str
+        One of :data:`VERDICTS`: ``"holds"`` (the source shows the claim is
+        true of today's code), ``"contradicted"`` (it shows the claim no
+        longer is) or ``"cannot_tell"`` (the source alone does not settle
+        it, or the verifier gave no verdict).
+    reason : str
+        The verifier's one-line reason; may be empty.
+    """
+
+    verdict: str
+    reason: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        """The check as ``{"verdict", "reason"}``."""
+        return {"verdict": self.verdict, "reason": self.reason}
+
+
+@dataclass(frozen=True, slots=True)
 class Item:
     """One constraint or risk of a :class:`Rationale`, with its source.
 
@@ -136,15 +167,19 @@ class Item:
     quote : str
         The checked quote, whitespace runs collapsed to one space. Empty
         unless ``basis`` is ``"quoted"``.
+    check : ItemCheck or None
+        The verification pass's verdict (a ``high`` card and deeper);
+        ``None`` when the item was not checked.
     """
 
     text: str
     basis: str
     refs: tuple[ItemRef, ...] = ()
     quote: str = ""
+    check: ItemCheck | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        """The item as ``{"text", "basis", "refs"}`` plus ``"quote"`` when set.
+        """The item as ``{"text", "basis", "refs"}`` plus ``"quote"`` and ``"check"`` when set.
 
         The shape the cache stores and the card serves; a plain string
         decodes back as basis ``"unknown"``.
@@ -156,6 +191,8 @@ class Item:
         }
         if self.quote:
             out["quote"] = self.quote
+        if self.check is not None:
+            out["check"] = self.check.as_dict()
         return out
 
 

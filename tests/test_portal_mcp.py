@@ -514,7 +514,15 @@ def test_tools_declare_an_output_schema() -> None:
         assert props[key]["items"] == {"$ref": "#/$defs/RationaleItem"}
     item = defs["RationaleItem"]
     assert set(item["required"]) == {"text", "basis", "refs"}
-    assert set(item["properties"]) == {"text", "basis", "refs", "quote"}
+    assert set(item["properties"]) == {"text", "basis", "refs", "quote", "check"}
+    # A high card's verification verdict (plan 62 section 14.4).
+    check = defs["RationaleItemCheck"]
+    assert set(check["required"]) == {"verdict", "reason"}
+    assert check["properties"]["verdict"]["enum"] == [
+        "holds",
+        "contradicted",
+        "cannot_tell",
+    ]
     assert item["properties"]["basis"]["enum"] == [
         "quoted",
         "cited",

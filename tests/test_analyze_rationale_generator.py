@@ -8,6 +8,7 @@ JSON parsing, and error wrapping.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -2033,3 +2034,347 @@ def test_r46_a_unique_added_anchor_still_renders() -> None:
     prompt, _ = _prompt([_blame(_thread_pr(_thread()))])
 
     assert "Review threads on these lines" in prompt
+
+
+# ---- plan 62 Part C: what each level renders (section 14.1, step C3) -------
+
+
+def _level_evidence() -> list[CommitEvidence]:
+    """Every §14.1 row in one target, each commit with its own raw description.
+
+    A ``blame`` unit (own PR #12), a walked squash unit (own PR #7) with two
+    recovered feature-branch commits, and eight context commits.
+    """
+
+    def described(item: CommitEvidence) -> CommitEvidence:
+        item.commit.llm_description = f"Raw description of {item.commit.sha[:8]}."
+        return item
+
+    squash_pr = _pr(
+        number=7, title="Squashed PR", commit_titles=_commit_titles("one", "two")
+    )
+    squash_pr.merge_commit_sha = squash_pr.head_sha = "5555555555555555"
+    origins = [
+        described(
+            _blame(
+                squash_pr,
+                sha=sha,
+                lines=None,
+                source="pr-origin",
+                committed_at=f"2026-04-1{n}T00:00:00Z",
+            )
+        )
+        for n, sha in ((1, "7777777777777777"), (0, "8888888888888888"))
+    ]
+    return [
+        described(_blame(_pr(number=12, title="Blame PR"))),
+        described(
+            _blame(
+                squash_pr,
+                sha="5555555555555555",
+                lines=None,
+                source="blame-walked",
+                committed_at="2026-04-20T00:00:00Z",
+            )
+        ),
+        *origins,
+        *(
+            described(_area(f"c{n}" * 8, 10 - n, _pr(number=30 + n)))
+            for n in range(1, 9)
+        ),
+    ]
+
+
+_RING0 = ("a1b2c3d4", "55555555")
+_FEATURE = ("77777777", "88888888")
+
+
+def _context(count: int) -> set[str]:
+    """The SHA prefixes of the newest ``count`` context commits of :func:`_level_evidence`."""
+    return {f"c{n}" * 4 for n in range(1, count + 1)}
+
+
+def _commits_in(prompt: str) -> set[str]:
+    """The SHA prefixes of every commit the prompt renders, Ring 0 and context."""
+    shas = {
+        line.split()[1] for line in prompt.splitlines() if line.startswith("COMMIT ")
+    }
+    shas |= {
+        line.split()[0]
+        for line in prompt.splitlines()
+        if line[:8].isalnum() and line[8:10] == "  " and not line.startswith("COMMIT")
+    }
+    return shas
+
+
+def _assert_every_commit_is_described_raw(prompt: str) -> None:
+    for sha in _commits_in(prompt):
+        assert f"  Summary: Raw description of {sha}." in prompt, sha
+
+
+def test_low_renders_its_rows() -> None:
+    prompt, card = _bundle_prompt(_level_evidence(), "low")
+
+    assert _commits_in(prompt) == set(_RING0)
+    assert "    Title: Blame PR" in prompt  # own PR of a commit that owns the lines
+    assert "  PR #7 (title only)" in prompt  # own PR of a walked commit
+    assert "  (squash of 2 commits; shown from high)" in prompt
+    assert "Source: area-history" not in prompt
+    assert "(8 file commits that touched the file but not these lines" in prompt
+    _assert_every_commit_is_described_raw(prompt)
+    assert card.coverage.trimmed == () and card.coverage.verification is None
+
+
+def test_medium_renders_its_rows() -> None:
+    prompt, card = _bundle_prompt(_level_evidence(), "medium")
+
+    assert _commits_in(prompt) == {*_RING0, *_context(4)}
+    assert "    Title: Blame PR" in prompt and "    Title: Squashed PR" in prompt
+    assert "(title only)" not in prompt
+    assert "  (body: the PR's squashed commits, see PR #7)" in prompt
+    assert "(4 more file commits not shown)" in prompt
+    _assert_every_commit_is_described_raw(prompt)
+    assert (card.coverage.line_commits, card.coverage.context_commits) == (2, 4)
+    assert card.coverage.trimmed == ()
+
+
+def test_high_renders_its_rows() -> None:
+    prompt, card = _bundle_prompt(_level_evidence(), "high")
+
+    assert _commits_in(prompt) == {*_RING0, *_FEATURE, *_context(6)}
+    assert "Source: original commit recovered from a squash-merged PR" in prompt
+    assert prompt.count("  PR #7 (shown above)") == 2  # the feature-branch commits
+    assert "(2 more file commits not shown)" in prompt
+    _assert_every_commit_is_described_raw(prompt)
+    assert (card.coverage.line_commits, card.coverage.context_commits) == (4, 6)
+    assert card.coverage.trimmed == ()
+
+
+def test_xhigh_renders_its_rows() -> None:
+    prompt, card = _bundle_prompt(_level_evidence(), "xhigh")
+
+    assert _commits_in(prompt) == {*_RING0, *_FEATURE, *_context(8)}
+    assert "more file commits not shown" not in prompt
+    _assert_every_commit_is_described_raw(prompt)
+    assert card.coverage.context_commits == 8
+
+
+def test_the_level_stoppers_are_the_r45_numbers() -> None:
+    from whygraph.analyze.card_bundle import level_caps
+
+    caps = {level: level_caps(level) for level in ("low", "medium", "high", "xhigh")}
+    assert {lv: c.full_pr_max_count for lv, c in caps.items()} == dict.fromkeys(
+        caps, 16
+    )
+    assert [c.full_pr_max_chars for c in caps.values()] == [35_000, *[40_000] * 3]
+    assert [c.total_max_chars for c in caps.values()] == [
+        158_000,
+        163_000,
+        183_000,
+        183_000,
+    ]
+    assert [c.context_commits for c in caps.values()] == [0, 4, 6, 8]
+    assert [c.feature_commits for c in caps.values()] == [False, False, True, True]
+
+
+def test_a_deeper_prompt_includes_every_commit_of_a_shallower_one() -> None:
+    """R24 commit-wise: each level's commits, with their descriptions, only grow."""
+    prompts = {
+        level: _bundle_prompt(_level_evidence(), level)[0]
+        for level in ("low", "medium", "high", "xhigh")
+    }
+
+    for shallow, deep in (("low", "medium"), ("medium", "high"), ("high", "xhigh")):
+        assert _commits_in(prompts[shallow]) < _commits_in(prompts[deep])
+        summaries = {
+            line for line in prompts[shallow].splitlines() if "  Summary: " in line
+        }
+        assert summaries <= set(prompts[deep].splitlines())
+        assert _titles(prompts[shallow]) <= _titles(prompts[deep])
+
+
+def test_generate_selects_its_bundle_at_the_level_it_is_given() -> None:
+    client = _StubClient()
+
+    RationaleGenerator(client).generate(_level_evidence(), level="high")
+
+    assert "COMMIT 77777777" in client.requests[0].messages[1].content
+    with pytest.raises(ValueError, match="unknown depth level"):
+        RationaleGenerator(_StubClient()).generate(_level_evidence(), level="huge")
+
+
+# ---- plan 62 Part C: the verification pass (section 14.2) -------------------
+
+
+def _draft() -> Rationale:
+    """A draft with two constraints, one risk and a tradeoff."""
+    return Rationale(
+        purpose="Fetches with retries.",
+        why="Three attempts.",
+        constraints=(
+            Item("MAX_ATTEMPTS stays 3", "quoted", (_PR_REF,), "stays at 3"),
+            Item("the timeout is passed on every call", "inferred"),
+        ),
+        tradeoffs=("retries over failing fast",),
+        risks=(Item("raising the limit locks the client out", "cited", (_PR_REF,)),),
+        model="stub-1",
+        provider="stub",
+        coverage=card_bundle_module.CardCoverage(line_commits=1),
+    )
+
+
+def _verdicts(*entries: dict) -> str:
+    return json.dumps({"verdicts": list(entries)})
+
+
+def test_verify_sends_the_source_and_the_numbered_claims() -> None:
+    client = _StubClient(text=_verdicts())
+
+    RationaleGenerator(client).verify(_draft(), _FILE[:6], first_line=1, subject="f")
+
+    (request,) = client.requests
+    system, task = request.messages[0].content, request.messages[1].content
+    assert '"verdicts"' in system and "cannot_tell" in system
+    assert "SOURCE (lines 1-6):" in task
+    assert "3      while attempts < MAX_ATTEMPTS:" in task
+    assert "C1: MAX_ATTEMPTS stays 3" in task
+    assert "C2: the timeout is passed on every call" in task
+    assert "R1: raising the limit locks the client out" in task
+    assert "retries over failing fast" not in task  # tradeoffs are not checked
+    assert "stays at 3" not in task  # only the claim, not its quote
+
+
+def test_verify_marks_every_item_and_changes_nothing_else() -> None:
+    reply = _verdicts(
+        {"id": "C1", "verdict": "holds", "reason": "line 3 compares to MAX_ATTEMPTS"},
+        {"id": "R1", "verdict": "contradicted", "reason": "  no   limit\nhere "},
+        {"id": "C9", "verdict": "holds", "reason": "unknown id"},
+        {"id": "C1", "verdict": "contradicted", "reason": "a second verdict"},
+    )
+    draft = _draft()
+
+    card = RationaleGenerator(_StubClient(text=reply)).verify(draft, _FILE[:6])
+
+    assert [i.check.as_dict() for i in (*card.constraints, *card.risks)] == [
+        {"verdict": "holds", "reason": "line 3 compares to MAX_ATTEMPTS"},
+        {"verdict": "cannot_tell", "reason": "no verdict given"},
+        {"verdict": "contradicted", "reason": "no limit here"},
+    ]
+    # Kept and marked: never added, removed or rewritten.
+    strip = [
+        dataclasses.replace(i, check=None) for i in (*card.constraints, *card.risks)
+    ]
+    assert strip == [*draft.constraints, *draft.risks]
+    assert (card.purpose, card.why, card.tradeoffs) == (
+        draft.purpose,
+        draft.why,
+        draft.tradeoffs,
+    )
+    assert card.coverage.verification == "verified"
+    assert card.coverage.line_commits == 1
+    assert card.constraints[0].as_dict()["check"]["verdict"] == "holds"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "C1", "verdict": "maybe"},
+        {"id": 1, "verdict": "holds"},
+        "C1 holds",
+        {"verdict": "holds"},
+    ],
+)
+def test_verify_ignores_a_malformed_entry(entry: object) -> None:
+    card = RationaleGenerator(
+        _StubClient(text=json.dumps({"verdicts": [entry]}))
+    ).verify(_draft(), _FILE[:6])
+
+    assert card.constraints[0].check.verdict == "cannot_tell"
+
+
+def test_verify_keeps_a_reason_that_is_not_a_string_out_and_clips_long_ones() -> None:
+    reply = _verdicts(
+        {"id": "C1", "verdict": "holds", "reason": 5},
+        {"id": "C2", "verdict": "holds", "reason": "x" * 1000},
+    )
+
+    card = RationaleGenerator(_StubClient(text=reply)).verify(_draft(), _FILE[:6])
+
+    assert card.constraints[0].check.reason == ""
+    assert len(card.constraints[1].check.reason) == 300
+
+
+@pytest.mark.parametrize(
+    "reply", ["not json", "[]", '{"verdicts": "C1 holds"}', '{"checks": []}']
+)
+def test_verify_raises_on_a_malformed_answer(reply: str) -> None:
+    with pytest.raises(RationaleError):
+        RationaleGenerator(_StubClient(text=reply)).verify(_draft(), _FILE[:6])
+
+
+def test_verify_strips_a_code_fence() -> None:
+    reply = "```json\n" + _verdicts({"id": "R1", "verdict": "holds"}) + "\n```"
+
+    card = RationaleGenerator(_StubClient(text=reply)).verify(_draft(), _FILE[:6])
+
+    assert card.risks[0].check.verdict == "holds"
+
+
+def test_verify_wraps_an_llm_error() -> None:
+    client = _StubClient(raise_with=LlmError("provider down"))
+
+    with pytest.raises(AnalyzeError, match="provider down"):
+        RationaleGenerator(client).verify(_draft(), _FILE[:6])
+
+
+def test_verify_a_draft_with_nothing_to_check_makes_no_call() -> None:
+    client = _StubClient()
+    draft = dataclasses.replace(_draft(), constraints=(), risks=())
+
+    card = RationaleGenerator(client).verify(draft, _FILE[:6])
+
+    assert client.requests == []
+    assert card.coverage.verification == "verified"
+
+
+def test_verify_records_its_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from whygraph.analyze import rationale_generator
+
+    recorded: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        rationale_generator,
+        "record_usage",
+        lambda task, response, **kw: recorded.append((task, kw["subject"])),
+    )
+
+    RationaleGenerator(_StubClient(text=_verdicts())).verify(
+        _draft(), _FILE[:6], subject="mod.fetch"
+    )
+
+    assert recorded == [("rationale", "mod.fetch")]
+
+
+def test_verification_source_is_the_targets_lines_within_the_limit() -> None:
+    from whygraph.analyze.rationale_generator import (
+        VERIFY_SOURCE_MAX_CHARS,
+        verification_source,
+    )
+
+    assert verification_source(_FILE, (3, 4)) == (_FILE[2:4], None)
+    assert verification_source(None, (1, 2)) == (None, "no_source")
+    assert verification_source(_FILE, None) == (None, "no_source")
+    assert verification_source((), (1, 2)) == (None, "no_source")
+    assert verification_source(_FILE, (40, 50)) == (None, "no_source")
+    long = ("x" * VERIFY_SOURCE_MAX_CHARS, "y")
+    assert verification_source(long, (1, 2)) == (None, "source_too_long")
+    assert verification_source(long, (1, 1)) == ((long[0],), None)
+
+
+def test_the_packaged_verify_prompt_resolves_with_its_placeholder() -> None:
+    from whygraph.analyze.prompt import VERIFY_PLACEHOLDER, resolve
+
+    prompt = resolve("rationale_verify", "verify", "anthropic", "any-model")
+
+    assert VERIFY_PLACEHOLDER in prompt.task
+    assert "holds" in prompt.system and "contradicted" in prompt.system
+    assert VERIFY_PLACEHOLDER not in prompt.system

@@ -832,3 +832,49 @@ def test_rationale_depth_columns_keep_legacy_rows(
         assert conn.execute("SELECT purpose FROM rationale_cache").fetchone() == ("p",)
     finally:
         conn.close()
+
+
+def test_rationale_checks_ride_in_the_existing_json_columns(
+    _isolate_config_and_engine: Path,
+) -> None:
+    """Plan 62 step C3: ``check`` and ``coverage.verification`` need no migration."""
+    import json
+
+    from whygraph.analyze import CardCoverage, Item, ItemCheck, Rationale
+    from whygraph.mcp.rationale_cache import lookup_exact, store_cached
+    from whygraph.mcp.targets import Target
+
+    db_path = _isolate_config_and_engine
+    command.upgrade(alembic_config(), "head")
+    columns = _column_names(db_path, "rationale_cache")
+    target = Target(path="a.py", line_start=1, line_end=3, qualified_name=None)
+    card = Rationale(
+        purpose="p",
+        why="w",
+        constraints=(Item("c", "inferred", check=ItemCheck("holds", "line 2")),),
+        tradeoffs=(),
+        risks=(Item("r", "inferred", check=ItemCheck("contradicted", "gone")),),
+        model="m",
+        provider="fake",
+        coverage=CardCoverage(verification="verified"),
+    )
+
+    store_cached(target, [], card, "fake", None, depth=2)
+
+    assert not {"check", "verification"} & columns
+    conn = sqlite3.connect(db_path)
+    try:
+        constraints, risks, coverage, depth = conn.execute(
+            "SELECT constraints, risks, coverage, depth FROM rationale_cache"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert json.loads(constraints)[0]["check"] == {
+        "verdict": "holds",
+        "reason": "line 2",
+    }
+    assert json.loads(risks)[0]["check"]["verdict"] == "contradicted"
+    assert (json.loads(coverage)["verification"], depth) == ("verified", 2)
+    row = lookup_exact(target, "fake", None)
+    assert row.rationale.constraints == card.constraints
+    assert row.rationale.coverage.verification == "verified"

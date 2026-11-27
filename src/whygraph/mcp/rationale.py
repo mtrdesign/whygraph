@@ -21,7 +21,17 @@ import anyio.from_thread
 from mcp.server.fastmcp import Context, FastMCP
 
 from whygraph.analyze import AnalyzeError, RationaleGenerator, card_bundle_for
-from whygraph.analyze.card_bundle import DEFAULT_LEVEL, LINE_LEVEL_SOURCES, CardBundle
+from whygraph.analyze.card_bundle import (
+    DEFAULT_LEVEL,
+    LINE_LEVEL_SOURCES,
+    UNVERIFIED_LEVEL,
+    CardBundle,
+    verifies,
+)
+from whygraph.analyze.rationale_generator import (
+    verification_source,
+    with_verification,
+)
 from whygraph.core import get_config
 from whygraph.core.context import current_project
 from whygraph.core.remote import RemoteError, RemoteProject, platform_block
@@ -130,6 +140,21 @@ class RationaleItemRef(_RationaleItemRefRequired, total=False):
     url: str
 
 
+class RationaleItemCheck(TypedDict):
+    """The verification pass's verdict on one item (a ``high`` card, plan 62 section 14.2).
+
+    ``verdict`` ``"holds"``: the target's source shows the item is true of
+    the code; ``"contradicted"``: it shows the item no longer is (the item
+    is kept, marked); ``"cannot_tell"``: the source alone does not settle
+    it. The verdict is as of the target's source when the card was built
+    (``cached_at``): a later committed edit of the lines regenerates the
+    card, an uncommitted one is not reflected.
+    """
+
+    verdict: Literal["holds", "contradicted", "cannot_tell"]
+    reason: str
+
+
 class _RationaleItemRequired(TypedDict):
     text: str
     basis: Literal["quoted", "cited", "inferred", "unknown"]
@@ -143,10 +168,12 @@ class RationaleItem(_RationaleItemRequired, total=False):
     named source is in the evidence but holds no quote; ``"inferred"``: no
     source is named, so the item is the model's reading of the diffs;
     ``"unknown"``: the card predates sources. ``quote`` is present only for
-    ``"quoted"``.
+    ``"quoted"``. ``check`` (:class:`RationaleItemCheck`) is present on a
+    card whose verification pass ran.
     """
 
     quote: str
+    check: RationaleItemCheck
 
 
 class _RationaleCardRequired(TypedDict):
@@ -183,7 +210,14 @@ class RationaleCard(_RationaleCardRequired, total=False):
     out - ``full_prs_demoted``, ``threads_lost``, ``trimmed``,
     ``descriptions_missing``, ``line_commits``, ``context_commits``,
     ``context_omitted`` - and is present on a card generated since the
-    cache stores it (a legacy row has none).
+    cache stores it (a legacy row has none). A card built at ``high`` or
+    deeper adds ``verification`` (plan 62 section 14.2): ``"verified"``
+    (every constraint and risk carries a ``check``, as of the target's
+    source when the card was built), ``"pending"`` (a partial card, checked
+    once its descriptions land), ``"failed"`` or ``"skipped"`` (not checked;
+    the card was stored as ``medium``), ``"source_too_long"`` or
+    ``"no_source"`` (not checked: the target's source is over the limit or
+    could not be read).
 
     ``context_stale`` (plan 62 section 13.5) says one or two commits touched
     the target's file (not its lines) since the card was written; three or
@@ -694,6 +728,84 @@ def _same_row(row: CachedCard | None, seen: CachedCard) -> bool:
     ) == (seen.cached_at, seen.evidence_fingerprint, seen.deferred_shas)
 
 
+def _verified(
+    generator: RationaleGenerator,
+    rationale: Rationale,
+    level: str,
+    *,
+    before_generate: Callable[[], None] | None,
+    review_scope: ReviewScope | None,
+    target_range: tuple[int, int] | None,
+    subject: str,
+) -> tuple[Rationale, str]:
+    """The verification pass over a non-partial draft, and the level to store it at.
+
+    Plan 62 section 14.2. Below ``high`` the draft is returned as is. With
+    nothing to check (no constraints, no risks) it is ``verified`` without a
+    call; without the target's source (none, or longer than
+    :data:`~whygraph.analyze.rationale_generator.VERIFY_SOURCE_MAX_CHARS`)
+    it keeps its level, marked ``no_source`` / ``source_too_long``, since
+    regenerating could not change that. Otherwise the pass is charged like
+    a card (``usage_blocked()``, then ``before_generate``) and run; a
+    refusal (``skipped``) or a failed call or answer (``failed``) stores
+    the draft at :data:`~whygraph.analyze.card_bundle.UNVERIFIED_LEVEL`, so
+    a later ``high`` request regenerates it.
+
+    Parameters
+    ----------
+    generator : RationaleGenerator
+        The generator that wrote the draft.
+    rationale : Rationale
+        The draft.
+    level : str
+        The level the draft was built at.
+    before_generate : callable or None
+        The card budget; any exception it raises refuses the pass.
+    review_scope : ReviewScope or None
+        The request's scope: its ``current_lines`` hold the target's source.
+    target_range : tuple[int, int] or None
+        The target's line range in those lines.
+    subject : str
+        What the card is about, for the call's usage.
+
+    Returns
+    -------
+    tuple[Rationale, str]
+        The card (``coverage.verification`` set from ``high``) and the
+        level to store it at.
+    """
+    if not verifies(level):
+        return rationale, level
+    if not rationale.constraints and not rationale.risks:
+        return with_verification(rationale, "verified"), level
+    file_lines = None if review_scope is None else review_scope.current_lines
+    source, unavailable = verification_source(file_lines, target_range)
+    if source is None or target_range is None:
+        return with_verification(rationale, unavailable or "no_source"), level
+    if usage_blocked() is not None:
+        return with_verification(rationale, "skipped"), UNVERIFIED_LEVEL
+    if before_generate is not None:
+        try:
+            before_generate()
+        except Exception as exc:  # noqa: BLE001 - any refusal skips the pass
+            _log.info("verification of the card of %s skipped: %s", subject, exc)
+            return with_verification(rationale, "skipped"), UNVERIFIED_LEVEL
+    try:
+        checked = generator.verify(
+            rationale, source, first_line=max(target_range[0], 1), subject=subject
+        )
+    except AnalyzeError as exc:
+        _log.warning("verification of the card of %s failed: %s", subject, exc)
+        return with_verification(rationale, "failed"), UNVERIFIED_LEVEL
+    return checked, level
+
+
+def _verification_pending(row: CachedCard) -> bool:
+    """Whether ``row``'s card waits for its verification pass (``coverage.verification``)."""
+    coverage = row.rationale.coverage
+    return coverage is not None and coverage.verification == "pending"
+
+
 def _complete_partial(
     target: Target,
     evidence: list[CommitEvidence],
@@ -723,7 +835,10 @@ def _complete_partial(
     regenerates at the row's level with the current Ring 0 plus the row's
     stored context commits (:func:`_completion_evidence`); a legacy row is
     regenerated from the whole evidence, as before, and stored as a
-    ``medium`` row.
+    ``medium`` row. At ``high`` and deeper the regenerated card - or, when
+    no deferred commit could ever be described, the stored draft still
+    ``pending`` - then gets its verification pass (:func:`_verified`), and
+    a failed or skipped pass stores it as ``medium``.
 
     Parameters
     ----------
@@ -787,9 +902,38 @@ def _complete_partial(
                 deferred_shas=" ".join(sorted(waiting)),
             )
             return
+        subject = target.qualified_name or target.path
         if not deferred - outcome.terminal:
             # Nothing gained: every deferred commit can never be described.
-            update_deferred(target, provider, model, seen=seen, deferred_shas="")
+            if not (verifies(level) and _verification_pending(seen)):
+                update_deferred(target, provider, model, seen=seen, deferred_shas="")
+                return
+            # The draft stands as it is; only its verification pass is due.
+            if not _same_row(lookup_exact(target, provider, model), seen):
+                return
+            checked, stored = _verified(
+                RationaleGenerator.from_config(config),
+                seen.rationale,
+                level,
+                before_generate=before_generate,
+                review_scope=review_scope,
+                target_range=target_range,
+                subject=subject,
+            )
+            if stop.is_set():
+                return
+            store_cached(
+                target,
+                evidence,
+                checked,
+                provider,
+                model,
+                deferred_shas="",
+                only_if=seen,
+                seen=seen,
+                depth=depth_of(stored),
+                context_shas=seen.context_shas,
+            )
             return
         if not _same_row(lookup_exact(target, provider, model), seen):
             return
@@ -797,17 +941,29 @@ def _complete_partial(
             return
         if before_generate is not None:
             before_generate()
-        rationale = RationaleGenerator.from_config(config).generate(
+        generator = RationaleGenerator.from_config(config)
+        rationale = generator.generate(
             fresh,
             symbol_context=_symbol_context(target),
-            subject=target.qualified_name or target.path,
+            subject=subject,
             bundle=bundle,
             missing_descriptions=_missing_reasons(outcome),
             **_thread_inputs(review_scope, target_range),
         )
+        rationale, stored = _verified(
+            generator,
+            rationale,
+            level,
+            before_generate=before_generate,
+            review_scope=review_scope,
+            target_range=target_range,
+            subject=subject,
+        )
         if stop.is_set():
             return
         # The fingerprint is over SHAs only: the request's evidence is the row's.
+        # ``seen`` lets a failed verification store the card shallower than
+        # the row it replaces; ``only_if`` still requires that exact row.
         store_cached(
             target,
             evidence,
@@ -816,7 +972,8 @@ def _complete_partial(
             model,
             deferred_shas="",
             only_if=seen,
-            depth=depth_of(level),
+            seen=seen,
+            depth=depth_of(stored),
             context_shas=_rendered_context(bundle, rationale),
         )
     except Exception as exc:  # noqa: BLE001 - the row stays partial
@@ -914,6 +1071,7 @@ def rationale_card(
     note: Callable[[str], None] | None = None,
     review_scope: ReviewScope | None = None,
     target_range: tuple[int, int] | None = None,
+    level: str = DEFAULT_LEVEL,
 ) -> dict:
     """The rationale card of ``target`` from ``evidence``: cached, or generated and cached.
 
@@ -964,6 +1122,15 @@ def rationale_card(
     target_range : tuple[int, int], optional
         The target's line range in ``review_scope.current_lines``; ``None``
         keeps review threads out too.
+    level : str, optional
+        The depth level the card is wanted at
+        (:data:`~whygraph.analyze.card_bundle.LEVELS`); default
+        :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`. A cached card
+        at least as deep is served; a generated card is built at it (or at a
+        deeper row's level, see Notes), and from ``high`` it gets the
+        verification pass (:func:`_verified`): a partial draft is stored
+        ``pending`` and checked by its completion, a failed or skipped pass
+        stores the card as ``medium``.
 
     Returns
     -------
@@ -989,6 +1156,8 @@ def rationale_card(
 
     Raises
     ------
+    ValueError
+        ``level`` is not a known level.
     NoEvidenceError
         ``evidence`` is empty.
     GenerationNotPermitted
@@ -1003,9 +1172,8 @@ def rationale_card(
     if not evidence:
         raise NoEvidenceError(_NO_EVIDENCE_MESSAGE, code="no_evidence")
 
+    depth_of(level)  # an unknown level raises before anything is read
     config = get_config()
-    # Every card is `medium` until depth levels ship (plan 62 Part C).
-    level = DEFAULT_LEVEL
     provider, pinned_model = config.cache_identity("rationale")
     cached: CachedCard | None = None
     if force_refresh:
@@ -1128,6 +1296,21 @@ def rationale_card(
     coverage = getattr(rationale, "coverage", None)
     omitted = coverage.omitted_shas if coverage is not None else frozenset()
     waiting = sorted(outcome.waiting - omitted)
+    # The verification pass (plan 62 section 14.2) runs on a non-partial
+    # draft only; a partial one is checked by its completion.
+    stored = level
+    if waiting and verifies(level):
+        rationale = with_verification(rationale, "pending")
+    elif not waiting:
+        rationale, stored = _verified(
+            generator,
+            rationale,
+            level,
+            before_generate=before_generate,
+            review_scope=review_scope,
+            target_range=target_range,
+            subject=target.qualified_name or target.path,
+        )
     cached_at = store_cached(
         target,
         evidence,
@@ -1136,7 +1319,7 @@ def rationale_card(
         pinned_model,
         deferred_shas=" ".join(waiting),
         seen=seen,
-        depth=depth_of(level),
+        depth=depth_of(stored),
         context_shas=_rendered_context(bundle, rationale),
     )
     if cached_at is None:
@@ -1155,7 +1338,7 @@ def rationale_card(
                 pinned_model,
                 allow_description,
                 before_generate,
-                depth=depth_of(level),
+                depth=depth_of(stored),
                 review_scope=review_scope,
                 target_range=target_range,
             )

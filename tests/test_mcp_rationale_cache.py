@@ -816,3 +816,113 @@ def test_store_cached_round_trips_depth_context_and_coverage(
     assert (row.depth, row.context_shas, row.level) == (2, "abc1234", "high")
     assert row.rationale.coverage == coverage
     assert row.evidence_fingerprint == ring0_fingerprint(_LINES)
+
+
+# ---- plan 62 Part C: checks and verification in the cache (C3) ------------
+
+
+def _checked_rationale(verification: str = "verified") -> Rationale:
+    from whygraph.analyze import CardCoverage, ItemCheck
+
+    return replace(
+        _RATIONALE,
+        constraints=(replace(_SOURCED, check=ItemCheck("holds", "line 3 says so")),),
+        risks=(Item("r", "inferred", check=ItemCheck("contradicted", "gone")),),
+        coverage=CardCoverage(line_commits=2, verification=verification),
+    )
+
+
+def test_a_verified_high_card_round_trips_and_satisfies_a_medium_request(
+    whygraph_db_initialized: Path,
+) -> None:
+    card = _checked_rationale()
+    assert store_cached(_T, _LINES, card, "fake", None, depth=2) is not None
+
+    hit = _lookup(_T, _LINES, "medium").card
+
+    assert hit is not None and hit.depth == 2
+    assert hit.rationale.constraints == card.constraints
+    assert hit.rationale.risks == card.risks
+    assert hit.rationale.coverage == card.coverage
+    # A medium card stored later (no row seen) never replaces it.
+    assert _store(_T, _LINES, depth=1, purpose="medium") is None
+    assert lookup_exact(_T, "fake", None).rationale.coverage.verification == "verified"
+
+
+def test_a_failed_verification_row_is_medium_and_misses_a_high_request(
+    whygraph_db_initialized: Path,
+) -> None:
+    store_cached(_T, _LINES, _checked_rationale("failed"), "fake", None, depth=1)
+
+    assert _lookup(_T, _LINES, "medium").card is not None
+    miss = _lookup(_T, _LINES, "high")
+    assert miss.card is None
+    assert miss.seen.rationale.coverage.verification == "failed"
+
+
+def test_a_completion_may_store_its_own_row_shallower(
+    whygraph_db_initialized: Path,
+) -> None:
+    """A pending high row, completed with a failed pass: replaced at medium."""
+    store_cached(_T, _LINES, _checked_rationale("pending"), "fake", None, depth=2)
+    seen = lookup_exact(_T, "fake", None)
+
+    stored = store_cached(
+        _T,
+        _LINES,
+        _checked_rationale("failed"),
+        "fake",
+        None,
+        only_if=seen,
+        seen=seen,
+        depth=1,
+    )
+
+    assert stored is not None
+    row = lookup_exact(_T, "fake", None)
+    assert (row.depth, row.rationale.coverage.verification) == (1, "failed")
+
+
+@pytest.mark.parametrize(
+    "check", [{"verdict": "maybe", "reason": "r"}, "holds", {"reason": "r"}]
+)
+def test_decode_item_drops_a_malformed_check(check: object) -> None:
+    value = {**_SOURCED.as_dict(), "check": check}
+    assert decode_item(value) == _SOURCED
+
+
+def test_decode_item_reads_a_check_without_a_string_reason() -> None:
+    from whygraph.analyze import ItemCheck
+
+    item = decode_item({"text": "t", "check": {"verdict": "holds", "reason": 3}})
+    assert item.check == ItemCheck("holds", "")
+
+
+def test_decode_coverage_ignores_an_unknown_verification() -> None:
+    from whygraph.mcp.rationale_cache import decode_coverage
+
+    assert decode_coverage('{"verification": "verified"}').verification == "verified"
+    assert decode_coverage('{"verification": "made-up"}').verification is None
+    assert decode_coverage('{"line_commits": 1}').verification is None
+
+
+def test_import_keeps_checks_and_a_known_verification() -> None:
+    from whygraph.core.import_checks import ImportFormatError
+    from whygraph.mcp.rationale_cache import (
+        _import_coverage,
+        _import_list_element,
+    )
+
+    item = {**_SOURCED.as_dict(), "check": {"verdict": "holds", "reason": "ok\x00"}}
+    kept = _import_list_element("constraints", item)
+    assert kept["check"] == {"verdict": "holds", "reason": "ok�"}
+    malformed = {**_SOURCED.as_dict(), "check": {"verdict": "maybe"}}
+    assert "check" not in _import_list_element("constraints", malformed)
+
+    assert json.loads(_import_coverage({"verification": "skipped"})) == {
+        "trimmed": [],
+        "verification": "skipped",
+    }
+    assert "verification" not in json.loads(_import_coverage({}))
+    with pytest.raises(ImportFormatError):
+        _import_coverage({"verification": "made-up"})

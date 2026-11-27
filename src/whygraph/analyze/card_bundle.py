@@ -40,7 +40,7 @@ LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 """The depth levels, shallowest first (plan 62 R24)."""
 
 DEFAULT_LEVEL = "medium"
-"""The level every card uses until depth levels ship (plan 62 Part C)."""
+"""The level a card is built at when its caller passes none (plan 62 Part C)."""
 
 LINE_LEVEL_SOURCES = frozenset(
     {"blame", "pr-origin", "blame-walked", "predecessor-blame", "local"}
@@ -81,6 +81,58 @@ CONTEXT_COMMITS: Mapping[str, int] = {
 
 FEATURE_COMMITS_FROM = "high"
 """The shallowest level whose squash units show their feature-branch commits."""
+
+VERIFY_FROM = "high"
+"""The shallowest level whose card runs the verification pass (section 14.2)."""
+
+UNVERIFIED_LEVEL = "medium"
+"""The level a card stores at when its verification pass failed or was skipped.
+
+The deepest level such a draft fully satisfies, so a later request at
+:data:`VERIFY_FROM` or deeper regenerates it (plan 62 section 14.2).
+"""
+
+VERIFICATIONS = (
+    "verified",
+    "pending",
+    "failed",
+    "skipped",
+    "source_too_long",
+    "no_source",
+)
+"""The values of :attr:`CardCoverage.verification`.
+
+``verified``: the pass ran (or the draft had nothing to check);
+``pending``: a partial card, verified by its completion; ``failed`` (the
+call or its answer failed) and ``skipped`` (refused by the card budget or
+an exhausted usage budget): stored at :data:`UNVERIFIED_LEVEL`;
+``source_too_long`` and ``no_source``: the target's source is over the
+verifier's limit or could not be read, so the card keeps its level
+unchecked (regenerating could not change that).
+"""
+
+
+def verifies(level: str) -> bool:
+    """Whether a card at ``level`` runs the verification pass (``high`` and deeper).
+
+    Parameters
+    ----------
+    level : str
+        One of :data:`LEVELS`.
+
+    Returns
+    -------
+    bool
+        ``True`` from :data:`VERIFY_FROM`.
+
+    Raises
+    ------
+    ValueError
+        If ``level`` is not one of :data:`LEVELS`.
+    """
+    if level not in LEVELS:
+        raise ValueError(f"unknown depth level {level!r}; expected one of {LEVELS}")
+    return LEVELS.index(level) >= LEVELS.index(VERIFY_FROM)
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +521,9 @@ class CardCoverage:
     omitted_shas : frozenset[str]
         The bundle's Ring 1 SHAs the prompt did not render; never served,
         used to keep them out of a card's deferred SHAs.
+    verification : str or None
+        The verification pass's outcome (:data:`VERIFICATIONS`), set on a
+        card built at :data:`VERIFY_FROM` or deeper; ``None`` below that.
     """
 
     line_commits: int = 0
@@ -479,10 +534,14 @@ class CardCoverage:
     trimmed: tuple[str, ...] = ()
     descriptions_missing: int = 0
     omitted_shas: frozenset[str] = frozenset()
+    verification: str | None = None
 
     def as_dict(self) -> dict[str, object]:
-        """The card's ``coverage`` object (every field but ``omitted_shas``)."""
-        return {
+        """The card's ``coverage`` object (every field but ``omitted_shas``).
+
+        ``verification`` is present only when set.
+        """
+        out: dict[str, object] = {
             "full_prs_demoted": self.full_prs_demoted,
             "threads_lost": self.threads_lost,
             "trimmed": list(self.trimmed),
@@ -491,3 +550,6 @@ class CardCoverage:
             "context_commits": self.context_commits,
             "context_omitted": self.context_omitted,
         }
+        if self.verification is not None:
+            out["verification"] = self.verification
+        return out

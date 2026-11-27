@@ -2072,3 +2072,326 @@ def test_a_card_survives_an_edit_above_its_symbol(
     identity = get_config().cache_identity("rationale")
     assert lookup_exact(before, *identity) is None
     assert lookup_exact(after, *identity) is not None
+
+
+# ---- plan 62 Part C: level assembly and the verification pass (C3) --------
+
+
+_SOURCE = ("line one", "line two", "line three", "")
+
+
+def _scope(lines: tuple[str, ...] = _SOURCE):  # noqa: ANN202
+    from whygraph.mcp.evidence import ReviewScope
+
+    return {
+        "review_scope": ReviewScope(
+            paths=frozenset({"sample.py"}), current_lines=lines
+        ),
+        "target_range": (1, 3),
+    }
+
+
+def _verifying_generator(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail: bool = False,
+    empty: bool = False,
+    on_generate=None,  # noqa: ANN001
+) -> list[tuple]:
+    """Patch the generator with a draft writer plus a verifier; return the call log.
+
+    ``("generate", level)`` per draft, ``("verify", source, first_line)`` per
+    verification call; ``fail`` makes every verification raise, ``empty``
+    drafts have no constraints and no risks, ``on_generate`` runs after
+    each draft.
+    """
+    from whygraph.analyze import CardCoverage, ItemCheck
+    from whygraph.analyze.rationale_generator import with_verification
+
+    log: list[tuple] = []
+
+    class _Verifying(_FakeGenerator):
+        def generate(self, evidence, *, bundle=None, **kwargs):  # noqa: ANN001, ANN003, ANN201
+            log.append(("generate", bundle.level))
+            card = dataclasses.replace(
+                super().generate(evidence), coverage=CardCoverage(line_commits=1)
+            )
+            if on_generate is not None:
+                on_generate()
+            return (
+                dataclasses.replace(card, constraints=(), risks=()) if empty else card
+            )
+
+        def verify(self, rationale, source, *, first_line=1, subject=None):  # noqa: ANN001, ANN201
+            log.append(("verify", tuple(source), first_line))
+            if fail:
+                raise AnalyzeError("verifier down")
+            check = ItemCheck("holds", "line 1 shows it")
+            return with_verification(
+                dataclasses.replace(
+                    rationale,
+                    constraints=tuple(
+                        dataclasses.replace(i, check=check)
+                        for i in rationale.constraints
+                    ),
+                    risks=tuple(
+                        dataclasses.replace(i, check=check) for i in rationale.risks
+                    ),
+                ),
+                "verified",
+            )
+
+    monkeypatch.setattr("whygraph.mcp.rationale.RationaleGenerator", _Verifying)
+    return log
+
+
+def test_a_low_request_builds_and_stores_a_low_card(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _verifying_generator(monkeypatch)
+
+    card = _rc(_ring_evidence([2, 1]), level="low", **_scope())
+
+    assert log == [("generate", "low")]
+    assert _row().depth == 0
+    assert "verification" not in card["coverage"]
+    assert "check" not in card["constraints"][0]
+    assert card["evidence_count"]["commits"] == 1  # no context at low
+
+
+def test_an_unknown_level_raises_before_anything_is_read(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _verifying_generator(monkeypatch)
+
+    with pytest.raises(ValueError, match="unknown depth level"):
+        _rc(_ring_evidence(), level="huge")
+
+    assert log == [] and _row() is None
+
+
+def test_a_high_card_is_verified_and_satisfies_every_shallower_request(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _verifying_generator(monkeypatch)
+    evidence = _ring_evidence()
+
+    card = _rc(evidence, level="high", **_scope())
+
+    assert log == [("generate", "high"), ("verify", _SOURCE[:3], 1)]
+    assert card["coverage"]["verification"] == "verified"
+    assert card["constraints"][0]["check"] == {
+        "verdict": "holds",
+        "reason": "line 1 shows it",
+    }
+    assert card["risks"][0]["check"]["verdict"] == "holds"
+    row = _row()
+    assert row.depth == 2
+    assert row.rationale.coverage.verification == "verified"
+    assert row.rationale.constraints[0].check.verdict == "holds"
+    for level in ("low", "medium", "high"):
+        hit = _rc(evidence, level=level, **_scope())
+        assert hit["generated"] is False
+        assert hit["constraints"][0]["check"]["verdict"] == "holds"
+    assert len(log) == 2
+
+
+def test_a_medium_request_never_overwrites_a_high_row(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _verifying_generator(monkeypatch)
+    evidence = _ring_evidence()
+    _rc(evidence, level="high", **_scope())
+
+    _rc(evidence, level="medium", force_refresh=True, **_scope())
+
+    # Regenerated at the row's depth, so verified again.
+    assert [entry[0] for entry in log] == ["generate", "verify"] * 2
+    assert log[2] == ("generate", "high")
+    assert _row().depth == 2
+
+
+def test_a_failed_verification_stores_the_card_at_medium(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _verifying_generator(monkeypatch, fail=True)
+    evidence = _ring_evidence()
+
+    card = _rc(evidence, level="high", **_scope())
+
+    assert card["generated"] is True
+    assert card["coverage"]["verification"] == "failed"
+    assert "check" not in card["constraints"][0]  # kept, unchecked
+    row = _row()
+    assert (row.depth, row.rationale.coverage.verification) == (1, "failed")
+    # A medium request is served; a high one regenerates.
+    assert _rc(evidence, level="medium", **_scope())["generated"] is False
+    assert len(log) == 2
+    assert _rc(evidence, level="high", **_scope())["generated"] is True
+    assert [entry[0] for entry in log] == ["generate", "verify"] * 2
+
+
+@pytest.mark.parametrize("gate", ["before_generate", "usage_blocked"])
+def test_a_refused_verification_is_skipped_and_stored_at_medium(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch, gate: str
+) -> None:
+    charged: list[bool] = []
+    blocked: list[str | None] = [None]
+
+    def before_generate() -> None:
+        charged.append(True)
+        if gate == "before_generate" and len(charged) > 1:
+            raise RuntimeError("hourly card limit reached")
+
+    def spent() -> None:
+        if gate == "usage_blocked":
+            blocked[0] = "org"  # the draft spent the rest of the budget
+
+    log = _verifying_generator(monkeypatch, on_generate=spent)
+    monkeypatch.setattr("whygraph.mcp.rationale.usage_blocked", lambda: blocked[0])
+    card = _rc(
+        _ring_evidence(), level="high", before_generate=before_generate, **_scope()
+    )
+
+    assert [entry[0] for entry in log] == ["generate"]
+    assert card["coverage"]["verification"] == "skipped"
+    assert (_row().depth, _row().rationale.coverage.verification) == (1, "skipped")
+    assert charged == ([True, True] if gate == "before_generate" else [True])
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ({}, "no_source"),
+        ("long", "source_too_long"),
+    ],
+)
+def test_a_high_card_without_a_checkable_source_keeps_its_level(
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: object,
+    expected: str,
+) -> None:
+    from whygraph.analyze.rationale_generator import VERIFY_SOURCE_MAX_CHARS
+
+    log = _verifying_generator(monkeypatch)
+    inputs = (
+        _scope(("x" * VERIFY_SOURCE_MAX_CHARS, "y", "z")) if scope == "long" else {}
+    )
+
+    card = _rc(_ring_evidence(), level="high", **inputs)
+
+    assert log == [("generate", "high")]  # no verification call
+    assert card["coverage"]["verification"] == expected
+    assert (_row().depth, _row().rationale.coverage.verification) == (2, expected)
+    assert _rc(_ring_evidence(), level="high", **inputs)["generated"] is False
+
+
+def test_a_high_card_with_nothing_to_check_is_verified_without_a_call(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = _verifying_generator(monkeypatch, empty=True)
+    charged: list[bool] = []
+
+    card = _rc(
+        _ring_evidence(),
+        level="high",
+        before_generate=lambda: charged.append(True),
+        **_scope(),
+    )
+
+    assert [entry[0] for entry in log] == ["generate"]
+    assert card["coverage"]["verification"] == "verified"
+    assert charged == [True]  # the draft only
+    assert _row().depth == 2
+
+
+def _partial_high(monkeypatch: pytest.MonkeyPatch, fake: _Describes) -> list[str]:
+    """Store a partial ``high`` card (no descriptor), then let describes work."""
+    from whygraph.mcp.evidence import drain_describes
+
+    shas = _seed_undescribed(2)
+    fake.unavailable = True
+    card = _card(shas, level="high", **_scope())
+    assert card["partial"] is True
+    assert card["coverage"]["verification"] == "pending"
+    assert drain_describes(timeout=30)
+    fake.unavailable = False
+    monkeypatch.setattr("whygraph.mcp.rationale.CARD_RETRY_COOLDOWN_SEC", 0)
+    return shas
+
+
+def test_a_partial_high_card_is_pending_then_verified_by_its_completion(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    log = _verifying_generator(monkeypatch)
+    shas = _partial_high(monkeypatch, fake)
+    row = _row()
+    assert (row.depth, row.rationale.coverage.verification) == (2, "pending")
+    assert log == [("generate", "high")]  # a partial draft is not verified
+
+    hit = _card(shas, level="high", **_scope())
+    assert (hit["partial"], hit["completing"]) == (True, True)
+    assert drain_describes(timeout=30)
+
+    assert log == [("generate", "high")] * 2 + [("verify", _SOURCE[:3], 1)]
+    row = _row()
+    assert (row.depth, row.deferred_shas) == (2, "")
+    assert row.rationale.coverage.verification == "verified"
+    final = _card(shas, level="high", **_scope())
+    assert final["partial"] is False and final["generated"] is False
+    assert final["constraints"][0]["check"]["verdict"] == "holds"
+
+
+def test_a_completion_whose_verification_fails_stores_the_card_at_medium(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    log = _verifying_generator(monkeypatch, fail=True)
+    shas = _partial_high(monkeypatch, fake)
+
+    assert _card(shas, level="high", **_scope())["completing"] is True
+    assert drain_describes(timeout=30)
+
+    assert [entry[0] for entry in log] == ["generate", "generate", "verify"]
+    row = _row()
+    assert (row.depth, row.deferred_shas) == (1, "")
+    assert row.rationale.coverage.verification == "failed"
+    # Served to a medium request; a high one regenerates.
+    assert _card(shas, level="medium", **_scope())["generated"] is False
+    assert _card(shas, level="high", **_scope())["generated"] is True
+
+
+def test_a_pending_card_whose_commits_cannot_be_described_is_still_verified(
+    temp_git_repo: Path,
+    whygraph_db_initialized: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing to regenerate from: the stored draft gets its verification pass."""
+    from whygraph.mcp.evidence import drain_describes
+
+    monkeypatch.chdir(temp_git_repo)
+    fake = _fake_describes(monkeypatch)
+    log = _verifying_generator(monkeypatch)
+    shas = _partial_high(monkeypatch, fake)
+    fake.empty = set(shas)
+
+    assert _card(shas, level="high", **_scope())["completing"] is True
+    assert drain_describes(timeout=30)
+
+    assert log == [("generate", "high"), ("verify", _SOURCE[:3], 1)]
+    row = _row()
+    assert (row.depth, row.deferred_shas) == (2, "")
+    assert row.rationale.coverage.verification == "verified"
+    assert row.rationale.constraints[0].check.verdict == "holds"

@@ -70,9 +70,21 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
-from whygraph.analyze import CardCoverage, CommitEvidence, Item, ItemRef, Rationale
-from whygraph.analyze.card_bundle import DEFAULT_LEVEL, LEVELS, LINE_LEVEL_SOURCES
-from whygraph.analyze.rationale import ITEM_BASES, REF_KINDS
+from whygraph.analyze import (
+    CardCoverage,
+    CommitEvidence,
+    Item,
+    ItemCheck,
+    ItemRef,
+    Rationale,
+)
+from whygraph.analyze.card_bundle import (
+    DEFAULT_LEVEL,
+    LEVELS,
+    LINE_LEVEL_SOURCES,
+    VERIFICATIONS,
+)
+from whygraph.analyze.rationale import ITEM_BASES, REF_KINDS, VERDICTS
 from whygraph.core.import_checks import ImportFormatError, clean_text
 from whygraph.db import get_session
 from whygraph.db.models import RationaleCache
@@ -206,6 +218,14 @@ def _decode_ref(value: object) -> ItemRef | None:
     return ItemRef(kind, ref_id, url if isinstance(url, str) and url else None)
 
 
+def _decode_check(value: object) -> ItemCheck | None:
+    """One stored ``check``, or ``None`` when it is not a known verdict with a string reason."""
+    if not isinstance(value, dict) or value.get("verdict") not in VERDICTS:
+        return None
+    reason = value.get("reason")
+    return ItemCheck(value["verdict"], reason if isinstance(reason, str) else "")
+
+
 def decode_item(value: object) -> Item | None:
     """One stored constraint or risk as an :class:`~whygraph.analyze.Item`.
 
@@ -213,16 +233,17 @@ def decode_item(value: object) -> Item | None:
     ----------
     value : object
         A decoded JSON list element: an object ``{"text", "basis", "refs",
-        "quote"}`` (:meth:`Item.as_dict`), or a plain string from a row or
-        bundle written before items carried sources.
+        "quote", "check"}`` (:meth:`Item.as_dict`), or a plain string from a
+        row or bundle written before items carried sources.
 
     Returns
     -------
     Item or None
         A plain string becomes ``Item(text, "unknown", (), "")``. An object
-        keeps its basis when it is a known one (else ``"unknown"``) and the
-        refs that are well formed. ``None`` for anything else (an object
-        without a string ``text``, a number), which the caller skips.
+        keeps its basis when it is a known one (else ``"unknown"``), the
+        refs that are well formed and a well-formed ``check`` (a malformed
+        one is dropped). ``None`` for anything else (an object without a
+        string ``text``, a number), which the caller skips.
     """
     if isinstance(value, str):
         return Item(value, "unknown")
@@ -238,7 +259,13 @@ def decode_item(value: object) -> Item | None:
         if ref is not None
     )
     quote = value.get("quote")
-    return Item(value["text"], basis, refs, quote if isinstance(quote, str) else "")
+    return Item(
+        value["text"],
+        basis,
+        refs,
+        quote if isinstance(quote, str) else "",
+        _decode_check(value.get("check")),
+    )
 
 
 def decode_items(raw: str | None) -> tuple[Item, ...]:
@@ -286,7 +313,9 @@ def decode_coverage(raw: str | None) -> CardCoverage | None:
     -------
     CardCoverage or None
         ``None`` for a missing or malformed column. Unknown keys are ignored,
-        a missing or non-integer count reads as 0.
+        a missing or non-integer count reads as 0, and a ``verification``
+        that is not one of
+        :data:`~whygraph.analyze.card_bundle.VERIFICATIONS` reads as ``None``.
     """
     try:
         value = json.loads(raw) if raw else None
@@ -299,10 +328,12 @@ def decode_coverage(raw: str | None) -> CardCoverage | None:
         for name in _COVERAGE_COUNTS
     }
     trimmed = value.get("trimmed")
+    verification = value.get("verification")
     return CardCoverage(
         trimmed=tuple(t for t in trimmed if isinstance(t, str))
         if isinstance(trimmed, list)
         else (),
+        verification=verification if verification in VERIFICATIONS else None,
         **counts,
     )
 
@@ -1310,7 +1341,8 @@ def _import_coverage(value: Any) -> str | None:
     """A record's ``coverage`` as the column's JSON; absent is ``None``.
 
     Only the known keys are kept: the counts as integers in ``0..2**31``,
-    ``trimmed`` as at most eight short ``snake_case`` names.
+    ``trimmed`` as at most eight short ``snake_case`` names, ``verification``
+    as one of :data:`~whygraph.analyze.card_bundle.VERIFICATIONS`.
     """
     if value is None:
         return None
@@ -1328,6 +1360,13 @@ def _import_coverage(value: Any) -> str | None:
     ):
         raise ImportFormatError("coverage.trimmed", "must be a list of short names")
     kept["trimmed"] = list(trimmed)
+    verification = value.get("verification")
+    if verification is not None:
+        if verification not in VERIFICATIONS:
+            raise ImportFormatError(
+                "coverage.verification", f"must be one of {', '.join(VERIFICATIONS)}"
+            )
+        kept["verification"] = verification
     return json.dumps(kept)
 
 
@@ -1336,8 +1375,9 @@ def _import_list_element(name: str, element: Any) -> Any:
 
     ``tradeoffs`` stay strings. A constraint or risk is read by the one
     decoder (:func:`decode_item`): a plain string becomes basis ``unknown``,
-    an object keeps its basis and well-formed refs, anything else is a format
-    error. The stored value is :meth:`Item.as_dict`.
+    an object keeps its basis, well-formed refs and a well-formed ``check``
+    (its reason cleaned like the text), anything else is a format error.
+    The stored value is :meth:`Item.as_dict`.
     """
     if name == "tradeoffs":
         return clean_text(
@@ -1350,6 +1390,12 @@ def _import_list_element(name: str, element: Any) -> Any:
     quote = clean_text(
         item.quote, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
     )
+    check = item.check
+    if check is not None:
+        reason = clean_text(
+            check.reason, multiline=True, max_chars=_IMPORT_ITEM_MAX, field=name
+        )
+        check = None if reason is None else ItemCheck(check.verdict, reason)
     if text is None or quote is None:
         return None
     refs = tuple(
@@ -1357,7 +1403,7 @@ def _import_list_element(name: str, element: Any) -> Any:
         for ref in item.refs
         if len(ref.id) <= _IMPORT_REF_MAX and len(ref.url or "") <= _IMPORT_REF_MAX
     )
-    return Item(text, item.basis, refs, quote).as_dict()
+    return Item(text, item.basis, refs, quote, check).as_dict()
 
 
 def _check_rationale(

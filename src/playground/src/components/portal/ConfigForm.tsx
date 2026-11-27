@@ -4,6 +4,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PlusIcon, TriangleAlertIcon, Trash2Icon } from "lucide-react";
 import {
+  ApiError,
   portalApi,
   portalKey,
   projectApi,
@@ -61,8 +62,10 @@ import { Label } from "../ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
+import { DEFAULT_CEILING, DEFAULT_DEPTH, isLevel } from "../../lib/rationaleDepth";
 import { Field } from "./Field";
 import { ModelIdInput } from "./ModelIdInput";
+import { OrgCeilingField, RationaleDepthFields } from "./RationaleDepthSection";
 
 // The project config and the defaults differ in `import` / the key fields
 // (project) and `no_provider_key` (defaults).
@@ -78,11 +81,12 @@ type StoredConfig = Omit<ProjectConfigView, "import"> & {
  */
 export type ConfigScope = { kind: "project"; slug: string } | { kind: "global" };
 
-type SectionId = "models" | "github" | "hooks" | "scanning" | "plans" | "limits" | "areas";
+type SectionId = "models" | "depth" | "github" | "hooks" | "scanning" | "plans" | "limits" | "areas";
 
 /** Each section's form fields; a section's Save writes these and nothing else. */
 const SECTION_FIELDS: Record<SectionId, (keyof ConfigFormValues)[]> = {
   models: ["defaultModel", "analyze", "rationale", "chat", "openaiBaseUrl", "ollamaHost"],
+  depth: ["depth", "maxDepth", "orgMaxDepth"],
   github: ["forge"],
   hooks: ["hooks"],
   scanning: ["serveCodegraph"],
@@ -98,8 +102,9 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 /**
  * The sections `ConfigForm` renders for a scope, in order, for the page's
  * section list: Models and keys and GitHub everywhere a project is; Git hooks
- * for a local folder (local mode); on the defaults, the GitHub token (local
- * mode) and the org Agent limits (production, owners).
+ * for a local folder (local mode); Rationale depth after Models and keys; on the
+ * defaults, the GitHub token (local mode), the org Agent limits and the org's
+ * depth ceiling (production, owners).
  */
 export function configSections(
   scope: ConfigScope["kind"],
@@ -109,6 +114,7 @@ export function configSections(
   if (scope === "project") {
     return [
       models,
+      { id: "depth", label: "Rationale depth" },
       { id: "github", label: "GitHub" },
       ...(!production && source === "local" ? [{ id: "hooks", label: "Git hooks" }] : []),
       ...(!production && source === "local" ? [{ id: "scanning", label: "Scanning" }] : []),
@@ -120,6 +126,7 @@ export function configSections(
     models,
     ...(!production ? [{ id: "github", label: "GitHub token" }] : []),
     ...(production && configurer ? [{ id: "limits", label: "Agent limits" }] : []),
+    ...(production && configurer ? [{ id: "depth", label: "Rationale depth" }] : []),
   ];
 }
 
@@ -498,6 +505,12 @@ export function ConfigForm({
   const errors = formState.errors;
   const showHooks = isProject && !production && project.data?.source === "local";
   const showLimits = !isProject && production && !readOnly;
+  const showOrgCeiling = !isProject && production && !readOnly;
+  const orgRationale = (orgLayer?.rationale ?? {}) as Record<string, unknown>;
+  const inheritedDepth = isLevel(orgRationale.depth) || orgRationale.depth === DEFAULT_DEPTH ? String(orgRationale.depth) : DEFAULT_DEPTH;
+  const inheritedMax = isLevel(orgRationale.max_depth) ? orgRationale.max_depth : DEFAULT_CEILING;
+  // Local mode has no organization ceiling; in production the org layer's, High until set.
+  const orgCeiling = isProject && production ? (isLevel(orgRationale.org_max_depth) ? orgRationale.org_max_depth : DEFAULT_CEILING) : null;
   const missingKey = project.data?.missing_key ?? null;
   const importReport = isProject ? (view.import ?? null) : null;
   const lastUsed = view.key_last_used;
@@ -512,8 +525,25 @@ export function ConfigForm({
     const fields = SECTION_FIELDS[section];
     if (!(await trigger(fields as FieldPath<ConfigFormValues>[]))) return false;
     const merged = { ...base, ...pick(getValues(), fields) } as ConfigFormValues;
-    const next = valuesToLayer(layer, merged, { scan: isProject, limits: section === "limits", areas: section === "areas", plans: section === "plans" });
-    const saved = await put.mutateAsync({ config: next });
+    const next = valuesToLayer(layer, merged, {
+      scan: isProject,
+      limits: section === "limits",
+      areas: section === "areas",
+      plans: section === "plans",
+      depth: section === "depth" && isProject,
+      ceiling: section === "depth" && !isProject,
+    });
+    let saved;
+    try {
+      saved = await put.mutateAsync({ config: next });
+    } catch (error) {
+      // The org's ceiling refused the project's: a field error beside the select, not a banner.
+      if (section === "depth" && error instanceof ApiError && error.code === "depth_above_ceiling") {
+        form.setError("maxDepth", { message: errorMessage(error) });
+        return false;
+      }
+      throw error;
+    }
     // The answer is the stored layer: this section is clean even when the
     // refetch brings back an identical payload (no new `stored.data`).
     reseed((saved as StoredConfig).config ?? next, section);
@@ -764,6 +794,30 @@ export function ConfigForm({
 
       {isProject && (
         <SettingsSection
+          id="depth"
+          title="Rationale depth"
+          description="How deep a rationale card digs, and so what it costs. Scans are not affected."
+        >
+          <SectionForm
+            name="Rationale depth"
+            dirty={dirty("depth")}
+            readOnly={readOnly}
+            onSave={() => saveSection("depth")}
+            onDiscard={() => discard("depth")}
+          >
+            <RationaleDepthFields
+              form={form}
+              readOnly={readOnly}
+              inheritedDepth={inheritedDepth}
+              inheritedMax={inheritedMax}
+              orgCeiling={orgCeiling}
+            />
+          </SectionForm>
+        </SettingsSection>
+      )}
+
+      {isProject && (
+        <SettingsSection
           id="github"
           title="GitHub"
           description={
@@ -1000,6 +1054,24 @@ export function ConfigForm({
                 />
               )}
             </Field>
+          </SectionForm>
+        </SettingsSection>
+      )}
+
+      {showOrgCeiling && (
+        <SettingsSection
+          id="depth"
+          title="Rationale depth"
+          description="The deepest level any project of this organization may build a rationale card at."
+        >
+          <SectionForm
+            name="Rationale depth"
+            dirty={dirty("depth")}
+            readOnly={readOnly}
+            onSave={() => saveSection("depth")}
+            onDiscard={() => discard("depth")}
+          >
+            <OrgCeilingField form={form} readOnly={readOnly} />
           </SectionForm>
         </SettingsSection>
       )}

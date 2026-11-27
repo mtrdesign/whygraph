@@ -1030,12 +1030,16 @@ describe("linked project pages", () => {
     const nav = screen.getByRole("navigation", { name: "Settings sections" });
     expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
       "General",
+      "Rationale depth",
       "Agents",
       "Git hooks",
       "Scanning",
       "Danger zone",
     ]);
     expect(screen.queryByTestId("key-anthropic")).toBeNull();
+    // The platform's depth and ceiling are read-only rows, never selects.
+    expect(screen.getByTestId("linked-depth")).toHaveTextContent("Managed on the platform");
+    expect(screen.queryByLabelText("Depth")).toBeNull();
     await user.click(await screen.findByRole("checkbox", { name: "post-commit" }));
     await user.click(within(screen.getByRole("region", { name: "Git hooks" })).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mutations().some((c) => c.method === "PUT")).toBe(true));

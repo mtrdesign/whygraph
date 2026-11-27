@@ -103,7 +103,60 @@ export interface RationaleItem {
   basis: "quoted" | "cited" | "inferred" | "unknown";
   refs: RationaleItemRef[];
   quote?: string;
+  /** The verification pass's verdict (a `high` card). */
+  check?: { verdict: "holds" | "contradicted" | "cannot_tell"; reason: string };
 }
+
+/** What a card was built from (`RationaleCard.coverage`); every field is absent on an older card. */
+export interface RationaleCoverage {
+  line_commits?: number;
+  context_commits?: number;
+  context_omitted?: number;
+  descriptions_missing?: number;
+  full_prs_demoted?: number;
+  threads_lost?: number;
+  verification?: "verified" | "failed" | "skipped" | "pending";
+  source?: "included" | "omitted" | "unavailable";
+}
+
+/** A price range in dollars (p50 to p90 of the sampled targets). */
+export interface CostRange {
+  low: number;
+  high: number;
+}
+
+/** One level of the depth estimate; tokens and prices are `null` when hidden or unpriced. */
+export interface DepthProfileLevel {
+  calls: number;
+  input_tokens: { p50: number; p90: number } | null;
+  output_tokens: number | null;
+  cost: CostRange | null;
+  first_card: CostRange | null;
+}
+
+/** `GET /api/projects/<slug>/rationale/depth-profile`. */
+export type DepthProfile =
+  | { status: "computing" }
+  | { status: "no_index" }
+  | { status: "no_history" }
+  | {
+      status: "ready";
+      head: string | null;
+      computed_at: string;
+      sampled: number;
+      model: { provider: string; model: string | null; source: "pinned" | "served" | null; price_known: boolean };
+      prices_as_of: string | null;
+      output_source: "ledger" | "default";
+      cost_hidden: boolean;
+      levels: Record<"low" | "medium" | "high", DepthProfileLevel>;
+      descriptions: { undescribed_share: number; per_commit_usd: number | null };
+      cheaper_descriptions: {
+        provider: string;
+        model: string | null;
+        per_commit_usd: number;
+        current_per_commit_usd: number;
+      } | null;
+    };
 
 export interface RationaleCard {
   status: "cached" | "not_generated" | "no_evidence";
@@ -123,6 +176,13 @@ export interface RationaleCard {
   completing?: boolean | null;
   /** Plans linked to the symbol (symbol scope); the key is absent when there are none. */
   plans?: PlanRef[];
+  /** The level the card was built at; `reason` is empty on a read (it is not stored). */
+  depth?: { requested: string; resolved: string; reason: string };
+  /** What the next level would add for this target; `null` or absent at the ceiling. */
+  deeper?: { level: string; adds: string } | null;
+  coverage?: RationaleCoverage;
+  /** Commits to the file newer than the card's context are not reflected. */
+  context_stale?: boolean;
 }
 
 export const PLAN_STATUS_VALUES = ["shipped", "in_flight", "not_implemented"] as const;
@@ -589,6 +649,9 @@ export interface ProjectLink {
   status: LinkStatus;
   status_reason: string | null;
   last_platform_head: string | null;
+  // The platform's `[rationale]` depth and effective ceiling as its last status answer said; `null` until one did.
+  rationale_depth?: string | null;
+  rationale_max_depth?: string | null;
   // The caller's role on the platform project as last reported; `null` until seen.
   // A viewer has no chat there.
   project_role: ProjectRole | null;
@@ -2886,8 +2949,12 @@ export function projectApi(slug: string) {
       get<NodeDetail>(`${base}/node?qualified_name=${q(qualified_name)}`),
     rationaleRead: (qualified_name: string) =>
       get<RationaleCard>(`${base}/node/rationale?qualified_name=${q(qualified_name)}`),
-    rationaleGenerate: (qualified_name: string) =>
-      send<RationaleCard>("POST", `${base}/node/rationale?qualified_name=${q(qualified_name)}`),
+    rationaleGenerate: (qualified_name: string, depth?: string) =>
+      send<RationaleCard>(
+        "POST",
+        `${base}/node/rationale?qualified_name=${q(qualified_name)}${depth ? `&depth=${encodeURIComponent(depth)}` : ""}`,
+      ),
+    depthProfile: () => get<DepthProfile>(`${base}/rationale/depth-profile`),
     evidence: (qualified_name: string, limit = 20) =>
       get<EvidenceResponse>(
         `${base}/node/evidence?qualified_name=${q(qualified_name)}&limit=${limit}`,

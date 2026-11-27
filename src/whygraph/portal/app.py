@@ -152,6 +152,7 @@ from .models import ScanRun, Setting, User
 from .org_routes import org_router
 from .orgs import ensure_builtin_org
 from .onboarding_routes import onboarding_router, welcome_router
+from .depth_profile_routes import depth_profile_router
 from .overview_routes import overview_router
 from .notes_routes import notes_read_router, notes_write_router
 from .plans_routes import plans_read_router
@@ -403,6 +404,21 @@ def create_portal_app(
                 project_db_access(
                     Action.PROJECT_READ,
                     guard=linked_guard("Plans"),
+                    usage_source="explorer",
+                )
+            )
+        ],
+    )
+    # The rationale depth estimate (plan 62 section 14.5a): a read, no model
+    # call; a linked project's cards are the platform's.
+    app.include_router(
+        depth_profile_router,
+        prefix="/api/projects/{slug}/rationale",
+        dependencies=[
+            Depends(
+                project_db_access(
+                    Action.PROJECT_READ,
+                    guard=linked_guard("The depth estimate"),
                     usage_source="explorer",
                 )
             )

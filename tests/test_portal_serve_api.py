@@ -430,6 +430,10 @@ def test_rationale_get_returns_cached_card(serve_client, monkeypatch) -> None:
     assert body["purpose"] == "the purpose"
     assert body["constraints"] == [{"text": "c1", "basis": "inferred", "refs": []}]
     assert (body["partial"], body["describing"], body["completing"]) == (True, 2, False)
+    # The row's level and what the next one adds, with no resolver and no reason.
+    assert body["depth"] == {"requested": "auto", "resolved": "medium", "reason": ""}
+    assert body["deeper"]["level"] == "high"
+    assert "each constraint and risk" in body["deeper"]["adds"]
     gen.assert_not_called()  # cache read is still LLM-free
 
 

@@ -782,6 +782,15 @@ def status_of(outcome: Any) -> tuple[str, str | None]:
 # ---------------------------------------------------------------------------
 
 
+_platform_depth: dict[int, tuple[str | None, str | None]] = {}
+"""``projects.id`` -> the platform's ``(rationale_depth, rationale_max_depth)`` last seen.
+
+In memory only (the settings page shows them read-only; a restart shows
+"not known yet" until the next status answer): nothing about a platform's
+cards is stored here beyond what the link row holds.
+"""
+
+
 def link_block(row: PlatformLink) -> dict[str, Any]:
     """The ``link`` block of a linked project's summary (plan section 4.11).
 
@@ -797,12 +806,16 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         ``platform_origin``, ``org``, ``remote_slug``, ``status``,
         ``status_reason``, ``last_platform_head``, ``project_role`` (the
         caller's role on the platform project as last reported, or
-        ``None``; a ``viewer`` has no chat there) and the three deep links
+        ``None``; a ``viewer`` has no chat there), ``rationale_depth`` and
+        ``rationale_max_depth`` (the platform's ``[rationale]`` depth and
+        effective ceiling as its last status answer said, ``None`` until
+        one did or from an older platform) and the three deep links
         into the platform's SPA: ``manage_url`` (the project's home),
         ``explorer_url`` and ``chat_url``. All three live on the org host,
         because that is where the project is.
     """
     home = f"{row.api_origin}/p/{row.remote_slug}"
+    depth, max_depth = _platform_depth.get(row.project_id, (None, None))
     return {
         "platform_origin": row.platform_origin,
         "org": row.org_slug,
@@ -811,6 +824,8 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         "status_reason": row.status_reason,
         "last_platform_head": row.last_platform_head,
         "project_role": row.remote_project_role,
+        "rationale_depth": depth,
+        "rationale_max_depth": max_depth,
         "explorer_url": f"{home}/explorer",
         "chat_url": f"{home}/chat",
         "manage_url": home,
@@ -882,6 +897,10 @@ def save_status(
             row.status_at = _now()
             changed = True
         if project is not None:
+            _platform_depth[project_id] = (
+                project.rationale_depth,
+                project.rationale_max_depth,
+            )
             if project.name and row.remote_name != project.name:
                 row.remote_name = project.name
                 local = session.get(Project, project_id)

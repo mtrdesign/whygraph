@@ -11,6 +11,7 @@ import {
   type RationaleItemRef,
 } from "../api";
 import { providerLabel } from "../lib/labels";
+import { depthShortName, formatCostRange } from "../lib/rationaleDepth";
 import { formatDateTime } from "../lib/format";
 import { plural } from "../lib/plural";
 import { useSlug } from "../lib/project";
@@ -18,6 +19,7 @@ import { budgetNoticeText } from "../lib/budgetBanner";
 import { useLlmBlock, useProjectCan } from "../lib/permissions";
 import { useProjectApi, useProjectKey, useProjectQuery } from "../lib/project";
 import { Badge } from "./ui/badge";
+import { DepthBadge } from "./portal/DepthInfo";
 import { Button } from "./ui/button";
 import { ErrorState } from "./state/ErrorState";
 import { Loading } from "./Loading";
@@ -67,6 +69,19 @@ function ItemRow({ item }: { item: RationaleItem }) {
           title={item.basis === "quoted" && item.quote ? item.quote : undefined}
         >
           {item.basis}
+        </span>
+      )}
+      {item.check && item.check.verdict !== "holds" && (
+        <span
+          className={
+            item.check.verdict === "contradicted"
+              ? "ml-2 text-xs text-destructive"
+              : "ml-2 text-xs text-muted-foreground"
+          }
+          data-testid="rationale-check"
+          title={item.check.reason || undefined}
+        >
+          {item.check.verdict === "contradicted" ? "Contradicted by today's code" : "Could not be checked"}
         </span>
       )}
       {refs.length > 0 && (
@@ -151,9 +166,53 @@ function PartialNote({
   );
 }
 
-function Card({ card, note }: { card: RationaleCard; note?: ReactNode }) {
+const VERIFICATION_NOTE = {
+  failed: "The verification pass failed, so the claims are not checked against today's code.",
+  skipped: "The verification pass was skipped, so the claims are not checked against today's code.",
+  pending: "The claims will be checked against today's code once the missing descriptions are in.",
+} as const;
+
+/** What this card was built from: the level and why, what it read, and what it could not check. */
+function BuiltNotes({ card, deeper }: { card: RationaleCard; deeper?: ReactNode }) {
+  const level = card.depth?.resolved;
+  const c = card.coverage;
+  const context = (c?.context_commits ?? 0) + (c?.context_omitted ?? 0);
+  const lines: ReactNode[] = [];
+  if (level) lines.push(card.depth?.reason || `Built at ${depthShortName(level)}.`);
+  if (c?.line_commits !== undefined)
+    lines.push(
+      `Read ${plural(c.line_commits, "commit")} that wrote these lines${
+        context > 0 ? `, ${c.context_commits ?? 0} of ${context} other commits to the file` : ""
+      }.`,
+    );
+  if (c?.verification && c.verification in VERIFICATION_NOTE)
+    lines.push(VERIFICATION_NOTE[c.verification as keyof typeof VERIFICATION_NOTE]);
+  if (card.context_stale) lines.push("Newer commits to this file are not reflected.");
+  if ((c?.descriptions_missing ?? 0) > 0 && card.partial !== true)
+    lines.push(`${plural(c!.descriptions_missing!, "commit")} had no description when this card was built.`);
+  if (card.deeper)
+    lines.push(
+      `A ${depthShortName(card.deeper.level)} card ${card.deeper.adds.charAt(0).toLowerCase()}${card.deeper.adds.slice(1)}`,
+    );
+  if (lines.length === 0 && !deeper) return null;
+  return (
+    <div className="mt-4 flex flex-col gap-1 text-[13px] text-muted-foreground" data-testid="rationale-built">
+      {lines.map((line, i) => (
+        <p key={i}>{line}</p>
+      ))}
+      {deeper}
+    </div>
+  );
+}
+
+function Card({ card, note, deeper }: { card: RationaleCard; note?: ReactNode; deeper?: ReactNode }) {
   return (
     <div className="p-4">
+      {card.depth && (
+        <div className="mb-3 flex justify-end">
+          <DepthBadge level={card.depth.resolved} />
+        </div>
+      )}
       {note}
       <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
         Purpose
@@ -168,6 +227,8 @@ function Card({ card, note }: { card: RationaleCard; note?: ReactNode }) {
       <ItemList title="Constraints" items={card.constraints} />
       <BulletList title="Tradeoffs" items={card.tradeoffs} />
       <ItemList title="Risks" items={card.risks} />
+
+      <BuiltNotes card={card} deeper={deeper} />
 
       <div className="mt-4 border-t border-border pt-2 text-[11px] text-muted-foreground">
         {card.provider}
@@ -270,6 +331,23 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
     onSuccess: (card) => queryClient.setQueryData(queryKey, card),
   });
 
+  // "Generate deeper" (R41): the next level through the same POST, gated like Generate, never above the ceiling.
+  const deeperLevel = data?.status === "cached" ? (data.deeper?.level ?? null) : null;
+  const canDeepen = deeperLevel !== null && canGenerate && !budgetBlocked && !missingKey;
+  const deepen = useMutation({
+    mutationFn: (level: string) => api.rationaleGenerate(qualifiedName, level),
+    onSuccess: (card) => queryClient.setQueryData(queryKey, card),
+  });
+  const profile = useProjectQuery(["depth-profile"], (api) => api.depthProfile(), {
+    enabled: canDeepen,
+    staleTime: 60_000,
+    refetchInterval: (query) => (query.state.data?.status === "computing" ? 1500 : false),
+  });
+  const deeperPrice =
+    deeperLevel && profile.data?.status === "ready" && !profile.data.cost_hidden
+      ? formatCostRange(profile.data.levels[deeperLevel as "medium" | "high"]?.cost)
+      : null;
+
   if (isLoading) return <div className="p-4"><Loading label="Checking cache…" /></div>;
   if (isError)
     return (
@@ -286,6 +364,25 @@ export function RationaleTab({ qualifiedName }: { qualifiedName: string }) {
       <>
       <Card
         card={data}
+        deeper={
+          canDeepen && deeperLevel ? (
+            <>
+              <Button
+                className="mt-2 self-start"
+                size="sm"
+                variant="outline"
+                disabled={deepen.isPending}
+                data-testid="generate-deeper"
+                onClick={() => deepen.mutate(deeperLevel)}
+              >
+                {deepen.isPending
+                  ? "Generating…"
+                  : `Generate deeper - ${depthShortName(deeperLevel)}${deeperPrice ? ` · about ${deeperPrice}` : ""}`}
+              </Button>
+              {deepen.isError && <ErrorState className="mt-1" size="inline" context="chat" error={deepen.error} />}
+            </>
+          ) : undefined
+        }
         note={
           data.partial === true ? (
             <PartialNote

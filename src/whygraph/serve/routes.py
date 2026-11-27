@@ -35,7 +35,13 @@ from whygraph.mcp.rationale import (
 )
 from whygraph.mcp.plans import card_plan_shas, guarded_plans_for
 from whygraph.mcp.rationale_cache import lookup_cached
-from whygraph.mcp.rationale_depth import OfferedDepth
+from whygraph.mcp.rationale_depth import (
+    OfferedDepth,
+    DepthResolution,
+    deeper,
+    depth_block,
+    effective_ceiling,
+)
 from whygraph.mcp.resources import _commit_resource, _issue_resource, _pr_resource
 from whygraph.mcp.targets import repo_root, resolve_target, target_dict
 from whygraph.services.codegraph import CodeGraph, CodeGraphError
@@ -201,7 +207,9 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     ``{status: "not_generated"}`` otherwise — the signal the UI uses to show a
     "Generate" button. Any card of the target's lines is a hit, whatever its
     depth (``min_depth="low"``, plan 62 section 13.5); its counts are over
-    the bundle at the card's own level.
+    the bundle at the card's own level. A hit also carries ``depth`` (the
+    row's level, no ``reason``: it is not stored) and ``deeper`` (what the
+    next level would add within the ceiling, ``None`` at it).
     """
     target = resolve_target(
         path=None, line_start=None, line_end=None, qualified_name=qualified_name
@@ -214,6 +222,10 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
     cached = lookup_cached(target, evidence, provider, pinned_model, min_depth="low")
     if cached is None:
         return {"status": "not_generated", "target": target_dict(target), **plans}
+    rationale = get_config().rationale
+    # No resolver and no reason: the row's stored level, and what the next
+    # level would add for this evidence within the effective ceiling.
+    resolution = DepthResolution(rationale.depth, cached.level, "")
     return {
         "status": "cached",
         **_format_response(
@@ -224,6 +236,8 @@ def rationale_read(qualified_name: str = Query(...)) -> dict:
             context_stale=cached.context_stale,
             **_partial_fields(cached),
         ),
+        "depth": depth_block(resolution, cached.level),
+        "deeper": deeper(cached.level, effective_ceiling(rationale), evidence),
         **plans,
     }
 

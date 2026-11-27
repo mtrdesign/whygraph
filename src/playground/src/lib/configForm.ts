@@ -88,6 +88,12 @@ export interface ConfigFormValues {
   plansDir: string;
   /** `[plans].dir = ""` is stored: plan indexing is off. */
   plansOff: boolean;
+  /** `[rationale].depth` of this layer; "" = not set here (the project inherits it). */
+  depth: string;
+  /** `[rationale].max_depth` of this layer; "" = not set here. */
+  maxDepth: string;
+  /** `[rationale].org_max_depth`, the org defaults only; "" = the default (High). */
+  orgMaxDepth: string;
 }
 
 /**
@@ -163,6 +169,9 @@ export function layerToValues(layer: ConfigDict): ConfigFormValues {
     agentDescriptions: limitText(obj(layer.analyze).agent_descriptions_per_hour),
     areas: areasFromLayer(layer),
     ...plansFromLayer(layer),
+    depth: str(obj(layer.rationale).depth),
+    maxDepth: str(obj(layer.rationale).max_depth),
+    orgMaxDepth: str(obj(layer.rationale).org_max_depth),
   };
 }
 
@@ -197,7 +206,7 @@ function prune(root: Record<string, unknown>, key: string) {
 export function valuesToLayer(
   base: ConfigDict,
   v: ConfigFormValues,
-  opts: { scan: boolean; limits?: boolean; areas?: boolean; plans?: boolean },
+  opts: { scan: boolean; limits?: boolean; areas?: boolean; plans?: boolean; depth?: boolean; ceiling?: boolean },
 ): ConfigDict {
   const layer = structuredClone(base) as Record<string, Record<string, unknown>>;
 
@@ -253,6 +262,17 @@ export function valuesToLayer(
       else scan.serve_codegraph = false;
     }
     prune(layer, "scan");
+  }
+  // Only the Rationale depth section's save writes `depth` / `max_depth` (a project), and only the
+  // org ceiling's writes `org_max_depth` (the org defaults); the other keys of `[rationale]` stay.
+  if (opts.depth || opts.ceiling) {
+    const table = (layer.rationale = obj(layer.rationale));
+    if (opts.depth) {
+      setOrDrop(table, "depth", v.depth);
+      setOrDrop(table, "max_depth", v.maxDepth);
+    }
+    if (opts.ceiling) setOrDrop(table, "org_max_depth", v.orgMaxDepth);
+    prune(layer, "rationale");
   }
   // Only the Plans section's save writes `[plans]`: off stores "" (an empty input alone drops the key = default on).
   if (opts.plans) {
@@ -364,6 +384,9 @@ export const configFormSchema = z.object({
   agentDescriptions: agentLimit,
   plansDir: z.string().refine((s) => !/[\n\r]/.test(s), "One folder only"),
   plansOff: z.boolean(),
+  depth: z.string(),
+  maxDepth: z.string(),
+  orgMaxDepth: z.string(),
   areas: z.array(areaRow).refine(
     (rows) => new Set(rows.map((r) => r.name.trim())).size === rows.length,
     "Area names must be unique",

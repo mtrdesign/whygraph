@@ -1534,6 +1534,144 @@ class RationaleGenerator:
             caps=_PrRenderCaps.from_config(config.rationale),
         )
 
+    def _prepare(
+        self,
+        evidence: Sequence[CommitEvidence],
+        *,
+        symbol_context: SymbolContext | None = None,
+        paths: frozenset[str] | None = None,
+        file_lines: Sequence[str] | None = None,
+        target_range: tuple[int, int] | None = None,
+        bundle: CardBundle | None = None,
+        missing_descriptions: Mapping[str, str] | None = None,
+        level: str = DEFAULT_LEVEL,
+        target_path: str | None = None,
+    ) -> tuple[str, dict[tuple[str, str], _Source], CardCoverage]:
+        """The draft prompt's task text, its quote sources and its coverage.
+
+        Everything :meth:`generate` does before the model call, so the
+        depth estimate (plan 62 section 14.5a) measures the very prompt a
+        card sends without making a call.
+        """
+        if not evidence:
+            raise AnalyzeError("empty evidence: nothing to explain")
+
+        caps = self._caps
+        if bundle is None:
+            bundle = card_bundle(evidence, level, pr_chars=_full_pr_chars(caps))
+        reasons = dict(missing_descriptions or {})
+        graph = (
+            None if symbol_context is None else _format_symbol_context(symbol_context)
+        )
+        source_block, source_coverage = None, None
+        if self._target_source:
+            if target_path is None and symbol_context is not None:
+                target_path = symbol_context.target.file_path
+            source_block, source_coverage = _target_source(
+                file_lines, target_range, target_path
+            )
+        # The graph section, then the target's source, ahead of the history.
+        preamble = "\n\n".join(p for p in (graph, source_block) if p is not None)
+        threads_possible = (
+            paths is not None
+            and file_lines is not None
+            and target_range is not None
+            and caps.review_threads_max_chars > 0
+        )
+        reserve = caps.review_threads_max_chars if threads_possible else 0
+
+        def task_for(layout: _Layout, threads: dict[int, _RenderedThreads]) -> str:
+            text = _render(layout, caps, threads)
+            if preamble:
+                text = f"{preamble}\n\n{text}"
+            return render(
+                self._rationale_prompt.task, text, placeholder=RATIONALE_PLACEHOLDER
+            )
+
+        layout, trimmed = _fit_prompt(
+            bundle,
+            caps,
+            reasons,
+            size=lambda lay: (
+                len(self._rationale_prompt.system) + len(task_for(lay, {})) + reserve
+            ),
+        )
+        # One thread selection, after both stoppers, for both the prompt and
+        # the quote sources.
+        threads = _select_threads(
+            layout.full_prs, bundle.ring0_all, paths, file_lines, target_range, caps
+        )
+        task = task_for(layout, threads)
+        # The text of each piece of evidence, by id, to judge the items' quotes.
+        sources = _evidence_sources(layout, caps, threads)
+        rendered_context = {item.commit.sha for item in layout.context}
+        coverage = CardCoverage(
+            line_commits=len(bundle.ring0),
+            context_commits=len(layout.context),
+            context_omitted=bundle.context_total - len(layout.context),
+            full_prs_demoted=len(layout.demoted),
+            threads_lost=_threads_lost(
+                layout.demoted, bundle.ring0_all, paths, file_lines, target_range, caps
+            ),
+            trimmed=trimmed,
+            descriptions_missing=sum(
+                1 for item in layout.rendered if not item.commit.llm_description
+            ),
+            omitted_shas=frozenset(
+                item.commit.sha
+                for item in bundle.ring1
+                if item.commit.sha not in rendered_context
+            ),
+            source=source_coverage,
+        )
+        return task, sources, coverage
+
+    def prompt_chars(
+        self,
+        evidence: Sequence[CommitEvidence],
+        *,
+        symbol_context: SymbolContext | None = None,
+        paths: frozenset[str] | None = None,
+        file_lines: Sequence[str] | None = None,
+        target_range: tuple[int, int] | None = None,
+        bundle: CardBundle | None = None,
+        missing_descriptions: Mapping[str, str] | None = None,
+        level: str = DEFAULT_LEVEL,
+        target_path: str | None = None,
+    ) -> int:
+        """The characters of the draft prompt (system and task) for ``evidence``.
+
+        Builds the prompt exactly as :meth:`generate` would and makes **no**
+        model call; used by the depth estimate (plan 62 section 14.5a).
+
+        Parameters
+        ----------
+        evidence, symbol_context, paths, file_lines, target_range, bundle, missing_descriptions, level, target_path
+            As for :meth:`generate`.
+
+        Returns
+        -------
+        int
+            ``len(system) + len(task)``.
+
+        Raises
+        ------
+        AnalyzeError
+            If ``evidence`` is empty.
+        """
+        task, _, _ = self._prepare(
+            evidence,
+            symbol_context=symbol_context,
+            paths=paths,
+            file_lines=file_lines,
+            target_range=target_range,
+            bundle=bundle,
+            missing_descriptions=missing_descriptions,
+            level=level,
+            target_path=target_path,
+        )
+        return len(self._rationale_prompt.system) + len(task)
+
     def generate(
         self,
         evidence: Sequence[CommitEvidence],
@@ -1628,76 +1766,16 @@ class RationaleGenerator:
             If the model's output cannot be parsed as the expected
             rationale JSON. Subclasses :class:`AnalyzeError`.
         """
-        if not evidence:
-            raise AnalyzeError("empty evidence: nothing to explain")
-
-        caps = self._caps
-        if bundle is None:
-            bundle = card_bundle(evidence, level, pr_chars=_full_pr_chars(caps))
-        reasons = dict(missing_descriptions or {})
-        graph = (
-            None if symbol_context is None else _format_symbol_context(symbol_context)
-        )
-        source_block, source_coverage = None, None
-        if self._target_source:
-            if target_path is None and symbol_context is not None:
-                target_path = symbol_context.target.file_path
-            source_block, source_coverage = _target_source(
-                file_lines, target_range, target_path
-            )
-        # The graph section, then the target's source, ahead of the history.
-        preamble = "\n\n".join(p for p in (graph, source_block) if p is not None)
-        threads_possible = (
-            paths is not None
-            and file_lines is not None
-            and target_range is not None
-            and caps.review_threads_max_chars > 0
-        )
-        reserve = caps.review_threads_max_chars if threads_possible else 0
-
-        def task_for(layout: _Layout, threads: dict[int, _RenderedThreads]) -> str:
-            text = _render(layout, caps, threads)
-            if preamble:
-                text = f"{preamble}\n\n{text}"
-            return render(
-                self._rationale_prompt.task, text, placeholder=RATIONALE_PLACEHOLDER
-            )
-
-        layout, trimmed = _fit_prompt(
-            bundle,
-            caps,
-            reasons,
-            size=lambda lay: (
-                len(self._rationale_prompt.system) + len(task_for(lay, {})) + reserve
-            ),
-        )
-        # One thread selection, after both stoppers, for both the prompt and
-        # the quote sources.
-        threads = _select_threads(
-            layout.full_prs, bundle.ring0_all, paths, file_lines, target_range, caps
-        )
-        task = task_for(layout, threads)
-        # The text of each piece of evidence, by id, to judge the items' quotes.
-        sources = _evidence_sources(layout, caps, threads)
-        rendered_context = {item.commit.sha for item in layout.context}
-        coverage = CardCoverage(
-            line_commits=len(bundle.ring0),
-            context_commits=len(layout.context),
-            context_omitted=bundle.context_total - len(layout.context),
-            full_prs_demoted=len(layout.demoted),
-            threads_lost=_threads_lost(
-                layout.demoted, bundle.ring0_all, paths, file_lines, target_range, caps
-            ),
-            trimmed=trimmed,
-            descriptions_missing=sum(
-                1 for item in layout.rendered if not item.commit.llm_description
-            ),
-            omitted_shas=frozenset(
-                item.commit.sha
-                for item in bundle.ring1
-                if item.commit.sha not in rendered_context
-            ),
-            source=source_coverage,
+        task, sources, coverage = self._prepare(
+            evidence,
+            symbol_context=symbol_context,
+            paths=paths,
+            file_lines=file_lines,
+            target_range=target_range,
+            bundle=bundle,
+            missing_descriptions=missing_descriptions,
+            level=level,
+            target_path=target_path,
         )
         request = CompletionRequest.of(
             task,

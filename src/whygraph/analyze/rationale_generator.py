@@ -61,6 +61,12 @@ _VERIFY_COMPONENT = "rationale_verify"
 VERIFY_SOURCE_MAX_CHARS = 20_000
 """The longest target source the verification pass checks against (section 14.2)."""
 
+TARGET_SOURCE_MAX_CHARS = 8_000
+"""The longest target source the draft prompt holds (section 14.2a, R48).
+
+A longer target gets no source block at all, never a truncated one.
+"""
+
 _VERIFY_REASON_MAX_CHARS = 300
 _NO_VERDICT = "no verdict given"
 
@@ -270,7 +276,10 @@ def _format_issue(issue: Issue) -> list[str]:
 
 _SOURCE_LABELS = {
     "blame": "line-blame",
-    "pr-origin": "original commit recovered from a squash-merged PR",
+    "pr-origin": (
+        "draft commit inside a squash-merged PR "
+        "(intermediate states never reached the default branch)"
+    ),
     "blame-walked": "line-blame (skipped a refactor commit)",
     "predecessor-blame": "line-blame on a pre-rename predecessor file",
     "area": "area-history (touched the file but not these lines)",
@@ -1068,14 +1077,15 @@ def _format_symbol_context(context: SymbolContext) -> str:
     lines.append("")
     lines.extend(
         _format_relations(
-            f"Called by ({len(context.callers)} caller(s) — blast radius of a change):",
+            f"Possible callers ({len(context.callers)}, matched by name; "
+            "may include other functions with the same name):",
             context.callers,
         )
     )
     lines.append("")
     lines.extend(
         _format_relations(
-            f"Calls ({len(context.callees)} callee(s) — what this depends on):",
+            f"Possible callees ({len(context.callees)}, matched by name):",
             context.callees,
         )
     )
@@ -1244,9 +1254,16 @@ def card_bundle_for(
 
 
 def verification_source(
-    file_lines: Sequence[str] | None, target_range: tuple[int, int] | None
+    file_lines: Sequence[str] | None,
+    target_range: tuple[int, int] | None,
+    *,
+    max_chars: int = VERIFY_SOURCE_MAX_CHARS,
 ) -> tuple[tuple[str, ...] | None, str | None]:
-    """The target's current source lines for the verification pass, or why there are none.
+    """The target's current source lines, or why there are none.
+
+    The one reader of the target's source for both LLM calls: the
+    verification pass (the default cap) and the draft prompt
+    (:data:`TARGET_SOURCE_MAX_CHARS`, section 14.2a).
 
     Parameters
     ----------
@@ -1255,6 +1272,8 @@ def verification_source(
         ``None`` when the file could not be read.
     target_range : tuple[int, int] or None
         The target's inclusive 1-based line range in ``file_lines``.
+    max_chars : int, optional
+        The longest source returned; default :data:`VERIFY_SOURCE_MAX_CHARS`.
 
     Returns
     -------
@@ -1262,7 +1281,7 @@ def verification_source(
         ``(lines, None)`` with the range's lines, or ``(None, reason)`` with
         ``reason`` ``"no_source"`` (no file, no range, or nothing in range)
         or ``"source_too_long"`` (the lines, newline-joined, are longer than
-        :data:`VERIFY_SOURCE_MAX_CHARS`).
+        ``max_chars``).
     """
     if file_lines is None or target_range is None:
         return None, "no_source"
@@ -1270,9 +1289,33 @@ def verification_source(
     lines = tuple(file_lines[max(start, 1) - 1 : max(end, 0)])
     if not any(line.strip() for line in lines):
         return None, "no_source"
-    if len("\n".join(lines)) > VERIFY_SOURCE_MAX_CHARS:
+    if len("\n".join(lines)) > max_chars:
         return None, "source_too_long"
     return lines, None
+
+
+def _numbered(source: Sequence[str], first_line: int) -> list[str]:
+    """``source`` with each line prefixed by its right-aligned line number."""
+    width = len(str(first_line + len(source) - 1))
+    return [f"{n:>{width}}  {line}" for n, line in enumerate(source, start=first_line)]
+
+
+def _target_source(
+    file_lines: Sequence[str] | None,
+    target_range: tuple[int, int] | None,
+    path: str | None,
+) -> tuple[str | None, str]:
+    """The draft prompt's ``TARGET SOURCE`` block and ``coverage.source`` (section 14.2a)."""
+    source, reason = verification_source(
+        file_lines, target_range, max_chars=TARGET_SOURCE_MAX_CHARS
+    )
+    if source is None or target_range is None:
+        return None, "omitted" if reason == "source_too_long" else "unavailable"
+    first = max(target_range[0], 1)
+    span = f"{first}-{first + len(source) - 1}"
+    where = f"{path}:{span}" if path else f"lines {span}"
+    header = f"TARGET SOURCE ({where}, as of the card's build)"
+    return "\n".join([header, "", *_numbered(source, first)]), "included"
 
 
 def with_verification(rationale: Rationale, verification: str) -> Rationale:
@@ -1309,11 +1352,8 @@ def _format_claims(rationale: Rationale, source: Sequence[str], first_line: int)
 
     Tradeoffs are not claims the pass checks (plan 62 section 14.2).
     """
-    width = len(str(first_line + len(source) - 1))
     lines = [f"SOURCE (lines {first_line}-{first_line + len(source) - 1}):"]
-    lines.extend(
-        f"{n:>{width}}  {line}" for n, line in enumerate(source, start=first_line)
-    )
+    lines.extend(_numbered(source, first_line))
     constraint_ids, risk_ids = _claim_ids(rationale)
     lines.extend(["", "CONSTRAINTS:"])
     lines.extend(
@@ -1404,6 +1444,13 @@ class RationaleGenerator:
         ``None`` (default) resolves ``analyze/prompts/rationale_verify/``
         by the client's provider and model. Its ``task`` should contain
         :data:`~whygraph.analyze.prompt.VERIFY_PLACEHOLDER`.
+    target_source : bool, optional
+        When ``True`` (default), the draft prompt holds the target's current
+        source (a ``TARGET SOURCE`` block, plan 62 section 14.2a) whenever
+        :meth:`generate` is given its lines and they fit
+        :data:`TARGET_SOURCE_MAX_CHARS`; ``False`` leaves it out and
+        ``coverage.source`` unset (an eval arm without it). The
+        verification pass is not affected.
 
     Examples
     --------
@@ -1420,9 +1467,11 @@ class RationaleGenerator:
         rationale_prompt: Prompt | None = None,
         caps: _PrRenderCaps | None = None,
         verify_prompt: Prompt | None = None,
+        target_source: bool = True,
     ) -> None:
         self._client = client
         self._timeout_sec = timeout_sec
+        self._target_source = target_source
         self._caps = caps if caps is not None else _PrRenderCaps()
         self._rationale_prompt = (
             rationale_prompt
@@ -1497,6 +1546,7 @@ class RationaleGenerator:
         bundle: CardBundle | None = None,
         missing_descriptions: Mapping[str, str] | None = None,
         level: str = DEFAULT_LEVEL,
+        target_path: str | None = None,
     ) -> Rationale:
         """Generate a rationale card for one evidence bundle.
 
@@ -1521,11 +1571,14 @@ class RationaleGenerator:
             paths may enter the prompt (plan 62 section 4.9a).
         file_lines : Sequence[str], optional
             The target file's current lines, the whole file, to find each
-            thread's content anchor in.
+            thread's content anchor in and to read the target's source from.
         target_range : tuple[int, int], optional
             The target's inclusive line range in ``file_lines``. Review
             threads render only when ``paths``, ``file_lines`` and
             ``target_range`` are all given; any ``None`` keeps them out.
+            The ``TARGET SOURCE`` block (plan 62 section 14.2a) needs
+            ``file_lines`` and ``target_range`` only, and is left out when
+            the generator was built with ``target_source=False``.
         bundle : CardBundle, optional
             What the card includes (:func:`card_bundle_for` over
             ``evidence``, plan 62 section 13.4); ``None`` (default) selects
@@ -1540,6 +1593,10 @@ class RationaleGenerator:
             :data:`~whygraph.analyze.card_bundle.DEFAULT_LEVEL`. The draft
             is never verified here: the caller runs :meth:`verify` on a
             non-partial ``high`` draft (plan 62 section 14.2).
+        target_path : str, optional
+            The target's file path, named in the ``TARGET SOURCE`` header;
+            ``None`` (default) uses ``symbol_context``'s, else the header
+            names the lines only.
 
         Returns
         -------
@@ -1581,6 +1638,15 @@ class RationaleGenerator:
         graph = (
             None if symbol_context is None else _format_symbol_context(symbol_context)
         )
+        source_block, source_coverage = None, None
+        if self._target_source:
+            if target_path is None and symbol_context is not None:
+                target_path = symbol_context.target.file_path
+            source_block, source_coverage = _target_source(
+                file_lines, target_range, target_path
+            )
+        # The graph section, then the target's source, ahead of the history.
+        preamble = "\n\n".join(p for p in (graph, source_block) if p is not None)
         threads_possible = (
             paths is not None
             and file_lines is not None
@@ -1591,8 +1657,8 @@ class RationaleGenerator:
 
         def task_for(layout: _Layout, threads: dict[int, _RenderedThreads]) -> str:
             text = _render(layout, caps, threads)
-            if graph is not None:
-                text = f"{graph}\n\n{text}"
+            if preamble:
+                text = f"{preamble}\n\n{text}"
             return render(
                 self._rationale_prompt.task, text, placeholder=RATIONALE_PLACEHOLDER
             )
@@ -1631,6 +1697,7 @@ class RationaleGenerator:
                 for item in bundle.ring1
                 if item.commit.sha not in rendered_context
             ),
+            source=source_coverage,
         )
         request = CompletionRequest.of(
             task,

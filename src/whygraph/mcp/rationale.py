@@ -217,7 +217,10 @@ class RationaleCard(_RationaleCardRequired, total=False):
     once its descriptions land), ``"failed"`` or ``"skipped"`` (not checked;
     the card was stored as ``medium``), ``"source_too_long"`` or
     ``"no_source"`` (not checked: the target's source is over the limit or
-    could not be read).
+    could not be read). A card generated since plan 62 section 14.2a adds
+    ``source``: ``"included"`` (the draft prompt held the target's source),
+    ``"omitted"`` (longer than the draft's limit) or ``"unavailable"`` (its
+    lines could not be read).
 
     ``context_stale`` (plan 62 section 13.5) says one or two commits touched
     the target's file (not its lines) since the card was written; three or
@@ -948,6 +951,7 @@ def _complete_partial(
             subject=subject,
             bundle=bundle,
             missing_descriptions=_missing_reasons(outcome),
+            target_path=target.path,
             **_thread_inputs(review_scope, target_range),
         )
         rationale, stored = _verified(
@@ -1284,6 +1288,7 @@ def rationale_card(
             subject=target.qualified_name or target.path,
             bundle=bundle,
             missing_descriptions=_missing_reasons(outcome),
+            target_path=target.path,
             **_thread_inputs(review_scope, target_range),
         )
     except (AnalyzeError, LlmError) as exc:

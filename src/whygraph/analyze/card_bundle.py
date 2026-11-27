@@ -111,6 +111,14 @@ verifier's limit or could not be read, so the card keeps its level
 unchecked (regenerating could not change that).
 """
 
+SOURCES = ("included", "omitted", "unavailable")
+"""The values of :attr:`CardCoverage.source` (plan 62 section 14.2a).
+
+``included``: the draft prompt held the target's source; ``omitted``: the
+source is longer than the draft's limit, so the prompt held none;
+``unavailable``: the target's lines could not be read.
+"""
+
 
 def verifies(level: str) -> bool:
     """Whether a card at ``level`` runs the verification pass (``high`` and deeper).
@@ -524,6 +532,9 @@ class CardCoverage:
     verification : str or None
         The verification pass's outcome (:data:`VERIFICATIONS`), set on a
         card built at :data:`VERIFY_FROM` or deeper; ``None`` below that.
+    source : str or None
+        Whether the draft prompt held the target's source (:data:`SOURCES`);
+        ``None`` when the generator was built without it.
     """
 
     line_commits: int = 0
@@ -535,11 +546,12 @@ class CardCoverage:
     descriptions_missing: int = 0
     omitted_shas: frozenset[str] = frozenset()
     verification: str | None = None
+    source: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         """The card's ``coverage`` object (every field but ``omitted_shas``).
 
-        ``verification`` is present only when set.
+        ``verification`` and ``source`` are present only when set.
         """
         out: dict[str, object] = {
             "full_prs_demoted": self.full_prs_demoted,
@@ -552,4 +564,6 @@ class CardCoverage:
         }
         if self.verification is not None:
             out["verification"] = self.verification
+        if self.source is not None:
+            out["source"] = self.source
         return out

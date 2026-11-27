@@ -2395,3 +2395,105 @@ def test_a_pending_card_whose_commits_cannot_be_described_is_still_verified(
     assert (row.depth, row.deferred_shas) == (2, "")
     assert row.rationale.coverage.verification == "verified"
     assert row.rationale.constraints[0].check.verdict == "holds"
+
+
+# ---- plan 62 Part C: grounding the draft (C3a, section 14.2a) -------------
+
+
+def _grounding_client(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The real generator over a scripted client; return each call's task text.
+
+    Every draft answers a card with one constraint and one risk; every
+    verification call answers ``holds`` for both.
+    """
+    import json
+
+    from whygraph.analyze import RationaleGenerator
+    from whygraph.services.llm import CompletionResponse, LlmClient
+
+    tasks: list[str] = []
+    card = {
+        "purpose": "Holds three sample lines.",
+        "why": "Built up in one commit.",
+        "constraints": ["keep it small"],
+        "tradeoffs": [],
+        "risks": ["none worth noting"],
+    }
+    verdicts = {
+        "verdicts": [
+            {"id": "C1", "verdict": "holds", "reason": "line 1"},
+            {"id": "R1", "verdict": "holds", "reason": "line 2"},
+        ]
+    }
+
+    class _Scripted(LlmClient):
+        provider = "fake"
+
+        @classmethod
+        def from_config(cls, config, **overrides):  # noqa: ANN001, ANN003, ANN206
+            return cls(model="fake-1")
+
+        def complete(self, request):  # noqa: ANN001, ANN201
+            task = request.messages[-1].content
+            tasks.append(task)
+            text = json.dumps(verdicts if "CONSTRAINTS:" in task else card)
+            return CompletionResponse(
+                text=text, model="fake-1", provider="fake", input_tokens=1
+            )
+
+    monkeypatch.setattr(
+        "whygraph.mcp.rationale.RationaleGenerator.from_config",
+        classmethod(lambda cls, config: RationaleGenerator(_Scripted(model="fake-1"))),
+    )
+    return tasks
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_the_card_prompt_holds_the_targets_source_at_every_level(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch, level: str
+) -> None:
+    tasks = _grounding_client(monkeypatch)
+
+    card = _rc(_ring_evidence(), level=level, **_scope())
+
+    draft = tasks[0]
+    assert "TARGET SOURCE (sample.py:1-3, as of the card's build)" in draft
+    assert "1  line one\n2  line two\n3  line three" in draft
+    assert card["coverage"]["source"] == "included"
+    assert _row().rationale.coverage.source == "included"
+    if level == "high":
+        # The verification pass still gets its source.
+        assert len(tasks) == 2
+        assert "SOURCE (lines 1-3):" in tasks[1]
+        assert "1  line one" in tasks[1]
+        assert card["coverage"]["verification"] == "verified"
+        assert card["constraints"][0]["check"]["verdict"] == "holds"
+    else:
+        assert len(tasks) == 1
+
+
+def test_a_card_without_its_files_lines_has_its_source_unavailable(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks = _grounding_client(monkeypatch)
+
+    card = _rc(_ring_evidence(), level="medium")
+
+    assert "TARGET SOURCE" not in tasks[0]
+    assert card["coverage"]["source"] == "unavailable"
+
+
+def test_a_long_target_has_no_source_but_is_still_verified(
+    whygraph_db_initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from whygraph.analyze.rationale_generator import TARGET_SOURCE_MAX_CHARS
+
+    tasks = _grounding_client(monkeypatch)
+    long = ("x" * TARGET_SOURCE_MAX_CHARS, "y", "z")
+
+    card = _rc(_ring_evidence(), level="high", **_scope(long))
+
+    assert "TARGET SOURCE" not in tasks[0]
+    assert card["coverage"]["source"] == "omitted"
+    assert "SOURCE (lines 1-3):" in tasks[1]  # under the verifier's own limit
+    assert card["coverage"]["verification"] == "verified"

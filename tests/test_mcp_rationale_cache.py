@@ -926,3 +926,28 @@ def test_import_keeps_checks_and_a_known_verification() -> None:
     assert "verification" not in json.loads(_import_coverage({}))
     with pytest.raises(ImportFormatError):
         _import_coverage({"verification": "made-up"})
+
+
+# ---- plan 62 Part C: coverage.source (C3a, section 14.2a) -----------------
+
+
+def test_coverage_source_round_trips_and_an_unknown_one_reads_as_none() -> None:
+    from whygraph.analyze import CardCoverage
+    from whygraph.mcp.rationale_cache import decode_coverage
+
+    stored = json.dumps(CardCoverage(line_commits=1, source="omitted").as_dict())
+    assert decode_coverage(stored).source == "omitted"
+    assert decode_coverage('{"source": "made-up"}').source is None
+    assert decode_coverage('{"line_commits": 1}').source is None
+    assert "source" not in CardCoverage(line_commits=1).as_dict()
+
+
+def test_import_keeps_a_known_source_and_refuses_an_unknown_one() -> None:
+    from whygraph.core.import_checks import ImportFormatError
+    from whygraph.mcp.rationale_cache import _import_coverage
+
+    for source in ("included", "omitted", "unavailable"):
+        assert json.loads(_import_coverage({"source": source}))["source"] == source
+    assert "source" not in json.loads(_import_coverage({}))
+    with pytest.raises(ImportFormatError, match="coverage.source"):
+        _import_coverage({"source": "made-up"})

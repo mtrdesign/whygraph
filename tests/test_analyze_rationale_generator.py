@@ -842,9 +842,12 @@ def test_format_symbol_context_renders_target_callers_and_callees() -> None:
     assert "CODE GRAPH CONTEXT" in text
     assert "Target: whygraph.analyze.RationaleGenerator.generate (method)" in text
     assert "def generate(self, evidence, *, symbol_context=None)" in text
-    assert "Called by (1 caller(s)" in text
+    assert (
+        "Possible callers (1, matched by name; may include other functions "
+        "with the same name):" in text
+    )
     assert "whygraph.cli.analyze (function)" in text
-    assert "Calls (1 callee(s)" in text
+    assert "Possible callees (1, matched by name):" in text
     assert "whygraph.analyze.prompt.render (function)" in text
 
 
@@ -1015,10 +1018,11 @@ _BYTE_IDENTITY_PROMPT = (
     "  def generate(self, evidence, *, symbol_context=None)\n"
     "  Generate a rationale card for one evidence bundle.\n"
     "\n"
-    "Called by (1 caller(s) — blast radius of a change):\n"
+    "Possible callers (1, matched by name; may include other functions with the "
+    "same name):\n"
     "  - pkg.caller (function)  src/whygraph/cli.py:42\n"
     "\n"
-    "Calls (0 callee(s) — what this depends on):\n"
+    "Possible callees (0, matched by name):\n"
     "  (none recorded)\n"
     "\n"
     "Evidence: 2 commit(s), 2 PR(s), 1 issue(s).\n"
@@ -1904,6 +1908,7 @@ def test_stopper_1_demotes_and_counts_lost_threads(monkeypatch) -> None:
         "line_commits": 2,
         "context_commits": 0,
         "context_omitted": 0,
+        "source": "included",
     }
     assert card.coverage.trimmed == ("full_pr_budget",)
 
@@ -1947,7 +1952,7 @@ def test_stopper_2_stops_trimming_once_the_prompt_fits(monkeypatch) -> None:
     monkeypatch.setitem(card_bundle_module.TOTAL_MAX_CHARS, "low", size - 10)
     monkeypatch.setitem(card_bundle_module.TOTAL_MAX_CHARS, "medium", size - 10)
 
-    _, card = _bundle_prompt(evidence, paths=None)
+    _, card = _bundle_prompt(evidence, paths=None, file_lines=None)
 
     assert card.coverage.trimmed == ("prompt_cap_context",)
     assert card.coverage.context_commits == 3
@@ -2142,7 +2147,10 @@ def test_high_renders_its_rows() -> None:
     prompt, card = _bundle_prompt(_level_evidence(), "high")
 
     assert _commits_in(prompt) == {*_RING0, *_FEATURE, *_context(6)}
-    assert "Source: original commit recovered from a squash-merged PR" in prompt
+    assert (
+        "Source: draft commit inside a squash-merged PR (intermediate states "
+        "never reached the default branch)" in prompt
+    )
     assert prompt.count("  PR #7 (shown above)") == 2  # the feature-branch commits
     assert "(2 more file commits not shown)" in prompt
     _assert_every_commit_is_described_raw(prompt)
@@ -2378,3 +2386,138 @@ def test_the_packaged_verify_prompt_resolves_with_its_placeholder() -> None:
     assert VERIFY_PLACEHOLDER in prompt.task
     assert "holds" in prompt.system and "contradicted" in prompt.system
     assert VERIFY_PLACEHOLDER not in prompt.system
+
+
+# ---- plan 62 Part C: grounding the draft (section 14.2a, R48) --------------
+
+_SOURCE_HEADER = "TARGET SOURCE (lines 1-6, as of the card's build)"
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_the_draft_holds_the_targets_numbered_source_at_every_level(
+    level: str,
+) -> None:
+    prompt, card = _bundle_prompt(_level_evidence(), level)
+
+    assert _SOURCE_HEADER in prompt
+    assert "1  def fetch(url):\n" in prompt
+    assert "3      while attempts < MAX_ATTEMPTS:\n" in prompt
+    assert "6      return response\n" in prompt
+    assert "compute_the_other_value" not in prompt  # only the target's lines
+    assert prompt.index(_SOURCE_HEADER) < prompt.index("COMMIT ")
+    assert card.coverage.source == "included"
+    assert card.coverage.as_dict()["source"] == "included"
+
+
+def test_the_source_block_follows_the_code_graph_context_and_names_the_path() -> None:
+    client = _StubClient()
+    context = SymbolContext(target=_symbol(), callers=(), callees=())
+
+    RationaleGenerator(client).generate(
+        [CommitEvidence(_commit())],
+        symbol_context=context,
+        file_lines=_FILE,
+        target_range=(3, 4),
+    )
+    prompt = client.requests[0].messages[1].content
+
+    header = (
+        "TARGET SOURCE (src/whygraph/analyze/rationale_generator.py:3-4, "
+        "as of the card's build)"
+    )
+    assert prompt.index("CODE GRAPH CONTEXT") < prompt.index(header)
+    assert prompt.index(header) < prompt.index("COMMIT ")
+    assert "3      while attempts < MAX_ATTEMPTS:\n4          attempts += 1" in prompt
+
+
+def test_an_explicit_target_path_names_the_source_block() -> None:
+    client = _StubClient()
+
+    RationaleGenerator(client).generate(
+        [CommitEvidence(_commit())],
+        file_lines=_FILE,
+        target_range=(8, 9),
+        target_path="src/fetch.py",
+    )
+
+    prompt = client.requests[0].messages[1].content
+    assert "TARGET SOURCE (src/fetch.py:8-9, as of the card's build)" in prompt
+    assert "8  def other():" in prompt
+
+
+def test_a_target_longer_than_the_limit_gets_no_source_at_all() -> None:
+    from whygraph.analyze.rationale_generator import TARGET_SOURCE_MAX_CHARS
+
+    assert TARGET_SOURCE_MAX_CHARS == 8_000
+    fits = ("x" * (TARGET_SOURCE_MAX_CHARS - 2), "y")
+    long = ("x" * (TARGET_SOURCE_MAX_CHARS - 1), "y")
+
+    prompt, card = _bundle_prompt(
+        _level_evidence(), file_lines=fits, target_range=(1, 2)
+    )
+    assert "TARGET SOURCE" in prompt and card.coverage.source == "included"
+
+    prompt, card = _bundle_prompt(
+        _level_evidence(), file_lines=long, target_range=(1, 2)
+    )
+    assert "TARGET SOURCE" not in prompt
+    assert "xxxxxxxx" not in prompt  # never a truncated source
+    assert card.coverage.source == "omitted"
+
+
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        {"file_lines": None},
+        {"target_range": None},
+        {"file_lines": ()},
+        {"target_range": (40, 50)},
+    ],
+)
+def test_a_target_without_readable_lines_has_its_source_unavailable(
+    inputs: dict,
+) -> None:
+    prompt, card = _bundle_prompt(_level_evidence(), **inputs)
+
+    assert "TARGET SOURCE" not in prompt
+    assert card.coverage.source == "unavailable"
+
+
+def test_the_switch_leaves_the_source_out() -> None:
+    client = _StubClient()
+
+    card = RationaleGenerator(client, target_source=False).generate(
+        _level_evidence(), file_lines=_FILE, target_range=_RANGE
+    )
+
+    assert "TARGET SOURCE" not in client.requests[0].messages[1].content
+    assert card.coverage.source is None
+    assert "source" not in card.coverage.as_dict()
+
+
+def test_the_verification_pass_keeps_its_own_larger_source_limit() -> None:
+    from whygraph.analyze.rationale_generator import (
+        TARGET_SOURCE_MAX_CHARS,
+        verification_source,
+    )
+
+    lines = ("x" * TARGET_SOURCE_MAX_CHARS, "y")
+
+    assert verification_source(lines, (1, 2)) == (lines, None)
+    assert verification_source(lines, (1, 2), max_chars=TARGET_SOURCE_MAX_CHARS) == (
+        None,
+        "source_too_long",
+    )
+
+
+def test_the_system_prompt_states_the_grounding_rules() -> None:
+    from whygraph.analyze.prompt import resolve
+
+    system = resolve("rationale_generator", "rationale", "anthropic", "m").system
+
+    assert "blast radius" not in system
+    assert "matched by name" in system
+    assert "TARGET SOURCE" in system and "Do not describe or paraphrase it" in system
+    assert "never base a constraint or a risk on the source alone" in system
+    assert "never as what exists today" in system
+    assert "never existed for users of the default branch" in system

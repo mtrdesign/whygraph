@@ -82,6 +82,7 @@ from whygraph.analyze.card_bundle import (
     DEFAULT_LEVEL,
     LEVELS,
     LINE_LEVEL_SOURCES,
+    SOURCES,
     VERIFICATIONS,
 )
 from whygraph.analyze.rationale import ITEM_BASES, REF_KINDS, VERDICTS
@@ -315,7 +316,9 @@ def decode_coverage(raw: str | None) -> CardCoverage | None:
         ``None`` for a missing or malformed column. Unknown keys are ignored,
         a missing or non-integer count reads as 0, and a ``verification``
         that is not one of
-        :data:`~whygraph.analyze.card_bundle.VERIFICATIONS` reads as ``None``.
+        :data:`~whygraph.analyze.card_bundle.VERIFICATIONS` (a ``source``
+        that is not one of :data:`~whygraph.analyze.card_bundle.SOURCES`)
+        reads as ``None``.
     """
     try:
         value = json.loads(raw) if raw else None
@@ -329,11 +332,13 @@ def decode_coverage(raw: str | None) -> CardCoverage | None:
     }
     trimmed = value.get("trimmed")
     verification = value.get("verification")
+    source = value.get("source")
     return CardCoverage(
         trimmed=tuple(t for t in trimmed if isinstance(t, str))
         if isinstance(trimmed, list)
         else (),
         verification=verification if verification in VERIFICATIONS else None,
+        source=source if source in SOURCES else None,
         **counts,
     )
 
@@ -1342,7 +1347,8 @@ def _import_coverage(value: Any) -> str | None:
 
     Only the known keys are kept: the counts as integers in ``0..2**31``,
     ``trimmed`` as at most eight short ``snake_case`` names, ``verification``
-    as one of :data:`~whygraph.analyze.card_bundle.VERIFICATIONS`.
+    as one of :data:`~whygraph.analyze.card_bundle.VERIFICATIONS`, ``source``
+    as one of :data:`~whygraph.analyze.card_bundle.SOURCES`.
     """
     if value is None:
         return None
@@ -1367,6 +1373,13 @@ def _import_coverage(value: Any) -> str | None:
                 "coverage.verification", f"must be one of {', '.join(VERIFICATIONS)}"
             )
         kept["verification"] = verification
+    source = value.get("source")
+    if source is not None:
+        if source not in SOURCES:
+            raise ImportFormatError(
+                "coverage.source", f"must be one of {', '.join(SOURCES)}"
+            )
+        kept["source"] = source
     return json.dumps(kept)
 
 

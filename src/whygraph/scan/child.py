@@ -47,11 +47,14 @@ import logging
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .authors import AuthorResolver
 from .codegraph_crawler import CodeGraphCrawler
+from whygraph.services.codegraph import index_predates_guard
+
 from .core_crawler import CORE_PHASE_WALL_SEC, CoreCrawler, index_file_exists
 from .git_crawler import GitCrawler, TagCrawler
 from .github_crawler import GitHubCrawler
@@ -317,6 +320,10 @@ def _scan(
         # file before it indexes, so a later check could see a half-built
         # index (plan 49 section 5.3 step 0).
         index_existed = index_file_exists(repository.root)
+        # An index without the guard stamp (one that predates the guard, or
+        # one an interrupted build left behind) is rebuilt from scratch by
+        # the refresh, so it is as half-built as a missing one meanwhile.
+        index_complete = index_existed and not index_predates_guard(repository.root)
         if codegraph_crawler is not None:
             codegraph_crawler.start()
 
@@ -335,6 +342,7 @@ def _scan(
         for c in phase1:
             c.join()
         phase_timings["Structural crawl"] = time.monotonic() - t0
+        branch = asdict(repository.branch_status())
 
         # Phase 2 - PR-origin recovery: needs Phase 1's git + PR rows. Gated
         # on a resolved client, which is None under --no-remote.
@@ -379,9 +387,10 @@ def _scan(
         phase_timings["Plans"] = time.monotonic() - t0
 
         # Phase 5 - Core commits: needs the commit rows and the code index.
-        # With no index file at scan start (a first scan), wait for the
-        # CodeGraph build first; the core task has no total meanwhile, and
-        # its wall starts after the wait. An existing index is read as is.
+        # With no complete index at scan start (a first scan, or an index
+        # the refresh rebuilds), wait for the CodeGraph build first; the
+        # core task has no total meanwhile, and its wall starts after the
+        # wait. A complete index is read as is while it syncs.
         if run_core:
             n += 1
             progress.phase(n, "Core commits")
@@ -393,7 +402,7 @@ def _scan(
                 wall_sec=None if describe_core else CORE_PHASE_WALL_SEC,
             )
             ran.append(core)
-            if not index_existed and codegraph_crawler is not None:
+            if not index_complete and codegraph_crawler is not None:
                 codegraph_crawler.join()
             core.start()
             core.join()
@@ -435,6 +444,7 @@ def _scan(
                 total_elapsed=time.monotonic() - scan_t0,
                 analyze_skip=analyze_skip,
                 codegraph=_codegraph_summary(codegraph_crawler, repository.root),
+                branch=branch,
             )
         )
 
@@ -605,12 +615,14 @@ def _result_event(
     total_elapsed: float,
     analyze_skip: str | None,
     codegraph: dict | None = None,
+    branch: dict | None = None,
 ) -> dict:
     """Build the closing ``result`` event.
 
     Overall status, elapsed time, per-phase timings and one entry per
     crawler (status, summary, error / warning), plus the CodeGraph step's
-    outcome (:func:`_codegraph_summary`).
+    outcome (:func:`_codegraph_summary`) and, for a full scan, the
+    checkout's ``branch`` status (plan 64).
     """
     entries = []
     for c in crawlers:
@@ -625,7 +637,7 @@ def _result_event(
         if warning:
             entry["warning"] = warning
         entries.append(entry)
-    return {
+    event: dict = {
         "type": "result",
         "status": "failed" if any(c.error is not None for c in crawlers) else "ok",
         "elapsed_sec": round(total_elapsed, 3),
@@ -634,6 +646,9 @@ def _result_event(
         "analyze_skipped": analyze_skip,
         "codegraph": codegraph if codegraph is not None else {"status": "skipped"},
     }
+    if branch is not None:
+        event["branch"] = branch
+    return event
 
 
 def _select_github_client(provider: str, repository: Repository) -> GitHubClient | None:

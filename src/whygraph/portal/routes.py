@@ -934,6 +934,31 @@ class _ListData:
     links: dict[int, PlatformLink]
 
 
+def _branch_block(value: object) -> dict | None:
+    """The validated ``branch`` block of a run summary, or ``None`` when malformed.
+
+    The block is display data written by a scan child: strings are
+    ``str | None`` of at most 255 characters, counts ``int >= 0 | None``.
+    Anything else drops the whole block.
+    """
+    if not isinstance(value, dict):
+        return None
+    out: dict = {}
+    for key in ("current", "default"):
+        text = value.get(key)
+        if text is not None and not (isinstance(text, str) and len(text) <= 255):
+            return None
+        out[key] = text
+    for key in ("ahead", "behind"):
+        count = value.get(key)
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or count < 0
+        ):
+            return None
+        out[key] = count
+    return out
+
+
 def _last_scan_stats(raw: str | None) -> dict | None:
     """``last_scan_stats`` from a run's ``summary`` text, or ``None`` (unparsable)."""
     summary = _load_summary(raw)
@@ -945,6 +970,7 @@ def _last_scan_stats(raw: str | None) -> dict | None:
         "described_pct": coverage.get("described_pct"),
         "rationale_cards": coverage.get("rationale_cards"),
         "as_of": coverage.get("at"),
+        "branch": _branch_block(summary.get("branch")),
     }
 
 

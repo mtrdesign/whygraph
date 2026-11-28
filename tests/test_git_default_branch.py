@@ -231,3 +231,100 @@ def test_private_tag_named_origin_main_does_not_win_the_fallback(
         "refs/remotes/origin/master",
         "refs/heads/master",
     )
+
+
+def _feature_checkout(tmp_path: Path) -> tuple[Path, str, str]:
+    """A clone on ``feature`` (1 own commit) while ``origin/main`` has 2 newer ones."""
+    origin_root = _init(tmp_path / "origin")
+    _commit(origin_root, "one.txt")
+    work = _clone(origin_root, tmp_path / "work")
+    _git(work, "checkout", "-q", "-b", "feature")
+    feature_sha = _commit(work, "feature.txt")
+    _commit(origin_root, "two.txt")
+    newest = _commit(origin_root, "three.txt")
+    _git(work, "fetch", "-q", "origin")
+    return work, feature_sha, newest
+
+
+def test_commits_on_a_feature_branch_include_default_branch_commits(
+    tmp_path: Path,
+) -> None:
+    """Plan 64 - the walk is the checkout plus the default branch."""
+    work, feature_sha, newest = _feature_checkout(tmp_path)
+
+    shas = {c.sha for c in Repository(work).commits}
+
+    assert {feature_sha, newest} <= shas
+    assert len(shas) == 4
+
+
+def test_commits_on_a_detached_head_include_default_branch_commits(
+    tmp_path: Path,
+) -> None:
+    work, _, newest = _feature_checkout(tmp_path)
+    _git(work, "checkout", "-q", "--detach", "HEAD")
+
+    shas = {c.sha for c in Repository(work).commits}
+
+    assert newest in shas
+
+
+def test_commits_without_default_refs_walk_head_only(tmp_path: Path) -> None:
+    root = _init(tmp_path / "solo", branch="trunk")
+    _commit(root, "a.txt")
+    _commit(root, "b.txt")
+
+    repo = Repository(root)
+
+    assert repo.default_branch_refs == ()
+    assert repo.commits.refs == ("trunk",)
+    assert len(repo.commits) == 2
+
+
+def test_branch_status_counts_ahead_and_behind(tmp_path: Path) -> None:
+    work, _, _ = _feature_checkout(tmp_path)
+
+    status = Repository(work).branch_status()
+
+    assert (status.current, status.default) == ("feature", "main")
+    assert (status.ahead, status.behind) == (1, 2)
+
+
+def test_branch_status_on_the_default_branch(origin: Path, tmp_path: Path) -> None:
+    work = _clone(origin, tmp_path / "work")
+
+    status = Repository(work).branch_status()
+
+    assert (status.current, status.default) == ("main", "main")
+    assert (status.ahead, status.behind) == (0, 0)
+
+
+def test_branch_status_detached_head_has_no_current(tmp_path: Path) -> None:
+    work, _, _ = _feature_checkout(tmp_path)
+    _git(work, "checkout", "-q", "--detach", "HEAD")
+
+    status = Repository(work).branch_status()
+
+    assert status.current is None
+    assert (status.default, status.ahead, status.behind) == ("main", 1, 2)
+
+
+def test_branch_status_with_unresolved_default(tmp_path: Path) -> None:
+    root = _init(tmp_path / "solo", branch="trunk")
+    _commit(root, "a.txt")
+
+    status = Repository(root).branch_status()
+
+    assert status.current == "trunk"
+    assert (status.default, status.ahead, status.behind) == (None, None, None)
+
+
+def test_default_branch_override_naming_a_missing_branch(
+    origin: Path, tmp_path: Path
+) -> None:
+    work = _clone(origin, tmp_path / "work")
+
+    repo = Repository(work, default_branch="nope")
+
+    assert repo.default_branch_name is None
+    assert repo.branch_status().default is None

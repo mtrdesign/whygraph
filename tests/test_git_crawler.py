@@ -571,6 +571,46 @@ def test_detached_head_records_the_literal_head(cloned: Path) -> None:
     assert _rows()[sha] == (0, "HEAD")
 
 
+def _feature_behind_main(cloned: Path) -> tuple[str, str]:
+    """``cloned`` on ``feature`` (1 own commit) with 3 newer ``origin/main`` commits.
+
+    Returns ``(feature_sha, [newest main sha])`` - the three newer commits are
+    pushed from the upstream and fetched, so only ``origin/main`` has them.
+    """
+    upstream = Path(_git_out(cloned, "remote", "get-url", "origin").strip())
+    _git(cloned, "switch", "-q", "-c", "feature")
+    feature_sha = _commit_file(cloned, "feature.txt")
+    _configure(upstream)
+    for name in ("m1.txt", "m2.txt", "m3.txt"):
+        newest = _commit_file(upstream, name)
+    _git(cloned, "fetch", "-q", "origin")
+    return feature_sha, newest
+
+
+def test_scan_on_a_feature_branch_stores_the_whole_default_branch(
+    cloned: Path,
+) -> None:
+    """Plan 64 - rows for every default-branch commit, whatever is checked out."""
+    feature_sha, newest = _feature_behind_main(cloned)
+
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+
+    rows = _rows()
+    assert rows[feature_sha] == (0, "feature")
+    assert rows[newest] == (1, None)
+    assert sum(1 for flag, _ in rows.values() if flag == 1) == 6
+    assert len(rows) == 7
+
+
+def test_scan_on_main_stores_the_same_rows_as_before(cloned: Path) -> None:
+    """With ``main`` checked out the union is just ``main`` - nothing new."""
+    GitCrawler(Progress(), repository=Repository(cloned)).run()
+
+    rows = _rows()
+    assert len(rows) == 3
+    assert all(row == (1, None) for row in rows.values())
+
+
 # --------------------------------------------------------------------------
 # Tags (plan 38, C4): mirrored from refs/whygraph/tags/, else refs/tags/.
 # --------------------------------------------------------------------------

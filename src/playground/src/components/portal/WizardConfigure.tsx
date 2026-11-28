@@ -16,6 +16,7 @@ import {
 } from "../../api";
 import { layerToValues, type ModelPick } from "../../lib/configForm";
 import { canOwn, isProduction, usePortalState, useReadOnly, useRole } from "../../lib/identity";
+import { checkoutNotice } from "../../lib/branchNotice";
 import { inheritedLayerLabel, providerLabel } from "../../lib/labels";
 import { can } from "../../lib/permissions";
 import { invalidateKeyDependents } from "../../lib/settings";
@@ -526,6 +527,7 @@ export function WizardConfigure({
   // The first scan is done (a describe run only starts after it): the stepper ticks Configure.
   const scanned = finished || (describes(run.kind) && !!project.last_scan_at);
   const linked = project.source === "platform";
+  const branchNotice = checkoutNotice(project.last_scan_stats?.branch);
   const config = useQuery({
     queryKey: projectKey(slug, "config"),
     queryFn: () => projectApi(slug).config(),
@@ -624,6 +626,14 @@ export function WizardConfigure({
         />
       ) : project.last_scan_at ? null : (
         <FirstScanStart slug={slug} project={project} onRun={onRun} />
+      )}
+
+      {finished && !linked && branchNotice && (
+        <Alert variant="info" data-testid="checkout-branch">
+          <InfoIcon />
+          <AlertTitle>{branchNotice.title}</AlertTitle>
+          <AlertDescription>{branchNotice.detail}</AlertDescription>
+        </Alert>
       )}
 
       {finished && !linked && can(project, "project.configure") && (

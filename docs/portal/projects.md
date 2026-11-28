@@ -290,6 +290,7 @@ The health panel lists what needs attention, most important first, each with wha
 | No key for the model that describes commits, writes rationale cards or chats | **Add a key** (project admins) |
 | The last scan failed | **Retry** and **Open log** |
 | The checkout is ahead of what WhyGraph last scanned, so the Explorer, Chat and the `whygraph_*` tools miss the newest commits; the CodeGraph tools stay current | **Rescan** |
+| On `<branch>`, N commits behind `<default>` (an info item): the checkout is another branch or a detached HEAD and is behind the default branch. The history already includes the default branch; the code index and plans follow the checkout. The count is as of your last `git fetch` | Information only. Switching branches triggers a rescan, after which the item updates |
 | Commits have no description yet | **Describe core** and **Describe all** (project admins); they also fill in as you browse |
 
 The CodeGraph rows are local-mode only, sit between "last scan failed" and "behind", and never change

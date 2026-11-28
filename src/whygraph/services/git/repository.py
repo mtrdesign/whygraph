@@ -8,6 +8,7 @@ import re
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,7 @@ from .commands import (
     GitRemoteRefsContainingCmd,
     GitRemoteUrlCmd,
     GitResolveCommitCmd,
+    GitRevListCountNotCmd,
     GitRevListShasCmd,
     GitSetRemoteHeadCmd,
     GitSetConfigCmd,
@@ -70,6 +72,29 @@ from .credentials import (
 from .exceptions import GitError
 from .file_change import FileChange
 from .tag import GitTag
+
+
+@dataclass(frozen=True)
+class BranchStatus:
+    """The checkout's position relative to the default branch.
+
+    Attributes
+    ----------
+    current : str or None
+        The checked-out branch; ``None`` on a detached HEAD.
+    default : str or None
+        The resolved default branch; ``None`` when it does not resolve.
+    ahead : int or None
+        Commits on ``HEAD`` that the default branch lacks.
+    behind : int or None
+        Commits on the default branch that ``HEAD`` lacks.
+    """
+
+    current: str | None
+    default: str | None
+    ahead: int | None
+    behind: int | None
+
 
 # The ``ignore_revs_file`` default of :meth:`Repository.blame`: detect the
 # work tree's ``.git-blame-ignore-revs`` (see
@@ -226,8 +251,12 @@ class Repository:
 
     @cached_property
     def commits(self) -> Commits:
-        """Reusable view of every commit reachable from :attr:`current_branch`.
+        """Reusable view of every commit reachable from the checkout or the default branch.
 
+        The walk is the union of :attr:`current_branch` and
+        :attr:`default_branch_refs`, so imports and describing cover the
+        shipped history whatever branch is checked out (plan 64). With no
+        resolvable default branch it is :attr:`current_branch` alone.
         For commits on a different ref, construct :class:`Commits`
         directly: ``Commits(repo.root, "other-ref")``.
 
@@ -236,9 +265,66 @@ class Repository:
         Commits
             A :class:`~collections.abc.Collection` over
             :class:`~whygraph.services.git.commit.Commit` instances,
-            bound to this repository's :attr:`root` and current branch.
+            bound to this repository's :attr:`root`.
         """
-        return Commits(self.root, self.current_branch)
+        extra = tuple(r for r in self.default_branch_refs if r != self.current_branch)
+        return Commits(self.root, self.current_branch, *extra)
+
+    @cached_property
+    def default_branch_name(self) -> str | None:
+        """Short name of the default branch, or ``None`` when it does not resolve.
+
+        Like :attr:`default_branch_refs`, an override naming a branch that
+        does not exist counts as unresolved.
+
+        Returns
+        -------
+        str or None
+            e.g. ``"main"``; ``None`` when :attr:`default_branch_refs` is empty.
+        """
+        if not self.default_branch_refs:
+            return None
+        return self._resolve_default_branch_name()
+
+    def branch_status(self) -> BranchStatus:
+        """Where the checkout stands relative to the default branch.
+
+        Returns
+        -------
+        BranchStatus
+            ``current`` is ``None`` on a detached HEAD; ``default`` is
+            :attr:`default_branch_name`; ``ahead`` / ``behind`` count the
+            commits only ``HEAD`` / only the default refs have, and are
+            ``None`` when the default is unresolved or ``git`` fails.
+
+        Notes
+        -----
+        Never raises: any ``git`` failure degrades to ``None`` fields,
+        mirroring :attr:`default_branch_refs`.
+        """
+        try:
+            current: str | None = self.current_branch
+        except GitError:
+            current = None
+        if current == "HEAD":
+            current = None
+        default = self.default_branch_name
+        ahead: int | None = None
+        behind: int | None = None
+        if default is not None:
+            refs = self.default_branch_refs
+            try:
+                ahead = self._shell.run(
+                    GitRevListCountNotCmd(["HEAD"], refs), cwd=self.root
+                )
+                behind = self._shell.run(
+                    GitRevListCountNotCmd(refs, ["HEAD"]), cwd=self.root
+                )
+            except (ShellError, ValueError):
+                ahead = behind = None
+        return BranchStatus(
+            current=current, default=default, ahead=ahead, behind=behind
+        )
 
     @cached_property
     def origin_url(self) -> str | None:

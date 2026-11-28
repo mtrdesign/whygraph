@@ -1151,4 +1151,48 @@ describe("WizardConfigure purpose option", () => {
     await screen.findByTestId("wizard-estimate");
     expect(screen.queryByTestId("purpose-option")).toBeNull();
   });
+
+  it("shows the checkout-branch notice above the import card when the scan was behind the default branch", async () => {
+    const behind = { current: "feature", default: "main", ahead: 1, behind: 3 };
+    const base = project();
+    const withBranch = (branch: typeof behind | null) => ({
+      ...base,
+      last_scan_at: "2026-10-01T00:00:00+00:00",
+      last_scan_stats: { commits: 5, described_pct: 0, rationale_cards: 0, as_of: "2026-10-01T00:00:00+00:00", branch },
+    });
+    const mount = async (p: unknown) => {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      await renderWithRouter(
+        <QueryClientProvider client={client}>
+          <WizardConfigure slug="alpha" project={p as Parameters<typeof WizardConfigure>[0]["project"]} runId={null} onRun={() => {}} />
+        </QueryClientProvider>,
+      );
+    };
+    await mount(withBranch(behind));
+    const alert = await screen.findByTestId("checkout-branch");
+    expect(alert).toHaveTextContent("On feature, 3 commits behind main");
+    expect(alert).toHaveTextContent("History includes all of main");
+  });
+
+  it("shows no checkout-branch notice on the default branch", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const p = {
+      ...project(),
+      last_scan_at: "2026-10-01T00:00:00+00:00",
+      last_scan_stats: {
+        commits: 5,
+        described_pct: 0,
+        rationale_cards: 0,
+        as_of: "2026-10-01T00:00:00+00:00",
+        branch: { current: "main", default: "main", ahead: 0, behind: 0 },
+      },
+    };
+    await renderWithRouter(
+      <QueryClientProvider client={client}>
+        <WizardConfigure slug="alpha" project={p as unknown as Parameters<typeof WizardConfigure>[0]["project"]} runId={null} onRun={() => {}} />
+      </QueryClientProvider>,
+    );
+    await screen.findByTestId("wizard-estimate");
+    expect(screen.queryByTestId("checkout-branch")).toBeNull();
+  });
 });

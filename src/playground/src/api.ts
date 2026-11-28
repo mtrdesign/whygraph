@@ -620,6 +620,8 @@ export interface LastScanStats {
   described_pct: number;
   rationale_cards: number;
   as_of: string;
+  /** The checkout's branch status at that scan (plan 64); `null` when the scan did not record one. */
+  branch?: { current: string | null; default: string | null; ahead: number | null; behind: number | null } | null;
 }
 
 /** What a budget caps, as refusals and alerts name it. */

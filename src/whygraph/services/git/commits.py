@@ -53,6 +53,8 @@ class Commits(Collection[Commit]):
         ``git`` invocation).
     ref : str
         Any commit-ish ``git`` accepts (branch, tag, sha, ``HEAD``).
+    *more_refs : str
+        Further commit-ish; the collection is the union of all refs.
     shell : Shell, optional
         Override the subprocess wrapper used to run ``git``. Defaults to
         a fresh :class:`Shell` per instance. Mostly useful for tests.
@@ -62,7 +64,9 @@ class Commits(Collection[Commit]):
     root : Path
         The bound working-tree root.
     ref : str
-        The ref being walked.
+        The first ref being walked.
+    refs : tuple of str
+        Every ref being walked (``ref`` first).
 
     Raises
     ------
@@ -76,36 +80,41 @@ class Commits(Collection[Commit]):
         self,
         root: Path,
         ref: str,
-        *,
+        *more_refs: str,
         shell: Shell | None = None,
     ) -> None:
         self.root = root
         self.ref = ref
+        self.refs = (ref, *more_refs)
         self._shell = shell or Shell()
         self._len_cache: int | None = None
 
     def __repr__(self) -> str:
-        return f"Commits(root={self.root!r}, ref={self.ref!r})"
+        return f"Commits(root={self.root!r}, refs={self.refs!r})"
 
     def __len__(self) -> int:
         if self._len_cache is None:
             try:
                 self._len_cache = self._shell.run(
-                    GitRevListCountCmd(self.ref), cwd=self.root
+                    GitRevListCountCmd(*self.refs), cwd=self.root
                 )
             except ShellError as exc:
-                raise GitError(f"failed to count commits on {self.ref!r}") from exc
+                raise GitError(
+                    f"failed to count commits on {', '.join(self.refs)!r}"
+                ) from exc
         return self._len_cache
 
     def __iter__(self) -> Iterator[Commit]:
         try:
             return self._shell.run(
-                GitLogShortstatCmd(self.ref),
+                GitLogShortstatCmd(*self.refs),
                 cwd=self.root,
                 timeout=LOG_TIMEOUT,
             )
         except ShellError as exc:
-            raise GitError(f"failed to enumerate commits on {self.ref!r}") from exc
+            raise GitError(
+                f"failed to enumerate commits on {', '.join(self.refs)!r}"
+            ) from exc
 
     def __contains__(self, item: object) -> bool:
         if not isinstance(item, Commit):

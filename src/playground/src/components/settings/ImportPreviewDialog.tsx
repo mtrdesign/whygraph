@@ -37,7 +37,7 @@ function skippedLines(r: ImportResult): string[] {
   add(r.rationale.existing, "rationale cards already here");
   add(r.rationale.inactive_model, "rationale cards from a model this project does not use");
   add(r.descriptions.kept_target, "descriptions kept as they are here");
-  add(r.descriptions.missing_commit, "descriptions for commits not found here");
+  add(r.descriptions.missing_commit, "descriptions for commits not scanned here (other branches); import again after scanning them");
   return out;
 }
 

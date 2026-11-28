@@ -223,8 +223,15 @@ repo on `develop` or `trunk` where `origin/HEAD` isn't set, name it explicitly:
 default_branch = "develop"
 ```
 
-The pre-scan panel shows what it resolved. If it says `unresolved`, branch flagging is off and every
-commit is treated as on the default branch - the same behaviour as before this existed.
+A local scan walks the checked-out branch **and** the default branch, so every default-branch commit is
+stored whatever is checked out. Describing (Describe all and Describe core) covers the same commits, so
+an older or feature branch still gets the shipped history. The code index, core files, plans, and the
+rationale and evidence tools still follow your checkout, because they read files on disk. When the
+checkout is behind the default branch, the Overview shows an info notice that says so. It counts commits
+as of your last `git fetch`, because local scans never fetch.
+
+If the default branch cannot be resolved, branch flagging is off and every commit is treated as on the
+default branch - the same behaviour as before this existed - and the walk covers the checked-out branch only.
 
 **What this means in practice:** unmerged work on a feature branch is excluded by design from
 velocity numbers, area history, and the [chat assistant's](chat.md#statistics-are-aggregate-only)

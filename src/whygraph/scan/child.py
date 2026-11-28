@@ -52,6 +52,8 @@ from typing import TYPE_CHECKING
 
 from .authors import AuthorResolver
 from .codegraph_crawler import CodeGraphCrawler
+from whygraph.services.codegraph import index_predates_guard
+
 from .core_crawler import CORE_PHASE_WALL_SEC, CoreCrawler, index_file_exists
 from .git_crawler import GitCrawler, TagCrawler
 from .github_crawler import GitHubCrawler
@@ -317,6 +319,10 @@ def _scan(
         # file before it indexes, so a later check could see a half-built
         # index (plan 49 section 5.3 step 0).
         index_existed = index_file_exists(repository.root)
+        # An index without the guard stamp (one that predates the guard, or
+        # one an interrupted build left behind) is rebuilt from scratch by
+        # the refresh, so it is as half-built as a missing one meanwhile.
+        index_complete = index_existed and not index_predates_guard(repository.root)
         if codegraph_crawler is not None:
             codegraph_crawler.start()
 
@@ -379,9 +385,10 @@ def _scan(
         phase_timings["Plans"] = time.monotonic() - t0
 
         # Phase 5 - Core commits: needs the commit rows and the code index.
-        # With no index file at scan start (a first scan), wait for the
-        # CodeGraph build first; the core task has no total meanwhile, and
-        # its wall starts after the wait. An existing index is read as is.
+        # With no complete index at scan start (a first scan, or an index
+        # the refresh rebuilds), wait for the CodeGraph build first; the
+        # core task has no total meanwhile, and its wall starts after the
+        # wait. A complete index is read as is while it syncs.
         if run_core:
             n += 1
             progress.phase(n, "Core commits")
@@ -393,7 +400,7 @@ def _scan(
                 wall_sec=None if describe_core else CORE_PHASE_WALL_SEC,
             )
             ran.append(core)
-            if not index_existed and codegraph_crawler is not None:
+            if not index_complete and codegraph_crawler is not None:
                 codegraph_crawler.join()
             core.start()
             core.join()

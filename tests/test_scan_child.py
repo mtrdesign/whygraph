@@ -35,7 +35,8 @@ from whygraph.db import ensure_initialized
 from whygraph.db import engine as db_engine
 from whygraph.scan import child
 from whygraph.scan.json_progress import JsonUsageSink
-from whygraph.services.codegraph import CodeGraphBootstrapError
+from whygraph.services.codegraph import GUARD_STAMP_RELPATH, CodeGraphBootstrapError
+from whygraph.services.codegraph.bootstrap import GUARD_VERSION
 from whygraph.services.llm import LlmError
 from whygraph.services.llm.types import CompletionResponse
 
@@ -1355,32 +1356,36 @@ class _TimedCore:
         pass
 
 
-@pytest.mark.parametrize("index_at_start", [False, True])
-def test_the_core_phase_waits_for_a_first_index_build_only(
+@pytest.mark.parametrize("index_at_start", ["none", "complete", "unstamped"])
+def test_the_core_phase_waits_for_a_full_index_build_only(
     isolated_db: Path,
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    index_at_start: bool,
+    index_at_start: str,
 ) -> None:
     """Acceptance 18: with no index file at scan start the core work starts
     after the CodeGraph crawler finished, even though the file appeared at
-    once; with one present it does not wait."""
+    once; with a complete (stamped) one present it does not wait. An index
+    without the guard stamp - one an interrupted build left behind - is
+    rebuilt from scratch, so the core work waits for it too."""
     _patch_crawlers(monkeypatch)
     log: list[tuple[str, float]] = []
     monkeypatch.setattr(_TimedCodeGraph, "log", log)
     monkeypatch.setattr(_TimedCore, "log", log)
     monkeypatch.setattr(child, "CodeGraphCrawler", _TimedCodeGraph)
     monkeypatch.setattr(child, "CoreCrawler", _TimedCore)
-    if index_at_start:
+    if index_at_start != "none":
         (repo / ".codegraph").mkdir()
         (repo / ".codegraph" / "codegraph.db").write_bytes(b"")
+    if index_at_start == "complete":
+        (repo / GUARD_STAMP_RELPATH).write_text(GUARD_VERSION + "\n")
 
     status, events, _ = _run(capsys, "--skip-analyze", "--no-remote", "--find-core")
 
     assert status == 0
     at = dict(log)
-    if index_at_start:
+    if index_at_start == "complete":
         assert at["core started"] < at["codegraph finished"]
     else:
         assert at["core built"] < at["codegraph finished"] <= at["core started"]

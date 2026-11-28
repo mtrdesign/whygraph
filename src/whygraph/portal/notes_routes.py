@@ -39,7 +39,7 @@ from .audit import audit
 from .authz import Action, OrgAccess
 from .db import get_session
 from .deps import bound_project, current_org
-from .models import User
+from .models import ConnectionToken, User
 from .people import user_label
 
 notes_read_router = APIRouter()
@@ -51,10 +51,10 @@ notes_write_router = APIRouter()
 FORMER_MEMBER = "Former member"
 """The display name of a uid with no ``users`` row (a removed member)."""
 
-ORIGIN_RE = re.compile(r"(ui|mcp|chat:[0-9]{1,18})")
+ORIGIN_RE = re.compile(r"(ui|mcp|chat:[0-9]{1,18}|link:[0-9]{1,18})")
 """What a bulk reject's ``origin`` must match in full."""
 
-_STATUS = {
+NOTE_ERROR_STATUS = {
     "note_not_found": 404,
     "note_state": 409,
     "note_invalid": 400,
@@ -74,7 +74,7 @@ def _mapped() -> Iterator[None]:
     except ServeError:
         raise
     except WhyGraphError as exc:
-        status = _STATUS.get(exc.code or "")
+        status = NOTE_ERROR_STATUS.get(exc.code or "")
         if status is None:
             raise
         raise ServeError(status, str(exc), code=exc.code) from exc
@@ -125,8 +125,41 @@ def _names(uids: set[str]) -> dict[str, str]:
     return names
 
 
-def _with_names(views: list[dict]) -> list[dict]:
-    """Add the author names and ``*_by_imported`` flags to each note."""
+LINK_ORIGIN_PREFIX = "link:"
+"""The origin of a proposal a linked checkout forwarded (plan 63)."""
+
+
+def _origin_names(views: list[dict], project_id: int) -> dict[int, str]:
+    """``connection_tokens.id`` -> ``client_name`` for the views' ``link:`` origins.
+
+    One query, limited to tokens of ``project_id``: a ``link:<id>`` naming
+    another project's token (or a swept / erased one) resolves to nothing.
+    """
+    ids: set[int] = set()
+    for view in views:
+        origin = view.get("origin")
+        if isinstance(origin, str) and origin.startswith(LINK_ORIGIN_PREFIX):
+            ids.add(int(origin.removeprefix(LINK_ORIGIN_PREFIX)))
+    if not ids:
+        return {}
+    with get_session() as db:
+        return dict(
+            db.exec(
+                select(ConnectionToken.id, ConnectionToken.client_name).where(
+                    col(ConnectionToken.id).in_(ids),
+                    col(ConnectionToken.project_id) == project_id,
+                )
+            ).all()
+        )
+
+
+def _with_names(views: list[dict], project_id: int | None = None) -> list[dict]:
+    """Add the author names and ``*_by_imported`` flags to each note.
+
+    With ``project_id``, a note with a ``link:<id>`` origin also gets
+    ``origin_name``: the connected machine's name, or ``None`` when that
+    token is gone or is not this project's (plan 63 section 4.3).
+    """
     uids = {v["proposed_by"] for v in views if v.get("proposed_by")}
     uids |= {v["confirmed_by"] for v in views if v.get("confirmed_by")}
     names = _names(uids)
@@ -142,11 +175,18 @@ def _with_names(views: list[dict]) -> list[dict]:
         )
         if confirmer:
             view["confirmed_by_name"] = names.get(confirmer, FORMER_MEMBER)
+    if project_id is not None:
+        machines = _origin_names(views, project_id)
+        for view in views:
+            origin = view.get("origin")
+            if isinstance(origin, str) and origin.startswith(LINK_ORIGIN_PREFIX):
+                token_id = int(origin.removeprefix(LINK_ORIGIN_PREFIX))
+                view["origin_name"] = machines.get(token_id)
     return views
 
 
-def _one(view: dict) -> dict:
-    return _with_names([dict(view)])[0]
+def _one(view: dict, project_id: int | None = None) -> dict:
+    return _with_names([dict(view)], project_id)[0]
 
 
 def _can_configure(request: Request) -> bool:
@@ -245,6 +285,7 @@ class RejectBody(BaseModel):
 
 @notes_read_router.get("")
 def list_notes(
+    request: Request,
     status: str | None = None,
     anchor_kind: str | None = None,
     path: str | None = None,
@@ -271,7 +312,8 @@ def list_notes(
     -------
     list of dict
         Notes as :class:`~whygraph.mcp.notes.NoteView` plus
-        ``proposed_by_name`` / ``confirmed_by_name``.
+        ``proposed_by_name`` / ``confirmed_by_name`` (and ``origin_name``
+        for a ``link:`` origin).
     """
     with _mapped():
         views = notes.list_notes(
@@ -284,7 +326,7 @@ def list_notes(
             before_id=before_id,
             attention=attention,
         )
-    return _with_names([dict(v) for v in views])
+    return _with_names([dict(v) for v in views], bound_project(request).id)
 
 
 @notes_read_router.get("/summary")
@@ -311,6 +353,7 @@ def notes_summary() -> dict[str, int]:
 
 @notes_read_router.get("/for-target")
 def notes_for_target(
+    request: Request,
     qualified_name: str | None = None,
     path: str | None = None,
     line_start: int | None = None,
@@ -336,11 +379,11 @@ def notes_for_target(
         views = notes.notes_for_target(
             target, include_proposed=include_proposed, include_missing=include_missing
         )
-    return _with_names([dict(v) for v in views])
+    return _with_names([dict(v) for v in views], bound_project(request).id)
 
 
 @notes_read_router.get("/{note_id}")
-def get_note(note_id: int) -> dict:
+def get_note(note_id: int, request: Request) -> dict:
     """One note of any status, with the ids of the notes that revise it."""
     with _mapped():
         view = dict(notes.get_note(note_id))
@@ -352,7 +395,7 @@ def get_note(note_id: int) -> dict:
                 .order_by(col(ProjectNote.id))
             ).all()
         )
-    return _one(view)
+    return _one(view, bound_project(request).id)
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +445,7 @@ def reject_agent_proposals(
     ):
         raise ServeError(
             400,
-            "proposed_by and origin (ui, mcp or chat:<id>) are required",
+            "proposed_by and origin (ui, mcp, chat:<id> or link:<id>) are required",
             code="note_invalid",
         )
     with _mapped():

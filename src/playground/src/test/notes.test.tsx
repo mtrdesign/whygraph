@@ -218,6 +218,18 @@ describe("Notes page", () => {
     expect(screen.queryByRole("button", { name: /confirm all/i })).toBeNull();
   });
 
+  it("names the linked checkout a proposal came from", async () => {
+    fake.notes = [
+      note({ id: 1, source: "mcp", origin: "link:7", origin_name: "my-laptop" }),
+      note({ id: 2, source: "mcp", origin: "link:8", origin_name: null }),
+      note({ id: 3, source: "mcp", origin: "mcp:cursor" }),
+    ];
+    mount("/p/alpha/notes");
+    expect(await within(await screen.findByTestId("note-1")).findByText("From my-laptop")).toBeInTheDocument();
+    expect(within(screen.getByTestId("note-2")).getByText("From a linked checkout")).toBeInTheDocument();
+    expect(within(screen.getByTestId("note-3")).queryByTestId("note-linked-origin")).toBeNull();
+  });
+
   it("confirms one note", async () => {
     fake.notes = [note({ id: 1 })];
     mount("/p/alpha/notes");

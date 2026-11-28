@@ -459,6 +459,7 @@ export const MESSAGES: Record<string, Resolver> = {
   note_needs_second_confirmer: "This note applies to most of the project, so another member or a project admin must confirm it.",
   note_no_actor: "WhyGraph couldn't tell who made this request. Reload the page and try again.",
   note_linked: "Notes for this project are kept on the platform.",
+  note_unsupported: "The platform this project is linked to is too old to take notes. Ask its admin to update WhyGraph.",
 
   // Committed plans (plan 61)
   plan_not_found: "That plan is not indexed in this project.",

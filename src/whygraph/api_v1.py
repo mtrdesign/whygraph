@@ -104,6 +104,31 @@ RATIONALE_DEPTH_CAPABILITY = "rationale_depth"
 """The ``meta`` capability of a platform whose ``/rationale`` takes ``intent``,
 ``depth`` and ``cached_only`` (plan 62 section 14.4)."""
 
+NOTES_CAPABILITY = "notes"
+"""The ``meta`` capability of a platform that serves the four ``/notes``
+routes (plan 63)."""
+
+NoteKind = Literal["decision", "constraint", "gotcha", "convention", "purpose"]
+"""A note kind (mirrors ``mcp.notes.NOTE_KINDS``; a test keeps them equal)."""
+
+AnchorKind = Literal["project", "area", "path", "range", "symbol"]
+"""A note anchor kind (mirrors ``mcp.notes.ANCHOR_KINDS``)."""
+
+_ANCHOR_FIELDS: dict[str, frozenset[str]] = {
+    "project": frozenset(),
+    "area": frozenset({"area"}),
+    "path": frozenset({"path"}),
+    "symbol": frozenset({"qualified_name"}),
+    "range": frozenset({"path", "line_start", "line_end"}),
+}
+"""The fields each anchor kind takes, besides ``kind`` (``mcp.notes._ANCHOR_KEYS``)."""
+
+_NOTE_REF = r"^(#[0-9]{1,9}|[0-9a-f]{40})$"
+"""A note ref: an issue / PR number (``#12``) or a full commit SHA."""
+
+MAX_NOTE_REFS = 5
+"""Most refs one proposed note may carry (``mcp.notes.MAX_REFS``)."""
+
 
 PLAN_STEM_PATTERN = r"[a-z0-9][a-z0-9-]{0,79}"
 """A plan stem (``mcp.plans.PLAN_STEM_RE``), for a route path and a wire field."""
@@ -142,6 +167,17 @@ def _check_path(value: str) -> str:
         raise ValueError("path must not start with '/', '-' or ':'")
     if ".." in value.split("/"):
         raise ValueError("path must not contain a '..' segment")
+    return value
+
+
+def _check_qualified_name(value: str | None) -> str | None:
+    """Refuse an empty, over-long or non-printable ``qualified_name``."""
+    if value is None:
+        return value
+    if not value or len(value) > MAX_QUALIFIED_NAME or not value.isprintable():
+        raise ValueError(
+            f"qualified_name must be 1 to {MAX_QUALIFIED_NAME} printable characters"
+        )
     return value
 
 
@@ -381,6 +417,134 @@ class PlansForIn(_In):
     scope: Literal["symbol", "file"] = "file"
     detail: Literal["compact", "full"] = "compact"
     target: PlansTargetIn | None = None
+
+
+class NoteAnchorIn(_In):
+    """Where a proposed note is anchored (``mcp.notes._ANCHOR_KEYS``).
+
+    Exactly the keys of ``kind`` are accepted: ``project`` none, ``area``
+    ``area``, ``path`` ``path``, ``range`` ``path`` + ``line_start`` +
+    ``line_end``, ``symbol`` ``qualified_name``.
+
+    Attributes
+    ----------
+    kind : {"project", "area", "path", "range", "symbol"}
+        The anchor kind.
+    path : str or None
+        A repository path (``path`` and ``range``).
+    line_start, line_end : int or None
+        The line range (``range`` only; both, ``1 <= start <= end``).
+    qualified_name : str or None
+        The symbol name (``symbol`` only).
+    area : str or None
+        A configured area label (``area`` only).
+    """
+
+    kind: AnchorKind
+    path: RepoPath | None = None
+    line_start: StrictInt | None = None
+    line_end: StrictInt | None = None
+    qualified_name: StrictStr | None = None
+    area: StrictStr | None = Field(None, max_length=128)
+
+    _name = field_validator("qualified_name")(_check_qualified_name)
+
+    @model_validator(mode="after")
+    def _keys(self) -> NoteAnchorIn:
+        allowed = _ANCHOR_FIELDS[self.kind]
+        given = {
+            name
+            for name in ("path", "line_start", "line_end", "qualified_name", "area")
+            if getattr(self, name) is not None
+        }
+        if given != allowed:
+            raise ValueError(
+                f"a {self.kind} anchor takes exactly: {', '.join(sorted(allowed)) or 'no fields'}"
+            )
+        if self.kind == "range":
+            assert self.line_start is not None and self.line_end is not None
+            _check_lines(self.line_start, self.line_end)
+        return self
+
+
+class NoteCheckIn(_In):
+    """The optional machine check of a ``constraint`` note.
+
+    Attributes
+    ----------
+    kind : {"absent", "present"}
+        Whether ``text`` must be absent from, or present in, the files.
+    text : str
+        The literal text (3 to 200 characters).
+    glob : str
+        The file glob it is searched in (1 to 200 characters).
+    """
+
+    kind: Literal["absent", "present"]
+    text: StrictStr = Field(min_length=3, max_length=200)
+    glob: StrictStr = Field(min_length=1, max_length=200)
+
+
+class NoteProposeIn(_In):
+    """``POST /api/v1/projects/{slug}/notes`` (plan 63 section 5).
+
+    Attributes
+    ----------
+    body : str
+        The note text (at most 1000 characters; the sender sends the
+        cleaned body).
+    kind : {"decision", "constraint", "gotcha", "convention"}
+        The note kind (``purpose`` is not proposable).
+    anchor : NoteAnchorIn
+        Where it is anchored.
+    fallback_to_project : bool
+        Anchor to the project when the platform lacks the anchor.
+    refs : list[str]
+        ``#N`` or full-SHA refs, at most :data:`MAX_NOTE_REFS`.
+    check : NoteCheckIn or None
+        The machine check (``constraint`` notes).
+    supersedes_id : int or None
+        The note this one replaces.
+    """
+
+    body: StrictStr = Field(min_length=1, max_length=1000)
+    kind: Literal["decision", "constraint", "gotcha", "convention"]
+    anchor: NoteAnchorIn
+    fallback_to_project: StrictBool = True
+    refs: list[Annotated[StrictStr, Field(pattern=_NOTE_REF)]] = Field(
+        default_factory=list, max_length=MAX_NOTE_REFS
+    )
+    check: NoteCheckIn | None = None
+    supersedes_id: StrictInt | None = Field(None, ge=1)
+
+
+class NotesForIn(_In):
+    """``POST /api/v1/projects/{slug}/notes/for``: the notes for a code target.
+
+    Attributes
+    ----------
+    path : str
+        The file path.
+    qualified_name : str or None
+        The symbol name.
+    line_start, line_end : int or None
+        The range in the sender's working tree (both or neither).
+    """
+
+    path: RepoPath
+    qualified_name: StrictStr | None = None
+    line_start: StrictInt | None = None
+    line_end: StrictInt | None = None
+
+    _name = field_validator("qualified_name")(_check_qualified_name)
+
+    @model_validator(mode="after")
+    def _range(self) -> NotesForIn:
+        if (self.line_start is None) != (self.line_end is None):
+            raise ValueError("line_start and line_end go together")
+        if self.line_start is not None and self.line_end is not None:
+            _check_lines(self.line_start, self.line_end)
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1120,78 @@ class PlanSectionOut(_Out):
     project: StatusOut | None = None
 
 
+class NoteAnchorOut(_Out):
+    """A note's anchor as the platform reports it."""
+
+    kind: AnchorKind
+    path: str | None = Field(None, max_length=MAX_PATH)
+    line_start: int | None = Field(None, ge=1)
+    line_end: int | None = Field(None, ge=1)
+    qualified_name: str | None = Field(None, max_length=MAX_QUALIFIED_NAME)
+    area: str | None = Field(None, max_length=128)
+
+
+class NoteCheckOut(_Out):
+    """A note's machine check."""
+
+    kind: Literal["absent", "present"]
+    text: str = Field(max_length=200)
+    glob: str = Field(max_length=200)
+
+
+class NoteOut(_Out):
+    """One note on the wire.
+
+    Everything ``render_note_line`` reads is typed, so a platform cannot
+    forge a raw string into a card. Proposer, confirmer and origin fields
+    are absent on purpose (an unknown field is dropped).
+    """
+
+    id: int = Field(ge=1)
+    kind: NoteKind
+    body: str = Field(max_length=1000)
+    status: Literal["confirmed", "proposed"]
+    anchor: NoteAnchorOut
+    anchor_state: Literal["current", "changed", "missing", "unknown", "n/a"]
+    commits_since: int | None = None
+    source: Literal["human", "chat", "mcp", "analysis"]
+    confirmed_at: str | None = None
+    edited_on_confirm: bool = False
+    refs: list[str] = Field(default_factory=list)
+    supersedes_id: int | None = None
+    check: NoteCheckOut | None = None
+    check_state: Literal["holds", "broken", "unknown"] | None = None
+    resource: str | None = None
+
+
+class DroppedRefOut(_Out):
+    """A ref the platform could not keep."""
+
+    ref: str
+    reason: Literal["not_on_platform"]
+
+
+class NoteProposeOut(_Out):
+    """The reply of ``POST /notes``.
+
+    ``anchor_downgraded`` is ``{"from", "to", "reason": "not_on_platform"}``
+    when the anchor fell back to the project.
+    """
+
+    note_id: int
+    status: str
+    duplicate: bool
+    note: NoteOut | None = None
+    anchor_downgraded: dict[str, Any] | None = None
+    dropped_refs: list[DroppedRefOut] = Field(default_factory=list)
+
+
+class NotesForOut(_Out):
+    """The reply of ``POST /notes/for`` and ``GET /notes/project``."""
+
+    notes: list[NoteOut]
+
+
 # ---------------------------------------------------------------------------
 # Conversions
 # ---------------------------------------------------------------------------
@@ -1028,20 +1264,24 @@ __all__ = [
     "MAX_HUNKS",
     "MAX_LIMIT",
     "MAX_LINE",
+    "MAX_NOTE_REFS",
     "MAX_ORIGINS",
     "MAX_PATH",
     "MAX_PLAN_PATHS",
     "MAX_PLAN_SECTION",
     "MAX_QUALIFIED_NAME",
+    "NOTES_CAPABILITY",
     "NOT_CACHED",
     "PLAN_SECTION_TEXT_MAX",
     "PLAN_STEM_PATTERN",
     "PLAN_TITLE_MAX",
     "PLATFORM_BUDGET_MESSAGE",
     "RATIONALE_DEPTH_CAPABILITY",
+    "AnchorKind",
     "Basis",
     "CommitOut",
     "DepthLevel",
+    "DroppedRefOut",
     "ErrorOut",
     "EvidenceCountOut",
     "EvidenceIn",
@@ -1051,6 +1291,16 @@ __all__ = [
     "Intent",
     "IssueOut",
     "MetaOut",
+    "NoteAnchorIn",
+    "NoteAnchorOut",
+    "NoteCheckIn",
+    "NoteCheckOut",
+    "NoteKind",
+    "NoteOut",
+    "NoteProposeIn",
+    "NoteProposeOut",
+    "NotesForIn",
+    "NotesForOut",
     "OriginIn",
     "PlanChildOut",
     "PlanCommitOut",

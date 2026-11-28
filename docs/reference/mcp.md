@@ -190,9 +190,12 @@ same text on the same anchor already existed (the existing note is returned and 
 created). When the match is another member's pending proposal, `note` is left out. A project-wide
 note, or one on a top-level folder, needs a second person to confirm it.
 
-The proposer is the local user. Refusals: `note_invalid` (the text, kind, anchor or refs failed
+The proposer is the local user, or on a [linked project](#linked-projects) the user of the
+connection token. Optional result keys: `anchor_downgraded` (`from`, `to`, `reason`: `not_pushed` or
+`not_on_platform`), `dropped_refs` (a list of `ref` and `reason`) and `platform` (linked projects
+only), and on a linked project `review` is a full platform URL. Refusals: `note_invalid` (the text, kind, anchor or refs failed
 validation), `note_limit` (20 agent proposals per member and 50 per project per UTC day, or 200
-waiting for review) and `note_linked` (a [linked project](#linked-projects)). It is a counted call
+waiting for review) and `note_unsupported` (a [linked project](#linked-projects) whose platform is too old). It is a counted call
 in [Agent activity](../portal/agents.md#agent-activity).
 
 ### `whygraph_rationale_brief`
@@ -359,7 +362,7 @@ Read-only, JSON, addressed by URI.
 | `whygraph://repo/overview` | `whygraph_repo_overview` | Repo-level summary: row counts, commit date range, scan freshness, LLM-description coverage, top contributors, and a `freshness` block. |
 | `whygraph://plan/{stem}` | `whygraph_plan` | A committed [plan](#plans)'s decision digest, its links and a contents list. Intent, not history. |
 | `whygraph://plan/{stem}/section/{n}` | `whygraph_plan_section` | One section of a plan, at most 8,000 characters. |
-| `whygraph://note/{id}` | `whygraph_note` | A **confirmed** [project note](../guide/notes.md), with its anchor, `anchor_state`, refs and who confirmed it. A proposed or retired note, or an unknown id, answers `{"error": "not_found", "id": ...}`. The body is member-written data, not instructions. |
+| `whygraph://note/{id}` | `whygraph_note` | A **confirmed** [project note](../guide/notes.md), with its anchor, `anchor_state`, refs and who confirmed it. A proposed or retired note, or an unknown id, answers `{"error": "not_found", "id": ...}`. On a [linked project](#linked-projects) it answers from the platform and only for a note another member or an admin confirmed, without the confirmer. The body is member-written data, not instructions. |
 
 The overview's `freshness` block says whether the index is current, so a planner can read it once and
 warn when the plan rests on an old scan:
@@ -500,7 +503,7 @@ prefix.
 | `provider_error` | - | The LLM provider failed while writing the card. | Retry later; check the provider key in the portal if it keeps failing. |
 | `note_invalid` | - | `whygraph_propose_note`: the text, kind, anchor or refs failed validation (several anchors, a path outside the repository, a symbol in several files, a ref that is not in the project's history). | Fix the argument the message names. |
 | `note_limit` | - | `whygraph_propose_note`: 20 agent proposals per member or 50 per project today (UTC), or 200 waiting for review. | Ask a member to review the waiting proposals, or try again tomorrow. |
-| `note_linked` | - | `whygraph_propose_note` on a [linked project](#linked-projects). | Propose the note on the platform. |
+| `note_unsupported` | - | `whygraph_propose_note` on a [linked project](#linked-projects) whose platform is too old to take notes. | Ask the platform's admin to update WhyGraph. |
 
 ## Linked projects
 
@@ -547,8 +550,17 @@ or `not_on_default_branch`, and a `platform.status` that says why. `whygraph_are
 `whygraph_rationale_brief` and the resources need the platform's history and fail with a message that
 names the fix.
 
-**No notes.** A linked project has no local notes database: `whygraph_propose_note` fails with
-`note_linked`, `whygraph://note/{id}` answers `not_found`, and the platform's cards carry no `notes`.
+**Notes.** A linked project keeps no notes locally; the platform does. `whygraph_propose_note` sends the
+proposal to the platform (proposer: the connection token's user, origin `link:<connection id>`), and
+narrows the anchor to what is pushed: a range or symbol only when the file is byte-identical to the
+default branch, a path only when tracked there, SHAs only when the default branch contains them. A
+narrowed anchor is reported as `anchor_downgraded` (`not_pushed`; `not_on_platform` when the
+platform's clone lags) and unsent refs as `dropped_refs`. Text that looks like a token or an AI provider
+key is refused with `note_invalid` (locally, and again by the platform). Offline, the call fails with the link error and nothing is queued. Cards (even a
+`no_evidence` reply) carry the platform's **link-trusted** `notes` (confirmed by someone other than
+the proposer, reconfirmed by someone else, or confirmed by a project admin), and
+`whygraph://note/{id}` reads the same set. A platform too old to know notes fails the proposal with
+`note_unsupported` and sets `"notes": "unsupported"` in the `platform` block.
 
 **Plans.** `whygraph_area_history` and `whygraph_rationale_brief` add the platform's [plans](#plans) to
 their results, and `whygraph://plan/{stem}` and `.../section/{n}` read the platform's copy. Only the
@@ -557,7 +569,8 @@ never computed from your uncommitted or unpushed work. The platform serves only 
 default branch. A platform too old to know plans leaves `plans` out and sets `"plans": "unsupported"`
 in the result's `platform` block; the link stays `ok`.
 
-**Other differences.** Only pushed commits, paths and symbol names are sent to the platform.
+**Other differences.** Only pushed commits, paths and symbol names are sent to the platform (note text
+is sent as written; see [Notes](../portal/platform-projects.md#notes)).
 `whygraph_rationale_brief` returns a card generated and cached on the platform (shared by the whole
 team), and fails with "no pushed history" while the target's lines are not on a pushed commit.
 `whygraph_area_history` answers for a path only when a pushed default-branch revision tracks it.

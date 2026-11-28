@@ -224,8 +224,9 @@ def initialize_project(
     claude_hooks : bool
         For Claude Code on ``migrate``: merge the WhyGraph hooks into
         ``.claude/settings.json`` (:func:`whygraph.agents.apply_claude_hooks`)
-        and write the agent hook helper. The portal passes ``False`` for a
-        linked project. A Claude Code ``remove`` strips the hooks and
+        and write the agent hook helper. The portal passes ``True`` for
+        every source, a linked project included (its hooks answer from the
+        platform's notes). A Claude Code ``remove`` strips the hooks and
         deletes the helper whatever this is. A ``needs_confirmation``
         outcome for ``.claude/settings.json`` never withholds the markers:
         the hooks just stay uninstalled.

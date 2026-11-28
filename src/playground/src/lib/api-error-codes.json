@@ -120,6 +120,7 @@
   "note_no_actor",
   "note_not_found",
   "note_state",
+  "note_unsupported",
   "oauth_state",
   "org_admin",
   "org_creation_restricted",

@@ -42,11 +42,11 @@ import re
 import sqlite3
 import stat
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import and_, case, false, func, insert, or_, update
@@ -73,6 +73,7 @@ from whygraph.services.codegraph import (
     Symbol,
 )
 from whygraph.services.git import git_env
+from whygraph.services.git.credentials import PROVIDER_KEY_PATTERN, TOKEN_PATTERN
 
 from . import targets
 from .descriptions import PROPOSE_NOTE_ANNOTATIONS, PROPOSE_NOTE_DESCRIPTION
@@ -214,7 +215,7 @@ _DUPLICATE_KEYS: dict[str, tuple[str, ...]] = {
 _RETIRE_FROM = {"rejected": "proposed", "outdated": "confirmed", "wrong": "confirmed"}
 """A retire reason a caller may pass, and the status it retires from."""
 
-_ORIGIN_RE = re.compile(r"ui|mcp|chat:[0-9]{1,18}")
+_ORIGIN_RE = re.compile(r"ui|mcp|chat:[0-9]{1,18}|link:[0-9]{1,18}")
 """An origin: never free text."""
 
 _SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
@@ -246,7 +247,8 @@ class NoteView(TypedDict, total=False):
         Path and area anchors only: default-branch commits touching the
         anchor since it was (re)confirmed, at most :data:`COMMITS_SINCE_CAP`.
     source, origin : str
-        Who proposed it and from where (``ui``, ``mcp``, ``chat:<id>``).
+        Who proposed it and from where (``ui``, ``mcp``, ``chat:<id>``,
+        ``link:<id>``).
     proposed_by, proposed_at : str
         Proposer uid and time.
     confirmed_by, confirmed_at : str
@@ -310,6 +312,34 @@ class NoteView(TypedDict, total=False):
 def _invalid(message: str) -> WhyGraphError:
     """A validation refusal; ``message`` names a field and a rule, never a value."""
     return WhyGraphError(message, code="note_invalid")
+
+
+def refuse_secret_text(*texts: object) -> None:
+    """Refuse note free text that holds a credential-shaped string.
+
+    A note's text is stored on a shared server and shown to the whole team,
+    so a GitHub token, a connection token (:data:`TOKEN_PATTERN`) or a
+    provider key (:data:`PROVIDER_KEY_PATTERN`) is refused rather than kept.
+
+    Parameters
+    ----------
+    *texts : object
+        The free-text fields to check (body, check text and glob, area);
+        anything that is not a string is ignored.
+
+    Raises
+    ------
+    WhyGraphError
+        ``note_invalid`` when any text holds a credential-shaped string. The
+        message never echoes the text.
+    """
+    for value in texts:
+        if isinstance(value, str) and (
+            TOKEN_PATTERN.search(value) or PROVIDER_KEY_PATTERN.search(value)
+        ):
+            raise _invalid(
+                "a note must not contain a token or credential; remove it and retry"
+            )
 
 
 def _state(message: str) -> WhyGraphError:
@@ -481,11 +511,11 @@ def _check_kind(kind: object) -> str:
 
 
 def _check_origin(origin: object) -> str | None:
-    """Validate an origin (``ui``, ``mcp``, ``chat:<id>``) or ``None``."""
+    """Validate an origin (``ui``, ``mcp``, ``chat:<id>``, ``link:<id>``) or ``None``."""
     if origin is None:
         return None
     if not isinstance(origin, str) or not _ORIGIN_RE.fullmatch(origin):
-        raise _invalid("origin must be ui, mcp or chat:<session id>")
+        raise _invalid("origin must be ui, mcp, chat:<session id> or link:<id>")
     return origin
 
 
@@ -497,6 +527,31 @@ def _normalise(body: str) -> str:
 # ---------------------------------------------------------------------------
 # Paths and anchored files
 # ---------------------------------------------------------------------------
+
+
+class AnchorNotFound(WhyGraphError):
+    """An anchor names a path, line range or symbol the repository lacks.
+
+    Carries the ``note_invalid`` code (the visible code is unchanged); a
+    caller that must tell "not found" from other refusals catches this.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="note_invalid")
+
+
+class RefNotFound(WhyGraphError):
+    """A ref names no commit, pull request or issue of the project.
+
+    Attributes
+    ----------
+    index : int
+        Position of the offending ref in the submitted list.
+    """
+
+    def __init__(self, message: str, index: int) -> None:
+        super().__init__(message, code="note_invalid")
+        self.index = index
 
 
 class _Unreadable(Exception):
@@ -542,9 +597,9 @@ def _validate_path(path: object) -> str:
         try:
             names = os.listdir(parent)
         except OSError:
-            raise _invalid("path does not exist") from None
+            raise AnchorNotFound("path does not exist") from None
         if part not in names:
-            raise _invalid("path does not exist (the case must match exactly)")
+            raise AnchorNotFound("path does not exist (the case must match exactly)")
         parent = parent / part
     return rel_posix
 
@@ -661,7 +716,7 @@ def _range_fields(path: object, line_start: object, line_end: object) -> dict:
         ) from None
     start, end = int(line_start), int(line_end)  # type: ignore[call-overload]
     if end > len(lines):
-        raise _invalid("the line range runs past the end of the file")
+        raise AnchorNotFound("the line range runs past the end of the file")
     return {
         "anchor_path": rel,
         "line_start": start,
@@ -670,8 +725,12 @@ def _range_fields(path: object, line_start: object, line_end: object) -> dict:
     }
 
 
-def _resolve_symbol_for_write(qualified_name: str) -> Target:
-    """Resolve a symbol by name alone, refusing a name defined in several files."""
+def _resolve_symbol_for_write(qualified_name: str, *, sync: bool = True) -> Target:
+    """Resolve a symbol by name alone, refusing a name defined in several files.
+
+    With ``sync=False`` the index is read as it stands (no freshness check,
+    no ``codegraph sync``) and an unindexed name raises :class:`AnchorNotFound`.
+    """
     root = targets.repo_root()
     try:
         with _open_graph(root) as graph:
@@ -682,6 +741,11 @@ def _resolve_symbol_for_write(qualified_name: str) -> Target:
         raise _invalid(
             "that symbol is defined in several files; anchor by path and lines instead"
         )
+    if not sync:
+        found = targets.indexed_symbol_target(qualified_name)
+        if found is None:
+            raise AnchorNotFound("that symbol is not in the code index")
+        return found
     try:
         return targets.resolve_target(
             path=None, line_start=None, line_end=None, qualified_name=qualified_name
@@ -689,7 +753,7 @@ def _resolve_symbol_for_write(qualified_name: str) -> Target:
     except WhyGraphError as exc:
         if exc.code == "not_indexed":
             raise _invalid("a symbol anchor needs the code index; scan first") from None
-        raise _invalid("that symbol is not in the code index") from None
+        raise AnchorNotFound("that symbol is not in the code index") from None
 
 
 def _symbol_fields(location: tuple[str, int, int], qualified_name: str) -> dict:
@@ -735,7 +799,7 @@ def _locate_symbol_for_write(row: ProjectNote) -> tuple[str, int, int]:
     return target.path, target.line_start, target.line_end
 
 
-def _anchor_fields(anchor: object) -> dict:
+def _anchor_fields(anchor: object, *, symbol_sync: bool = True) -> dict:
     """Validate a proposal's anchor into ``project_note`` column values."""
     if not isinstance(anchor, Mapping):
         raise _invalid("anchor must be an object with a kind")
@@ -765,7 +829,7 @@ def _anchor_fields(anchor: object) -> dict:
         if not isinstance(name, str) or not name.strip():
             raise _invalid("a symbol anchor needs a qualified name")
         name = name.strip()
-        target = _resolve_symbol_for_write(name)
+        target = _resolve_symbol_for_write(name, sync=symbol_sync)
         location = (target.path, target.line_start, target.line_end)
         fields.update(_symbol_fields(location, name))
     return fields
@@ -805,8 +869,9 @@ def _validate_refs(session: Session, refs: object) -> str | None:
             number = int(issue.group(1))
             known = session.get(PullRequest, number) or session.get(Issue, number)
             if known is None:
-                raise _invalid(
-                    f"refs[{index}] names no pull request or issue of this project"
+                raise RefNotFound(
+                    f"refs[{index}] names no pull request or issue of this project",
+                    index,
                 )
             value = f"#{number}"
         elif _SHA_RE.fullmatch(text):
@@ -817,7 +882,9 @@ def _validate_refs(session: Session, refs: object) -> str | None:
                 .limit(2)
             ).all()
             if len(shas) != 1:
-                raise _invalid(f"refs[{index}] names no single commit of this project")
+                raise RefNotFound(
+                    f"refs[{index}] names no single commit of this project", index
+                )
             value = shas[0]
         else:
             raise _invalid(f"refs[{index}] must be a commit SHA or #N")
@@ -1501,6 +1568,7 @@ def propose(
     refs: Iterable[str] | None = (),
     supersedes_id: int | None = None,
     check: Mapping[str, Any] | None = None,
+    symbol_sync: bool = True,
 ) -> NoteView:
     """Propose a note (or a revision of a confirmed one).
 
@@ -1523,7 +1591,7 @@ def propose(
     actor_uid : str or None
         The proposer.
     origin : str, optional
-        ``ui``, ``mcp`` or ``chat:<session id>``.
+        ``ui``, ``mcp``, ``chat:<session id>`` or ``link:<id>``.
     refs : iterable of str, optional
         Commit SHAs (unique prefixes of at least 7 characters, stored in
         full) and ``#N`` pull requests or issues, each existing in the
@@ -1535,6 +1603,9 @@ def propose(
         ``{"kind", "text", "glob"}``, a ``constraint`` note's check; the
         rules are :func:`_clean_check`'s. A revision carries its own check:
         nothing is copied from the note it revises.
+    symbol_sync : bool, optional
+        ``False`` resolves a symbol anchor from the index as it stands, with
+        no re-sync (the platform's server clone); default ``True``.
 
     Returns
     -------
@@ -1564,7 +1635,7 @@ def propose(
     check_fields = _clean_check(kind, check)
     if supersedes_id is not None and not _is_int(supersedes_id):
         raise _invalid("supersedes_id must be a note id")
-    fields = {**_anchor_fields(anchor), **check_fields}
+    fields = {**_anchor_fields(anchor, symbol_sync=symbol_sync), **check_fields}
     with get_session() as session:
         _begin_immediate(session)
         refs_json = _validate_refs(session, refs)
@@ -1990,7 +2061,7 @@ def reject_agent_proposals(
     proposed_by : str
         The proposer whose proposals are rejected.
     origin : str
-        ``mcp`` or ``chat:<session id>`` (``ui`` matches no agent proposal).
+        ``mcp``, ``chat:<session id>`` or ``link:<id>`` (``ui`` matches no agent proposal).
 
     Returns
     -------
@@ -2009,7 +2080,7 @@ def reject_agent_proposals(
     if not isinstance(proposed_by, str) or not proposed_by:
         raise _invalid("proposed_by must be a member id")
     if origin is None or _check_origin(origin) is None:
-        raise _invalid("origin must be ui, mcp or chat:<session id>")
+        raise _invalid("origin must be ui, mcp, chat:<session id> or link:<id>")
     with get_session() as session:
         _begin_immediate(session)
         result = session.exec(  # type: ignore[call-overload]
@@ -2212,7 +2283,11 @@ def _overlap_rank(
 
 
 def notes_for_target(
-    target: Target, *, include_proposed: bool = False, include_missing: bool = False
+    target: Target,
+    *,
+    include_proposed: bool = False,
+    include_missing: bool = False,
+    keep: Callable[[ProjectNote], bool] | None = None,
 ) -> list[NoteView]:
     """The notes that apply to a code target, best first.
 
@@ -2232,6 +2307,9 @@ def notes_for_target(
         Also return ``proposed`` notes (the Explorer only; default ``False``).
     include_missing : bool, optional
         Also return notes whose anchor is ``missing`` (the Explorer only).
+    keep : callable, optional
+        A row filter applied before the per-target limit (and before any
+        check budget is spent); rows it rejects are dropped.
 
     Returns
     -------
@@ -2269,6 +2347,8 @@ def notes_for_target(
         ).all()
         groups: tuple[list, list, list] = ([], [], [])
         for row in rows:
+            if keep is not None and not keep(row):
+                continue
             state = evaluator.evaluate(row)
             if state[0] == "missing" and not include_missing:
                 continue
@@ -2302,7 +2382,11 @@ def notes_for_target(
         ]
 
 
-def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
+def project_notes(
+    budget: int = PROJECT_NOTES_BUDGET_CHARS,
+    *,
+    keep: Callable[[ProjectNote], bool] | None = None,
+) -> list[NoteView]:
     """Confirmed project-anchored notes within a character budget.
 
     The confirmed ``purpose`` note comes first, then the others, newest
@@ -2320,6 +2404,9 @@ def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
         fits; only a smaller ``budget`` (or a purpose edited past 600
         characters at confirm time, at most :data:`BODY_MAX_CHARS`) can make
         the result exceed ``budget``, and then the purpose is all it holds.
+    keep : callable, optional
+        A row filter applied before the budget is charged; rows it rejects
+        are dropped (the purpose too).
 
     Returns
     -------
@@ -2342,6 +2429,8 @@ def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
             )
         ).all()
         for row in rows:
+            if keep is not None and not keep(row):
+                continue
             view = _view(row, "n/a", None)
             cost = len(render_note_line(view)) + 1
             if used + cost > budget and row.kind != PURPOSE_KIND:
@@ -2349,6 +2438,32 @@ def project_notes(budget: int = PROJECT_NOTES_BUDGET_CHARS) -> list[NoteView]:
             used += cost
             out.append(view)
     return out
+
+
+def link_trusted(row: ProjectNote, admin_uids: frozenset[str]) -> bool:
+    """Whether a note may reach a linked (local) agent.
+
+    Parameters
+    ----------
+    row : ProjectNote
+        The stored note.
+    admin_uids : frozenset of str
+        Uids of the project's current admins and owners.
+
+    Returns
+    -------
+    bool
+        ``True`` for a ``confirmed`` note that someone other than its
+        proposer confirmed, or reconfirmed, or that a current admin / owner
+        confirmed. A confirmer of ``None`` (imported or system) is never
+        trusted on its own; a self-confirmed note by a non-admin is not.
+    """
+    if row.status != "confirmed":
+        return False
+    for who in (row.confirmed_by, row.reconfirmed_by):
+        if who is not None and who != row.proposed_by:
+            return True
+    return row.confirmed_by is not None and row.confirmed_by in admin_uids
 
 
 def render_note_line(note: NoteView) -> str:
@@ -2690,11 +2805,15 @@ def _import_refs(value: object) -> list[str]:
 
 
 def _import_origin(value: object, chat_ids: Mapping[int, int]) -> str | None:
-    """An origin, with ``chat:<n>`` remapped to the imported session or nulled."""
+    """An origin: ``chat:<n>`` remapped to the imported session or nulled, ``link:<n>`` to ``mcp``."""
     if value is None:
         return None
     if not isinstance(value, str) or not _ORIGIN_RE.fullmatch(value):
-        raise ImportFormatError("origin", "must be ui, mcp or chat:<session id>")
+        raise ImportFormatError(
+            "origin", "must be ui, mcp, chat:<session id> or link:<id>"
+        )
+    if value.startswith("link:"):
+        return "mcp"
     if not value.startswith("chat:"):
         return value
     target = chat_ids.get(int(value.removeprefix("chat:")))
@@ -3204,6 +3323,22 @@ class _ProposeNoteRequired(TypedDict):
     review: str
 
 
+_AnchorDowngraded = TypedDict(
+    "_AnchorDowngraded",
+    {
+        "from": str,
+        "to": str,
+        "reason": Literal["not_pushed", "not_on_platform"],
+    },
+)
+"""The anchor a linked proposal was narrowed to (``from`` is a keyword)."""
+
+
+class _DroppedRef(TypedDict):
+    ref: str
+    reason: Literal["not_pushed", "not_on_platform"]
+
+
 class ProposeNoteResult(_ProposeNoteRequired, total=False):
     """The ``whygraph_propose_note`` result (also its output schema).
 
@@ -3221,9 +3356,19 @@ class ProposeNoteResult(_ProposeNoteRequired, total=False):
         The note. Omitted on a dedupe hit unless the matched note is
         confirmed or was proposed by the caller, so another member's pending
         proposal never reaches a model.
+    anchor_downgraded : dict
+        Linked projects only: ``{"from", "to", "reason"}`` when the anchor
+        was narrowed to what the platform can hold.
+    dropped_refs : list of dict
+        Linked projects only: ``{"ref", "reason"}`` for each ref dropped.
+    platform : dict
+        Linked projects only: the platform block (origin, project, status).
     """
 
     note: NoteView
+    anchor_downgraded: _AnchorDowngraded
+    dropped_refs: list[_DroppedRef]
+    platform: dict[str, Any]
 
 
 def _mcp_anchor(
@@ -3325,15 +3470,32 @@ def whygraph_propose_note(
     Raises
     ------
     WhyGraphError
-        ``note_linked`` on a linked project (before any DB access),
-        ``note_invalid``, ``note_check_invalid``, ``note_limit``,
+        ``note_unsupported`` (a linked project whose platform cannot take
+        notes), ``note_invalid``, ``note_check_invalid``, ``note_limit``,
         ``note_no_actor``, ``note_not_found`` / ``note_state`` for a bad
         ``supersedes_id``.
     """
-    _refuse_linked()
-    anchor = _mcp_anchor(qualified_name, path, line_start, line_end, area, project_wide)
     given = {"kind": check_kind, "text": check_text, "glob": check_glob}
     check = given if any(value is not None for value in given.values()) else None
+    project = current_project()
+    if project is not None and project.remote is not None:
+        from .notes_linked import linked_propose
+
+        return linked_propose(
+            project.remote,
+            body,
+            kind,
+            qualified_name=qualified_name,
+            path=path,
+            line_start=line_start,
+            line_end=line_end,
+            area=area,
+            project_wide=project_wide,
+            refs=refs,
+            check=check,
+            supersedes_id=supersedes_id,
+        )
+    anchor = _mcp_anchor(qualified_name, path, line_start, line_end, area, project_wide)
     actor = current_actor()
     view = propose(
         body,
@@ -3353,11 +3515,21 @@ def _note_resource(id: int) -> dict:
     """Read the resource backing ``whygraph://note/{id}``.
 
     Only a confirmed note is readable; a missing, proposed or retired note,
-    and any id on a linked project, is ``{"error": "not_found", "id": id}``.
+    is ``{"error": "not_found", "id": id}``. A linked project reads the
+    note from its platform (confirmed notes only, the platform's rule); a
+    non-integer id makes no request.
     """
     ctx = current_project()
     if ctx is not None and ctx.remote is not None:
-        return {"error": "not_found", "id": id}
+        remote = ctx.remote
+        missing = {"error": "not_found", "id": id}
+        if not _is_int(id):
+            from whygraph.core.remote import platform_block
+
+            return {**missing, "platform": platform_block(remote)}
+        from .resources import _linked_read
+
+        return _linked_read(remote, lambda: remote.note(id), missing)
     try:
         view = get_note(id)
     except WhyGraphError as exc:
@@ -3407,7 +3579,11 @@ __all__ = [
     "NOTE_KINDS",
     "NoteView",
     "NotesImportResult",
+    "AnchorNotFound",
     "ProposeNoteResult",
+    "RefNotFound",
+    "link_trusted",
+    "refuse_secret_text",
     "PROJECT_NOTES_BUDGET_CHARS",
     "PURPOSE_BODY_MAX_CHARS",
     "PURPOSE_KIND",

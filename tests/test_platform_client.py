@@ -562,3 +562,90 @@ def test_other_5xx_stay_unreachable(monkeypatch, response):
     client, _ = _slow_client(monkeypatch, lambda r: response)
     with pytest.raises(PlatformUnreachable):
         client.rationale(SLUG, RationaleIn(target=TARGET))
+
+
+# -- per-call deadlines and notes (plan 63 step 4, C1-C3) -------------------
+
+_DEADLINE = httpx.Timeout(connect=0.5, read=0.6, write=0.05, pool=0.05)
+
+
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout]
+)
+def test_c1_a_per_call_deadline_maps_every_timeout_to_platform_slow(error):
+    def slow(request):
+        raise error("slow", request=request)
+
+    fake = FakePlatform()
+    client = _client(fake)
+    client._client = httpx.Client(transport=httpx.MockTransport(slow))
+    with pytest.raises(PlatformRefused) as err:
+        client.notes_for(SLUG, "a.py", timeout=_DEADLINE)
+    assert (err.value.status, err.value.code) == (504, "platform_slow")
+    assert link_status_for(err.value)[0] == "ok"
+
+
+@pytest.mark.parametrize("mode", ["timeout", "connect_timeout"])
+def test_c1_without_a_per_call_deadline_a_timeout_stays_unreachable(mode):
+    fake = FakePlatform()
+    client = _client(fake)
+    fake.failure = mode
+    with pytest.raises(PlatformUnreachable):
+        client.notes_for(SLUG, "a.py")
+    with pytest.raises(PlatformUnreachable):
+        client.meta()
+
+
+def test_c2_meta_forwards_its_deadline():
+    fake = FakePlatform()
+    seen: list[dict] = []
+
+    def wrapped(request):
+        seen.append(request.extensions["timeout"])
+        return fake.handle(request)
+
+    client = PlatformHttp(
+        platform_origin=PLATFORM_ORIGIN, transport=httpx.MockTransport(wrapped)
+    )
+    client.meta(timeout=_DEADLINE)
+    assert seen[0] == {"connect": 0.5, "read": 0.6, "write": 0.05, "pool": 0.05}
+    client.meta()
+    assert seen[1]["read"] == 10.0
+
+
+def test_c3_notes_replies_drop_none_keys_and_unknown_fields():
+    fake = FakePlatform()
+    fake.notes = [
+        {
+            **fake.notes[0],
+            "proposed_by": "someone",
+            "check": None,
+            "commits_since": None,
+        }
+    ]
+    client = _client(fake)
+    for reply in (
+        client.notes_for(SLUG, "a.py", qualified_name="pkg.f", lines=(1, 2)),
+        client.project_notes(SLUG),
+    ):
+        (note,) = reply["notes"]
+        assert "check" not in note and "commits_since" not in note
+        assert "proposed_by" not in note and "project" not in reply
+        assert note["anchor"] == {"kind": "project"}
+    assert "project" not in client.note(SLUG, 1)
+    out = client.propose_note(
+        SLUG, {"body": "b", "kind": "gotcha", "anchor": {"kind": "project"}}
+    )
+    assert out["note_id"] == 7 and "anchor_downgraded" not in out
+    assert fake.proposals == [
+        {
+            "body": "b",
+            "kind": "gotcha",
+            "anchor": {"kind": "project"},
+            "fallback_to_project": True,
+            "refs": [],
+        }
+    ]
+    with pytest.raises(PlatformRefused) as err:
+        client.note(SLUG, 99)
+    assert err.value.code == "not_found"

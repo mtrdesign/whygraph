@@ -29,6 +29,7 @@ from .commands import (
     GitCloneCmd,
     GitCurrentBranchCmd,
     GitDiffCmd,
+    GitDiffQuietCmd,
     GitDiffTreeFileChangesCmd,
     GitFastForwardCmd,
     GitFetchDefaultCmd,
@@ -40,6 +41,7 @@ from .commands import (
     GitIsShallowCmd,
     GitLogCommitCmd,
     GitLogPathsBetweenCmd,
+    GitLsFilesTagsCmd,
     GitLsRemoteBranchCmd,
     GitLsRemoteRefsCmd,
     GitLsTreeLongCmd,
@@ -137,6 +139,12 @@ _TAG_LIMIT = 500
 
 # A full SHA-1 commit id, the only revision :meth:`Repository.range_shas` passes.
 _FULL_SHA = re.compile(r"[0-9a-f]{40}")
+
+# What :meth:`Repository.resolve_commit` passes to git: 7 to 40 hex characters.
+_SHA_PREFIX = re.compile(r"[0-9a-fA-F]{7,40}")
+
+# A regular file's modes in ``git ls-tree`` (not a symbolic link or submodule).
+_REGULAR_MODES = ("100644", "100755")
 
 
 class Repository:
@@ -859,6 +867,99 @@ class Repository:
             )
         except ShellError:
             return False
+
+    def resolve_commit(self, prefix: str) -> str | None:
+        """The full SHA of the one commit a hex ``prefix`` names (purely local).
+
+        Only 7 to 40 hex characters reach git (``git rev-parse --verify
+        --quiet <prefix>^{commit}``), so an option-like or ref-like string
+        never does. An answer that does not start with the prefix (a ref
+        that happens to be spelled in hex) is refused too.
+
+        Parameters
+        ----------
+        prefix : str
+            An abbreviated or full commit SHA.
+
+        Returns
+        -------
+        str or None
+            The full lower-case SHA; ``None`` for an unusable argument, an
+            unknown or ambiguous prefix, a non-commit, or a git failure.
+        """
+        if not isinstance(prefix, str) or not _SHA_PREFIX.fullmatch(prefix):
+            return None
+        prefix = prefix.lower()
+        try:
+            sha = self._shell.run(
+                GitResolveCommitCmd(prefix), cwd=self.root, check=False, env=git_env()
+            )
+        except ShellError:
+            return None
+        if sha is None or not _FULL_SHA.fullmatch(sha) or not sha.startswith(prefix):
+            return None
+        return sha
+
+    def worktree_matches(self, ref: str, path: str) -> bool:
+        """Whether the working-tree file ``path`` is identical to ``ref``'s (local).
+
+        All three must hold:
+
+        * ``ref`` tracks ``path`` as a regular file (``ls-tree``, literal);
+        * ``git --literal-pathspecs diff --no-ext-diff --no-textconv --quiet
+          <ref> -- <path>`` exits ``0``;
+        * the index holds ``path`` as one plain entry (``ls-files -v`` tag
+          ``H``): an assume-unchanged (lower-case tag) or skip-worktree
+          (``S``) entry makes ``git diff`` skip the file, so it would read
+          as identical whatever the disk holds.
+
+        Parameters
+        ----------
+        ref : str
+            The commit-ish to compare against (a remote-tracking ref).
+        path : str
+            A repository-relative file path.
+
+        Returns
+        -------
+        bool
+            ``False`` for any doubt: an unusable argument, an untracked or
+            differing file, a flagged index entry, or a git failure.
+        """
+        if not ref or ref.startswith("-") or not path or "\x00" in path:
+            return False
+        try:
+            entries = self.tree_entries(ref, path)
+        except GitError:
+            return False
+        if not any(
+            e.name == path and e.type == "blob" and e.mode in _REGULAR_MODES
+            for e in entries
+        ):
+            return False
+        try:
+            same = self._shell.run(
+                GitDiffQuietCmd(ref, path), cwd=self.root, check=False, env=git_env()
+            )
+        except ShellError:
+            return False
+        if same is not True:
+            return False
+        cmd = GitLsFilesTagsCmd(path)
+        try:
+            result = subprocess.run(
+                cmd.argv(),
+                cwd=self.root,
+                capture_output=True,
+                timeout=self._shell.timeout,
+                check=False,
+                env=git_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if result.returncode != 0:
+            return False
+        return cmd.parse_bytes(result.stdout) == (("H", path),)
 
     def remote_refs_containing(self, sha: str) -> tuple[str, ...]:
         """The origin remote's tracking refs whose history contains ``sha``.

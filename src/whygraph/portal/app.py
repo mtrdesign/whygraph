@@ -461,16 +461,14 @@ def create_portal_app(
     )
     # Claude Code hooks (plan 40 section 5.9): local mode only. FastAPI runs
     # these mount-level dependencies in list order, before any of the router's
-    # own, so production answers 404 before any identity or project check.
+    # own, so production answers 404 before any identity or project check. A
+    # linked project is served too, from its platform's notes (plan 63
+    # section 4.11): ``require_initialized`` opens no DB for it.
     app.include_router(
         agent_hooks_router,
         dependencies=[
             Depends(require_local),
-            Depends(
-                project_db_access(
-                    Action.PROJECT_READ, guard=linked_guard("Agent hooks")
-                )
-            ),
+            Depends(project_db_access(Action.PROJECT_READ)),
         ],
     )
     app.include_router(

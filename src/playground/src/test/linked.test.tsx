@@ -37,6 +37,7 @@ function link(over: Partial<ProjectLink> = {}): ProjectLink {
     explorer_url: "https://acme.whygraph.example.com/p/alpha/explorer",
     chat_url: "https://acme.whygraph.example.com/p/alpha/chat",
     manage_url: "https://acme.whygraph.example.com/p/alpha/settings",
+    notes_url: "https://acme.whygraph.example.com/p/alpha/notes",
     ...over,
   };
 }
@@ -957,6 +958,10 @@ describe("linked project pages", () => {
     expect(within(panel).getByRole("link", { name: /Open Explorer on platform/ })).toHaveAttribute(
       "href",
       "https://acme.whygraph.example.com/p/alpha/explorer",
+    );
+    expect(within(panel).getByRole("link", { name: "Notes" })).toHaveAttribute(
+      "href",
+      "https://acme.whygraph.example.com/p/alpha/notes",
     );
     expect(within(panel).getByRole("link", { name: /Open Chat on platform/ })).toBeInTheDocument();
     expect(within(panel).getByTestId("linked-role")).toHaveTextContent("Contributor");

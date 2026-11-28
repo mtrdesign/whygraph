@@ -1,0 +1,37 @@
+{
+  "body": {
+    "notes": [
+      {
+        "anchor": {
+          "kind": "project"
+        },
+        "anchor_state": "n/a",
+        "body": "Keep the demo offline.",
+        "confirmed_at": "<time>",
+        "edited_on_confirm": false,
+        "id": 2,
+        "kind": "decision",
+        "refs": [],
+        "resource": "whygraph://note/2",
+        "source": "mcp",
+        "status": "confirmed"
+      }
+    ],
+    "project": {
+      "access_lost": false,
+      "clone_url": "http://127.0.0.1:9/acme/api.git",
+      "default_branch": "main",
+      "github_full_name": "acme/api",
+      "last_scan_at": null,
+      "last_scanned_head": null,
+      "name": "Api project",
+      "plans_dir": "docs/plans",
+      "project_role": "admin",
+      "rationale_depth": "auto",
+      "rationale_max_depth": "medium",
+      "role": "owner",
+      "slug": "api"
+    }
+  },
+  "status": 200
+}

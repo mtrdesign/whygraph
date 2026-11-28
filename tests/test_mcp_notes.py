@@ -1359,17 +1359,12 @@ def test_propose_tool_needs_exactly_one_anchor(
     assert _code(lambda: _as("u-mcp", **args)) == "note_invalid"
 
 
-def test_propose_tool_binds_the_actor_and_refuses_linked(
+def test_propose_tool_binds_the_actor(
     project: SimpleNamespace,
 ) -> None:
     assert _code(
         lambda: notes.whygraph_propose_note("x", "decision", project_wide=True)
     ) == ("note_no_actor")
-    linked = _context(project.root, project.db, remote=object())
-    with use_project(linked):
-        assert _code(lambda: _as("u-mcp", project_wide=True)) == "note_linked"
-    with get_session() as session:
-        assert session.exec(select(ProjectNote)).first() is None
 
 
 def test_propose_tool_dedupe_trims_another_members_proposal(
@@ -1402,9 +1397,6 @@ def test_note_resource_serves_confirmed_notes_only(project: SimpleNamespace) -> 
     served = notes._note_resource(live)
     assert served["id"] == live and served["body"] == "Live."
     assert served["resource"] == f"whygraph://note/{live}"
-    linked = _context(project.root, project.db, remote=object())
-    with use_project(linked):
-        assert notes._note_resource(live) == {"error": "not_found", "id": live}
 
 
 def test_confirmed_project_note_stays_out_of_the_repo_overview(
@@ -1488,23 +1480,6 @@ def test_brief_tool_no_evidence(
     assert result["target"]["path"] == "src/chat/x.py"
 
 
-def test_brief_tool_linked_project_gets_no_notes(
-    project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from whygraph.mcp import rationale
-
-    _confirmed({"kind": "path", "path": "src/chat"})
-    remote = object()
-    monkeypatch.setattr(
-        rationale,
-        "linked_rationale",
-        lambda r, t, **depth_inputs: {"purpose": "platform", "target": {}},
-    )
-    with use_project(_context(project.root, project.db, remote=remote)):
-        card = rationale._rationale_brief_tool(**_brief_args())
-    assert card == {"purpose": "platform", "target": {}}
-
-
 def test_public_brief_never_carries_notes(
     project: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1522,8 +1497,12 @@ def test_public_brief_never_carries_notes(
 
 def test_only_the_registered_tool_imports_notes() -> None:
     root = Path(__file__).resolve().parents[1] / "src" / "whygraph"
-    for rel in ("serve/routes.py", "portal/v1_routes.py"):
-        assert "notes_for_target" not in (root / rel).read_text(), rel
+    assert "notes_for_target" not in (root / "serve/routes.py").read_text()
+    # The platform's /notes/for route reads notes (plan 63); its /rationale
+    # card never carries them (RationaleOut has no notes field).
+    v1 = (root / "portal" / "v1_routes.py").read_text()
+    start = v1.index("def post_rationale(")
+    assert "notes" not in v1[start:].split("\n@v1_router")[0]
     text = (root / "mcp" / "rationale.py").read_text()
     for name in ("_format_response", "_cached_only_card", "def rationale_card"):
         start = text.index(name)
@@ -2444,3 +2423,115 @@ def test_propose_tool_refuses_a_bad_check(
     with pytest.raises(WhyGraphError) as info:
         _as("u-mcp", kind="decision", project_wide=True, **{**args, **CHECK_ARGS})
     assert (info.value.code, str(info.value)) == ("note_check_invalid", M_CONSTRAINT)
+
+
+# ---------------------------------------------------------------------------
+# 9. Linked-notes domain seams (plan 63, step 2)
+# ---------------------------------------------------------------------------
+
+
+def test_keep_filters_before_the_per_target_limit(project: SimpleNamespace) -> None:
+    ids = [
+        _confirmed({"kind": "path", "path": "src/chat/x.py"}, f"n{n}") for n in range(8)
+    ]
+    oldest = set(ids[:3])
+    got = [
+        n["id"]
+        for n in notes.notes_for_target(
+            _target(), keep=lambda row: row.id in oldest | {ids[-1]}
+        )
+    ]
+    # Unfiltered, the cap would have returned only the newest ones.
+    assert got == [ids[-1], *reversed(ids[:3])]
+
+
+def test_keep_filters_before_the_project_budget(project: SimpleNamespace) -> None:
+    kept = _confirmed(PROJECT, "Kept note.")
+    _confirmed(PROJECT, "x" * 500)
+    one_line = len(notes.render_note_line(notes.get_note(kept))) + 1
+    got = notes.project_notes(one_line, keep=lambda row: row.id == kept)
+    assert [n["id"] for n in got] == [kept]
+
+
+@pytest.mark.parametrize(
+    ("fields", "admins", "expected"),
+    [
+        ({"confirmed_by": "u2"}, set(), True),
+        ({"confirmed_by": "u1"}, set(), False),
+        ({"confirmed_by": "u1"}, {"u1"}, True),
+        ({"confirmed_by": "u1", "reconfirmed_by": "u3"}, set(), True),
+        ({"confirmed_by": "u1", "reconfirmed_by": "u1"}, set(), False),
+        ({"confirmed_by": None}, set(), False),
+        ({"confirmed_by": None, "reconfirmed_by": "u3"}, set(), True),
+        ({"confirmed_by": "u2", "status": "proposed"}, set(), False),
+        ({"confirmed_by": "u2", "status": "retired"}, {"u2"}, False),
+    ],
+)
+def test_link_trusted_truth_table(
+    fields: dict, admins: set[str], expected: bool
+) -> None:
+    row = ProjectNote(
+        kind="decision",
+        body="b",
+        status=fields.pop("status", "confirmed"),
+        anchor_kind="project",
+        source="mcp",
+        proposed_by="u1",
+        proposed_at=NOW.isoformat(),
+        **fields,
+    )
+    assert notes.link_trusted(row, frozenset(admins)) is expected
+
+
+def test_index_only_symbol_resolution_makes_no_sync(project: SimpleNamespace) -> None:
+    anchor = {"kind": "symbol", "qualified_name": "pkg.a"}
+    view = _propose("indexed", anchor, symbol_sync=False)
+    assert view["anchor"]["qualified_name"] == "pkg.a"
+    assert project.syncs == []
+    with pytest.raises(notes.AnchorNotFound) as raised:
+        _propose(
+            "nope", {"kind": "symbol", "qualified_name": "pkg.nope"}, symbol_sync=False
+        )
+    assert raised.value.code == "note_invalid"
+    assert project.syncs == []
+
+
+def test_anchor_not_found_keeps_message_and_code(project: SimpleNamespace) -> None:
+    cases = [
+        ({"kind": "path", "path": "README.md/x.py"}, "path does not exist"),
+        (
+            {"kind": "path", "path": "SRC/chat"},
+            "path does not exist (the case must match exactly)",
+        ),
+        (
+            {"kind": "range", "path": "src/chat/x.py", "line_start": 9, "line_end": 11},
+            "the line range runs past the end of the file",
+        ),
+        (
+            {"kind": "symbol", "qualified_name": "pkg.nope"},
+            "that symbol is not in the code index",
+        ),
+    ]
+    for anchor, message in cases:
+        with pytest.raises(notes.AnchorNotFound) as raised:
+            _propose("ok", anchor)
+        assert str(raised.value) == message and raised.value.code == "note_invalid"
+        assert isinstance(raised.value, WhyGraphError)
+
+
+def test_ref_not_found_carries_its_index(project: SimpleNamespace) -> None:
+    with pytest.raises(notes.RefNotFound) as raised:
+        _propose("x", refs=["#999"])
+    assert raised.value.index == 0 and raised.value.code == "note_invalid"
+    assert "refs[0] names no pull request or issue of this project" in str(raised.value)
+    _commit("abcdef1234567890abcdef1234567890abcdef12", "2026-01-01T00:00:00+00:00", ())
+    with pytest.raises(notes.RefNotFound) as raised:
+        _propose("x", refs=["abcdef1", "1234567"])
+    assert raised.value.index == 1
+    assert "names no single commit of this project" in str(raised.value)
+
+
+def test_link_origin_is_accepted(project: SimpleNamespace) -> None:
+    view = _propose("from a link", origin="link:12", source="mcp")
+    assert _row(view["id"]).origin == "link:12"
+    assert _code(lambda: _propose("x", origin="link:abc")) == "note_invalid"

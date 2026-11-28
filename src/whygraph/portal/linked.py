@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence, TypeVar
 
+import httpx
 from cryptography.fernet import InvalidToken
 from pydantic import ValidationError
 from sqlmodel import Session, select
@@ -58,9 +59,11 @@ from whygraph.api_v1 import (
     MAX_PLAN_PATHS,
     MAX_PLAN_SECTION,
     NOT_CACHED,
+    NOTES_CAPABILITY,
     RATIONALE_DEPTH_CAPABILITY,
     EvidenceIn,
     HunkIn,
+    NoteProposeIn,
     OriginIn,
     PlansForIn,
     PlansTargetIn,
@@ -108,6 +111,10 @@ LOGIN_REQUIRED_CODE = "login_required"
 
 PLANS_CAPABILITY = "plans"
 """The ``meta`` capability of a platform that serves the plans routes."""
+
+HOOK_TIMEOUT = httpx.Timeout(connect=0.5, read=0.6, write=0.05, pool=0.05)
+"""A hook call sequence's budget for one platform call: 1.2 s in all, under the
+helper's ``curl -m 2`` ceiling (plan 63 section 4.4)."""
 
 PLAN_STATUSES = ("shipped", "in_flight", "not_implemented")
 """The derived statuses a plan ref may carry (plan 61 section 3.2)."""
@@ -594,7 +601,9 @@ class LinkedProject:
 
     # -- plans (plan 61 section 4.8) ----------------------------------------
 
-    def _capability_set(self) -> frozenset[str]:
+    def _capability_set(
+        self, timeout: float | httpx.Timeout | None = None
+    ) -> frozenset[str]:
         """The platform's ``meta`` capabilities (read once, if it succeeds).
 
         Only a successful read is kept: a failed one raises
@@ -603,7 +612,7 @@ class LinkedProject:
         """
         if self._capabilities is None:
             try:
-                meta = self._client.meta()
+                meta = self._client.meta(timeout=timeout)
             except PlatformError as exc:
                 status, reason = link_status_for(exc)
                 raise RemoteError(
@@ -735,6 +744,135 @@ class LinkedProject:
                 ) from exc
             raise
 
+    # -- notes (plan 63 section 4.4) ----------------------------------------
+
+    def prime_capabilities(self, timeout: float | httpx.Timeout | None = None) -> bool:
+        """Read ``meta`` now unless its capabilities are already known.
+
+        The hook cache calls it first so that ``meta`` and the notes call
+        share one deadline (plan 63 section 4.4).
+
+        Returns
+        -------
+        bool
+            Whether a ``meta`` request was made.
+
+        Raises
+        ------
+        RemoteError
+            As :meth:`_capability_set`.
+        """
+        if self._capabilities is not None:
+            return False
+        self._capability_set(timeout)
+        return True
+
+    def _notes_capable(self, timeout: float | httpx.Timeout | None = None) -> bool:
+        """Whether the platform's ``meta`` lists ``notes`` (:meth:`_capability_set`)."""
+        return NOTES_CAPABILITY in self._capability_set(timeout)
+
+    def propose_note(self, payload: dict) -> dict:
+        """``POST /notes``: propose a note; ``review`` is built here.
+
+        Raises
+        ------
+        RemoteError
+            ``reason`` ``note_unsupported`` (``status`` ``ok``, no request
+            beyond ``meta``) for a platform without notes; otherwise the
+            platform's code (``note_limit``, ``note_invalid``, ``note_state``,
+            ``throttled``, ``forbidden``, ...) with the link's status.
+        """
+        if not self._notes_capable():
+            raise RemoteError(
+                f"{self.url} does not accept notes from a linked checkout - "
+                "update the platform",
+                status="ok",
+                reason="note_unsupported",
+            )
+        body = self._body(lambda: NoteProposeIn.model_validate(payload))
+        reply = self._without_project(
+            self._guard(
+                lambda: self._client.propose_note(
+                    self.slug, body.model_dump(exclude_none=True)
+                )
+            )
+        )
+        reply["review"] = f"{self.url}/p/{self.slug}/notes?id={reply['note_id']}"
+        return reply
+
+    def notes_for(
+        self,
+        path: str,
+        *,
+        qualified_name: str | None = None,
+        lines: tuple[int, int] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> tuple[list[dict], bool]:
+        """``POST /notes/for``: the platform's notes for one target.
+
+        Returns
+        -------
+        tuple[list[dict], bool]
+            The notes and ``supported``; ``([], False)`` without a request
+            when ``meta`` lacks ``notes``, and for an older platform's
+            unknown-route answer.
+        """
+        return self._notes_read(
+            lambda: self._client.notes_for(
+                self.slug,
+                path,
+                qualified_name=qualified_name,
+                lines=lines,
+                timeout=timeout,
+            ),
+            timeout,
+        )
+
+    def project_notes(
+        self, *, timeout: float | httpx.Timeout | None = None
+    ) -> tuple[list[dict], bool]:
+        """``GET /notes/project``: the platform's project-level notes."""
+        return self._notes_read(
+            lambda: self._client.project_notes(self.slug, timeout=timeout), timeout
+        )
+
+    def _notes_read(
+        self, call: Callable[[], dict], timeout: float | httpx.Timeout | None
+    ) -> tuple[list[dict], bool]:
+        """One notes list read: a missing capability or route is ``([], False)``."""
+        if not self._notes_capable(timeout):
+            return [], False
+        try:
+            reply = self._guard(call)
+        except RemoteError as exc:
+            if _plans_unsupported(exc.__cause__):
+                return [], False
+            raise
+        return list(reply.get("notes") or []), True
+
+    def note(self, note_id: int) -> dict:
+        """``GET /notes/{id}``: one confirmed note.
+
+        ``note_id`` must be a positive ``int`` (checked before any request);
+        a platform without notes reads as :class:`RemoteNotFound`.
+        """
+        if isinstance(note_id, bool) or not isinstance(note_id, int) or note_id < 1:
+            raise RemoteNotFound("no such note", status=self.status)
+        if not self._notes_capable():
+            raise RemoteNotFound("this platform serves no notes", status=self.status)
+        try:
+            return self._without_project(
+                self._guard(lambda: self._client.note(self.slug, note_id))
+            )
+        except RemoteNotFound:
+            raise
+        except RemoteError as exc:
+            if _plans_unsupported(exc.__cause__):
+                raise RemoteNotFound(
+                    "this platform serves no notes", status=exc.status
+                ) from exc
+            raise
+
     def revoke(self) -> None:
         """``DELETE /token``: give up this machine's access (step 9's removal)."""
         self._guard(lambda: self._client.revoke(self.slug))
@@ -811,7 +949,7 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         effective ceiling as its last status answer said, ``None`` until
         one did or from an older platform) and the three deep links
         into the platform's SPA: ``manage_url`` (the project's home),
-        ``explorer_url`` and ``chat_url``. All three live on the org host,
+        ``explorer_url``, ``chat_url`` and ``notes_url``. All three live on the org host,
         because that is where the project is.
     """
     home = f"{row.api_origin}/p/{row.remote_slug}"
@@ -828,6 +966,7 @@ def link_block(row: PlatformLink) -> dict[str, Any]:
         "rationale_max_depth": max_depth,
         "explorer_url": f"{home}/explorer",
         "chat_url": f"{home}/chat",
+        "notes_url": f"{home}/notes",
         "manage_url": home,
     }
 

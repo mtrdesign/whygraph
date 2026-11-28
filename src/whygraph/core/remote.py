@@ -10,7 +10,7 @@ The protocol is what keeps :mod:`whygraph.core` free of
 :mod:`whygraph.portal`: the only implementation,
 :class:`whygraph.portal.linked.LinkedProject`, lives on the portal side
 with the HTTP client, the connection token and the link row, while
-:mod:`whygraph.mcp` sees nothing but these ten calls, two exception
+:mod:`whygraph.mcp` sees nothing but these fourteen calls, two exception
 types and the two display fields.
 
 Every method returns JSON-ready data (plain ``dict`` / ``list``), already
@@ -207,6 +207,65 @@ class RemoteProject(Protocol):
 
     def plan_section(self, stem: str, n: int) -> dict:
         """One section of a plan; :class:`RemoteNotFound` for a miss."""
+        ...
+
+    def propose_note(self, payload: dict) -> dict:
+        """Propose a note on the platform (plan 63 section 4.4).
+
+        Parameters
+        ----------
+        payload : dict
+            The already-reduced ``NoteProposeIn`` body.
+
+        Returns
+        -------
+        dict
+            The platform's ``NoteProposeOut`` fields plus ``review``, the
+            project's notes page URL for the new note.
+
+        Raises
+        ------
+        RemoteError
+            ``reason`` ``note_unsupported`` (no request made) for a platform
+            without notes, or the platform's error code.
+        """
+        ...
+
+    def notes_for(
+        self,
+        path: str,
+        *,
+        qualified_name: str | None = None,
+        lines: tuple[int, int] | None = None,
+        timeout: Any = None,
+    ) -> tuple[list[dict], bool]:
+        """The platform's notes for one target.
+
+        Parameters
+        ----------
+        path : str
+            A path the same call already sent.
+        qualified_name : str or None, optional
+            The symbol, when it may be sent.
+        lines : tuple[int, int] or None, optional
+            The range, when it may be sent.
+        timeout : optional
+            A per-call deadline (an ``httpx.Timeout`` or seconds); running
+            out is a :class:`RemoteError` with reason ``platform_slow``.
+
+        Returns
+        -------
+        tuple[list[dict], bool]
+            The notes and whether the platform serves notes at all.
+        """
+        ...
+
+    def project_notes(self, *, timeout: Any = None) -> tuple[list[dict], bool]:
+        """The platform's project-level notes and whether it serves notes."""
+        ...
+
+    def note(self, note_id: int) -> dict:
+        """One confirmed note; :class:`RemoteNotFound` for a miss."""
         ...
 
 

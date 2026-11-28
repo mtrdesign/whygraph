@@ -824,7 +824,7 @@ describe("Use with your agent", () => {
     expect(new URL(link.getAttribute("href")!).searchParams.get("intent")).toBe(INTENT_A);
     expect(fake.calls.find((c) => c.path === INTENT_PATH)).toMatchObject({ method: "POST", body: { port: 8765 } });
     expect(screen.getByTestId("connect-scope")).toHaveTextContent(
-      "This lets WhyGraph on port 8765 of this computer read this project as you and, if your role allows, ask for rationale cards with your organization's AI keys. You confirm once more on your machine.",
+      "This lets WhyGraph on port 8765 of this computer read this project as you, propose notes for your team to review and, if your role allows, ask for rationale cards with your organization's AI keys. You confirm once more on your machine.",
     );
     // The intent is bound to the port: a new port gets its own.
     await user.click(screen.getByRole("button", { name: "Change" }));

@@ -264,7 +264,7 @@ The call counters of [Agent activity](agents.md#agent-activity) are separate fro
 count calls, never money. Two rules about the note tools:
 
 - A `whygraph_propose_note` call refused with `note_limit` (a cap on agent proposals), `note_invalid`
-  or `note_linked` counts as a **failed** call on purpose, so an agent that keeps hitting the cap shows
+  or `note_unsupported` counts as a **failed** call on purpose, so an agent that keeps hitting the cap shows
   as an error rate in the Overview. A reading of a note that does not exist (`whygraph://note/{id}`
   answering `not_found`) is counted as a failed call too, like the other resources.
 - A `whygraph_rationale_brief` call that finds no evidence for new code but returns the notes written

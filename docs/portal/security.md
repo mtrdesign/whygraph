@@ -183,7 +183,12 @@ runs on a developer's laptop and a repository on it is untrusted.
   an API response, a log line, an error message, a command line or a child process's environment.
   `wgc_` tokens are masked like GitHub's in anything a run writes. A scan child gets no token: the child
   environment is an allowlist the token is not on.
-- **Only pushed data leaves your machine.** See [what leaves your
+- **Only pushed structured data leaves your machine, plus note text.** Paths, line ranges, symbol
+  names and SHAs are sent only when they are pushed. The text of a proposed [project
+  note](../guide/notes.md) (body, check text and glob, area name) is sent as written and can describe
+  unpushed work, including when an agent proposes on its own; text that looks like a token or an AI
+  provider key is refused first, and the platform refuses it again, so a client that skips the local
+  check cannot store one. See [what leaves your
   machine](platform-projects.md#what-leaves-your-machine). The client also checks every request body
   against the same models the platform enforces, and caps what it reads back.
 - **A platform address is `https`.** The local portal calls exactly two origins, the platform's base
@@ -198,8 +203,8 @@ runs on a developer's laptop and a repository on it is untrusted.
   project and the same port, once, within 15 minutes; it grants nothing on its own, your local
   portal still asks you to press Connect, and the platform page never contacts the local one.
   Because that click on the platform is the approval, the card says under the button what it
-  grants: WhyGraph on that port reads the project as you and, if your role allows, asks for
-  rationale cards with the organization's AI keys. A made-up or expired intent, another person,
+  grants: WhyGraph on that port reads the project as you, proposes notes for your team to review
+  and, if your role allows, asks for rationale cards with the organization's AI keys. A made-up or expired intent, another person,
   another project or another port, and a project that lost its GitHub access, all get the normal
   Allow page.
 - **A pre-approved link is bound to the port on the card.** That port must be your own WhyGraph's:
@@ -207,7 +212,8 @@ runs on a developer's laptop and a repository on it is untrusted.
   keeps the intent out of its access log (the `/link` and `/setup` queries are blanked), and the
   platform keeps it out of its own (`/connect` and the `/signin` round trip).
 - **Visible to admins.** An owner or admin of a project sees the machine name each member gave
-  their connection, and can revoke it. See [Connected
+  their connection, and can revoke it. A note proposed through a connection shows that machine name
+  to **every** member of the project ("From <machine>" on the Notes page), not only to admins. See [Connected
   machines](../deploy/production.md#connected-portals).
 
 ## Keys and tokens
@@ -435,6 +441,11 @@ front of every later session. The controls:
   waits for review, so any member who can read the project can propose through their agent. It is
   capped: 20 per member and 50 per project per day, and 200 waiting at once. **Reject all from this
   origin** clears one member's runaway agent without confirming anything.
+- **Linked proposals need a contributor.** A proposal forwarded from a [linked
+  checkout](platform-projects.md#notes) is a write on the platform, so it needs the role that can
+  use Chat (a viewer is refused with `403 forbidden`), not just `project.read`. It is filed as the
+  user of the connection token, with origin `link:<connection id>`, so the same caps apply and
+  **Reject all from this origin** clears one machine.
 - **Notes are data, never instructions.** The assistant's system prompt and the MCP instructions say
   so; a note is rendered on one line, its text quoted and whitespace collapsed, wherever it goes into
   plain text; text with control characters is refused; notes are never fed to rationale generation; and
@@ -462,13 +473,32 @@ a guard against injected text, not against a local program that already acts as 
 portal every member signs in, and a project note is visible to every member who can open the project
 (proposals included).
 
+**A linked checkout is the same risk, with your platform identity.** Any local process that can read
+your portal's link can propose notes to the platform as you, through your agent's MCP endpoint or
+the portal's own routes. It can only propose: a person on the platform still confirms, and the
+caps above apply.
+
+### Notes delivered to linked agents { #linked-notes-trust }
+
+A linked checkout's agent reads the platform's notes, and so its hooks inject them into sessions that
+have a shell. The platform therefore delivers only **link-trusted** notes: confirmed by someone other
+than the proposer, reconfirmed by someone else, or confirmed by a current project admin or owner. A
+note a non-admin confirmed themselves stays on the platform and never reaches a linked agent. What
+travels is typed (a note's id, kind, anchor, state and quoted text; never who proposed or confirmed it,
+or its origin), so a platform cannot add structure the hook output does not already allow. The
+residual risk is that a second member confirms a hostile note: it then reaches teammates' agents as
+data, labelled as member-written, exactly as it would on the platform. The cache of these answers is
+per project, platform and slug, and may serve a note for up to five minutes after access is revoked.
+
 ### Claude Code hook output { #hook-output }
 
 The helper that Claude Code's [notes hooks](agents.md#claude-code-hooks) run prints only one of two
 shapes: `{}` or a fixed two-key envelope for its own event, with `additionalContext` as the only
 payload. The portal writes every `"` inside that text as `\u0022`, and the helper refuses any answer
 that holds a literal `"` there, so nothing can follow the text to add a key such as `continue` or
-`decision`. A note reaches the model labelled as member-written data, not instructions.
+`decision`. A note reaches the model labelled as member-written data, not instructions. On a linked
+checkout the same helper and envelope are used; the portal fills them from the platform's
+link-trusted notes, and a failed or slow platform answers `{}`.
 
 ## Project transfer { #project-transfer }
 

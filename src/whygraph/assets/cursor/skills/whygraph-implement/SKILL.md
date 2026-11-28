@@ -419,14 +419,14 @@ Edit no file yourself; only plan-tool.sh restore writes the plan. `amend-check` 
 
 ## Step 5 - Propose the listed decisions
 
-If an implementor report has a `## Decisions worth a note` section, call the MCP tool `whygraph_propose_note` once per listed entry: `kind` and `body` from the entry; for the anchor, a `qualified_name`, or `path` (with `line_start` and `line_end` when the entry gives lines). Then print, for each, the note id and its review link (the portal page path the tool returns). A tool error: print it verbatim and go on to the next entry. With no such section, do nothing here. Do this once per report.
+If an implementor report has a `## Decisions worth a note` section, call the MCP tool `whygraph_propose_note` once per listed entry: `kind` and `body` from the entry; for the anchor, a `qualified_name`, or `path` (with `line_start` and `line_end` when the entry gives lines). Then print, for each, the note id and its review link (the review link the tool returns: a portal path, or a platform URL on a linked project). A tool error: print it verbatim and go on to the next entry. With no such section, do nothing here. Do this once per report.
 
 When the run summary says `Acceptance: passed`, also propose for each step that has a **Changes on purpose** line, at most 3 times in one run. The line holds a quote, its tag, then ` - ` and the reason. The quote is the text inside the quotation marks, without the tag.
 - The tag is `(note #<id>)`: call `whygraph_propose_note` with `supersedes_id` <id>, kind `constraint`, the anchor `path` of the step's first **Files** entry, and the body `Changed on purpose by <plan stem>, step <N>: <the reason on the line>`.
 - Otherwise: call it with kind `decision`, the same anchor, and the body `"<quote>" no longer holds. Changed on purpose by <plan stem>, step <N>: <the reason on the line>`.
 Print each note id and its review link. A tool error: print it and go on.
 
-The anchor `path` is the first **Files** entry without its `:<lines>` suffix. `<plan stem>` is the plan's stem, as Step 3e defines it. A person confirms each proposal in the portal; confirming a revision retires the old note.
+The anchor `path` is the first **Files** entry without its `:<lines>` suffix. `<plan stem>` is the plan's stem, as Step 3e defines it. A person confirms each proposal in the portal (or on the platform for a linked project); confirming a revision retires the old note.
 
 ## Step 6 - Stop
 

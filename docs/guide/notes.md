@@ -122,7 +122,7 @@ rules as any other note: it is a proposal until it is confirmed, and no model re
   `purpose` kind and the `analysis` source.
 - **Where it shows up.** Once confirmed, the purpose is a project-wide note: the Chat assistant
   reads it with `find_notes` (see [Chat](chat.md#team-notes)), and on a local portal it also reaches
-  MCP agents and the Claude Code session hook. On a production portal it reaches Chat only. It is not available on a [linked project](../portal/platform-projects.md).
+  MCP agents and the Claude Code session hook. On a production portal it reaches Chat only. A [linked project](../portal/platform-projects.md#notes) reads the platform's confirmed purpose through the Claude Code session hook.
 
 ## Where you work with notes
 
@@ -240,13 +240,19 @@ Notes live in the project's WhyGraph database, so they follow its history; [expo
 keeps them unless you ask for the history to be deleted. Removing a production project deletes its notes
 unless **Keep history** is ticked.
 
-!!! info "Not available on a linked project"
-    A [linked project](../portal/platform-projects.md) has no WhyGraph database on your machine, so it
-    has no Notes page, its rationale cards carry no `notes`, and `whygraph_propose_note` and
-    `whygraph://note/{id}` are refused there.
+!!! info "On a linked project"
+    A [linked project](../portal/platform-projects.md#notes) has no WhyGraph database on your machine
+    and no Notes page of its own. Your agent's `whygraph_propose_note` (and `/whygraph-note`) sends
+    the proposal to the platform, where it waits for review on the platform's Notes page as an agent
+    proposal from you, with origin `link`; the page shows the machine it came from to every member.
+    The same limits apply (20 proposals per member and 50 per project per day, 200 waiting), and a
+    viewer cannot propose. A note about code that is not pushed yet is filed on a wider anchor and
+    the result says so. Your agent reads back only notes another member (or a project admin) has
+    confirmed: on cards, through `whygraph://note/{id}` and through the Claude Code hooks. Reviewing
+    happens on the platform, not in your local portal. There is no offline queue.
 
 On a production portal, notes reach people through Chat and the Explorer only: there is no MCP
-endpoint, and the platform API carries no notes. Confirming, marking still true and retiring a note are
+endpoint. The platform's API serves notes only to [linked checkouts](../portal/platform-projects.md#notes). Confirming, marking still true and retiring a note are
 written to the [security event log](../deploy/production.md#the-security-event-log) (the note id and
 who acted, never its text). See [Security](../portal/security.md#project-notes) for how notes are
 treated as untrusted input.

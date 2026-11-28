@@ -55,7 +55,9 @@ from test_portal_v1 import (  # noqa: F401 -- `v1` and `generator` are fixtures
     _Generator,
     generator,
     PLAN_STEM,
+    _uid,
     hunks_of,
+    seed_notes,
     seed_plan,
     target_body,
     v1,
@@ -65,6 +67,9 @@ from whygraph.api_v1 import (
     EvidenceIn,
     EvidenceReplyOut,
     MetaOut,
+    NoteOut,
+    NoteProposeOut,
+    NotesForOut,
     PlanOut,
     PlanSectionOut,
     PlansForOut,
@@ -177,6 +182,19 @@ def world(v1: V1World, generator: type[_Generator], monkeypatch) -> V1World:  # 
     monkeypatch.setattr(analyze_pkg, "backfill_file_description", backfill_file)
     head = head_sha(v1)
     seed_plan(v1)
+    ben, cy = _uid(v1, "ben"), _uid(v1, "cy")
+    # Link-trusted: proposed by Cy, confirmed by Ben (a second member).
+    seed_notes(
+        v1,
+        {
+            "body": "Keep sample.py free of I/O.",
+            "kind": "constraint",
+            "anchor_kind": "path",
+            "anchor_path": "sample.py",
+            "confirmed_by": ben,
+        },
+        {"body": "Keep the demo offline.", "proposed_by": cy, "confirmed_by": ben},
+    )
     with use_project(v1.ctx()), get_session() as session:
         session.add(
             PullRequest(
@@ -280,6 +298,28 @@ def cases(w: V1World) -> list[Case]:
             f"/plans/{PLAN_STEM}/sections/{_plan_section(w)}",
             model=PlanSectionOut,
         ),
+        Case(
+            "notes_propose",
+            "POST",
+            "/notes",
+            model=NoteProposeOut,
+            kwargs={
+                "json": {
+                    "body": "Prefer pure functions here.",
+                    "kind": "convention",
+                    "anchor": {"kind": "path", "path": "sample.py"},
+                }
+            },
+        ),
+        Case(
+            "notes_for",
+            "POST",
+            "/notes/for",
+            model=NotesForOut,
+            kwargs={"json": {"path": "sample.py"}},
+        ),
+        Case("notes_project", "GET", "/notes/project", model=NotesForOut),
+        Case("note", "GET", "/notes/1", model=NoteOut),
         Case("revoke", "DELETE", "/token"),
     ]
 
@@ -366,8 +406,12 @@ def test_api_v1_contract_fixtures_are_current(world: V1World) -> None:
     for case in cases(world):
         response = run_case(world, case)
         body = response.json() if response.content else None
-        assert response.status_code == 200 or (
-            case.route == "revoke" and response.status_code == 204
+        assert response.status_code == (
+            201
+            if case.route == "notes_propose"
+            else 204
+            if case.route == "revoke"
+            else 200
         ), f"{case.route}: {response.status_code} {response.text}"
         if case.model is not None:
             case.model.model_validate(body)
@@ -437,6 +481,17 @@ def test_platform_client_parses_every_recorded_reply() -> None:
             lambda: client.plans_for(FAKE_SLUG, ["a" * 40], ["sample.py"]),
             lambda: client.plan(FAKE_SLUG, PLAN_STEM),
             lambda: client.plan_section(FAKE_SLUG, PLAN_STEM, 1),
+            lambda: client.propose_note(
+                FAKE_SLUG,
+                {
+                    "body": "Prefer pure functions.",
+                    "kind": "convention",
+                    "anchor": {"kind": "project"},
+                },
+            ),
+            lambda: client.notes_for(FAKE_SLUG, "sample.py"),
+            lambda: client.project_notes(FAKE_SLUG),
+            lambda: client.note(FAKE_SLUG, 1),
         ):
             assert isinstance(call(), dict)
         client.revoke(FAKE_SLUG)

@@ -122,11 +122,21 @@ sends the platform:
   came from);
 - the symbol's **qualified name**, only when the line it is declared on blames to a pushed commit;
 - for [plans](#plans), only those same SHAs and that path, and the stem of a plan when your agent reads
-  one.
+  one;
+- for [project notes](#notes), the note's **body, kind, check text and glob, and area name**, any `#N`
+  references, an anchor (a path, a line range or a symbol name) only when it is pushed, and SHAs only
+  when the default branch contains them; and the **path of each pushed file** your agent reads, so the
+  platform can answer with its notes (at most once per file every five minutes).
 
 It never sends file contents, commit messages, uncommitted lines, or commits that exist only in your
 checkout. Whether a commit is pushed is read from your `origin/*` refs as the last `git fetch` left
 them; the portal never fetches for you.
+
+**Note text is the exception.** A note's body, check text, glob and area name are written by you or
+by your agent and are sent as written, so they can describe unpushed work. This includes the agent
+flows that propose on their own, such as `/whygraph-implement`. Text that looks like a token or an
+AI provider key is refused before anything is sent, and the platform refuses it too. If your checkout is a fork, "pushed" may mean pushed to the fork's
+`origin`, which the platform may not have.
 
 ## What your agent sees
 
@@ -181,11 +191,50 @@ your portal its plans folder, which your portal writes to the untracked `.whygra
 same read-only **Plans** page as a local project, so teammates can browse the plans there; the linked
 project has no Plans page of its own.
 
-### No notes
+### Notes
 
-A linked project has no local WhyGraph database, so it has no [project notes](../guide/notes.md):
-`whygraph_propose_note` and `whygraph://note/{id}` are refused (`note_linked`, `not_found`), the
-platform's cards carry no `notes`, and the portal shows no Notes page for the project.
+A linked project has no local WhyGraph database, so it keeps no notes of its own; the platform holds
+them and its **Notes** page is where they are reviewed. See [project notes](../guide/notes.md).
+
+**Proposing.** `whygraph_propose_note` (and `/whygraph-note`, `/whygraph-claude-md` and the
+`/whygraph-implement` flows) works on a linked project. Your portal validates the note as for a local
+project, refuses text that looks like a token or an AI provider key, and sends it to the platform, where it lands in the
+review queue as an agent proposal by you (the user of the connection token), with origin
+`link:<connection id>`. The platform's Notes page shows the machine name your portal gave the
+connection to every member of the project, as "From <machine>". There is no local queue: when the
+platform cannot be reached the call fails with the link error, and nothing is stored to send later.
+The reply carries the **review link**, a full platform URL.
+
+**The anchor ladder.** The note is anchored as narrowly as is safe to send:
+
+- a **line range** or **symbol** is kept only when the file is byte-identical to the default
+  branch and, for a symbol, the code index is current; otherwise the note falls back to the file's
+  **path**, and then to the whole project;
+- a **path** is kept only when the default branch tracks it;
+- a **SHA** reference is kept only when the default branch contains it; `#N` references are kept;
+- a project or area anchor is always sent.
+
+When the anchor is narrowed the result has `anchor_downgraded` (`from`, `to`, `reason`), and refs
+that were not sent are listed in `dropped_refs`. The reason is `not_pushed` when your checkout
+narrowed it, and `not_on_platform` when the platform's clone had not caught up with a push yet; a
+note is never refused for that lag. A narrowed note is wider, so it needs a second confirmer, as any
+wide note does. The unpushed path or name never leaves your machine.
+
+**Reading back.** Cards for a linked project carry the platform's notes, including a `no_evidence`
+reply, and `whygraph://note/{id}` answers from the platform. Only **link-trusted** notes are
+delivered: confirmed by someone other than the proposer, reconfirmed by someone else, or confirmed
+by a current project admin or owner. A note a non-admin confirmed themselves stays on the platform
+and never reaches a linked agent. Pending and retired notes are `not_found`.
+
+**Hooks.** The Claude Code hooks work on a linked checkout: `SessionStart` injects the project-wide
+notes and `PostToolUse` the notes for a pushed file the agent touches (the path only is sent), under
+the same size budget and dedupe as a local project. The platform's answers are cached for five
+minutes, and an outage serves the last answer rather than slowing the agent. A checkout linked
+before this release needs **Update agent files** once to get the hooks.
+
+**Older platforms.** A platform advertises the `notes` capability in `GET /api/v1/meta`. Against an
+older one, proposing fails with `note_unsupported` without a request, reads leave `notes` out and set
+`"notes": "unsupported"` in the `platform` block, and the link stays `ok`.
 
 ### Offline
 

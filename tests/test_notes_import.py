@@ -556,9 +556,10 @@ def test_chat_origins_are_remapped_or_nulled(project: SimpleNamespace) -> None:
         _rec(2, origin="chat:6"),
         _rec(3, origin="mcp"),
         _rec(4, origin=None),
+        _rec(5, origin="link:7"),
     ]
     _import(records, chat_ids={5: 41})
-    assert [r.origin for r in _rows()] == ["chat:41", None, "mcp", None]
+    assert [r.origin for r in _rows()] == ["chat:41", None, "mcp", None, "mcp"]
 
 
 @pytest.mark.parametrize(

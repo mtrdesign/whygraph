@@ -186,8 +186,8 @@ function ConnectSteps({
           </Button>
         </div>
         <p className="text-xs text-muted-foreground" data-testid="connect-scope">
-          This lets WhyGraph on port {port} of this computer read this project as you and, if your role allows, ask
-          for rationale cards with your organization's AI keys. You confirm once more on your machine.
+          This lets WhyGraph on port {port} of this computer read this project as you, propose notes for your team to review and, if your role
+          allows, ask for rationale cards with your organization's AI keys. You confirm once more on your machine.
         </p>
         {editing ? (
           <div className="flex flex-col gap-1.5">

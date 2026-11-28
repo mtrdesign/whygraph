@@ -1425,6 +1425,11 @@ V1_ROUTES = {
     (f"{_V1}/plans/for", "POST"),
     (f"{_V1}/plans/{{stem}}", "GET"),
     (f"{_V1}/plans/{{stem}}/sections/{{n}}", "GET"),
+    # Notes (plan 63 section 4.2): the first write route on the bearer API
+    (f"{_V1}/notes", "POST"),
+    (f"{_V1}/notes/for", "POST"),
+    (f"{_V1}/notes/project", "GET"),
+    (f"{_V1}/notes/{{note_id}}", "GET"),
 }
 """Production's bearer-only ``/api/v1`` project routes (M2e plan section 4.3):
 org host, a connection token instead of a session. They resolve
@@ -1555,6 +1560,10 @@ ROUTE_ACTIONS: dict[tuple[str, str], str] = {
     (f"{_V1}/plans/for", "POST"): _READ,
     (f"{_V1}/plans/{{stem}}", "GET"): _READ,
     (f"{_V1}/plans/{{stem}}/sections/{{n}}", "GET"): _READ,
+    (f"{_V1}/notes", "POST"): _CHAT,
+    (f"{_V1}/notes/for", "POST"): _READ,
+    (f"{_V1}/notes/project", "GET"): _READ,
+    (f"{_V1}/notes/{{note_id}}", "GET"): _READ,
     # Project management: project_access(...)
     (_P, "GET"): _READ,
     (f"{_P}/config", "GET"): _READ,

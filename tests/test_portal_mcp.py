@@ -526,7 +526,10 @@ def test_tools_declare_an_output_schema() -> None:
     ref = defs["RationaleItemRef"]
     assert set(ref["required"]) == {"kind", "id"}
     assert ref["properties"]["kind"]["enum"] == ["commit", "pr", "issue"]
-    assert "note" in tools["whygraph_propose_note"].outputSchema["properties"]
+    propose_props = tools["whygraph_propose_note"].outputSchema["properties"]
+    assert {"note", "anchor_downgraded", "dropped_refs", "platform"} <= set(
+        propose_props
+    )
     # The card's depth and what the next level adds (plan 62 section 14.4).
     assert {"depth", "deeper", "coverage"} <= set(props)
     assert set(defs["RationaleDepth"]["required"]) == {

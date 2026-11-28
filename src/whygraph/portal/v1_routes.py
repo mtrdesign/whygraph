@@ -29,11 +29,25 @@ that project's context. Every answer carries ``project`` - the
   ``{"status": "not_cached", "target"}``.
 * ``GET /history``, ``/commits/{sha}``, ``/prs/{number}``,
   ``/issues/{number}``, ``/overview`` - the MCP resource bodies.
+* ``POST /plans/for``, ``GET /plans/{stem}``, ``/plans/{stem}/sections/{n}``
+  - committed plans (plan 61).
+* ``POST /notes`` - the **one write route** (``project.chat``, plan 63): a
+  note proposal by the token's user, ``source="mcp"``,
+  ``origin="link:<connection id>"``, both set here and never by the client;
+  a symbol resolves from the index only (no ``codegraph sync``); an anchor or
+  ref the server clone lacks is retried as project-wide / dropped
+  (``not_on_platform``). ``POST /notes/for``, ``GET /notes/project`` and
+  ``GET /notes/{note_id}`` serve **link-trusted** confirmed notes only
+  (:func:`~whygraph.mcp.notes.link_trusted`). Every note leaves through
+  :class:`~whygraph.api_v1.NoteOut`, so no uid and no ``origin`` reach the
+  wire.
 
-Each of the seven data routes counts one agent call (``v1:evidence``,
+Each of the fourteen data routes counts one agent call (``v1:evidence``,
 ``v1:rationale``, ``v1:history``, ``v1:commit``, ``v1:pr``, ``v1:issue``,
-``v1:overview``) once it passed its rate limit; the status route ``GET ""``,
-which a local portal polls, is not agent activity and is not counted.
+``v1:overview``, ``v1:plans_for``, ``v1:plan``, ``v1:plan_section``,
+``v1:note_propose``, ``v1:notes_for``, ``v1:notes_project``, ``v1:note``)
+once it passed its rate limit; the status route ``GET ""``, which a local
+portal polls, is not agent activity and is not counted.
 
 Limits (on :class:`~whygraph.portal.deps.PortalState`): ``v1_token`` per
 token for the reads, ``v1_heavy`` per token for evidence and rationale,
@@ -48,26 +62,35 @@ generation failure), ``422 bad_hunk`` (a ``GitError`` - git's stderr is
 never returned), ``422 bad_request`` (anything else a request got wrong,
 redacted), ``404 not_found`` (an unknown commit / PR / issue), ``413
 body_too_large`` past :data:`MAX_BODY_BYTES`, ``429 throttled`` /
-``generation_limited`` and ``403 generation_disabled``.
+``generation_limited`` and ``403 generation_disabled``. The note routes map
+the note codes first (``note_invalid`` / ``note_check_invalid`` ``400``,
+``note_not_found`` ``404``, ``note_state`` ``409``, ``note_limit`` ``429``,
+redacted messages) and a locked project DB to ``503 busy``.
 """
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, TypeVar
 
-from fastapi import APIRouter, Depends, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request, Response
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy.exc import OperationalError
+from sqlmodel import col, select
 
 from whygraph.analyze import AnalyzeError
 from whygraph.api_v1 import (
     MAX_LIMIT,
+    MAX_LINE,
     MAX_PATH,
     MAX_PLAN_SECTION,
     PLATFORM_BUDGET_MESSAGE,
     EvidenceIn,
+    NoteOut,
+    NoteProposeIn,
+    NotesForIn,
     PlansForIn,
     RationaleIn,
     RepoPath,
@@ -79,6 +102,8 @@ from whygraph.core import get_config
 from whygraph.core.config import AnalyzeConfig, RationaleConfig, is_agent_limit
 from whygraph.core.usage import BUDGET_EXCEEDED, count_agent_call
 from whygraph.db import get_session
+from whygraph.db.models.project_note import ProjectNote
+from whygraph.mcp import notes
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import (
     backfill_evidence_descriptions,
@@ -121,6 +146,8 @@ from .deps import (
     v1_project_db_access,
     v1_user,
 )
+from .models import Membership, ProjectGrant, User
+from .notes_routes import NOTE_ERROR_STATUS
 from .routes import _missing_key
 from .security import Principal
 from .v1_status import load_status
@@ -137,6 +164,7 @@ _SHA = TypeAdapter(Sha)
 _PATH = TypeAdapter(RepoPath)
 
 _PROJECT = v1_project_db_access(Action.PROJECT_READ)
+_PROPOSE = v1_project_db_access(Action.PROJECT_CHAT)
 
 v1_router = APIRouter(
     prefix="/api/v1/projects/{slug}", dependencies=[Depends(require_production)]
@@ -746,6 +774,236 @@ def get_plan_section(
 ) -> dict:
     """One section of a plan, at most 8,000 characters."""
     return _resource(project, principal, lambda: _plan_section_resource(stem, str(n)))
+
+
+# ---------------------------------------------------------------------------
+# Notes (plan 63 section 4.2)
+# ---------------------------------------------------------------------------
+
+_FALLBACK_ANCHORS = ("path", "range", "symbol")
+"""The anchor kinds a proposal may fall back from to ``project``."""
+
+
+def _note_out(view: Any) -> dict:
+    """One note as it may leave the platform (:class:`~whygraph.api_v1.NoteOut`).
+
+    Every note a ``/notes`` route answers goes through here: the model drops
+    ``proposed_by`` / ``confirmed_by`` / ``reconfirmed_by`` / ``retired_by``
+    and ``origin``, and types everything a card line renders.
+    """
+    return NoteOut.model_validate(dict(view)).model_dump(mode="json", exclude_none=True)
+
+
+def _admin_uids(project: BoundProject) -> frozenset[str]:
+    """The uids whose **current** role on ``project`` can configure it.
+
+    Org owners and admins (project admins everywhere) and members with an
+    ``admin`` grant on this project, read from the portal DB on every call,
+    so a demoted or removed admin's confirmations stop vouching at once. A
+    disabled or soft-deleted account vouches for nothing.
+    """
+    live = (col(User.deleted_at).is_(None), col(User.disabled_at).is_(None))
+    with portal_session() as db:
+        org_admins = db.exec(
+            select(User.uid)
+            .join(Membership, col(Membership.user_id) == col(User.id))
+            .where(
+                col(Membership.org_id) == project.org_id,
+                col(Membership.role).in_(("owner", "admin")),
+                *live,
+            )
+        ).all()
+        granted = db.exec(
+            select(User.uid)
+            .join(ProjectGrant, col(ProjectGrant.user_id) == col(User.id))
+            .where(
+                col(ProjectGrant.project_id) == project.id,
+                col(ProjectGrant.org_id) == project.org_id,
+                col(ProjectGrant.role) == "admin",
+                *live,
+            )
+        ).all()
+    return frozenset(org_admins) | frozenset(granted)
+
+
+@contextmanager
+def _note_errors() -> Iterator[None]:
+    """:func:`_mapped_errors`, with the note codes and a busy DB mapped first.
+
+    A note code keeps its status (:data:`NOTE_ERROR_STATUS`) and its code;
+    its message is redacted. A locked project DB is ``503 busy``.
+    """
+    with _mapped_errors():
+        try:
+            yield
+        except WhyGraphError as exc:
+            status = NOTE_ERROR_STATUS.get(exc.code or "")
+            if status is None:
+                raise
+            raise ApiError(status, redact_tokens(str(exc)), code=exc.code) from None
+        except (sqlite3.OperationalError, OperationalError):
+            raise ApiError(
+                503,
+                "the project database is busy; retry shortly",
+                code="busy",
+                headers={"Retry-After": "1"},
+                retry_after=1,
+            ) from None
+
+
+@v1_router.post("/notes", status_code=201)
+def post_note(
+    response: Response,
+    project: BoundProject = Depends(_PROPOSE),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    body: NoteProposeIn = Depends(_json_body(NoteProposeIn)),
+    _count: None = Depends(_counted("v1:note_propose")),
+) -> dict:
+    """Propose a note as the token's user (``NoteProposeOut``; ``201``, ``200`` on a duplicate).
+
+    The proposer is the token's user and the origin its connection, both set
+    here. An anchor the server clone lacks falls back to the project when
+    ``fallback_to_project`` allows it, and a ref it has not scanned is
+    dropped; each is reported as ``not_on_platform``.
+    """
+    status = _status(project, principal)
+    anchor: dict[str, Any] = body.anchor.model_dump(exclude_none=True)
+    refs = list(body.refs)
+    dropped: list[dict[str, str]] = []
+    downgraded: dict[str, str] | None = None
+    # Each retry drops one ref or downgrades the anchor once, so at most
+    # len(refs) + 1 retries; the bound is belt and braces.
+    attempts = len(refs) + 2
+    with _note_errors():
+        # The local side refuses these too; a platform must not rely on it,
+        # since any holder of a valid token can call this route.
+        notes.refuse_secret_text(
+            body.body,
+            body.check.text if body.check else None,
+            body.check.glob if body.check else None,
+            anchor.get("area"),
+        )
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
+            try:
+                view = notes.propose(
+                    body.body,
+                    body.kind,
+                    anchor,
+                    source="mcp",
+                    actor_uid=principal.uid,
+                    origin=f"link:{principal.token_id}",
+                    refs=refs,
+                    check=body.check.model_dump() if body.check else None,
+                    supersedes_id=body.supersedes_id,
+                    symbol_sync=False,
+                )
+                break
+            except notes.RefNotFound as exc:
+                if last or not 0 <= exc.index < len(refs):
+                    raise
+                ref = refs.pop(exc.index)
+                dropped.append({"ref": ref, "reason": "not_on_platform"})
+            except notes.AnchorNotFound:
+                kind = anchor["kind"]
+                if (
+                    last
+                    or downgraded is not None
+                    or not body.fallback_to_project
+                    or kind not in _FALLBACK_ANCHORS
+                ):
+                    raise
+                downgraded = {
+                    "from": kind,
+                    "to": "project",
+                    "reason": "not_on_platform",
+                }
+                anchor = {"kind": "project"}
+    result: dict[str, Any] = dict(notes.proposal_result(view, principal.uid))
+    result.pop("review", None)
+    if "note" in result:
+        result["note"] = _note_out(result["note"])
+    if downgraded is not None:
+        result["anchor_downgraded"] = downgraded
+    result["dropped_refs"] = dropped
+    result["project"] = status
+    response.status_code = 200 if result["duplicate"] else 201
+    return result
+
+
+@v1_router.post("/notes/for")
+def post_notes_for(
+    project: BoundProject = Depends(_PROJECT),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    body: NotesForIn = Depends(_json_body(NotesForIn)),
+    _count: None = Depends(_counted("v1:notes_for")),
+) -> dict:
+    """The link-trusted confirmed notes for a code target (``NotesForOut``)."""
+    status = _status(project, principal)
+    admins = _admin_uids(project)
+    target = Target(
+        path=body.path,
+        line_start=body.line_start or 1,
+        line_end=body.line_end or MAX_LINE,
+        qualified_name=body.qualified_name,
+    )
+    with _note_errors():
+        views = notes.notes_for_target(
+            target, keep=lambda row: notes.link_trusted(row, admins)
+        )
+        out = [_note_out(view) for view in views]
+    return {"notes": out, "project": status}
+
+
+@v1_router.get("/notes/project")
+def get_project_notes(
+    project: BoundProject = Depends(_PROJECT),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:notes_project")),
+) -> dict:
+    """The link-trusted confirmed project notes, purpose first, within budget."""
+    status = _status(project, principal)
+    admins = _admin_uids(project)
+    with _note_errors():
+        views = notes.project_notes(keep=lambda row: notes.link_trusted(row, admins))
+        out = [_note_out(view) for view in views]
+    return {"notes": out, "project": status}
+
+
+def _trusted_note_resource(note_id: int, admins: frozenset[str]) -> dict:
+    """``whygraph://note/{id}`` for a linked agent: confirmed and link-trusted only.
+
+    Anything else - missing, proposed, retired, or self-confirmed by a
+    non-admin - is ``{"error": "not_found"}``, never a different answer.
+    """
+    with _note_errors():
+        with get_session() as session:
+            row = session.get(ProjectNote, note_id)
+            trusted = row is not None and notes.link_trusted(row, admins)
+        if not trusted:
+            return {"error": "not_found", "id": note_id}
+        found = notes._note_resource(note_id)
+        if found.get("error") == "not_found":
+            return found
+        return _note_out(found)
+
+
+@v1_router.get("/notes/{note_id}")
+def get_note(
+    note_id: int = Path(..., ge=1),
+    project: BoundProject = Depends(_PROJECT),
+    principal: Principal = Depends(v1_user),
+    _limit: None = Depends(_light),
+    _count: None = Depends(_counted("v1:note")),
+) -> dict:
+    """One confirmed, link-trusted note (``NoteOut`` plus ``project``)."""
+    admins = _admin_uids(project)
+    return _resource(
+        project, principal, lambda: _trusted_note_resource(note_id, admins)
+    )
 
 
 __all__ = ["GIT_BUDGET", "MAX_BODY_BYTES", "org_limit", "v1_router"]

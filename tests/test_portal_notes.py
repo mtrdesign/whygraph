@@ -716,3 +716,97 @@ def test_a_revision_over_rest_carries_its_own_check(api: SimpleNamespace) -> Non
     done = call(t, "dee", "POST", f"{N}/{revision.json()['id']}/confirm", json={})
     assert done.json()["check_state"] == "holds"
     assert call(t, "dee", "GET", f"{N}/{old['id']}").json()["status"] == "retired"
+
+
+# ---------------------------------------------------------------------------
+# Linked proposals: origin_name and the per-machine bulk reject (plan 63 4.3)
+# ---------------------------------------------------------------------------
+
+
+def _token_row(t: SimpleNamespace, who: str, project_id: int, name: str) -> int:
+    """A ``connection_tokens`` row (no usable token) and its id."""
+    import secrets
+
+    from whygraph.portal import db as portal_db
+    from whygraph.portal.models import ConnectionToken
+
+    with portal_db.get_session() as session:
+        row = ConnectionToken(
+            user_id=t.ids[who],
+            org_id=t.org_id,
+            project_id=project_id,
+            token_hash=secrets.token_hex(32),
+            client_name=name,
+        )
+        session.add(row)
+        session.flush()
+        return int(row.id)
+
+
+def test_origin_name_names_this_projects_machine_for_every_reader(
+    api: SimpleNamespace,
+) -> None:
+    """``origin_name`` on the list, one note and for-target, for a member and a viewer.
+
+    Another project's token is never named, nor a swept one; a non-link
+    origin carries no ``origin_name`` at all.
+    """
+    t = api
+    other_root = make_repo(t.root.parent, "web")
+    web = _insert_project(t.org_id, "web", "Acme Web", other_root, t.ids["ben"])
+    mine = _token_row(t, "dee", t.project_id, "dee-laptop")
+    theirs = _token_row(t, "dee", web, "web-box")
+    swept = 987654321
+    here, elsewhere, gone, plain = seed_rows(
+        t,
+        {"origin": f"link:{mine}", "anchor_kind": "path", "anchor_path": "sample.py"},
+        {"origin": f"link:{theirs}", "body": "agent text 2"},
+        {"origin": f"link:{swept}", "body": "agent text 3"},
+        {"body": "agent text 4"},
+    )
+    expected = {here: "dee-laptop", elsewhere: None, gone: None}
+    for who in ("dee", "eve"):
+        listed = call(t, who, "GET", N)
+        assert listed.status_code == 200, (who, listed.text)
+        by_id = {n["id"]: n for n in listed.json()}
+        for nid, name in expected.items():
+            assert "origin_name" in by_id[nid] and by_id[nid]["origin_name"] == name
+        assert "origin_name" not in by_id[plain]
+        assert "web-box" not in listed.text
+        one = call(t, who, "GET", f"{N}/{here}")
+        assert one.status_code == 200 and one.json()["origin_name"] == "dee-laptop"
+        assert call(t, who, "GET", f"{N}/{elsewhere}").json()["origin_name"] is None
+        target = call(
+            t,
+            who,
+            "GET",
+            f"{N}/for-target",
+            params={"path": "sample.py", "line_start": 1, "line_end": 3},
+        )
+        assert target.status_code == 200, target.text
+        (found,) = [n for n in target.json() if n["id"] == here]
+        assert found["origin_name"] == "dee-laptop"
+
+
+def test_bulk_reject_by_a_link_origin_is_per_machine(api: SimpleNamespace) -> None:
+    t = api
+    laptop = _token_row(t, "dee", t.project_id, "dee-laptop")
+    desktop = _token_row(t, "dee", t.project_id, "dee-desktop")
+    one, two, other_machine, plain_mcp = seed_rows(
+        t,
+        {"origin": f"link:{laptop}"},
+        {"origin": f"link:{laptop}", "body": "agent text 2"},
+        {"origin": f"link:{desktop}", "body": "agent text 3"},
+        {"body": "agent text 4"},
+    )
+    done = call(
+        t,
+        "cy",
+        "POST",
+        f"{N}/reject-agent-proposals",
+        json={"proposed_by": t.uids["dee"], "origin": f"link:{laptop}"},
+    )
+    assert done.status_code == 200 and done.json() == {"rejected": 2}, done.text
+    states = {n["id"]: n["status"] for n in call(t, "cy", "GET", N).json()}
+    assert states[one] == states[two] == "retired"
+    assert states[other_machine] == states[plain_mcp] == "proposed"

@@ -8,7 +8,8 @@
       "history",
       "resources",
       "plans",
-      "rationale_depth"
+      "rationale_depth",
+      "notes"
     ],
     "min_client": "2.0.0"
   },

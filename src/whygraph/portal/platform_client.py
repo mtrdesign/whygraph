@@ -48,6 +48,11 @@ from whygraph.api_v1 import (
     EvidenceIn,
     EvidenceReplyOut,
     MetaOut,
+    NoteOut,
+    NoteProposeIn,
+    NoteProposeOut,
+    NotesForIn,
+    NotesForOut,
     PlanOut,
     PlanSectionOut,
     PlansForIn,
@@ -480,12 +485,13 @@ class PlatformHttp:
         bearer: bool,
         body: BaseModel | dict | None = None,
         params: dict[str, Any] | None = None,
-        timeout: float | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> Any:
         """Send one request and return the parsed, capped JSON body.
 
-        ``timeout`` replaces the client's read timeout for this call; a read
-        that exceeds it is a ``504`` ``platform_slow`` refusal, not an outage.
+        ``timeout`` replaces the client's timeouts for this call; one that
+        runs out (connect, read, write or pool) is a ``504``
+        ``platform_slow`` refusal, not an outage.
         """
         if base is None or _origin(base) not in {
             _origin(self.platform_origin),
@@ -515,9 +521,9 @@ class PlatformHttp:
                         raise PlatformUnreachable("the platform's reply is too large")
                     chunks.append(chunk)
                 status = response.status_code
-        except httpx.ReadTimeout:
+        except httpx.TimeoutException as exc:
             if timeout is None:
-                logger.warning("platform request failed: ReadTimeout")
+                logger.warning("platform request failed: %s", type(exc).__name__)
                 raise PlatformUnreachable("the platform could not be reached") from None
             raise PlatformRefused(
                 504,
@@ -588,8 +594,13 @@ class PlatformHttp:
 
     # -- platform origin ----------------------------------------------------
 
-    def meta(self) -> MetaOut:
+    def meta(self, timeout: float | httpx.Timeout | None = None) -> MetaOut:
         """``GET /api/v1/meta`` (no credentials).
+
+        Parameters
+        ----------
+        timeout : float or httpx.Timeout, optional
+            A per-call deadline; running out is ``504`` ``platform_slow``.
 
         Returns
         -------
@@ -606,7 +617,13 @@ class PlatformHttp:
         """
         out: MetaOut = self._model(
             MetaOut,
-            self._call("GET", self.platform_origin, "/api/v1/meta", bearer=False),
+            self._call(
+                "GET",
+                self.platform_origin,
+                "/api/v1/meta",
+                bearer=False,
+                timeout=timeout,
+            ),
         )
         if out.api_version != API_VERSION:
             raise UpdateRequired(
@@ -758,6 +775,66 @@ class PlatformHttp:
         """``GET .../plans/{stem}/sections/{n}``: one section (validated)."""
         data = self._resource(slug, f"plans/{quote(stem, safe='')}/sections/{int(n)}")
         return self._fields(PlanSectionOut, data)
+
+    def propose_note(self, slug: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """``POST .../notes``: propose a note (validated, ``None`` keys dropped).
+
+        The body is built with :class:`~whygraph.api_v1.NoteProposeIn`, so a
+        value the contract refuses raises ``ValidationError`` before
+        anything is sent.
+        """
+        body = NoteProposeIn.model_validate(payload)
+        data = self._v1(
+            "POST",
+            f"{self._slug(slug)}/notes",
+            body=body.model_dump(mode="json", exclude_none=True),
+        )
+        return self._notes_reply(NoteProposeOut, data)
+
+    def notes_for(
+        self,
+        slug: str,
+        path: str,
+        *,
+        qualified_name: str | None = None,
+        lines: tuple[int, int] | None = None,
+        timeout: float | httpx.Timeout | None = None,
+    ) -> dict[str, Any]:
+        """``POST .../notes/for``: the notes for one target (validated)."""
+        body = NotesForIn(
+            path=path,
+            qualified_name=qualified_name,
+            line_start=lines[0] if lines else None,
+            line_end=lines[1] if lines else None,
+        )
+        data = self._v1(
+            "POST",
+            f"{self._slug(slug)}/notes/for",
+            body=body.model_dump(mode="json", exclude_none=True),
+            timeout=timeout,
+        )
+        return self._notes_reply(NotesForOut, data)
+
+    def project_notes(
+        self, slug: str, *, timeout: float | httpx.Timeout | None = None
+    ) -> dict[str, Any]:
+        """``GET .../notes/project``: the project-level notes (validated)."""
+        data = self._v1("GET", f"{self._slug(slug)}/notes/project", timeout=timeout)
+        return self._notes_reply(NotesForOut, data)
+
+    def note(self, slug: str, note_id: int) -> dict[str, Any]:
+        """``GET .../notes/{id}``: one confirmed note (validated)."""
+        data = self._resource(slug, f"notes/{int(note_id)}")
+        return self._notes_reply(NoteOut, data)
+
+    def _notes_reply(self, model: type[BaseModel], data: Any) -> dict[str, Any]:
+        """A notes reply validated and dumped without ``None`` keys.
+
+        Matches the shape of ``mcp.notes._view``, which omits absent keys.
+        """
+        if isinstance(data, dict):
+            self._note_project(data)
+        return self._model(model, data).model_dump(mode="json", exclude_none=True)
 
     def _fields(self, model: type[BaseModel], data: Any) -> dict[str, Any]:
         """``data`` validated with ``model``, as the fields the platform sent."""

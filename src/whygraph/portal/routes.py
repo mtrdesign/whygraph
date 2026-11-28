@@ -104,6 +104,7 @@ from whygraph.services.github import (
 )
 
 from . import connections, sessions, updates
+from .agent_hook_routes import LINKED_NOTES
 from .audit import audit
 from .budgets import reload_org_budgets
 from .clones import production_initialize, remove_clone
@@ -2067,6 +2068,7 @@ def _add_platform(
         _reconnect(state, existing, entry)
         state.pending_links.pop(body.link_id, org_id)
         state.contexts.invalidate(existing)
+        LINKED_NOTES.drop_project(existing)
         return existing
     try:
         with get_session() as session:
@@ -2873,6 +2875,7 @@ def _remove_project(
     dispose_engine(project.db_path)
     state.migrations.forget(project.db_path)
     state.contexts.invalidate(project.id)
+    LINKED_NOTES.drop_project(project.id)
     state.depth_profiles.discard(project.id)
 
     hooks = None
@@ -3325,7 +3328,7 @@ def init_project(
             dry_run=body.dry_run,
             contained=True,
             replace_codegraph=body.replace_codegraph,
-            claude_hooks=project.source != "platform",
+            claude_hooks=True,
             acknowledge_upstream=body.acknowledge_upstream,
         )
     except UnsafePathError as exc:

@@ -969,6 +969,78 @@ class GitResolveCommitCmd(ShellCommand[str | None]):
         return result.stdout.strip() or None
 
 
+class GitDiffQuietCmd(ShellCommand[bool | None]):
+    """``git --literal-pathspecs diff --no-ext-diff --no-textconv --quiet <ref> -- <path>``.
+
+    Does the working-tree file at ``path`` match ``ref``'s? Must be run with
+    ``check=False``: exit ``0`` is ``True`` (identical), ``1`` is ``False``
+    (differs), anything else (an unknown ref, a git failure) is ``None``.
+    ``--literal-pathspecs`` keeps glob characters in ``path`` literal, and no
+    external diff or textconv driver runs. Exit ``0`` also answers for a path
+    that neither side tracks, so a caller must check that ``ref`` tracks it.
+
+    Parameters
+    ----------
+    ref : str
+        The commit-ish to compare against (never starting with ``-``; the
+        caller checks).
+    path : str
+        A repository-relative path (after ``--``, so never an option).
+    """
+
+    def __init__(self, ref: str, path: str) -> None:
+        self.ref = ref
+        self.path = path
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "--literal-pathspecs",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--quiet",
+            self.ref,
+            "--",
+            self.path,
+        ]
+
+    def parse(self, result: CompletedProcess[str]) -> bool | None:
+        return {0: True, 1: False}.get(result.returncode)
+
+
+class GitLsFilesTagsCmd:
+    """``git --literal-pathspecs ls-files -v -z -- <path>`` - index entries with their tags.
+
+    Run for its **bytes** (a file name need not be UTF-8), like
+    :class:`GitLsTreeLongCmd`. ``-v`` prefixes each entry with a status tag:
+    ``H`` a plain cached entry, ``S`` skip-worktree, and a **lowercase**
+    letter an assume-unchanged entry - the two flags that make ``git diff``
+    skip the working-tree file.
+
+    Parameters
+    ----------
+    path : str
+        A repository-relative path (after ``--``, so never an option).
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def argv(self) -> list[str]:
+        return ["git", "--literal-pathspecs", "ls-files", "-v", "-z", "--", self.path]
+
+    def parse_bytes(self, stdout: bytes) -> tuple[tuple[str, str], ...]:
+        """Parse ``<tag> <name>`` records separated by NUL into ``(tag, name)``."""
+        entries: list[tuple[str, str]] = []
+        for record in stdout.split(b"\0"):
+            tag, space, raw_name = record.partition(b" ")
+            if not space:
+                continue
+            entries.append((tag.decode("ascii", "replace"), os.fsdecode(raw_name)))
+        return tuple(entries)
+
+
 class GitCheckoutResetCmd(ShellCommand[None]):
     """``git -c core.symlinks=false -c core.hooksPath=/dev/null checkout -q -B <branch> <commit> --``.
 

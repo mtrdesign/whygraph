@@ -108,6 +108,7 @@ describe("projectHealth precedence (plan section 4.10)", () => {
     explorer_url: "https://acme.whygraph.example.com/p/alpha/explorer",
     chat_url: "https://acme.whygraph.example.com/p/alpha/chat",
     manage_url: "https://acme.whygraph.example.com/p/alpha/settings",
+    notes_url: "https://acme.whygraph.example.com/p/alpha/notes",
   };
   const cases: [string, Partial<ProjectDetails>, string, string][] = [
     ["healthy", {}, "ready", "Ready"],
@@ -327,6 +328,10 @@ describe("Overview chart data", () => {
     expect(agentKindLabel("v1:plans_for")).toBe("Plan lookups");
     expect(agentKindLabel("v1:plan")).toBe("Plan digests");
     expect(agentKindLabel("v1:plan_section")).toBe("Plan section reads");
+    expect(agentKindLabel("v1:note_propose")).toBe("Note proposals");
+    expect(agentKindLabel("v1:notes_for")).toBe("Note lookups");
+    expect(agentKindLabel("v1:notes_project")).toBe("Project notes");
+    expect(agentKindLabel("v1:note")).toBe("Note reads");
   });
 });
 

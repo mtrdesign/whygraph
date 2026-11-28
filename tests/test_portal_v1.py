@@ -49,6 +49,9 @@ from test_portal_hosts_isolation import _insert_project
 from whygraph.analyze import AnalyzeError, Item, ItemRef, Rationale
 from whygraph.api_v1 import (
     EvidenceReplyOut,
+    NoteOut,
+    NoteProposeOut,
+    NotesForOut,
     PlanOut,
     PlanSectionOut,
     PlansForOut,
@@ -59,18 +62,21 @@ from whygraph.api_v1 import (
 from whygraph.core.context import use_project
 from whygraph.db import get_session
 from whygraph.db.models import Commit, Plan, PlanLink
+from whygraph.db.models.project_note import ProjectNote
+from whygraph.mcp import notes as notes_mod
 from whygraph.mcp import plans as plans_mod
 from whygraph.mcp import rationale as rationale_mod
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import collect_evidence
 from whygraph.mcp.rationale import NoEvidenceError
+from whygraph.mcp import targets as targets_mod
 from whygraph.mcp.targets import Target
 from whygraph.portal import connections
 from whygraph.portal import db as portal_db
 from whygraph.portal import orgs
 from whygraph.portal import policy, v1_routes
 from whygraph.portal.config_layers import load_layer, save_layer
-from whygraph.portal.models import Organization, Project, User
+from whygraph.portal.models import Membership, Organization, Project, User
 from whygraph.portal.v1_routes import GIT_BUDGET, MAX_BODY_BYTES, org_limit
 from whygraph.scan.git_crawler import GitCrawler
 from whygraph.services.git import GitError, Repository
@@ -1415,6 +1421,463 @@ def test_v1_overview_carries_the_plans_block(v1: V1World) -> None:
     }
     seed_plan(v1)
     assert call(v1, "GET", "/overview").json()["plans"]["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Notes (plan 63 section 4.2, 9 "Platform" P1-P13)
+# ---------------------------------------------------------------------------
+
+_WIRE_FORBIDDEN = (
+    "proposed_by",
+    "confirmed_by",
+    "reconfirmed_by",
+    "retired_by",
+    "origin",
+    "review",
+)
+"""Keys no ``/notes`` reply may carry (uids, the origin, a local review path)."""
+
+
+def _uid(w: V1World, who: str) -> str:
+    with portal_db.get_session() as session:
+        return session.get(User, w.ids[who]).uid
+
+
+def _proposal(body: str, anchor: dict | None = None, **extra: Any) -> dict:
+    return {
+        "body": body,
+        "kind": "decision",
+        "anchor": anchor or {"kind": "project"},
+        **extra,
+    }
+
+
+def _row(w: V1World, note_id: int) -> ProjectNote:
+    with use_project(w.ctx()), get_session() as session:
+        row = session.get(ProjectNote, note_id)
+        session.expunge(row)
+        return row
+
+
+def seed_notes(w: V1World, *rows: dict) -> list[int]:
+    """Insert raw ``project_note`` rows (confirmed project notes by Cy by default)."""
+    ids = []
+    with use_project(w.ctx()), get_session() as session:
+        for n, row in enumerate(rows):
+            values = {
+                "kind": "decision",
+                "body": f"seeded note {n}",
+                "status": "confirmed",
+                "anchor_kind": "project",
+                "source": "mcp",
+                "origin": "mcp",
+                "proposed_by": _uid(w, "cy"),
+                "proposed_at": "2026-11-01T00:00:00+00:00",
+                "confirmed_at": f"2026-11-02T00:00:{n:02d}+00:00",
+            }
+            values.update(row)
+            note = ProjectNote(**values)
+            session.add(note)
+            session.flush()
+            ids.append(int(note.id))
+    return ids
+
+
+def _no_wire_identity(payload: Any, *uids: str) -> None:
+    """No uid, origin or review path anywhere in a reply."""
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            assert not set(value) & set(_WIRE_FORBIDDEN), sorted(value)
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk({k: v for k, v in payload.items() if k != "project"})
+    text = json.dumps(payload)
+    for uid in uids:
+        assert uid not in text
+
+
+def test_v1_note_propose_stores_the_tokens_user_and_connection(v1: V1World) -> None:
+    """P1: 201, ``source="mcp"``, ``origin="link:<token id>"``, the token's user."""
+    cy = _mint(v1.ids["cy"], v1.project_id, name="cy-laptop")
+    response = call(v1, "POST", "/notes", token=cy, json=_proposal("Keep it small."))
+    assert response.status_code == 201, response.text
+    body = response.json()
+    NoteProposeOut.model_validate(body)
+    assert (body["status"], body["duplicate"], body["dropped_refs"]) == (
+        "proposed",
+        False,
+        [],
+    )
+    assert "anchor_downgraded" not in body
+    assert body["note"]["source"] == "mcp" and body["note"]["status"] == "proposed"
+    assert StatusOut.model_validate(body["project"]).slug == SLUG
+    _no_wire_identity(body, _uid(v1, "cy"))
+    row = _row(v1, body["note_id"])
+    assert (row.source, row.origin, row.proposed_by) == (
+        "mcp",
+        f"link:{_token_id(cy)}",
+        _uid(v1, "cy"),
+    )
+    # The client names neither the proposer nor the origin.
+    for forged in (
+        {"origin": "ui"},
+        {"proposed_by": _uid(v1, "ben")},
+        {"source": "human"},
+    ):
+        refused = call(
+            v1, "POST", "/notes", token=cy, json=_proposal("Forged.", **forged)
+        )
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["code"] == "bad_request"
+
+
+def test_v1_note_propose_refuses_a_viewer(v1: V1World) -> None:
+    """P2: a viewer's token reads notes but cannot propose (``403 forbidden``)."""
+    with portal_db.get_session() as session:
+        session.get(Organization, v1.org_id).default_project_role = "viewer"
+    viewer = _mint(v1.ids["cy"], v1.project_id)
+    refused = call(v1, "POST", "/notes", token=viewer, json=_proposal("No."))
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "forbidden"
+    assert call(v1, "GET", "/notes/project", token=viewer).status_code == 200
+    with use_project(v1.ctx()), get_session() as session:
+        assert session.exec(select(ProjectNote)).all() == []
+
+
+def test_v1_note_propose_keeps_the_daily_cap(v1: V1World) -> None:
+    """P3: the member's 21st agent proposal of the day is ``429 note_limit``."""
+    today = notes_mod._iso(notes_mod._utcnow())
+    seed_notes(
+        v1,
+        *(
+            {"status": "proposed", "confirmed_at": None, "proposed_at": today}
+            for _ in range(notes_mod.MAX_AGENT_PROPOSALS_PER_USER_PER_DAY)
+        ),
+    )
+    cy = _mint(v1.ids["cy"], v1.project_id)
+    refused = call(v1, "POST", "/notes", token=cy, json=_proposal("One too many."))
+    assert refused.status_code == 429, refused.text
+    assert refused.json()["code"] == "note_limit"
+    # Another member still proposes.
+    assert call(v1, "POST", "/notes", json=_proposal("Ben's.")).status_code == 201
+
+
+def test_v1_note_propose_duplicate_is_200_and_trims_anothers_pending(
+    v1: V1World,
+) -> None:
+    """P4: a duplicate answers 200; another member's pending note is not echoed."""
+    first = call(v1, "POST", "/notes", json=_proposal("Same text."))
+    assert first.status_code == 201, first.text
+    cy = _mint(v1.ids["cy"], v1.project_id)
+    again = call(v1, "POST", "/notes", token=cy, json=_proposal("Same  text."))
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body["duplicate"] is True and body["note_id"] == first.json()["note_id"]
+    assert "note" not in body
+    mine = call(v1, "POST", "/notes", json=_proposal("Same text."))
+    assert mine.status_code == 200 and mine.json()["note"]["id"] == body["note_id"]
+    _no_wire_identity(mine.json(), _uid(v1, "ben"))
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        {"kind": "path", "path": "missing.py"},
+        {"kind": "symbol", "qualified_name": "sample.nope"},
+        {"kind": "range", "path": "sample.py", "line_start": 2, "line_end": 40},
+    ],
+    ids=["path", "symbol", "range"],
+)
+def test_v1_note_anchor_not_on_platform_falls_back_to_the_project(
+    v1: V1World, anchor: dict
+) -> None:
+    """P5: a lacking anchor is filed project-wide, or refused without the fallback."""
+    kept = call(v1, "POST", "/notes", json=_proposal(f"On {anchor['kind']}.", anchor))
+    assert kept.status_code == 201, kept.text
+    body = kept.json()
+    assert body["note"]["anchor"] == {"kind": "project"}
+    assert body["anchor_downgraded"] == {
+        "from": anchor["kind"],
+        "to": "project",
+        "reason": "not_on_platform",
+    }
+    assert _row(v1, body["note_id"]).anchor_kind == "project"
+    refused = call(
+        v1,
+        "POST",
+        "/notes",
+        json=_proposal("Strict.", anchor, fallback_to_project=False),
+    )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["code"] == "note_invalid"
+
+
+def test_v1_note_unknown_refs_are_dropped(v1: V1World) -> None:
+    """P6: refs the clone has not scanned are dropped; the known one is kept."""
+    head = _git(v1.root, "rev-parse", "HEAD").strip()
+    unknown = "c" * 40
+    response = call(
+        v1,
+        "POST",
+        "/notes",
+        json=_proposal("With refs.", refs=[unknown, head, "#4242"]),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["dropped_refs"] == [
+        {"ref": unknown, "reason": "not_on_platform"},
+        {"ref": "#4242", "reason": "not_on_platform"},
+    ]
+    assert body["note"]["refs"] == [head]
+    # A missing anchor and missing refs together: both fall back.
+    both = call(
+        v1,
+        "POST",
+        "/notes",
+        json=_proposal(
+            "Both.", {"kind": "path", "path": "gone.py"}, refs=[unknown, "#7"]
+        ),
+    )
+    assert both.status_code == 201, both.text
+    assert both.json()["anchor_downgraded"]["from"] == "path"
+    assert len(both.json()["dropped_refs"]) == 2
+
+
+def test_v1_note_bad_supersedes_keeps_its_code(v1: V1World) -> None:
+    """P7: ``note_not_found`` 404 and ``note_state`` 409 pass through."""
+    missing = call(v1, "POST", "/notes", json=_proposal("Rev.", supersedes_id=4242))
+    assert (missing.status_code, missing.json()["code"]) == (404, "note_not_found")
+    pending = call(v1, "POST", "/notes", json=_proposal("Pending.")).json()["note_id"]
+    state = call(v1, "POST", "/notes", json=_proposal("Rev 2.", supersedes_id=pending))
+    assert (state.status_code, state.json()["code"]) == (409, "note_state")
+
+
+def test_v1_note_symbol_propose_never_syncs_codegraph(
+    v1: V1World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P8: a symbol anchor resolves from the index as it stands."""
+    synced: list[str] = []
+    real = targets_mod.resolve_target
+
+    def resolve_spy(**kwargs: Any) -> Target:
+        if kwargs.get("qualified_name"):
+            synced.append(kwargs["qualified_name"])
+        return real(**kwargs)
+
+    def resync_spy(*args: Any, **kwargs: Any) -> Any:
+        synced.append("resync")
+        raise AssertionError("codegraph sync on the platform")
+
+    monkeypatch.setattr(targets_mod, "resolve_target", resolve_spy)
+    monkeypatch.setattr(targets_mod, "_resync_and_lookup", resync_spy)
+    anchor = {"kind": "symbol", "qualified_name": "sample.fn"}
+    response = call(v1, "POST", "/notes", json=_proposal("On fn.", anchor))
+    assert response.status_code == 201, response.text
+    assert response.json()["note"]["anchor"]["qualified_name"] == "sample.fn"
+    assert "anchor_downgraded" not in response.json()
+    assert synced == []
+
+
+def _trust_world(v1: V1World) -> dict[str, int]:
+    """Path notes on ``sample.py`` across the trust cases (Fay is an org admin)."""
+    cy, ben, fay = (_uid(v1, who) for who in ("cy", "ben", "fay"))
+    path = {"anchor_kind": "path", "anchor_path": "sample.py"}
+    names = (
+        "self_member",
+        "second_member",
+        "self_admin",
+        "reconfirmed",
+        "pending",
+        "retired",
+    )
+    ids = seed_notes(
+        v1,
+        {**path, "confirmed_by": cy},
+        {**path, "confirmed_by": ben},
+        {**path, "proposed_by": fay, "confirmed_by": fay},
+        {**path, "confirmed_by": cy, "reconfirmed_by": ben},
+        {**path, "status": "proposed", "confirmed_at": None},
+        {
+            **path,
+            "status": "retired",
+            "confirmed_by": ben,
+            "retired_by": ben,
+            "retire_reason": "wrong",
+        },
+    )
+    return dict(zip(names, ids))
+
+
+def test_v1_notes_for_serves_link_trusted_notes_only(v1: V1World) -> None:
+    """P9: second-member, reconfirmed and admin-confirmed; never self-confirmed."""
+    ids = _trust_world(v1)
+    cy = _mint(v1.ids["cy"], v1.project_id)
+    response = call(v1, "POST", "/notes/for", token=cy, json={"path": "sample.py"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    NotesForOut.model_validate(body)
+    assert {n["id"] for n in body["notes"]} == {
+        ids["second_member"],
+        ids["self_admin"],
+        ids["reconfirmed"],
+    }
+    _no_wire_identity(body, *(_uid(v1, who) for who in ("ben", "cy", "fay")))
+    # The admin set is read per request: Fay demoted, her note stops vouching.
+    with portal_db.get_session() as session:
+        member = session.exec(
+            select(Membership).where(
+                Membership.org_id == v1.org_id, Membership.user_id == v1.ids["fay"]
+            )
+        ).one()
+        member.role = "member"
+    again = call(v1, "POST", "/notes/for", token=cy, json={"path": "sample.py"})
+    assert {n["id"] for n in again.json()["notes"]} == {
+        ids["second_member"],
+        ids["reconfirmed"],
+    }
+    lines = call(
+        v1,
+        "POST",
+        "/notes/for",
+        token=cy,
+        json={"path": "sample.py", "line_start": 1},
+    )
+    assert lines.status_code == 422  # both lines or neither
+
+
+def test_v1_note_resource_is_link_trusted_and_confirmed_only(v1: V1World) -> None:
+    """P10: 200 for a link-trusted note; ``404 not_found`` for everything else."""
+    ids = _trust_world(v1)
+    ok = call(v1, "GET", f"/notes/{ids['second_member']}")
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    NoteOut.model_validate(body)
+    assert body["id"] == ids["second_member"] and body["status"] == "confirmed"
+    assert body["resource"] == f"whygraph://note/{ids['second_member']}"
+    assert StatusOut.model_validate(body["project"]).slug == SLUG
+    _no_wire_identity(body, _uid(v1, "cy"), _uid(v1, "ben"))
+    for name in ("pending", "retired", "self_member"):
+        refused = call(v1, "GET", f"/notes/{ids[name]}")
+        assert refused.status_code == 404, (name, refused.text)
+        assert refused.json()["code"] == "not_found"
+    assert call(v1, "GET", "/notes/4242").json()["code"] == "not_found"
+    assert call(v1, "GET", "/notes/0").status_code == 422
+
+
+def test_v1_project_notes_are_trusted_purpose_first_within_budget(
+    v1: V1World,
+) -> None:
+    """P11: link-trusted project notes, purpose first, within the budget."""
+    cy, ben = _uid(v1, "cy"), _uid(v1, "ben")
+    big = "x" * 900
+    purpose, self_confirmed, *trusted = seed_notes(
+        v1,
+        {
+            "kind": "purpose",
+            "source": "analysis",
+            "origin": None,
+            "proposed_by": ben,
+            "confirmed_by": _uid(v1, "fay"),
+            "confirmed_at": "2026-11-01T00:00:00+00:00",
+        },
+        {"confirmed_by": cy},
+        *({"body": f"{big} {n}", "confirmed_by": ben} for n in range(4)),
+    )
+    response = call(v1, "GET", "/notes/project")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    NotesForOut.model_validate(body)
+    got = [n["id"] for n in body["notes"]]
+    assert got[0] == purpose and self_confirmed not in got
+    assert 1 < len(got) < 2 + len(trusted)  # the budget dropped some
+    admins = v1_routes._admin_uids(
+        type("P", (), {"id": v1.project_id, "org_id": v1.org_id})()
+    )
+    with use_project(v1.ctx()):
+        local = notes_mod.project_notes(
+            keep=lambda row: notes_mod.link_trusted(row, admins)
+        )
+    assert [n["id"] for n in local] == got
+    used = sum(len(notes_mod.render_note_line(n)) + 1 for n in local)
+    assert used <= notes_mod.PROJECT_NOTES_BUDGET_CHARS
+    _no_wire_identity(body, cy, ben)
+
+
+def test_v1_notes_routes_count_their_kinds(v1: V1World, counted: list[str]) -> None:
+    """P12: one agent call per note route, by kind."""
+    (nid,) = seed_notes(v1, {"confirmed_by": _uid(v1, "ben")})
+    assert call(v1, "POST", "/notes", json=_proposal("Counted.")).status_code == 201
+    assert call(v1, "POST", "/notes/for", json={"path": "sample.py"}).status_code == 200
+    assert call(v1, "GET", "/notes/project").status_code == 200
+    assert call(v1, "GET", f"/notes/{nid}").status_code == 200
+    assert counted == ["v1:note_propose", "v1:notes_for", "v1:notes_project", "v1:note"]
+
+
+def test_v1_note_errors_are_redacted_and_busy_is_503(
+    v1: V1World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P13: a note error message never carries a token; a locked DB is ``503 busy``."""
+    import sqlite3
+
+    secret = "ghp_" + "A" * 36
+
+    def leaky(*args: Any, **kwargs: Any) -> Any:
+        raise WhyGraphError(f"refused {secret}", code="note_invalid")
+
+    monkeypatch.setattr(notes_mod, "propose", leaky)
+    refused = call(v1, "POST", "/notes", json=_proposal("Leak."))
+    assert (refused.status_code, refused.json()["code"]) == (400, "note_invalid")
+    assert secret not in refused.text and "ghp_***" in refused.text
+
+    def locked(*args: Any, **kwargs: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(notes_mod, "project_notes", locked)
+    busy = call(v1, "GET", "/notes/project")
+    assert (busy.status_code, busy.json()["code"]) == (503, "busy")
+    assert busy.headers["Retry-After"] == "1"
+
+
+_GH_SECRET = "ghp_" + "B" * 36
+_PROVIDER_SECRET = "sk-" + "c" * 30
+
+
+@pytest.mark.parametrize(
+    ("proposal", "secret"),
+    [
+        (_proposal(f"Use {_GH_SECRET} here."), _GH_SECRET),
+        (_proposal(f"Key {_PROVIDER_SECRET}."), _PROVIDER_SECRET),
+        (
+            _proposal(
+                "Checked.",
+                check={"kind": "absent", "text": _PROVIDER_SECRET, "glob": "*.py"},
+            ),
+            _PROVIDER_SECRET,
+        ),
+        (
+            _proposal(
+                "Globbed.",
+                check={"kind": "absent", "text": "abc", "glob": f"{_GH_SECRET}/*"},
+            ),
+            _GH_SECRET,
+        ),
+        (_proposal("Area.", {"kind": "area", "area": _GH_SECRET}), _GH_SECRET),
+    ],
+)
+def test_v1_note_secret_text_is_refused_on_the_platform(
+    v1: V1World, proposal: dict, secret: str
+) -> None:
+    """The platform refuses credential-shaped text itself; no client is trusted to."""
+    refused = call(v1, "POST", "/notes", json=proposal)
+    assert (refused.status_code, refused.json()["code"]) == (400, "note_invalid")
+    assert secret not in refused.text
+    with use_project(v1.ctx()), get_session() as session:
+        assert session.exec(select(ProjectNote)).all() == []
 
 
 # ---------------------------------------------------------------------------

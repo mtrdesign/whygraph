@@ -34,6 +34,10 @@ const AGENT_KINDS: Record<string, string> = {
   "v1:plans_for": "Plan lookups",
   "v1:plan": "Plan digests",
   "v1:plan_section": "Plan section reads",
+  "v1:note_propose": "Note proposals",
+  "v1:notes_for": "Note lookups",
+  "v1:notes_project": "Project notes",
+  "v1:note": "Note reads",
 };
 
 /** `Evidence lookups` for `whygraph_evidence_for`; an unknown kind is shown as sent. */

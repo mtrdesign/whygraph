@@ -179,9 +179,6 @@ REFUSED: list[tuple[str, str, dict | None]] = [
     ("GET", f"/api/projects/{SLUG}/transfer/export", None),
     ("POST", f"/api/projects/{SLUG}/transfer/import", None),
     ("DELETE", f"/api/projects/{SLUG}/transfer/rationale", None),
-    # Claude Code hooks: linked projects get none (plan 40 section 5.9).
-    ("POST", f"/api/projects/{SLUG}/agent-hooks/session-start", {}),
-    ("POST", f"/api/projects/{SLUG}/agent-hooks/post-tool", {}),
     # The chat router: Chat opens on the platform too.
     ("GET", f"/api/projects/{SLUG}/chat/providers", None),
     ("GET", f"/api/projects/{SLUG}/chat/modes", None),
@@ -662,7 +659,7 @@ def test_pending_reports_no_reconnect_for_another_link_target(
 def test_summary_carries_the_link_block(
     portal: TestClient, fake: FakePlatform, env: SimpleNamespace
 ) -> None:
-    """``_summary.link`` is exactly the twelve fields the SPA reads."""
+    """``_summary.link`` is exactly the thirteen fields the SPA reads."""
     linked_project(portal, fake, env)
     block = summary(portal)["link"]
     assert block == {
@@ -677,6 +674,7 @@ def test_summary_carries_the_link_block(
         "rationale_max_depth": None,
         "explorer_url": f"{HOME}/explorer",
         "chat_url": f"{HOME}/chat",
+        "notes_url": f"{HOME}/notes",
         "manage_url": HOME,
     }
     # The details route carries the same block, and a local project none.

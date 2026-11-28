@@ -402,6 +402,11 @@ export function NoteCard({
       {agent && (
         <p className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground" data-testid="note-origin">
           <Badge variant="info">{SOURCE_LABEL[note.source]}</Badge>
+          {note.origin.startsWith("link:") && (
+            <span data-testid="note-linked-origin">
+              From {note.origin_name || "a linked checkout"}
+            </span>
+          )}
           {session !== null && viewer === note.proposed_by ? (
             <Link
               to="/p/$slug/chat/{-$id}"

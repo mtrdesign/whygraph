@@ -65,6 +65,7 @@ from sqlmodel import Session, col, select
 
 from whygraph.api_v1 import (
     API_VERSION,
+    NOTES_CAPABILITY,
     RATIONALE_DEPTH_CAPABILITY,
     MetaOut,
     TokenReply,
@@ -113,13 +114,15 @@ CAPABILITIES: tuple[str, ...] = (
     "resources",
     "plans",
     RATIONALE_DEPTH_CAPABILITY,
+    NOTES_CAPABILITY,
 )
 """The ``/api/v1`` route families this platform offers.
 
 ``rationale_depth`` (plan 62 section 14.4) is not a route family: it says
 ``/rationale`` takes ``intent``, ``depth`` and ``cached_only`` and answers
 ``depth``, ``coverage`` and ``deeper``
-(:data:`~whygraph.api_v1.RATIONALE_DEPTH_CAPABILITY`)."""
+(:data:`~whygraph.api_v1.RATIONALE_DEPTH_CAPABILITY`). ``notes`` (plan 63)
+is the four ``/notes`` routes (:data:`~whygraph.api_v1.NOTES_CAPABILITY`)."""
 
 REDIRECT_URI_RE = re.compile(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})/connect/callback")
 """The only ``redirect_uri`` shape accepted (with a port of 1-65535).

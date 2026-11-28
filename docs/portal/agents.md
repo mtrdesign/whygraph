@@ -330,8 +330,14 @@ teammate who clones the repository without WhyGraph sees nothing and no error; w
 reads the project's slug and port from the untracked `.whygraph/portal.env` (which also holds a third line, `plans_dir`, for [publishing plans](../guide/planning.md#sharing-plans); the hook helper ignores it) and asks your local portal
 on `127.0.0.1`. If the portal is down, the helper prints nothing.
 
-**Local mode only.** Production has no hooks, and a project [linked to a platform](platform-projects.md)
-gets none.
+**Local mode only.** Production has no hooks. A project [linked to a platform](platform-projects.md)
+gets them too: the portal installs them at link time and answers from the platform instead of a local
+database. `SessionStart` delivers the platform's project-wide notes and `PostToolUse` the notes for a
+pushed file (only its path is sent; an unpushed or untracked file gets none). Only
+[link-trusted](platform-projects.md#notes) notes are delivered, the same budget and once-per-session
+dedupe apply, and the answers are cached for five minutes, so a slow or unreachable platform costs
+the agent nothing. A checkout linked before this release gets the hooks after one **Update agent
+files**.
 
 **Limits.**
 
@@ -363,7 +369,9 @@ is installed for Claude Code and Cursor (as a skill) and for VS Code (as a promp
 `whygraph_propose_note`. The command asks for the anchor (a symbol, a file or lines, an area, or the
 whole project) when the context does not make it obvious, calls `whygraph_propose_note`, and prints the
 review link. The note then waits for a member to confirm it on the project's Notes page; nothing reads
-it before.
+it before. On a checkout [linked to a platform](platform-projects.md#notes) the note goes to the
+platform, the review link is a platform URL, and a note about code that is not pushed yet is filed on
+a wider anchor; the command says so and names any reference it dropped.
 
 The implementor subagent stays free of MCP tools. It runs one step at a time, each in a fresh run at the
 step's own model, with a [review gate](../guide/planning.md#the-pipeline) after each verified step (Claude
@@ -449,11 +457,12 @@ ledger: **Kept**, **Moved**, **Dropped**, **Suggested, not written** and **Forei
 - **Notes.** A decision tied to one symbol or file is proposed as a [project note](../guide/notes.md)
   instead of a line in the file: at most five per run, none with `--no-notes` or after a cancel.
   `.whygraph/claude-md/proposed.txt` records what was proposed, so a re-run does not propose the same
-  one again. A member must confirm each proposal in the portal; **Reject all from this origin**
+  one again. A member must confirm each proposal in the portal (on the platform for a linked project); **Reject all from this origin**
   removes every pending proposal from that member's agent (see
   [Limits on agent proposals](../guide/notes.md#limits-on-agent-proposals)).
 - **Linked projects.** On a checkout [linked to a platform](platform-projects.md) it makes no rationale
-  and no note calls, and lists the note candidates under **Suggested, not written**.
+  calls, but it proposes notes to the platform as it does locally, and names the anchor a note was
+  filed under when it had to be widened.
 - **Without the WhyGraph tools** it still works, from git and your answers.
 - **Other agents.** Cursor also loads `.claude/skills/`, so with Claude Code selected the command shows
   up in Cursor's slash menu too; it is untested there. VS Code and Codex do not get it.

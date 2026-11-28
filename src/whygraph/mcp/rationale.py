@@ -529,6 +529,24 @@ def linked_rationale(
 ) -> dict:
     """``whygraph_rationale_brief``'s answer for a project linked to a platform.
 
+    The note-free card: :func:`_linked_rationale` without its ``sendable``.
+    The registered tool attaches the platform's notes itself.
+    """
+    return _linked_rationale(
+        remote, target, intent=intent, depth=depth, cached_only=cached_only
+    )[0]
+
+
+def _linked_rationale(
+    remote: RemoteProject,
+    target: Target,
+    *,
+    intent: str | None = None,
+    depth: str | None = None,
+    cached_only: bool | None = None,
+) -> tuple[dict, Target | None]:
+    """The linked card and the target its request sent (``sendable``).
+
     The card is built, cached and paid for **on the platform** (M2e plan
     section 4.5), so every checkout of the repository shares one cache row:
     nothing here reads the local rationale cache or calls an LLM. Only the
@@ -548,8 +566,9 @@ def linked_rationale(
 
     Returns
     -------
-    dict
-        The platform's card plus a ``platform`` block. Its ``target`` is
+    tuple[dict, Target]
+        The platform's card and the ``sendable`` target the request was
+        made for. The card is the platform's plus a ``platform`` block. Its ``target`` is
         the platform's own range for the symbol, which is what the card
         describes. ``plans`` (symbol scope, from the platform) when any;
         ``platform.plans = "unsupported"`` on an older platform.
@@ -578,7 +597,7 @@ def linked_rationale(
         raise WhyGraphError(str(exc)) from exc
     result = {**card, "platform": platform_block(remote)}
     if card.get("status") == "not_cached":
-        return result  # as the local tool: no plans on a cached_only miss
+        return result, sendable  # as the local tool: no plans on a cached_only miss
     # Plans beside the card (plan 61 section 4.8): only what this call just
     # sent - the pushed hunks' SHAs (first distinct, blame order) and the
     # sendable path; the target only when its path is the asked-for one,
@@ -591,7 +610,7 @@ def linked_rationale(
         scope="symbol",
         target=sendable if sendable.path == target.path else None,
     )
-    return result
+    return result, sendable
 
 
 def _partial_fields(row: CachedCard) -> dict[str, Any]:
@@ -1534,7 +1553,7 @@ def _rationale_brief_tool(
     level that is not offered), then
     every non-linked outcome gains the target's confirmed notes (data the
     members wrote, never fed into the card). A linked project gets the
-    platform's card unchanged. Code with no commits raises
+    platform's card plus the platform's notes. Code with no commits raises
     ``no_evidence`` as before, unless confirmed notes exist, in which case
     ``{"status": "no_evidence", "target", "notes"}`` is returned. The same
     holds for ``plans`` (compact pointers to the committed plans that
@@ -1550,13 +1569,32 @@ def _rationale_brief_tool(
     )
     project = current_project()
     if project is not None and project.remote is not None:
-        return linked_rationale(
-            project.remote,
-            target,
-            intent=intent,
-            depth=depth,
-            cached_only=cached_only,
-        )
+        from .notes_linked import linked_notes
+
+        remote = project.remote
+        repo = Repository(repo_root())
+        try:
+            linked_card, sendable = _linked_rationale(
+                remote, target, intent=intent, depth=depth, cached_only=cached_only
+            )
+        except NoEvidenceError:
+            found, _ = linked_notes(remote, repo, target, None)
+            if not found:
+                raise
+            return {
+                "status": "no_evidence",
+                "target": target_dict(target),
+                "notes": found,
+                "platform": platform_block(remote),
+            }
+        found, supported = linked_notes(remote, repo, target, sendable)
+        if found:
+            linked_card["notes"] = found
+        if not supported:
+            linked_card.setdefault("platform", platform_block(remote))["notes"] = (
+                "unsupported"
+            )
+        return linked_card  # type: ignore[return-value]
     notes = notes_for_target(target)
     evidence = collect_evidence(target, limit=20)
     plans = guarded_plans_for(

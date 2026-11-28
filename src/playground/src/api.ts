@@ -655,6 +655,7 @@ export interface ProjectLink {
   explorer_url: string;
   chat_url: string;
   manage_url: string;
+  notes_url: string;
 }
 
 export type AccessLostReason = "no_access" | "git_access_denied" | "repo_deleted" | "tracked_whygraph_state";
@@ -2738,6 +2739,8 @@ export interface Note {
   commits_since?: number | null;
   source: NoteSource;
   origin: string;
+  /** A `link:` origin: the connected machine's name, when the platform has one. */
+  origin_name?: string | null;
   proposed_by: string;
   proposed_by_name?: string | null;
   /** The proposer came in with an imported bundle (plan 42); the name is display-only provenance. */

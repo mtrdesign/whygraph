@@ -13,16 +13,18 @@ function, which pytest plugs into ``httpx.MockTransport`` (the shape of
   as a platform serves it on every host, then, bearer only:
   ``GET /api/v1/projects/{slug}``,
   ``POST .../evidence`` and ``.../rationale``, ``GET .../history``,
-  ``.../commits/{sha}``, ``.../prs/{n}``, ``.../issues/{n}``, ``.../overview``
-  and ``DELETE .../token``.
+  ``.../commits/{sha}``, ``.../prs/{n}``, ``.../issues/{n}``, ``.../overview``,
+  the notes routes (``POST .../notes``, ``POST .../notes/for``,
+  ``GET .../notes/project``, ``GET .../notes/{id}``) and ``DELETE .../token``.
 
 Replies are **table-driven**: :attr:`FakePlatform.responses` maps a route name
 (``meta``, ``org_meta``, ``token``, ``status``, ``evidence``, ``rationale``, ``history``,
-``commit``, ``pr``, ``issue``, ``overview``, ``revoke``) to a
+``commit``, ``pr``, ``issue``, ``overview``, ``revoke``, ``notes_propose``, ``notes_for``,
+``notes_project``, ``note``) to a
 ``(status, body)`` pair that replaces the hand-written default, so step 4's
 contract recorder can swap in recorded fixtures (:meth:`FakePlatform.from_fixtures`).
 Failure modes are set on :attr:`FakePlatform.failure` (``unreachable``,
-``oversized``, ``not_json``, ``redirect``, ``timeout``) or per token with
+``oversized``, ``not_json``, ``redirect``, ``timeout``, ``connect_timeout``) or per token with
 :meth:`FakePlatform.revoke_token`.
 
 Never imported by ``src/``.
@@ -47,7 +49,14 @@ SLUG = "demo"
 TOKEN = "wgc_" + "A1b2C3d4" * 5 + "xyz"
 SHA = "a" * 40
 
-FAILURES = ("unreachable", "oversized", "not_json", "redirect", "timeout")
+FAILURES = (
+    "unreachable",
+    "oversized",
+    "not_json",
+    "redirect",
+    "timeout",
+    "connect_timeout",
+)
 
 
 def s256(verifier: str) -> str:
@@ -113,6 +122,7 @@ class FakePlatform:
         min_client: str = "0.0.0",
         plans_supported: bool = True,
         depth_supported: bool = True,
+        notes_supported: bool = True,
     ) -> None:
         self.platform_origin = platform_origin
         self.host = httpx.URL(platform_origin).netloc.decode()
@@ -120,6 +130,14 @@ class FakePlatform:
         self.min_client = min_client
         self.plans_supported = plans_supported
         self.depth_supported = depth_supported
+        self.notes_supported = notes_supported
+        # Canned notes replies (plan 63 step 4): ``notes`` is what ``notes/for``
+        # and ``notes/project`` list, ``note_status`` / ``note_error`` make the
+        # propose route (or every notes route) refuse with ``(status, code)``.
+        self.notes: list[dict] = [note_body()]
+        self.propose_reply: dict | None = None
+        self.notes_refusal: tuple[int, str] | None = None
+        self.proposals: list[dict] = []
         self.requests: list[httpx.Request] = []
         self.responses: dict[str, tuple[int, Any]] = {}
         self.failure: str | None = None
@@ -192,6 +210,8 @@ class FakePlatform:
         self.requests.append(request)
         if self.failure == "timeout":
             raise httpx.ReadTimeout("fake timeout", request=request)
+        if self.failure == "connect_timeout":
+            raise httpx.ConnectTimeout("fake connect timeout", request=request)
         if self.failure == "unreachable":
             return httpx.Response(503, json=error_body("unavailable"))
         if self.failure == "redirect":
@@ -230,6 +250,7 @@ class FakePlatform:
                     "resources",
                     *(["plans"] if self.plans_supported else []),
                     *(["rationale_depth"] if self.depth_supported else []),
+                    *(["notes"] if self.notes_supported else []),
                 ],
                 "base_origin": self.platform_origin,
             },
@@ -306,6 +327,8 @@ class FakePlatform:
             return self._out("overview", 200, {"name": "Demo", "project": project})
         if tail == "plans/for" or tail.startswith("plans/"):
             return self._plans(method, tail, project)
+        if tail == "notes" or tail.startswith("notes/"):
+            return self._notes(request, tail, project)
         for route, noun in (("commit", "commits"), ("pr", "prs"), ("issue", "issues")):
             if method == "GET" and tail.startswith(noun + "/"):
                 return self._out(
@@ -342,6 +365,68 @@ class FakePlatform:
                 "plan_section", 200, {**plan_section_body(), "project": project}
             )
         return httpx.Response(404, json=error_body("not_found"))
+
+    def _notes(
+        self, request: httpx.Request, tail: str, project: dict
+    ) -> httpx.Response:
+        """The four notes routes (plan 63 section 4.2).
+
+        Without ``notes_supported`` all four answer ``401 login_required``
+        (an older platform's catch-all). Request bodies are in
+        :attr:`requests`; a propose body is also parsed into :attr:`proposals`.
+        """
+        if not self.notes_supported:
+            return httpx.Response(401, json=error_body("login_required"))
+        method = request.method
+        parts = tail.split("/")
+        if self.notes_refusal is not None:
+            status, code = self.notes_refusal
+            return httpx.Response(status, json=error_body(code))
+        if method == "POST" and parts == ["notes"]:
+            self.proposals.append(json.loads(request.content or b"{}"))
+            reply = self.propose_reply or {
+                "note_id": 7,
+                "status": "proposed",
+                "duplicate": False,
+                "note": note_body(id=7, status="proposed"),
+            }
+            return self._out("notes_propose", 200, {**reply, "project": project})
+        if method == "POST" and parts == ["notes", "for"]:
+            return self._out(
+                "notes_for", 200, {"notes": self.notes, "project": project}
+            )
+        if method == "GET" and parts == ["notes", "project"]:
+            return self._out(
+                "notes_project", 200, {"notes": self.notes, "project": project}
+            )
+        if method == "GET" and len(parts) == 2 and parts[1].isdigit():
+            known = {n["id"]: n for n in self.notes}
+            if int(parts[1]) in known or "note" in self.responses:
+                return self._out(
+                    "note",
+                    200,
+                    {**known.get(int(parts[1]), note_body()), "project": project},
+                )
+        return httpx.Response(404, json=error_body("not_found"))
+
+
+def note_body(**over: Any) -> dict:
+    """A ``NoteOut``-shaped dict (a confirmed project-level decision by default)."""
+    body = {
+        "id": 1,
+        "kind": "decision",
+        "body": "Keep the demo offline.",
+        "status": "confirmed",
+        "anchor": {"kind": "project"},
+        "anchor_state": "n/a",
+        "source": "human",
+        "confirmed_at": "2026-10-05T10:00:00Z",
+        "edited_on_confirm": False,
+        "refs": [],
+        "resource": "whygraph://note/1",
+    }
+    body.update(over)
+    return body
 
 
 PLAN_STEM = "demo-plan"

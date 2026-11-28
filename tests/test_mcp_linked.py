@@ -59,8 +59,14 @@ from platform_fake import (
 )
 from whygraph.api_v1 import PLATFORM_BUDGET_MESSAGE
 from whygraph.core.config import Config
-from whygraph.core.context import ProjectContext, ProjectContextError, use_project
+from whygraph.core.context import (
+    ProjectContext,
+    ProjectContextError,
+    use_actor,
+    use_project,
+)
 from whygraph.db import get_engine, get_session
+from whygraph.mcp import targets as targets_module
 from whygraph.mcp.area_history import whygraph_area_history
 from whygraph.mcp.errors import WhyGraphError
 from whygraph.mcp.evidence import (
@@ -70,7 +76,9 @@ from whygraph.mcp.evidence import (
     PUSH_UNCOMMITTED,
     whygraph_evidence_for,
 )
+from whygraph.mcp.notes_linked import linked_notes, linked_propose
 from whygraph.mcp.rationale import whygraph_rationale_brief
+from whygraph.mcp.targets import Target
 from whygraph.mcp.resources import (
     _commit_resource,
     _issue_resource,
@@ -81,6 +89,7 @@ from whygraph.portal import db as portal_db
 from whygraph.portal.linked import LinkedProject
 from whygraph.portal.paths import project_db_path
 from whygraph.portal.platform_client import PlatformHttp, api_origin_for
+from whygraph.services.git import Repository
 
 API_ORIGIN = api_origin_for(PLATFORM_ORIGIN, ORG)
 """Where the fake platform's org host lives (computed, never taken from it)."""
@@ -1360,3 +1369,823 @@ def test_mcp_linked_plans_unknown_route_reads_as_unsupported(
     with use_project(linked):
         follow = whygraph_evidence_for(path="a.py", line_start=1, line_end=6)
     assert follow["platform"]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Notes (plan 63 step 5): linked_propose and linked_notes
+# ---------------------------------------------------------------------------
+#
+# A checkout of its own, so the evidence fixture above stays as pinned:
+#
+#   pushed (origin/main = p1)     b.py, c.py, wrap.py, a.py, pkg/old.py
+#   committed locally (l1)        local.py (new), wrap.py (method wrapped
+#                                 in a new class NewLocalWrapper)
+#   modified, not committed       a.py
+#   untracked                     brand_new_secret.py, b*.py,
+#                                 pkg/newsub/inner_secret.py, .env
+#   symlink                       link.py -> b.py
+#
+# The index holds pkg.keep (b.py, fresh), pkg.secret_fn (local.py),
+# NewLocalWrapper.method (wrap.py), pkg.ghost_fn (c.py, recorded with bytes
+# c.py no longer has: a stale index) and pkg.edited (a.py).
+
+LOCAL_UID = "u-local-secret-uid"
+
+
+def _node(qn: str, path: str, start: int, end: int) -> dict:
+    return {
+        "id": f"n_{qn}",
+        "kind": "function",
+        "name": qn.rsplit(".", 1)[-1],
+        "qualified_name": qn,
+        "file_path": path,
+        "language": "python",
+        "start_line": start,
+        "end_line": end,
+        "docstring": None,
+        "signature": None,
+    }
+
+
+NOTE_NODES = [
+    _node("pkg.keep", "b.py", 1, 2),
+    _node("pkg.secret_fn", "local.py", 1, 2),
+    _node("NewLocalWrapper.method", "wrap.py", 2, 3),
+    _node("pkg.ghost_fn", "c.py", 1, 2),
+    _node("pkg.edited", "a.py", 1, 2),
+]
+
+
+def _note_index(root: Path, *, hashes: dict[str, bytes] | None = None) -> None:
+    """(Re)build the index; ``hashes`` overrides a file's recorded bytes.
+
+    ``hashes=None`` records the current bytes of each file; pass ``{}`` and
+    no ``content_hash`` column is created at all (an older index).
+    """
+    import hashlib
+    import sqlite3
+
+    db = root / ".codegraph" / "codegraph.db"
+    db.parent.mkdir(exist_ok=True)
+    if db.exists():
+        db.unlink()
+    build_fake_codegraph_db(db, nodes=NOTE_NODES, edges=[])
+    if hashes == {}:
+        return
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE files ADD COLUMN content_hash TEXT")
+        for path in sorted({n["file_path"] for n in NOTE_NODES}):
+            data = (hashes or {}).get(path, (root / path).read_bytes())
+            conn.execute(
+                "INSERT INTO files (path, language, content_hash) VALUES (?, ?, ?)",
+                (path, "python", hashlib.sha256(data).hexdigest()),
+            )
+
+
+@pytest.fixture
+def notes_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The checkout drawn above, with no real ``codegraph sync`` possible."""
+    root = tmp_path / "notes-checkout"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "remote", "add", "origin", "https://github.com/acme/demo.git")
+    files = {
+        "b.py": "def keep():\n    return 1\n",
+        "c.py": "def plain():\n    return 1\n",
+        "wrap.py": "def method():\n    return 1\n",
+        "a.py": "def edited():\n    return 1\n",
+        "pkg/old.py": "x = 1\n",
+    }
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "pushed", date=C1_DATE)
+    p1 = _head(root)
+    _git(root, "update-ref", "refs/remotes/origin/main", p1)
+    _git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+    (root / "local.py").write_text("def secret_fn():\n    return 2\n")
+    (root / "wrap.py").write_text(
+        "class NewLocalWrapper:\n    def method(self):\n        return 1\n"
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "local only", date=C2_DATE)
+    l1 = _head(root)
+
+    (root / "a.py").write_text("def edited():\n    return 99\n")
+    (root / "brand_new_secret.py").write_text("x = 2\n")
+    (root / "b*.py").write_text("x = 3\n")
+    (root / "pkg" / "newsub").mkdir()
+    (root / "pkg" / "newsub" / "inner_secret.py").write_text("x = 4\n")
+    (root / ".env").write_text("SECRET=1\n")
+    (root / "link.py").symlink_to("b.py")
+
+    _note_index(root, hashes={"c.py": b"def ghost_fn():\n    return 0\n"})
+    monkeypatch.setattr(targets_module, "refresh_codegraph_index", lambda *a, **k: None)
+    real_which = targets_module.shutil.which
+    monkeypatch.setattr(
+        targets_module.shutil,
+        "which",
+        lambda cmd, *a, **k: None if cmd == "codegraph" else real_which(cmd, *a, **k),
+    )
+    return SimpleNamespace(root=root, p1=p1, l1=l1)
+
+
+@pytest.fixture
+def notes_fake() -> FakePlatform:
+    return FakePlatform()
+
+
+@pytest.fixture
+def notes_ctx(notes_repo: SimpleNamespace, notes_fake: FakePlatform) -> ProjectContext:
+    return linked_over(notes_repo, notes_fake)
+
+
+def propose(ctx: ProjectContext, body: str = "Keep it simple.", **kw: object) -> dict:
+    """``linked_propose`` as the tool will call it, under the linked context."""
+    kind = kw.pop("kind", "decision")
+    with use_project(ctx), use_actor(LOCAL_UID):
+        return dict(linked_propose(ctx.remote, body, kind, **kw))  # type: ignore[arg-type]
+
+
+def propose_code(ctx: ProjectContext, **kw: object) -> str | None:
+    with pytest.raises(WhyGraphError) as caught:
+        propose(ctx, **kw)  # type: ignore[arg-type]
+    return caught.value.code
+
+
+def raw(fake: FakePlatform) -> bytes:
+    """Every byte the machine sent: each request's URL and body."""
+    return b"\n".join(
+        str(r.url).encode() + b"\n" + (r.content or b"") for r in fake.requests
+    )
+
+
+def sent_anchor(fake: FakePlatform) -> dict:
+    assert len(fake.proposals) == 1
+    return fake.proposals[0]["anchor"]
+
+
+def assert_absent(fake: FakePlatform, *needles: str) -> None:
+    data = raw(fake)
+    for needle in needles:
+        assert needle.encode() not in data, needle
+
+
+def test_notes_linked_l1_pushed_path(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L1: a pushed path is sent as given; ``review`` is the platform's page."""
+    result = propose(notes_ctx, path="./b.py")
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "b.py"}
+    assert result["review"] == f"{API_ORIGIN}/p/{SLUG}/notes?id=7"
+    assert result["note_id"] == 7 and result["status"] == "proposed"
+    assert result["duplicate"] is False and result["note"]["id"] == 7
+    assert result["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert "anchor_downgraded" not in result and "dropped_refs" not in result
+    assert_absent(notes_fake, "./b.py")
+
+
+def test_notes_linked_pushed_directory_path(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """A directory ``D`` tracks is a pushed path too."""
+    propose(notes_ctx, path="pkg")
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "pkg"}
+
+
+def test_notes_linked_l2_range_on_an_identical_file(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L2: a file byte-identical to ``D`` keeps its range."""
+    result = propose(notes_ctx, path="b.py", line_start=1, line_end=2)
+    assert sent_anchor(notes_fake) == {
+        "kind": "range",
+        "path": "b.py",
+        "line_start": 1,
+        "line_end": 2,
+    }
+    assert "anchor_downgraded" not in result
+
+
+def test_notes_linked_l3_range_in_a_modified_file(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L3: an edited file's range goes as its path, with no lines."""
+    result = propose(notes_ctx, path="a.py", line_start=1, line_end=2)
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "a.py"}
+    assert b"line_start" not in raw(notes_fake)
+    assert result["anchor_downgraded"] == {
+        "from": "range",
+        "to": "path",
+        "reason": "not_pushed",
+    }
+    # A file changed only by an unpushed commit is the same case.
+    notes_fake.proposals.clear()
+    propose(notes_ctx, path="wrap.py", line_start=1, line_end=2)
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "wrap.py"}
+
+
+def test_notes_linked_symbol_in_an_identical_file(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """A symbol whose file is identical to ``D`` and freshly indexed goes by name."""
+    result = propose(notes_ctx, qualified_name="  pkg.keep ")
+    assert sent_anchor(notes_fake) == {"kind": "symbol", "qualified_name": "pkg.keep"}
+    assert "anchor_downgraded" not in result
+
+
+def test_notes_linked_l4_symbol_in_a_local_only_commit(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L4: a symbol defined only in an unpushed file goes project-wide, unnamed."""
+    result = propose(notes_ctx, qualified_name="pkg.secret_fn")
+    assert sent_anchor(notes_fake) == {"kind": "project"}
+    assert result["anchor_downgraded"] == {
+        "from": "symbol",
+        "to": "project",
+        "reason": "not_pushed",
+    }
+    assert_absent(notes_fake, "secret_fn", "local.py")
+
+
+def test_notes_linked_l5_untracked_file(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L5: an untracked file (and a glob-shaped name) goes project-wide."""
+    propose(notes_ctx, path="brand_new_secret.py")
+    propose(notes_ctx, path="b*.py", line_start=1, line_end=1)
+    assert [p["anchor"] for p in notes_fake.proposals] == [{"kind": "project"}] * 2
+    assert_absent(notes_fake, "brand_new_secret", "b*.py")
+
+
+def test_notes_linked_l6_refs(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    """L6: an unpushed SHA is dropped, ``#N`` kept, a pushed prefix expanded."""
+    unpushed = notes_repo.l1[:10].upper()
+    result = propose(
+        notes_ctx,
+        project_wide=True,
+        refs=[unpushed, "#12", notes_repo.p1[:8], "#12", "deadbeefcafe"],
+    )
+    assert notes_fake.proposals[0]["refs"] == ["#12", notes_repo.p1]
+    assert result["dropped_refs"] == [
+        {"ref": unpushed.lower(), "reason": "not_pushed"},
+        {"ref": "deadbeefcafe", "reason": "not_pushed"},
+    ]
+    assert_absent(
+        notes_fake, notes_repo.l1[:7], notes_repo.l1[:7].upper(), "deadbeefcafe"
+    )
+
+
+@pytest.mark.parametrize("refs", [["main"], ["--output=x"], ["#x"], "abc1234"])
+def test_notes_linked_bad_refs_are_refused_locally(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, refs: object
+) -> None:
+    """A ref that is neither a SHA nor ``#N`` never reaches git or the platform."""
+    assert propose_code(notes_ctx, project_wide=True, refs=refs) == "note_invalid"
+    assert notes_fake.requests == []
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        {"path": ".env"},
+        {"path": "link.py"},
+        {"path": "link.py", "line_start": 1, "line_end": 1},
+        {"path": "B.py"},  # a case variant: refused on every file system
+        {"path": "../outside.py"},
+        {"path": "b.py", "line_start": 1, "line_end": 99},  # past the end
+        {"qualified_name": "pkg.not_indexed"},
+        {"path": "b.py", "project_wide": True},
+    ],
+)
+def test_notes_linked_l7_local_refusals_make_no_request(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, anchor: dict
+) -> None:
+    """L7: a denied, symlinked or otherwise invalid anchor is refused locally."""
+    assert propose_code(notes_ctx, **anchor) == "note_invalid"
+    assert notes_fake.requests == []
+
+
+def test_notes_linked_other_local_validation_makes_no_request(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """Body, kind, check and supersedes_id are checked before any request."""
+    cases = [
+        ({"body": "   "}, "note_invalid"),
+        ({"kind": "purpose", "project_wide": True}, "note_invalid"),
+        (
+            {
+                "project_wide": True,
+                "check": {"kind": "absent", "text": "abc", "glob": "*.py"},
+            },
+            "note_check_invalid",  # a check needs a constraint
+        ),
+        ({"project_wide": True, "supersedes_id": "3"}, "note_invalid"),
+        ({"project_wide": True, "supersedes_id": 0}, "note_not_found"),
+        ({"area": "x" * 129}, "note_invalid"),
+    ]
+    for kw, code in cases:
+        assert propose_code(notes_ctx, **kw) == code, kw
+    assert notes_fake.requests == []
+
+
+def test_notes_linked_sends_check_and_supersedes(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    propose(
+        notes_ctx,
+        kind="constraint",
+        area=" backend ",
+        check={"kind": "absent", "text": "eval(", "glob": "src/**/*.py"},
+        supersedes_id=3,
+    )
+    body = notes_fake.proposals[0]
+    assert body == {
+        "body": "Keep it simple.",
+        "kind": "constraint",
+        "anchor": {"kind": "area", "area": "backend"},
+        "fallback_to_project": True,
+        "refs": [],
+        "check": {"kind": "absent", "text": "eval(", "glob": "src/**/*.py"},
+        "supersedes_id": 3,
+    }
+
+
+def test_notes_linked_unsupported_platform(notes_repo: SimpleNamespace) -> None:
+    """An older platform: ``note_unsupported`` after ``meta``, never a POST."""
+    fake = FakePlatform(notes_supported=False)
+    ctx = linked_over(notes_repo, fake)
+    assert propose_code(ctx, project_wide=True) == "note_unsupported"
+    assert [r.url.path for r in fake.requests] == ["/api/v1/meta"]
+    assert fake.proposals == []
+    assert ctx.remote is not None and ctx.remote.status == "ok"
+
+
+@pytest.mark.parametrize(
+    ("refusal", "code"),
+    [
+        ((429, "note_limit"), "note_limit"),
+        ((400, "note_invalid"), "note_invalid"),
+        ((409, "note_state"), "note_state"),
+        ((404, "note_not_found"), "note_not_found"),
+        ((429, "throttled"), "throttled"),
+        ((400, "note_made_up"), None),  # an unknown code is never passed through
+        ((403, "forbidden"), None),
+    ],
+)
+def test_notes_linked_l9_platform_codes(
+    notes_ctx: ProjectContext,
+    notes_fake: FakePlatform,
+    refusal: tuple[int, str],
+    code: str | None,
+) -> None:
+    """L9: the platform's note codes keep their code; the link stays ``ok``."""
+    notes_fake.notes_refusal = refusal
+    assert propose_code(notes_ctx, project_wide=True) == code
+    assert notes_ctx.remote is not None and notes_ctx.remote.status == "ok"
+
+
+@pytest.mark.parametrize("failure", ["unreachable", "timeout", "connect_timeout"])
+def test_notes_linked_l10_unreachable(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, failure: str
+) -> None:
+    """L10: after one good call, an outage is the link's error, and nothing is queued."""
+    propose(notes_ctx, project_wide=True)
+    notes_fake.failure = failure
+    with pytest.raises(WhyGraphError) as caught:
+        propose(notes_ctx, project_wide=True)
+    assert caught.value.code is None
+    assert notes_ctx.remote is not None
+    assert notes_ctx.remote.status == "unreachable"
+    assert "platform unreachable" in str(caught.value)
+    assert len(notes_fake.proposals) == 1
+    assert TOKEN not in str(caught.value)
+
+
+def test_notes_linked_l13_platform_downgrade_passes_through(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    """L13: ``not_on_platform`` from the platform; a local downgrade wins the reason."""
+    notes_fake.propose_reply = {
+        "note_id": 9,
+        "status": "proposed",
+        "duplicate": False,
+        "anchor_downgraded": {
+            "from": "path",
+            "to": "project",
+            "reason": "not_on_platform",
+        },
+        "dropped_refs": [{"ref": notes_repo.p1, "reason": "not_on_platform"}],
+    }
+    result = propose(notes_ctx, path="b.py", refs=[notes_repo.p1])
+    assert result["anchor_downgraded"] == {
+        "from": "path",
+        "to": "project",
+        "reason": "not_on_platform",
+    }
+    assert result["dropped_refs"] == [
+        {"ref": notes_repo.p1, "reason": "not_on_platform"}
+    ]
+    assert result["review"] == f"{API_ORIGIN}/p/{SLUG}/notes?id=9"
+    assert "note" not in result
+
+    # Both sides narrowed: symbol -> path here, path -> project there.
+    result = propose(
+        notes_ctx, qualified_name="NewLocalWrapper.method", refs=[notes_repo.l1]
+    )
+    assert result["anchor_downgraded"] == {
+        "from": "symbol",
+        "to": "project",
+        "reason": "not_pushed",
+    }
+    assert result["dropped_refs"] == [
+        {"ref": notes_repo.l1, "reason": "not_pushed"},
+        {"ref": notes_repo.p1, "reason": "not_on_platform"},
+    ]
+
+
+def test_notes_linked_l14_stale_index(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    """L14: a stale index never names its symbol, even in a file identical to ``D``."""
+    result = propose(notes_ctx, qualified_name="pkg.ghost_fn")
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "c.py"}
+    assert result["anchor_downgraded"]["reason"] == "not_pushed"
+    assert_absent(notes_fake, "ghost_fn")
+
+
+def test_notes_linked_l14_index_without_hashes(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    """An index that recorded no file hashes cannot prove freshness: no name."""
+    _note_index(notes_repo.root, hashes={})
+    propose(notes_ctx, qualified_name="pkg.keep")
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "b.py"}
+    assert_absent(notes_fake, "pkg.keep")
+
+
+def test_notes_linked_l15_method_wrapped_in_a_new_class(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L15: the new class name never leaves; the pushed file's path does."""
+    result = propose(notes_ctx, qualified_name="NewLocalWrapper.method")
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "wrap.py"}
+    assert result["anchor_downgraded"] == {
+        "from": "symbol",
+        "to": "path",
+        "reason": "not_pushed",
+    }
+    assert_absent(notes_fake, "NewLocalWrapper")
+
+
+def test_notes_linked_l15_symbol_in_a_modified_file(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """A freshly indexed symbol in an uncommitted edit goes as its path."""
+    propose(notes_ctx, qualified_name="pkg.edited")
+    assert sent_anchor(notes_fake) == {"kind": "path", "path": "a.py"}
+    assert_absent(notes_fake, "pkg.edited")
+
+
+@pytest.mark.parametrize(
+    "path", ["pkg/newsub", "pkg/newsub/inner_secret.py", "pkg/newsub/"]
+)
+def test_notes_linked_l16_new_subdirectory_under_a_pushed_one(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, path: str
+) -> None:
+    """L16: a new local directory (or a file in it) under ``pkg/`` goes project-wide."""
+    result = propose(notes_ctx, path=path)
+    assert sent_anchor(notes_fake) == {"kind": "project"}
+    assert result["anchor_downgraded"]["to"] == "project"
+    assert_absent(notes_fake, "newsub", "inner_secret")
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"body": "use ghp_" + "a1B2c3D4" * 3 + " here", "project_wide": True},
+        {"body": "token wgc_" + "A1b2C3d4" * 3, "project_wide": True},
+        {"body": "key sk-" + "Z9y8X7w6" * 3, "project_wide": True},
+        {"area": "sk-" + "q" * 24},
+        {
+            "kind": "constraint",
+            "project_wide": True,
+            "check": {"kind": "absent", "text": "ghs_" + "x" * 12, "glob": "*.py"},
+        },
+        {
+            "kind": "constraint",
+            "project_wide": True,
+            "check": {"kind": "absent", "text": "abc", "glob": "gho_aaaaaaaaaa/*.py"},
+        },
+    ],
+)
+def test_notes_linked_l17_token_text_is_refused(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, kw: dict
+) -> None:
+    """L17: token-shaped free text is refused locally, with no request."""
+    assert propose_code(notes_ctx, **kw) == "note_invalid"
+    assert notes_fake.requests == []
+
+
+def test_notes_linked_l18_no_identity_on_the_wire(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    """L18: no origin, proposer, actor or local uid in any request body."""
+    propose(notes_ctx, path="b.py", line_start=1, line_end=2, refs=["#3"])
+    propose(notes_ctx, qualified_name="pkg.keep")
+    propose(notes_ctx, project_wide=True)
+    for body in notes_fake.proposals:
+        assert set(body) <= {
+            "body",
+            "kind",
+            "anchor",
+            "fallback_to_project",
+            "refs",
+            "check",
+            "supersedes_id",
+        }
+    for request in notes_fake.requests:
+        content = request.content or b""
+        for needle in (b'"origin"', b"proposed_by", b"actor", LOCAL_UID.encode()):
+            assert needle not in content
+    assert_absent(notes_fake, LOCAL_UID, str(notes_repo.root))
+
+
+def test_notes_linked_without_a_default_branch(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    """No ``D``: every anchor but project and area is sent as project."""
+    _git(notes_repo.root, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    _git(notes_repo.root, "update-ref", "-d", "refs/remotes/origin/main")
+    asked = [
+        {"path": "b.py"},
+        {"path": "b.py", "line_start": 1, "line_end": 2},
+        {"qualified_name": "pkg.keep"},
+    ]
+    for kw in asked:
+        result = propose(notes_ctx, refs=[notes_repo.p1, "#4"], **kw)
+        assert result["anchor_downgraded"]["to"] == "project"
+        assert result["dropped_refs"] == [
+            {"ref": notes_repo.p1, "reason": "not_pushed"}
+        ]
+    propose(notes_ctx, area="backend")
+    propose(notes_ctx, project_wide=True)
+    assert [p["anchor"] for p in notes_fake.proposals] == [{"kind": "project"}] * 3 + [
+        {"kind": "area", "area": "backend"},
+        {"kind": "project"},
+    ]
+    assert all(p["refs"] == ["#4"] for p in notes_fake.proposals[:3])
+    assert_absent(notes_fake, "pkg.keep", "b.py", notes_repo.p1)
+
+
+# -- linked_notes --------------------------------------------------------------
+
+
+def notes_for_bodies(fake: FakePlatform) -> list[dict]:
+    return [
+        json.loads(request.content)
+        for request in fake.requests
+        if request.url.path.endswith("/notes/for")
+    ]
+
+
+def _target(path: str, qn: str | None = None) -> Target:
+    return Target(path=path, line_start=1, line_end=2, qualified_name=qn)
+
+
+def test_linked_notes_asks_only_what_was_sendable(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    repo = Repository(notes_repo.root)
+    remote = notes_ctx.remote
+    with use_project(notes_ctx):
+        same = linked_notes(remote, repo, _target("b.py", "pkg.keep"), _target("b.py"))
+        other = linked_notes(
+            remote, repo, _target("moved.py", "pkg.x"), _target("b.py", "pkg.x")
+        )
+        tracked = linked_notes(remote, repo, _target("c.py", "pkg.c"), None)
+        local = linked_notes(remote, repo, _target("local.py", "pkg.secret_fn"), None)
+    assert same[1] and other[1] and tracked[1]
+    assert same[0] == notes_fake.notes
+    assert local == (None, True)
+    assert notes_for_bodies(notes_fake) == [
+        {"path": "b.py", "line_start": 1, "line_end": 2},
+        {"path": "b.py"},
+        {"path": "c.py"},
+    ]
+    assert_absent(notes_fake, "moved.py", "local.py", "secret_fn", "pkg.c")
+
+
+def test_linked_notes_never_raises(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace, notes_fake: FakePlatform
+) -> None:
+    repo = Repository(notes_repo.root)
+    notes_fake.failure = "unreachable"
+    with use_project(notes_ctx):
+        assert linked_notes(
+            notes_ctx.remote, repo, _target("b.py"), _target("b.py")
+        ) == (
+            None,
+            True,
+        )
+
+
+def test_linked_notes_on_an_older_platform(notes_repo: SimpleNamespace) -> None:
+    fake = FakePlatform(notes_supported=False)
+    ctx = linked_over(notes_repo, fake)
+    with use_project(ctx):
+        answer = linked_notes(
+            ctx.remote, Repository(notes_repo.root), _target("b.py"), _target("b.py")
+        )
+    assert answer == ([], False)
+    assert notes_for_bodies(fake) == []
+
+
+# -- the tool, card and resource (plan 63 step 6) --------------------------------
+
+
+def _registered_tools() -> dict:
+    import asyncio
+
+    from whygraph.mcp import server as mcp_server
+
+    return {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+
+
+def _call_tool(name: str, args: dict) -> dict:
+    """Call a registered tool through the MCP server; its structured result."""
+    import asyncio
+
+    from whygraph.mcp import server as mcp_server
+
+    result = asyncio.run(mcp_server.mcp.call_tool(name, args))
+    if isinstance(result, tuple):  # (content, structured)
+        return result[1]
+    return result.structuredContent
+
+
+def _valid(name: str, result: dict) -> None:
+    import jsonschema
+
+    jsonschema.validate(
+        json.loads(json.dumps(result, default=str)),
+        _registered_tools()[name].outputSchema,
+    )
+
+
+def brief(ctx: ProjectContext, **kw: object) -> dict:
+    from whygraph.mcp.rationale import _rationale_brief_tool
+
+    with use_project(ctx):
+        return dict(_rationale_brief_tool(**kw))  # type: ignore[arg-type]
+
+
+def test_mcp_linked_propose_tool_forwards_to_the_platform(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """The registered tool routes a linked project to ``linked_propose`` (L19)."""
+    with use_project(notes_ctx), use_actor(LOCAL_UID):
+        result = _call_tool(
+            "whygraph_propose_note",
+            {"body": "Keep it simple.", "kind": "decision", "path": "b.py"},
+        )
+    assert notes_fake.proposals[0]["anchor"] == {"kind": "path", "path": "b.py"}
+    assert result["note_id"] == 7 and result["review"].startswith(API_ORIGIN)
+    assert result["platform"] == {"status": "ok", "url": API_ORIGIN}
+    _valid("whygraph_propose_note", result)
+
+
+def test_mcp_linked_propose_result_validates_with_every_optional_key(
+    notes_ctx: ProjectContext, notes_repo: SimpleNamespace
+) -> None:
+    """L19: ``anchor_downgraded`` and ``dropped_refs`` fit the output schema."""
+    result = propose(notes_ctx, path="local.py", refs=[notes_repo.l1, "#3"])  # type: ignore[arg-type]
+    assert "anchor_downgraded" in result and "dropped_refs" in result
+    _valid("whygraph_propose_note", result)
+
+
+def test_mcp_linked_card_carries_the_platforms_notes(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L11: a pushed path gets the card plus the platform's notes (L19 schema)."""
+    card = brief(notes_ctx, path="b.py", line_start=1, line_end=2)
+    assert [n["id"] for n in card["notes"]] == [1]
+    assert "unsupported" not in json.dumps(card["platform"])
+    assert notes_for_bodies(notes_fake) == [
+        {"path": "b.py", "line_start": 1, "line_end": 2}
+    ]
+    _valid("whygraph_rationale_brief", card)
+
+
+def test_mcp_linked_card_notes_ride_a_not_cached_miss(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    notes_fake.responses["rationale"] = (
+        200,
+        {
+            "status": "not_cached",
+            "target": {"path": "b.py", "line_start": 1, "line_end": 2},
+            "project": notes_fake.projects[SLUG],
+        },
+    )
+    card = brief(notes_ctx, path="b.py", line_start=1, line_end=2, cached_only=True)
+    assert card["status"] == "not_cached" and card["notes"]
+
+
+def test_mcp_linked_no_evidence_with_notes_on_a_pushed_path(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, monkeypatch
+) -> None:
+    """L11: no pushed hunks but a path ``D`` tracks - notes only, path only."""
+    from whygraph.mcp import rationale
+
+    def no_evidence(*a: object, **k: object) -> None:
+        raise rationale.NoEvidenceError("none", code="no_evidence")
+
+    monkeypatch.setattr(rationale, "_linked_rationale", no_evidence)
+    reply = brief(notes_ctx, path="c.py", line_start=1, line_end=2)
+    assert reply["status"] == "no_evidence" and reply["notes"]
+    assert reply["target"]["path"] == "c.py"
+    assert reply["platform"] == {"status": "ok", "url": API_ORIGIN}
+    assert notes_for_bodies(notes_fake) == [{"path": "c.py"}]
+    _valid("whygraph_rationale_brief", reply)
+
+
+def test_mcp_linked_no_evidence_without_notes_reraises(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, monkeypatch
+) -> None:
+    """L11: an unpushed path asks nothing and keeps the original refusal."""
+    with pytest.raises(WhyGraphError) as caught:
+        brief(notes_ctx, path="local.py", line_start=1, line_end=1)
+    assert caught.value.code == "no_evidence"
+    assert notes_for_bodies(notes_fake) == []
+    from whygraph.mcp import rationale
+
+    def no_evidence(*a: object, **k: object) -> None:
+        raise rationale.NoEvidenceError("none", code="no_evidence")
+
+    monkeypatch.setattr(rationale, "_linked_rationale", no_evidence)
+    notes_fake.notes = []
+    with pytest.raises(WhyGraphError) as again:
+        brief(notes_ctx, path="c.py", line_start=1, line_end=2)
+    assert again.value.code == "no_evidence"
+
+
+def test_mcp_linked_card_notes_on_a_substituted_path_send_the_path_only(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform, monkeypatch
+) -> None:
+    """L11: a ``sendable`` on another path never leaks the target's name."""
+    from whygraph.mcp import rationale
+
+    sendable = Target(path="b.py", line_start=1, line_end=2, qualified_name="pkg.x")
+
+    def substituted(remote: object, target: Target, **k: object) -> tuple:
+        return {"purpose": "p", "target": {}, "platform": {}}, sendable
+
+    monkeypatch.setattr(rationale, "_linked_rationale", substituted)
+    card = brief(notes_ctx, path="moved.py", line_start=1, line_end=2)
+    assert card["notes"]
+    assert notes_for_bodies(notes_fake) == [{"path": "b.py"}]
+    assert_absent(notes_fake, "moved.py", "pkg.x")
+
+
+def test_mcp_linked_card_on_an_older_platform_says_notes_are_unsupported(
+    notes_repo: SimpleNamespace,
+) -> None:
+    """L8 (card half): ``platform.notes == "unsupported"``, no notes key."""
+    fake = FakePlatform(notes_supported=False)
+    ctx = linked_over(notes_repo, fake)
+    card = brief(ctx, path="b.py", line_start=1, line_end=2)
+    assert card["platform"]["notes"] == "unsupported"
+    assert "notes" not in card
+    _valid("whygraph_rationale_brief", card)
+
+
+def test_mcp_linked_public_brief_stays_note_free(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    with use_project(notes_ctx):
+        card = whygraph_rationale_brief(path="b.py", line_start=1, line_end=2)
+    assert "notes" not in card
+    assert notes_for_bodies(notes_fake) == []
+
+
+def test_mcp_linked_note_resource_reads_from_the_platform(
+    notes_ctx: ProjectContext, notes_fake: FakePlatform
+) -> None:
+    """L12: the platform's confirmed note, a miss, and a non-int id."""
+    from whygraph.mcp.notes import _note_resource
+
+    with use_project(notes_ctx):
+        served = _note_resource(1)
+        assert served["id"] == 1 and served["body"] == "Keep the demo offline."
+        assert served["platform"] == {"status": "ok", "url": API_ORIGIN}
+        missing = _note_resource(99)
+        assert missing["error"] == "not_found" and missing["id"] == 99
+        before = len(notes_fake.requests)
+        refused = _note_resource("abc")  # type: ignore[arg-type]
+        assert refused["error"] == "not_found"
+        assert len(notes_fake.requests) == before

@@ -7,19 +7,30 @@ response models mirror the MCP tools' dict shapes exactly.
 from __future__ import annotations
 
 import json
+import typing
 
 import pytest
 from pydantic import ValidationError
 
+from whygraph import api_v1
 from whygraph.analyze import CommitEvidence, Item, ItemRef, Rationale
 from whygraph.api_v1 import (
     API_VERSION,
     MAX_HUNKS,
     MAX_ORIGINS,
+    NOTES_CAPABILITY,
     ErrorOut,
     EvidenceIn,
     EvidenceOut,
     HunkIn,
+    NoteAnchorIn,
+    NoteAnchorOut,
+    NoteCheckIn,
+    NoteOut,
+    NoteProposeIn,
+    NoteProposeOut,
+    NotesForIn,
+    NotesForOut,
     OriginIn,
     RationaleIn,
     RationaleItemOut,
@@ -31,6 +42,7 @@ from whygraph.api_v1 import (
     hunk_in_from_blame,
 )
 from whygraph.db.models import Commit, Issue, PullRequest
+from whygraph.mcp import notes
 from whygraph.mcp.evidence import ReviewScope, _evidence_dict, evidence_dicts
 from whygraph.mcp.rationale import _format_response
 from whygraph.mcp.targets import Target, target_dict
@@ -631,3 +643,245 @@ def test_hunk_conversions_round_trip() -> None:
     assert [o.final_start for o in back.origins] == [1, 2]
     with pytest.raises(ValidationError):
         hunk_in_from_blame(BlameHunk("0" * 40, 1, None, None, None, None))
+
+
+# ---------------------------------------------------------------------------
+# Notes (plan 63 section 5)
+# ---------------------------------------------------------------------------
+
+
+def _literal_args(model, field: str) -> tuple[str, ...]:
+    return typing.get_args(model.model_fields[field].annotation)
+
+
+def test_notes_capability_name() -> None:
+    assert NOTES_CAPABILITY == "notes"
+
+
+def test_note_literals_mirror_the_domain() -> None:
+    assert _literal_args(NoteOut, "kind") == notes.NOTE_KINDS
+    assert set(_literal_args(NoteAnchorIn, "kind")) == set(notes.ANCHOR_KINDS)
+    assert set(_literal_args(NoteAnchorIn, "kind")) == set(notes._ANCHOR_KEYS)
+    assert _literal_args(NoteOut, "source") == notes.SOURCES
+    assert _literal_args(NoteOut, "status") == ("confirmed", "proposed")
+    (check_state,) = [
+        a
+        for a in typing.get_args(NoteOut.model_fields["check_state"].annotation)
+        if a is not type(None)
+    ]
+    assert set(typing.get_args(check_state)) == set(notes.CHECK_STATES)
+    assert _literal_args(NoteProposeIn, "kind") == notes._PROPOSE_KINDS
+    assert set(_literal_args(NoteProposeIn, "kind")) == set(notes.NOTE_KINDS) - {
+        notes.PURPOSE_KIND
+    }
+    assert api_v1.MAX_NOTE_REFS == notes.MAX_REFS
+    assert api_v1._ANCHOR_FIELDS == notes._ANCHOR_KEYS
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        {"kind": "project"},
+        {"kind": "area", "area": "billing"},
+        {"kind": "path", "path": "src/a.py"},
+        {"kind": "range", "path": "src/a.py", "line_start": 3, "line_end": 9},
+        {"kind": "symbol", "qualified_name": "pkg.mod.fn"},
+    ],
+)
+def test_note_anchor_valid_per_kind(anchor) -> None:
+    assert NoteAnchorIn.model_validate(anchor).kind == anchor["kind"]
+
+
+@pytest.mark.parametrize(
+    "anchor",
+    [
+        {"kind": "project", "path": "a.py"},
+        {"kind": "area"},
+        {"kind": "area", "area": "x", "path": "a.py"},
+        {"kind": "path"},
+        {"kind": "path", "path": "a.py", "qualified_name": "f"},
+        {"kind": "path", "path": "a.py", "line_start": 1, "line_end": 2},
+        {"kind": "symbol"},
+        {"kind": "symbol", "qualified_name": "f", "path": "a.py"},
+        {"kind": "symbol", "qualified_name": ""},
+        {"kind": "symbol", "qualified_name": "a\nb"},
+        {"kind": "range", "path": "a.py"},
+        {"kind": "range", "path": "a.py", "line_start": 1},
+        {"kind": "range", "path": "a.py", "line_start": 5, "line_end": 2},
+        {"kind": "range", "path": "a.py", "line_start": 0, "line_end": 2},
+        {"kind": "range", "line_start": 1, "line_end": 2},
+        {"kind": "path", "path": "../a.py"},
+        {"kind": "bogus"},
+        {"kind": "path", "path": "a.py", "extra": 1},
+        {"kind": "range", "path": "a.py", "line_start": "1", "line_end": 2},
+        {"kind": "area", "area": "x" * 129},
+    ],
+)
+def test_note_anchor_refuses(anchor) -> None:
+    with pytest.raises(ValidationError):
+        NoteAnchorIn.model_validate(anchor)
+
+
+def test_note_check_shape() -> None:
+    ok = {"kind": "absent", "text": "TODO", "glob": "src/**/*.py"}
+    assert NoteCheckIn.model_validate(ok).kind == "absent"
+    for bad in (
+        {**ok, "kind": "maybe"},
+        {**ok, "text": "ab"},
+        {**ok, "text": "x" * 201},
+        {**ok, "glob": ""},
+        {**ok, "glob": "x" * 201},
+        {**ok, "extra": 1},
+        {"kind": "absent", "text": "TODO"},
+    ):
+        with pytest.raises(ValidationError):
+            NoteCheckIn.model_validate(bad)
+
+
+def _propose(**over):
+    body = {"body": "Keep it.", "kind": "gotcha", "anchor": {"kind": "project"}}
+    body.update(over)
+    return body
+
+
+def test_note_propose_defaults_and_refs() -> None:
+    m = NoteProposeIn.model_validate(_propose())
+    assert m.fallback_to_project is True
+    assert m.refs == [] and m.check is None and m.supersedes_id is None
+    refs = ["#12", "a" * 40]
+    assert NoteProposeIn.model_validate(_propose(refs=refs)).refs == refs
+    for bad in (
+        ["abc1234"],
+        ["A" * 40],
+        ["#"],
+        ["#x"],
+        ["#1234567890"],
+        ["junk"],
+        ["a" * 41],
+        [1],
+    ):
+        with pytest.raises(ValidationError):
+            NoteProposeIn.model_validate(_propose(refs=bad))
+    five = [f"#{i}" for i in range(1, 6)]
+    assert len(NoteProposeIn.model_validate(_propose(refs=five)).refs) == 5
+    with pytest.raises(ValidationError):
+        NoteProposeIn.model_validate(_propose(refs=[*five, "#6"]))
+
+
+def test_note_propose_strict_and_closed() -> None:
+    for over in (
+        {"kind": "purpose"},
+        {"kind": "bogus"},
+        {"body": ""},
+        {"body": "x" * 1001},
+        {"body": 5},
+        {"fallback_to_project": "yes"},
+        {"fallback_to_project": 1},
+        {"supersedes_id": "3"},
+        {"supersedes_id": 0},
+        {"extra": 1},
+        {"anchor": {"kind": "path"}},
+    ):
+        with pytest.raises(ValidationError):
+            NoteProposeIn.model_validate(_propose(**over))
+    ok = NoteProposeIn.model_validate(
+        _propose(
+            kind="constraint",
+            supersedes_id=3,
+            check={"kind": "present", "text": "abc", "glob": "*.py"},
+        )
+    )
+    assert ok.check is not None and ok.supersedes_id == 3
+
+
+def test_notes_for_in() -> None:
+    assert NotesForIn.model_validate({"path": "a.py"}).line_start is None
+    ok = NotesForIn.model_validate(
+        {"path": "a.py", "qualified_name": "f", "line_start": 1, "line_end": 4}
+    )
+    assert ok.line_end == 4
+    for bad in (
+        {"path": "a.py", "line_start": 1},
+        {"path": "a.py", "line_end": 1},
+        {"path": "a.py", "line_start": 4, "line_end": 1},
+        {"path": "a.py", "line_start": "1", "line_end": 2},
+        {"path": "a.py", "qualified_name": ""},
+        {"path": "/abs"},
+        {},
+        {"path": "a.py", "extra": 1},
+    ):
+        with pytest.raises(ValidationError):
+            NotesForIn.model_validate(bad)
+
+
+def _note(**over):
+    note = {
+        "id": 1,
+        "kind": "decision",
+        "body": "b",
+        "status": "confirmed",
+        "anchor": {"kind": "project"},
+        "anchor_state": "n/a",
+        "source": "human",
+    }
+    note.update(over)
+    return note
+
+
+def test_note_out_refuses_unknown_enums() -> None:
+    assert NoteOut.model_validate(_note()).refs == []
+    for over in (
+        {"kind": "bogus"},
+        {"anchor_state": "stale"},
+        {"source": "robot"},
+        {"status": "retired"},
+        {"check_state": "maybe"},
+        {"anchor": {"kind": "bogus"}},
+        {"body": "x" * 1001},
+        {"id": 0},
+    ):
+        with pytest.raises(ValidationError):
+            NoteOut.model_validate(_note(**over))
+
+
+def test_note_out_drops_proposer_and_origin() -> None:
+    assert not {
+        "proposed_by",
+        "confirmed_by",
+        "reconfirmed_by",
+        "retired_by",
+        "origin",
+    } & set(NoteOut.model_fields)
+    dumped = NoteOut.model_validate(
+        _note(proposed_by="u1", origin="o", confirmed_by="u2")
+    ).model_dump()
+    assert not {"proposed_by", "origin", "confirmed_by"} & set(dumped)
+
+
+def test_note_propose_and_for_out() -> None:
+    out = NoteProposeOut.model_validate(
+        {
+            "note_id": 4,
+            "status": "proposed",
+            "duplicate": False,
+            "note": _note(id=4),
+            "anchor_downgraded": {
+                "from": "path",
+                "to": "project",
+                "reason": "not_on_platform",
+            },
+            "dropped_refs": [{"ref": "#9", "reason": "not_on_platform"}],
+        }
+    )
+    assert out.note is not None and out.dropped_refs[0].ref == "#9"
+    with pytest.raises(ValidationError):
+        NoteProposeOut.model_validate(
+            {
+                "note_id": 4,
+                "status": "x",
+                "duplicate": False,
+                "dropped_refs": [{"ref": "#9", "reason": "other"}],
+            }
+        )
+    assert NotesForOut.model_validate({"notes": [_note()]}).notes[0].id == 1
+    assert NoteAnchorOut.model_validate({"kind": "path", "path": "a.py"}).path == "a.py"

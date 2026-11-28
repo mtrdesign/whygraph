@@ -324,8 +324,8 @@ export function ConnectPage() {
         </Alert>
       )}
       <p className="text-xs text-muted-foreground">
-        Allowing lets that machine read this project's history as you and, if your role allows, ask for
-        rationale cards, which use the organization's AI keys within its hourly limit. You can revoke it
+        Allowing lets that machine read this project's history as you, propose notes for your team to review and, if
+        your role allows, ask for rationale cards, which use the organization's AI keys within its hourly limit. You can revoke it
         any time on your Account page, under Connected machines.
       </p>
       <div className="flex flex-wrap gap-2">

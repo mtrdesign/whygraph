@@ -1228,6 +1228,7 @@ def test_meta_is_public_on_every_host(cn: SimpleNamespace) -> None:
                 "resources",
                 "plans",
                 "rationale_depth",
+                "notes",
             ],
             "base_origin": PROD_BASE,  # the same on every host
         }
@@ -1447,6 +1448,22 @@ V1_REQUESTS: dict[tuple[str, str], tuple[int, str | None, dict]] = {
     (f"{_V1}/plans/for", "POST"): (200, None, {"json": {"shas": [], "paths": []}}),
     (f"{_V1}/plans/{{stem}}", "GET"): (404, "not_found", {}),
     (f"{_V1}/plans/{{stem}}/sections/{{n}}", "GET"): (404, "not_found", {}),
+    # Notes (plan 63 section 4.2): a project-wide proposal is created, the
+    # reads answer over no notes, and an unknown note is ``not_found``.
+    (f"{_V1}/notes", "POST"): (
+        201,
+        None,
+        {
+            "json": {
+                "body": "Keep it small.",
+                "kind": "decision",
+                "anchor": {"kind": "project"},
+            }
+        },
+    ),
+    (f"{_V1}/notes/for", "POST"): (200, None, {"json": {"path": "sample.py"}}),
+    (f"{_V1}/notes/project", "GET"): (200, None, {}),
+    (f"{_V1}/notes/{{note_id}}", "GET"): (404, "not_found", {}),
 }
 """How the bearer sweep calls each ``/api/v1`` project route, and the
 ``(status, code, request kwargs)`` of a call that gets through."""
@@ -1460,6 +1477,7 @@ def _v1_url(path: str, slug: str) -> str:
         ("{number}", "4242"),
         ("{stem}", "nosuch-plan"),
         ("{n}", "1"),
+        ("{note_id}", "4242"),
     ):
         path = path.replace(placeholder, value)
     assert "{" not in path, path

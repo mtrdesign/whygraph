@@ -93,19 +93,54 @@ class GitRemoteUrlCmd(ShellCommand[str | None]):
 
 
 class GitRevListCountCmd(ShellCommand[int]):
-    """``git rev-list --count <ref>`` — total commits reachable from ``ref``.
+    """``git rev-list --count <ref>... --`` — commits reachable from the refs.
 
     Parameters
     ----------
-    ref : str
-        Any commit-ish ``git`` accepts (branch, tag, sha, ``HEAD``).
+    *refs : str
+        One or more commit-ish ``git`` accepts (branch, tag, sha, ``HEAD``);
+        the count is of their union. A trailing ``--`` keeps a ref named
+        like a path from being ambiguous.
     """
 
-    def __init__(self, ref: str) -> None:
-        self.ref = ref
+    def __init__(self, *refs: str) -> None:
+        self.refs = refs
 
     def argv(self) -> list[str]:
-        return ["git", "rev-list", "--count", self.ref]
+        return ["git", "rev-list", "--count", *self.refs, "--"]
+
+    def parse(self, result: CompletedProcess[str]) -> int:
+        return int(result.stdout.strip() or "0")
+
+
+class GitRevListCountNotCmd(ShellCommand[int]):
+    """``git rev-list --count <include>... --not <exclude>... --``.
+
+    Counts the commits reachable from ``include`` but from none of
+    ``exclude`` (the "ahead" / "behind" figures of a branch comparison).
+
+    Parameters
+    ----------
+    include : Sequence[str]
+        Commit-ish whose union is counted.
+    exclude : Sequence[str]
+        Commit-ish whose reachable commits are left out.
+    """
+
+    def __init__(self, include: Sequence[str], exclude: Sequence[str]) -> None:
+        self.include = tuple(include)
+        self.exclude = tuple(exclude)
+
+    def argv(self) -> list[str]:
+        return [
+            "git",
+            "rev-list",
+            "--count",
+            *self.include,
+            "--not",
+            *self.exclude,
+            "--",
+        ]
 
     def parse(self, result: CompletedProcess[str]) -> int:
         return int(result.stdout.strip() or "0")
@@ -1247,7 +1282,7 @@ class GitLogCommitCmd(ShellCommand[Commit]):
 
 
 class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
-    """``git log --shortstat --pretty=format:Commit.LOG_FORMAT <ref>``.
+    """``git log --shortstat --pretty=format:Commit.LOG_FORMAT <ref>... --``.
 
     Yields one :class:`Commit` per record in the captured stdout, newest
     first. Records are separated by :data:`Commit.LOG_FORMAT`'s leading
@@ -1255,12 +1290,14 @@ class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
 
     Parameters
     ----------
-    ref : str
-        Any commit-ish ``git`` accepts.
+    *refs : str
+        One or more commit-ish ``git`` accepts; the walk is their union.
+        A trailing ``--`` keeps a ref named like a path from being
+        ambiguous.
     """
 
-    def __init__(self, ref: str) -> None:
-        self.ref = ref
+    def __init__(self, *refs: str) -> None:
+        self.refs = refs
 
     def argv(self) -> list[str]:
         return [
@@ -1268,7 +1305,8 @@ class GitLogShortstatCmd(ShellCommand[Iterator[Commit]]):
             "log",
             f"--pretty=format:{Commit.LOG_FORMAT}",
             "--shortstat",
-            self.ref,
+            *self.refs,
+            "--",
         ]
 
     def parse(self, result: CompletedProcess[str]) -> Iterator[Commit]:

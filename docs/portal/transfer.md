@@ -118,6 +118,10 @@ are not affected. Importing the same bundle again adds the rest, since the targe
   added twice.
 - **Cards are reused.** A rationale call for an imported place with the same provider and model makes
   no model call.
+- **Descriptions for commits on other branches wait.** A bundle can carry descriptions for commits on
+  branches this project has not scanned. They are counted in the preview as "descriptions for commits not
+  scanned here (other branches)" and skipped. Scan those branches, then import the bundle again: re-importing
+  is safe, and the descriptions are added.
 
 ### Settings
 

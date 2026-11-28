@@ -245,6 +245,51 @@ def test_list_runs_a_constant_number_of_statements(
     assert _statements(ready, "/api/projects") == one
 
 
+def _branch_summary(branch: object) -> str:
+    return json.dumps(
+        {
+            "coverage": {
+                "commits": 3,
+                "described_pct": 0.0,
+                "rationale_cards": 0,
+                "at": "2026-10-03T00:00:00+00:00",
+            },
+            "branch": branch,
+        }
+    )
+
+
+_GOOD_BRANCH = {"current": "feature", "default": "main", "ahead": 1, "behind": 3}
+
+
+def test_last_scan_stats_exposes_a_valid_branch_block(
+    ready: TestClient, env: SimpleNamespace
+) -> None:
+    """Plan 64 - the block rides along, validated; missing or malformed -> null."""
+    cases = {
+        "valid": _GOOD_BRANCH,
+        "nullable": {"current": None, "default": None, "ahead": None, "behind": None},
+        "missing": None,
+        "not-a-dict": "feature",
+        "negative": {**_GOOD_BRANCH, "behind": -1},
+        "string-count": {**_GOOD_BRANCH, "ahead": "1"},
+        "bool-count": {**_GOOD_BRANCH, "ahead": True},
+        "long-name": {**_GOOD_BRANCH, "current": "x" * 256},
+        "int-name": {**_GOOD_BRANCH, "default": 5},
+    }
+    for slug, branch in cases.items():
+        initialized_repo(ready, env, slug)
+        raw = json.loads(_branch_summary(branch))
+        if slug == "missing":
+            del raw["branch"]
+        _add_runs(slug, json.dumps(raw))
+    by_slug = {p["slug"]: p for p in ready.get("/api/projects").json()["projects"]}
+    assert by_slug["valid"]["last_scan_stats"]["branch"] == _GOOD_BRANCH
+    assert by_slug["nullable"]["last_scan_stats"]["branch"] == cases["nullable"]
+    for slug in set(cases) - {"valid", "nullable"}:
+        assert by_slug[slug]["last_scan_stats"]["branch"] is None, slug
+
+
 def test_last_scan_stats_from_the_newest_snapshot(
     ready: TestClient, env: SimpleNamespace
 ) -> None:
@@ -276,6 +321,7 @@ def test_last_scan_stats_from_the_newest_snapshot(
         "described_pct": 50.0,
         "rationale_cards": 7,
         "as_of": "2026-10-02T00:00:00+00:00",
+        "branch": None,
     }
     assert by_slug["demo"]["last_scan_stats"] == expected
     assert by_slug["other"]["last_scan_stats"] is None

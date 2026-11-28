@@ -47,6 +47,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -341,6 +342,7 @@ def _scan(
         for c in phase1:
             c.join()
         phase_timings["Structural crawl"] = time.monotonic() - t0
+        branch = asdict(repository.branch_status())
 
         # Phase 2 - PR-origin recovery: needs Phase 1's git + PR rows. Gated
         # on a resolved client, which is None under --no-remote.
@@ -442,6 +444,7 @@ def _scan(
                 total_elapsed=time.monotonic() - scan_t0,
                 analyze_skip=analyze_skip,
                 codegraph=_codegraph_summary(codegraph_crawler, repository.root),
+                branch=branch,
             )
         )
 
@@ -612,12 +615,14 @@ def _result_event(
     total_elapsed: float,
     analyze_skip: str | None,
     codegraph: dict | None = None,
+    branch: dict | None = None,
 ) -> dict:
     """Build the closing ``result`` event.
 
     Overall status, elapsed time, per-phase timings and one entry per
     crawler (status, summary, error / warning), plus the CodeGraph step's
-    outcome (:func:`_codegraph_summary`).
+    outcome (:func:`_codegraph_summary`) and, for a full scan, the
+    checkout's ``branch`` status (plan 64).
     """
     entries = []
     for c in crawlers:
@@ -632,7 +637,7 @@ def _result_event(
         if warning:
             entry["warning"] = warning
         entries.append(entry)
-    return {
+    event: dict = {
         "type": "result",
         "status": "failed" if any(c.error is not None for c in crawlers) else "ok",
         "elapsed_sec": round(total_elapsed, 3),
@@ -641,6 +646,9 @@ def _result_event(
         "analyze_skipped": analyze_skip,
         "codegraph": codegraph if codegraph is not None else {"status": "skipped"},
     }
+    if branch is not None:
+        event["branch"] = branch
+    return event
 
 
 def _select_github_client(provider: str, repository: Repository) -> GitHubClient | None:

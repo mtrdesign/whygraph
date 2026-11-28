@@ -185,3 +185,36 @@ def test_full_history_log_carries_the_long_timeout(tmp_path: Path) -> None:
     list(commits)
     assert ("rev-list", None) in spy.timeouts
     assert ("log", LOG_TIMEOUT) in spy.timeouts
+
+
+def _diverge(root: Path) -> None:
+    """``feature`` branches at ``second``; ``main`` gains one more commit."""
+    _git(root, "checkout", "-q", "-b", "feature", "HEAD~1")
+    (root / "f.txt").write_text("feature\n")
+    _git(root, "add", "f.txt")
+    _git(root, "commit", "-q", "-m", "feature work")
+
+
+def test_multi_ref_walk_is_the_union(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    _diverge(root)
+
+    commits = Commits(root, "feature", "refs/heads/main")
+
+    assert commits.ref == "feature"
+    assert commits.refs == ("feature", "refs/heads/main")
+    subjects = [c.subject for c in commits]
+    assert len(commits) == len(subjects) == 4
+    assert set(subjects) == {"first", "second", "third", "feature work"}
+
+
+def test_a_file_named_like_a_ref_does_not_break_the_walk(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    (root / "main").write_text("a path, not a branch\n")
+    _git(root, "add", "main")
+    _git(root, "commit", "-q", "-m", "add file named main")
+
+    commits = Commits(root, "main", "refs/heads/main")
+
+    assert len(commits) == 4
+    assert len(list(commits)) == 4

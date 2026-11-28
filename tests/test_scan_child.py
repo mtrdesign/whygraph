@@ -446,6 +446,38 @@ def test_result_reports_the_codegraph_step(
     assert events[-1]["codegraph"] == expected
 
 
+def test_a_full_scan_result_carries_the_branch_status(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Plan 64 - the checkout's branch status rides on a full scan's result."""
+    _patch_crawlers(monkeypatch)
+
+    _, events, _ = _run(capsys, "--skip-analyze", "--no-remote")
+
+    assert events[-1]["branch"] == {
+        "current": "main",
+        "default": None,
+        "ahead": None,
+        "behind": None,
+    }
+
+
+def test_codegraph_only_and_github_only_results_have_no_branch(
+    isolated_db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_crawlers(monkeypatch)
+    _with_github(monkeypatch)
+
+    for flag in ("--codegraph-only", "--github-only"):
+        _, events, _ = _run(capsys, flag)
+        assert events[-1]["type"] == "result"
+        assert "branch" not in events[-1], flag
+
+
 def test_result_counts_the_indexed_files(
     isolated_db: Path,
     repo: Path,

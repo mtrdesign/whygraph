@@ -2,6 +2,7 @@ import type { AccessLostReason, CodegraphOverview, ProjectDetails, ProjectOvervi
 import { providerLabel } from "./labels";
 import { can } from "./permissions";
 import { linkNotice } from "./platformLink";
+import { checkoutNotice } from "./branchNotice";
 import { plural } from "./plural";
 
 // One precedence for "what is the state of this project": the Overview's health
@@ -94,6 +95,7 @@ export type HealthId =
   | "missing_key"
   | "failed"
   | "behind"
+  | "checkout_branch"
   | "waiting"
   | "unscanned"
   | "scanning"
@@ -405,6 +407,12 @@ export function projectHealth(
       actions: mayScan ? [{ kind: "rescan", label: "Rescan" }] : [],
     });
     if (!scanning) pill({ key: "behind", label: "Behind", tone: "warn", tooltip: title });
+  }
+
+  // 10b. Scanned on a branch behind the default branch (plan 64): information only.
+  const notice = !linked && p.source === "local" ? checkoutNotice(p.last_scan_stats?.branch) : null;
+  if (usable && notice) {
+    items.push({ id: "checkout_branch", tone: "info", title: notice.title, detail: notice.detail, actions: [] });
   }
 
   // 11. Commits waiting for a description.

@@ -75,6 +75,11 @@ describe("ImportPreviewDialog", () => {
     expect(onImport).toHaveBeenLastCalledWith(true);
   });
 
+  it("words missing_commit as commits on branches not scanned here (plan 64)", () => {
+    dialog(result({ descriptions: { filled: 0, kept_target: 0, missing_commit: 3, skipped_oversize: 0 } }));
+    expect(screen.getByText(/3 descriptions for commits not scanned here \(other branches\); import again after scanning them/)).toBeInTheDocument();
+  });
+
   it("disables the settings box when the config is invalid", () => {
     dialog(result({ config: { present: true, invalid: ["foo.bar"], changes: [{ key: "a", from: 1, to: 2 }], applied: false, error: null } }));
     expect(screen.getByRole("checkbox", { name: /Apply these settings/ })).toHaveAttribute("aria-disabled", "true");

@@ -436,6 +436,63 @@ def test_descriptions_fill_only_null(project):
         assert again.filled == 0
 
 
+def test_descriptions_for_default_branch_commits_import_into_a_feature_scan(
+    project, tmp_path
+):
+    """Plan 64 - a bundle exported on ``main`` lands on a project scanned on ``feature``."""
+    import subprocess
+
+    from rich.progress import Progress
+
+    from whygraph.scan.git_crawler import GitCrawler
+    from whygraph.services.git import Repository
+
+    def git(cwd: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True
+        ).stdout
+
+    def commit(cwd: Path, name: str) -> str:
+        (cwd / name).write_text(name)
+        git(cwd, "add", name)
+        git(cwd, "commit", "-q", "-m", name)
+        return git(cwd, "rev-parse", "HEAD").strip()
+
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    git(upstream, "init", "-q", "-b", "main")
+    for key, val in (
+        ("user.email", "t@x"),
+        ("user.name", "T"),
+        ("commit.gpgsign", "false"),
+    ):
+        git(upstream, "config", key, val)
+    commit(upstream, "one.txt")
+    work = tmp_path / "work"
+    git(tmp_path, "clone", "-q", str(upstream), str(work))
+    for key, val in (
+        ("user.email", "t@x"),
+        ("user.name", "T"),
+        ("commit.gpgsign", "false"),
+    ):
+        git(work, "config", key, val)
+    git(work, "switch", "-q", "-c", "feature")
+    commit(work, "feature.txt")
+    main_shas = [commit(upstream, "two.txt"), commit(upstream, "three.txt")]
+    git(work, "fetch", "-q", "origin")
+
+    GitCrawler(Progress(), repository=Repository(work)).run()
+
+    commits = [
+        {"sha": s, "llm_description": "d", "llm_description_model": "o:m"}
+        for s in main_shas
+    ]
+    with get_session() as session:
+        result = import_descriptions(session, commits, [])
+    assert result.missing_commit == 0
+    assert result.filled == 2
+
+
 def test_descriptions_oversize_and_format(project):
     with get_session() as session:
         session.connection().execute(insert(Commit), [_commit_row(sha(1))])
